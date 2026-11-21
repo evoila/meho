@@ -482,7 +482,7 @@ def _check_login_realm_approver(
     approval sign-in
     (:func:`~meho_backplane.operations.approval_sign_in_writes.approval_sign_in_check`).
     A person behind the agent, service or runner login that asked may
-    approve it.
+    approve it, but not a change that can change the approval sign-in.
     """
     if not operator.platform_admin:
         denial = (
@@ -502,7 +502,10 @@ def _check_login_realm_approver(
             "with a token, the command line, MCP or an agent. A second person who is a "
             "platform admin must approve it",
         )
-    if own and approval_sign_in_check(request):
+    from meho_backplane.operations.people_behind import is_person_behind
+
+    behind = is_person_behind(operator.sub, request.people_behind)
+    if (own or behind) and approval_sign_in_check(request):
         raise _refusal(
             request,
             operator,

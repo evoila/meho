@@ -16,7 +16,9 @@ For a request of an agent:
 * an admin behind the agent approves its change of rights in the web
   console (``test_people_behind_approve.py``);
 * in MEHO's own login realm only a platform admin behind the agent does;
-* a plain operator behind the agent never approves a change of rights.
+* a plain operator behind the agent never approves a change of rights;
+* a platform admin behind the agent never approves its change of the
+  approval sign-in; another platform admin does.
 
 Every case is checked on the approve, on the "may I approve?" answer, on
 web push and on the policy evaluator. Fixture values are made up.
@@ -73,7 +75,17 @@ def _card(op_id: str) -> dict[str, Any]:
     if op_id == _MEMBER_ADD:
         grant.update(user_id="11111111-1111-1111-1111-111111111111")
         grant.update(group_id="22222222-2222-2222-2222-222222222222")
-    return {"op_id": op_id, "safety_level": "dangerous", "preview": {"grant": grant}}
+    preview: dict[str, Any] = {"grant": grant}
+    if op_id == _MAPPER_CREATE:
+        # An ordinary claim on an ordinary client: it cannot change the approval sign-in.
+        preview.update(
+            client_id="example-app",
+            new_mapper={
+                "protocolMapper": "oidc-hardcoded-claim-mapper",
+                "config": {"claim.name": "team"},
+            },
+        )
+    return {"op_id": op_id, "safety_level": "dangerous", "preview": preview}
 
 
 async def _park(requester: Operator, op_id: str) -> uuid.UUID:
@@ -179,3 +191,36 @@ async def test_an_operator_behind_the_agent_never_approves_its_change_of_rights(
     assert not await _surfaces_agree(request_id, operator_behind)
     with pytest.raises(RightsChangeApprovalError):
         await _approve(request_id, operator_behind)
+
+
+async def test_a_platform_admin_behind_the_agent_never_approves_its_sign_in_change() -> None:
+    await _register_agent()
+    effect = _card("keycloak.client.update")
+    effect["preview"].update(
+        client_id="meho-web-approve",
+        new_values={"authenticationFlowBindingOverrides": {"browser": ""}},
+    )
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=_agent(),
+            connector_id="keycloak-admin-26.x",
+            op_id="keycloak.client.update",
+            target=None,
+            params=_PARAMS,
+            params_hash=compute_params_hash(_PARAMS),
+            proposed_effect=effect,
+            rights_change=True,
+        )
+        await session.commit()
+        request_id = request.id
+    platform_admin_behind = _admin(_SETTER_UP, platform=True)
+
+    assert not await _surfaces_agree(request_id, platform_admin_behind)
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(request_id, platform_admin_behind)
+    assert "can change the sign-in that MEHO asks for before an approval" in exc.value.reason_text
+
+    other = _admin("another-platform-admin", platform=True)
+    assert await _surfaces_agree(request_id, other)
+    assert (await _approve(request_id, other)).status == "approved"

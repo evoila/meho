@@ -1484,7 +1484,8 @@ card, the same rule as `check_grant_approval` on approve. When the admin
 may not make it alone (in the login realm: an admin who is not a platform
 admin), the call waits, and a platform admin approves it. In the login
 realm a change that can change the approval sign-in never runs alone and
-is never approved by the login that asked: a connector registers a check
+is never approved by the login that asked or by a person behind it
+(`people_behind`): a connector registers a check
 of such a request with `register_approval_sign_in_check`
 (`operations/approval_sign_in_writes.py`; the Keycloak checks are in
 `connectors/keycloak/approval_sign_in_writes.py`). The key

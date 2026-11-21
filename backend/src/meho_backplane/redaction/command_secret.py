@@ -37,7 +37,8 @@ inside a JSON string or a double-quoted command does a run of
 backslashes that a double quote follows end the value, before the
 backslashes: in a JSON string inside a JSON string that is the escaped
 closing quote. There an escaped line end or tab (backslashes before
-``n``, ``r`` or ``t``) also ends the value, before the backslashes. A
+``n``, ``r`` or ``t``) also ends the value, before the backslashes, and
+an escaped line end ends the command of a tool, as a real line end does. A
 form that stands in a quoted command or in a JSON string, also a
 double-quoted string inside a single-quoted command, ends at the closing
 quote of that string, so a JSON log line still parses.
@@ -85,6 +86,8 @@ _ALREADY_HIDDEN: Final = re.compile(
 _BARE: Final = re.compile(r"""[^\s'"\\;|&<>()]+""")
 _DOUBLE_QUOTE_MARK: Final = re.compile(r"""[\\"]""")
 _BACKSLASHES: Final = re.compile(r"\\+")
+#: An escaped line end (backslashes before ``n`` or ``r``) inside a JSON string.
+_ESCAPED_LINE_END: Final = re.compile(r"\\+[nr]")
 
 
 def _skip_double_quoted(text: str, start: int, size: int | None = None) -> int:
@@ -473,7 +476,11 @@ def _segment_spans(
     while pos < size:
         gap = _BLANKS.match(text, pos, size)
         pos = pos if gap is None else gap.end()
-        if pos >= size or text[pos] in "\n;|&":
+        if (
+            pos >= size
+            or text[pos] in "\n;|&"
+            or (in_string and _ESCAPED_LINE_END.match(text, pos, size) is not None)
+        ):
             break
         # A whole shell word, so a ``;`` or a space inside quotes does not end it.
         start, end = pos, _value_end(text, pos, size, in_string=in_string)

@@ -722,6 +722,65 @@ def test_an_escaped_line_end_or_tab_in_a_json_string_ends_the_value(
         assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
 
 
+#: (first line, later lines): a tool on the first line, without and with a
+#: password, and plain options of other tools on a later line that the tool
+#: on the first line would read as its own.
+_TOOL_THEN_OTHER: Final = (
+    (
+        ("mysql --version", f"mysql -u root -p{PW}"),
+        ("tar -pcf archive.tar files", "gcc -pedantic x.c"),
+    ),
+    (("mariadb --version", f"mariadb -p{PW} db"), ("tar -pcf archive.tar files",)),
+    (("sqlcmd -S h -Q x", f"sqlcmd -S h -P {PW}"), ("ssh -P 2222 h", "mvn -P release package")),
+    (("bcp t out f", f"bcp t out f -P {PW}"), ("mvn -P release package",)),
+    (("ldapsearch -x", f"ldapsearch -w {PW} -x"), ("grep -w word file", "nc -w 5 h 80")),
+    (("ldapmodify -x", f"ldapmodify -w {PW} -x"), ("grep -w word file",)),
+    (
+        ("curl https://h/x", "curl -u admin" + ":" + PW + " https://h/x"),
+        ("docker run -u 1000:1000 img",),
+    ),
+    (("smbclient //h/share", f"smbclient //h/share -U bob%{PW}"), ("rpm -U pkg-1%2.rpm",)),
+)
+#: How the lines are split: a line end, a carriage return and a line end,
+#: two line ends, and a blank before the line end.
+_LINE_SPLITS: Final = ("\n", "\r\n", "\n\n", " \n")
+#: (line, its secret values, JSON levels): inside a JSON string or a
+#: double-quoted command an escaped line end ends the command of the tool,
+#: so the options on the later line stay as on main.
+_COMMAND_ENDS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    (first + split + later, (PW,) if PW in first else (), levels)
+    for firsts, laters in _TOOL_THEN_OTHER
+    for first in firsts
+    for later in laters
+    for split in _LINE_SPLITS
+    for levels in (1, 2)
+] + [
+    (line, (PW,) if PW in line else (), levels)
+    for firsts, laters in _TOOL_THEN_OTHER
+    for first in firsts
+    for later in laters
+    for line in (
+        'sh -c "' + first + "\\n" + later + '" && echo ok',
+        'sh -c "' + first + "\\r\\n" + later + '" && echo ok',
+        "sh -c '" + first + "\n" + later + "' && echo ok",
+    )
+    for levels in (0, 1, 2)
+    if levels or line.startswith('sh -c "')
+]
+
+
+@pytest.mark.parametrize(("line", "secrets", "levels"), _COMMAND_ENDS_IN_JSON)
+def test_an_escaped_line_end_in_a_json_string_ends_the_command_of_a_tool(
+    line: str, secrets: tuple[str, ...], levels: int
+) -> None:
+    text = _in_json(line, levels)
+    values = tuple(_as_json(secret, levels) for secret in secrets)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, values, policy) == []
+        on_main = redact(text, _without_command_rule(policy)).redacted
+        assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
 #: A Windows path in quotes: ``\\u`` there is no Unicode escape.
 _WINDOWS_PATH: Final = 'copy "C:\\users\\public\\file.txt" backup'
 

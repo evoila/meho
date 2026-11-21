@@ -3,11 +3,11 @@
 
 """A preview of a typed write shows what it will change (#5074).
 
-With the ``PREVIEW_TYPED_WRITES`` switch off (the default), a typed write
-that does not carry ``requires_approval`` (``targets.register``) and a
-credential write with its own safe preview (``keycloak.user.reset_password``)
-both answer ``status="unavailable"``, as before. With the switch on, both
-preview. A credential write shows only its own plan: the params are never
+With the ``PREVIEW_TYPED_WRITES`` switch off (the default), a typed
+``caution`` write that does not carry ``requires_approval`` (the stand-in
+``demo.lab.create``) and a credential write with its own safe preview
+(``keycloak.user.reset_password``) both answer ``status="unavailable"``.
+With the switch on, both preview. A credential write shows only its own plan: the params are never
 copied, and a secret value never shows.
 
 Most tests here run with the switch on. The tests named ``*_switch_off_*``
@@ -122,11 +122,11 @@ async def _preview(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 async def test_caution_write_without_requires_approval_previews(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``targets.register`` runs at once only from the web interface, and it still previews."""
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    """A caution write that needs no approval still previews."""
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
     params = {"name": "lab-a", "product": "demo"}
 
-    envelope = await _preview("targets.register", params)
+    envelope = await _preview("demo.lab.create", params)
 
     assert envelope["status"] == "ok"
     assert envelope["method"] == "COMPOSITE"
@@ -141,11 +141,11 @@ async def test_caution_write_without_requires_approval_previews(
 async def test_different_params_give_different_hashes(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
 
-    first = await _preview("targets.register", {"name": "lab-a"})
-    second = await _preview("targets.register", {"name": "lab-b"})
-    again = await _preview("targets.register", {"name": "lab-a"})
+    first = await _preview("demo.lab.create", {"name": "lab-a"})
+    second = await _preview("demo.lab.create", {"name": "lab-b"})
+    again = await _preview("demo.lab.create", {"name": "lab-a"})
 
     assert first["preview_hash"] != second["preview_hash"]
     assert first["preview_hash"] == again["preview_hash"]
@@ -247,9 +247,9 @@ async def test_switch_off_caution_write_without_requires_approval_stays_unavaila
     stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
 
-    envelope = await _preview("targets.register", {"name": "lab-a"})
+    envelope = await _preview("demo.lab.create", {"name": "lab-a"})
 
     assert envelope["status"] == "unavailable"
     assert envelope["extras"]["reason"] == "not_ingested"

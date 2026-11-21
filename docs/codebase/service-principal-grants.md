@@ -273,6 +273,12 @@ the floor. REST answers 403 `role_floor_required: <op> needs the
 tenant_admin role; your role is operator`. The console passes the
 session's role; its grant writes need `tenant_admin` anyway.
 
+**No grant makes or changes a target.** `targets.register` and
+`targets.update` mark `host` and `fqdn` as addresses MEHO connects to, so
+grant create refuses a grant on them and a grant row never clears a call
+(`caller_address_grant_reason`). Every new target and every change of a
+target waits for a person ([targets.md](targets.md)).
+
 The **target scope** is one of three shapes:
 
 - a concrete `target_id` — the op on exactly that target (matched

@@ -45,6 +45,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from tests._register_runs_as_approved import person_register_runs_as_approved  # noqa: F401
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -53,7 +54,9 @@ from tests.mcp_test_fixtures import (
 )
 
 # MCP calls come with a token; these tests check executed writes (#3980).
-pytestmark = pytest.mark.usefixtures("person_token_writes_run_at_once")
+pytestmark = pytest.mark.usefixtures(
+    "person_token_writes_run_at_once", "person_register_runs_as_approved"
+)
 
 _TOOL = "meho_targets_register"
 

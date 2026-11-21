@@ -351,10 +351,14 @@ def _hide_yaml(text: str, depth: int) -> str:
     if depth > _MAX_TEXT_DEPTH:
         # Deeper than the pass reads: hide the whole text rather than show it unread.
         return SECRET_FIELD_MARKER
-    if text.startswith("\ufeff"):
-        # The C parser skips a byte order mark without counting it in its
-        # positions, so the text is read without the mark and the mark is put back.
-        return "\ufeff" + _hide_yaml(text[1:], depth)
+    # The C parser skips byte order marks without counting them in its
+    # positions, so the text is read without the marks and they are put back.
+    body = text.lstrip("\ufeff")
+    marks = text[: len(text) - len(body)]
+    return marks + _hide_yaml_body(body, depth)
+
+
+def _hide_yaml_body(text: str, depth: int) -> str:
     finder = _Finder(text, depth)
     try:
         # Keep every document alive while walking: the walk marks nodes by

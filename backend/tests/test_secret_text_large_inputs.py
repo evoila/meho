@@ -194,3 +194,11 @@ def test_large_comment_broken_yaml_and_xml_texts_are_hidden_in_time(text: str) -
     assert time.monotonic() - started < _TIME_LIMIT_S
     assert _FAKE_MARKUP not in shown
     assert _MARKER in shown
+
+
+def test_yaml_text_after_many_byte_order_marks_is_hidden_in_time() -> None:
+    marks = "\ufeff" * 300_000
+    started = time.monotonic()
+    shown = _shown_text(f"{marks}key: value\npassword: {_FAKE}\n")
+    assert time.monotonic() - started < _TIME_LIMIT_S
+    assert shown == f'{marks}key: value\npassword: "{_MARKER}"\n'

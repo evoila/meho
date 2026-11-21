@@ -624,6 +624,17 @@ def test_yaml_with_a_byte_order_mark_changes_only_the_secret_value(text: str) ->
     assert _MARKER in json.dumps(lines)
 
 
+def test_many_byte_order_marks_before_plain_lines_change_nothing() -> None:
+    text = "\ufeff" * 5_000 + "key: value\nhost: db\n"
+    assert hide_secret_text(text) == text
+
+
+def test_many_byte_order_marks_before_a_secret_key_hide_only_the_value() -> None:
+    marks = "\ufeff" * 5_000
+    shown = hide_secret_text(f"{marks}key: value\npassword: {_FAKE_BLOCK}\n")
+    assert shown == f'{marks}key: value\npassword: "{_MARKER}"\n'
+
+
 def test_too_deep_step_hides_the_whole_text(monkeypatch: pytest.MonkeyPatch) -> None:
     from meho_backplane.redaction import secret_text
 

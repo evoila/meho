@@ -247,6 +247,38 @@ def test_reads_subresource_writes_and_other_apis_keep_their_rules(op_id: str) ->
     assert ingested_op_is_credential_call(op_id) is False
 
 
+@pytest.mark.parametrize("method", ["post", "Put", "patch", "delete"])
+def test_a_write_with_a_lower_case_method_waits(method: str) -> None:
+    op_id = f"{method}:/api/v1/namespaces/{{namespace}}/configmaps/{{name}}"
+    assert ingested_op_is_credential_call(op_id) is True
+    assert credential_grant_reason(op_id) is not None
+
+
+_OTHER_PRODUCT_WRITE = "POST:/apis/widgets.example.com/v1/namespaces/{namespace}/widgets"
+
+
+@pytest.mark.asyncio
+async def test_a_write_of_another_api_file_with_such_a_path_waits() -> None:
+    row = _ingested(_OTHER_PRODUCT_WRITE)
+    row.product, row.version, row.impl_id = "widgets", "2.0", "widgets-rest"
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(row)
+    await _assert_waits_for_every_login(row, {"namespace": "apps", "cluster": "c-1"})
+    with pytest.raises(GrantValidationError) as refused:
+        await ServicePrincipalGrantService().create(
+            _TENANT,
+            "op-admin",
+            ServiceGrantCreate(
+                principal_sub=_SERVICE,
+                op_id=_OTHER_PRODUCT_WRITE,
+                connector_id="widgets-2.0-widgets-rest",
+                reason="unattended deploy",
+            ),
+            creator_role=TenantRole.TENANT_ADMIN,
+        )
+    assert str(refused.value) == f"{credential_grant_reason(_OTHER_PRODUCT_WRITE)} Leave it out."
+
+
 async def _store(op_id: str) -> EndpointDescriptor:
     row = _ingested(op_id)
     async with get_sessionmaker()() as session, session.begin():

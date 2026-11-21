@@ -1488,7 +1488,16 @@ is never approved by the login that asked or by a person behind it
 (`people_behind`): a connector registers a check
 of such a request with `register_approval_sign_in_check`
 (`operations/approval_sign_in_writes.py`; the Keycloak checks are in
-`connectors/keycloak/approval_sign_in_writes.py`). The key
+`connectors/keycloak/approval_sign_in_writes.py`). For Keycloak these
+are: a `client.update` of a sign-in client, or one that sets the
+`clientId` of one on another client; a `client.create` with the
+`clientId` of a sign-in client; a `client.delete` of a sign-in client; a
+`protocol_mapper.create` on a sign-in client or of a sign-in claim; a
+scope mapper update of a sign-in claim; and a `realm.update` of other keys
+than names, mail, events and languages. The sign-in clients are the CLI
+and web approval clients, the console login client and the client of the
+Keycloak admin API (`KEYCLOAK_ADMIN_CLIENT_ID`), compared without letter
+case. The key
 `asked_in_web_console` of `proposed_effect` is internal
 (`INTERNAL_EFFECT_KEYS` in `operations/_preview.py`): no approval response
 returns it. The dispatcher

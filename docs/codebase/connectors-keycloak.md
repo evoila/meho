@@ -502,13 +502,19 @@ For such a write:
   web console, or approves it; a tenant admin's call waits. There the
   login that asked approves the request only when it asked in the web
   console. A write that can change the approval sign-in
-  (`approval_sign_in_writes.py`: a `client.update` of the approval clients
-  or the console login client, a protocol mapper on them or of a sign-in
-  claim, a scope mapper of a sign-in claim, a `realm.update` of other keys
-  than names, mail, events and languages) never runs alone there, and the
+  (`approval_sign_in_writes.py`) never runs alone there, and the
   login that asked never approves it, nor a person behind it. A card names
   the client only as Keycloak returned it; a failed read leaves the card
-  without a client, and the write counts as one on an approval client;
+  without a client, and the write counts as one on an approval client.
+  The sign-in clients are the CLI and web approval clients, the console
+  login client and the client of the Keycloak admin API
+  (`KEYCLOAK_ADMIN_CLIENT_ID`), compared without letter case. Such a write
+  is a `client.update` of a sign-in client, or one that sets the
+  `clientId` of one; a `client.create` with the `clientId` of one; a
+  `client.delete` of one (the delete card names the client); a protocol
+  mapper on one or of a sign-in claim; a scope mapper of a sign-in claim;
+  and a `realm.update` of other keys than names, mail, events and
+  languages;
 - a standing grant, an older grant row and a run approval never cover it:
   each call that waits needs its own approval;
 - no operation setting turns its approval off. An edit that tries is

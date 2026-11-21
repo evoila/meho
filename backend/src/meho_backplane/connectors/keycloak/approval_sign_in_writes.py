@@ -12,7 +12,12 @@ alone in the web console and the login that asked never approves them
 
 * ``keycloak.client.update`` of a sign-in client
   (:func:`sign_in_client_ids`): the clients of the CLI approval and the web
-  approval, and the client of the web console login;
+  approval, the client of the web console login, and the client MEHO uses
+  for the Keycloak admin API (``KEYCLOAK_ADMIN_CLIENT_ID``). Also an update
+  that sets the ``clientId`` of a sign-in client on another client;
+* ``keycloak.client.create`` of a client with the ``clientId`` of a sign-in
+  client, and ``keycloak.client.delete`` of a sign-in client. The names
+  are compared without letter case;
 * ``keycloak.protocol_mapper.create`` on a sign-in client, or of a mapper
   that puts a sign-in claim (:data:`SIGN_IN_CLAIMS`) into a token or is a
   sign-in level mapper (:data:`SIGN_IN_MAPPER_TYPES`);
@@ -81,6 +86,7 @@ def sign_in_client_ids() -> frozenset[str]:
         settings.keycloak_cli_approve_client_id,
         settings.ui_keycloak_approve_client_id,
         settings.ui_keycloak_client_id,
+        settings.keycloak_admin_client_id,
     )
     return frozenset(name.casefold() for name in map(_text, names) if name is not None)
 
@@ -109,10 +115,21 @@ def _representation(request: ApprovalRequest) -> dict[str, Any]:
     return {}
 
 
+def _is_sign_in_client(value: Any) -> bool:
+    """True when *value* names a sign-in client, or names no client."""
+    client_id = _text(value)
+    return client_id is None or client_id.casefold() in sign_in_client_ids()
+
+
 def _on_sign_in_client(request: ApprovalRequest) -> bool:
     """True when the card names a sign-in client, or names no client."""
-    client_id = _text(_preview(request).get("client_id"))
-    return client_id is None or client_id.casefold() in sign_in_client_ids()
+    return _is_sign_in_client(_preview(request).get("client_id"))
+
+
+def _sets_sign_in_client_id(request: ApprovalRequest) -> bool:
+    """True when the write sets a ``clientId`` that is the one of a sign-in client."""
+    representation = _representation(request)
+    return "clientId" in representation and _is_sign_in_client(representation["clientId"])
 
 
 def _sign_in_claim(config: Any) -> bool:
@@ -126,7 +143,17 @@ def _sign_in_mapper_type(value: Any) -> bool:
 
 
 def _client_update(request: ApprovalRequest) -> bool:
-    return _on_sign_in_client(request)
+    return _on_sign_in_client(request) or _sets_sign_in_client_id(request)
+
+
+def _client_create(request: ApprovalRequest) -> bool:
+    return _is_sign_in_client(_representation(request).get("clientId"))
+
+
+def _client_delete(request: ApprovalRequest) -> bool:
+    radius = _preview(request).get("blast_radius")
+    target = radius.get("object") if isinstance(radius, dict) else None
+    return _is_sign_in_client(target.get("client_id") if isinstance(target, dict) else None)
 
 
 def _protocol_mapper_create(request: ApprovalRequest) -> bool:
@@ -159,6 +186,8 @@ def register_approval_sign_in_checks() -> None:
     """Register the check of each Keycloak write that can change the approval sign-in."""
     for op_id, check in (
         ("keycloak.client.update", _client_update),
+        ("keycloak.client.create", _client_create),
+        ("keycloak.client.delete", _client_delete),
         ("keycloak.protocol_mapper.create", _protocol_mapper_create),
         ("keycloak.client_scope.protocol_mapper.update", _scope_mapper_update),
         ("keycloak.realm.update", _realm_update),

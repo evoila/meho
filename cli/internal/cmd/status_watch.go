@@ -134,6 +134,7 @@ func runWatch(ctx context.Context, opts watchOptions) error {
 			HTTPClient:  client.HTTPClient(),
 			URL:         feedURL,
 			Bearer:      client.AccessToken(),
+			SessionID:   client.SessionID(),
 			LastEventID: lastEventID,
 			JSONOut:     opts.JSONOut,
 			Stdout:      opts.Stdout,
@@ -202,6 +203,7 @@ type streamArgs struct {
 	HTTPClient  *http.Client
 	URL         string
 	Bearer      string
+	SessionID   string
 	LastEventID string
 	JSONOut     bool
 	Stdout      io.Writer
@@ -247,6 +249,7 @@ func streamOnce(ctx context.Context, args streamArgs) error {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+args.Bearer)
+	api.SetSessionIDHeader(req, args.SessionID)
 	// The feed is an audited request. ctx is the command context, so
 	// the global --work-ref rides along on every connect and reconnect.
 	api.SetWorkRefHeader(req)

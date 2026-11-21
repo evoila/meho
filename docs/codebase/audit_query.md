@@ -716,8 +716,13 @@ client).
   targets.
 - The MCP tool row and the operation rows of one request also share one
   `request_id`.
-- A call without the header (REST, CLI, an MCP client that sends none)
-  still lands with a NULL `agent_session_id` (#3623).
+- A CLI call sends the id of its login session in the
+  `Meho-Session-Id` header. When no agent run or MCP session is bound,
+  the rows of that request carry it as `agent_session_id`, and their
+  payload has `session_from_client: true`. That key tells a CLI login
+  session apart from an agent run or an MCP session.
+- A call without either header (a plain REST call, an MCP client that
+  sends none) still lands with a NULL `agent_session_id`.
 
 ### Client-credential runs (#3446)
 

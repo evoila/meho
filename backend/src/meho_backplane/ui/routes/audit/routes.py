@@ -98,6 +98,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit import _REPLAY_ROW_CAP, _count_session_rows
 from meho_backplane.audit_query import (
+    AuditEntry,
     AuditQueryFilters,
     AuditQueryResult,
     DurationParseError,
@@ -116,6 +117,7 @@ from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
+from meho_backplane.operations._audit import payload_session_from_client
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
@@ -350,6 +352,15 @@ def _tenant_label(tenant_name: str | None, tenant_id: uuid.UUID | None) -> str:
     return str(tenant_id) if tenant_id is not None else "-"
 
 
+def _is_agent_session(row: AuditEntry) -> bool:
+    """Return True when the row's session id is an agent run or an MCP session.
+
+    A session id the CLI sent for its login session (payload key
+    ``session_from_client``) is not an agent session.
+    """
+    return row.agent_session_id is not None and not payload_session_from_client(row.payload)
+
+
 def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str, object]]:
     """Project substrate :class:`AuditEntry` rows to the row template shape.
 
@@ -379,6 +390,7 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
                 str(row.agent_session_id) if row.agent_session_id is not None else None
             ),
             "replay_enabled": is_admin and row.agent_session_id is not None,
+            "agent_session": _is_agent_session(row),
         }
         for row in result.rows
     ]
@@ -422,6 +434,7 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
             str(node.agent_session_id) if node.agent_session_id is not None else None
         ),
         "replay_enabled": is_admin and node.agent_session_id is not None,
+        "agent_session": _is_agent_session(node),
         "depth": node.depth,
         "children": [_project_replay_node(child, is_admin=is_admin) for child in node.children],
     }

@@ -4165,9 +4165,12 @@ manual reference path (and what the helper encodes); use the helper
 once you have an admin credential wired up, use this page to
 understand or verify what it did.</p>
 <p>Use the helper only for a <strong>new realm</strong>. On a realm that already
-works, update the sign-in clients one setting at a time, for
-example with the operation <code>keycloak.client.update</code> or in the admin
-console. The helper sets its values again on every run: it
+works, update the sign-in clients one setting at a time in the
+Keycloak admin console. In MEHO's own login realm, MEHO refuses most
+changes of its own sign-in clients through the operation
+<code>keycloak.client.update</code>. It allows a new redirect address or web
+origin, a new name or description, turning a client on, and removing
+a client's own login flow (not on the approval clients). The helper sets its values again on every run: it
 overwrites the redirect URIs, web origins and flow switches of the
 three clients, and the eight mappers, also <code>tenant-id</code> and
 <code>tenant-role</code>. If you do run it on an existing realm, run it with
@@ -4407,9 +4410,12 @@ By hand, under <strong>Authentication → Create flow</strong>:</p>
 <code>meho approval sign-in</code> (without the level). Bind the client to the new
 flow; you can delete the older flow after that.</p>
 <p><strong>On an existing realm.</strong> Create <code>meho-cli-approve</code> by hand as above,
-or with the operation <code>keycloak.client.create</code>, and set the two token
-settings on an existing <code>meho-cli-approve</code> with
-<code>keycloak.client.update</code>. Add its login flow as the next section says.
+or with the operation <code>keycloak.client.create</code>. Set the two token
+settings on an existing <code>meho-cli-approve</code> in the Keycloak admin console.
+In MEHO's own login realm, MEHO refuses this change through
+<code>keycloak.client.update</code>: both settings are in the client's <code>attributes</code>
+(<code>use.refresh.tokens</code>, <code>access.token.lifespan</code>). Add its login flow as
+the next section says.
 Do not
 run <code>meho admin keycloak bootstrap-clients</code> for this: on an existing
 realm it also rewrites the <code>meho-cli</code> and <code>meho-mcp</code> clients and their
@@ -5729,19 +5735,12 @@ not touch <code>meho-web</code>: on your own Keycloak, assign them by hand.</p>
 <p><strong>On an existing realm, set the two values once.</strong> The Keycloak that
 ships with the MEHO chart reads the realm file only when it creates the
 realm. Its setup job adds clients and groups, but it does not change
-realm settings. So on a running realm, do one of these:</p>
-<ul>
-<li>In the Keycloak admin console, open <strong>Realm settings → Sessions</strong> and
-  set <strong>SSO Session Idle</strong> to 1 hour and <strong>SSO Session Max</strong> to 10
-  hours.</li>
-<li>Or use the MEHO Keycloak connector (<code>keycloak.realm.update</code>). It asks
-  for an approval. Put the two values in a file and run:</li>
-</ul>
-<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>realm-sessions.json<span class="w"> </span><span class="s">&lt;&lt;'JSON'</span>
-<span class="s">{"ssoSessionIdleTimeout": 3600, "ssoSessionMaxLifespan": 36000}</span>
-<span class="s">JSON</span>
-meho<span class="w"> </span>keycloak<span class="w"> </span>realm<span class="w"> </span>update<span class="w"> </span>--target<span class="w"> </span>&lt;your-keycloak-target&gt;<span class="w"> </span>-f<span class="w"> </span>realm-sessions.json
-</code></pre></div>
+realm settings. So on a running realm, open <strong>Realm settings →
+Sessions</strong> in the Keycloak admin console and set <strong>SSO Session Idle</strong> to
+1 hour and <strong>SSO Session Max</strong> to 10 hours.</p>
+<p>In MEHO's own login realm, MEHO refuses this change through the operation
+<code>keycloak.realm.update</code> (the keys <code>ssoSessionIdleTimeout</code> and
+<code>ssoSessionMaxLifespan</code>). Make it in the Keycloak admin console.</p>
 <h2 id="approve-only-principal">Approve-only principal<a class="headerlink" href="#approve-only-principal" title="Permanent link">&para;</a></h2>
 <p>Clearing the approval queue needs the <strong>operator</strong> role. MEHO keeps an
 <strong><code>approver</code></strong> capability in the code: a <code>read_only</code> login with it would
@@ -5887,28 +5886,13 @@ one.</p>
 <p>Keycloak reads the chart's realm file only at its first start. The
 chart's realm finishing job cannot change realm settings either: its
 account <code>meho-admin</code> may only manage clients and users. So a realm that
-already runs gets these settings once, in one of two ways:</p>
-<ul>
-<li>
-<p><strong>Through MEHO</strong>, with <code>keycloak.realm.update</code> (it waits until
-  another admin approves). Put the values in a file, for example <code>realm-login.json</code>:</p>
-<div class="highlight"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">"rememberMe"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"ssoSessionIdleTimeoutRememberMe"</span><span class="p">:</span><span class="w"> </span><span class="mi">2592000</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"ssoSessionMaxLifespanRememberMe"</span><span class="p">:</span><span class="w"> </span><span class="mi">2592000</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"webAuthnPolicyPasswordlessPasskeysEnabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"webAuthnPolicyPasswordlessUserVerificationRequirement"</span><span class="p">:</span><span class="w"> </span><span class="s2">"required"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"webAuthnPolicyPasswordlessResidentKey"</span><span class="p">:</span><span class="w"> </span><span class="s2">"required"</span>
-<span class="p">}</span>
-</code></pre></div>
-<p>Then run <code>meho keycloak realm update --target &lt;keycloak-target&gt;
---realm meho -f realm-login.json</code>. MEHO reads the realm, changes only
-these fields, and writes it back.</p>
-</li>
-<li>
-<p><strong>By hand</strong>, in the Keycloak admin console, with the table above.</p>
-</li>
-</ul>
+already runs gets these settings once, by hand, in the Keycloak admin
+console, with the table above.</p>
+<p>In MEHO's own login realm, MEHO refuses this change through the operation
+<code>keycloak.realm.update</code> (the keys <code>rememberMe</code>,
+<code>ssoSessionIdleTimeoutRememberMe</code>, <code>ssoSessionMaxLifespanRememberMe</code> and
+the passkey policy keys <code>webAuthnPolicyPasswordless...</code>). Make it in the
+Keycloak admin console.</p>
 <p><strong>A realm made before Keycloak 26.4.</strong> Keycloak 26.4 added a step to the
 browser flow of new realms: <strong>Condition - credential</strong>. It skips the
 one-time code after a passkey login. An upgrade does not add it to an older
@@ -6047,7 +6031,7 @@ usually appear:</p>
 <tr>
 <td><code>meho login</code> fails at once with <code>invalid_request</code> and "Missing parameter: code_challenge_method"</td>
 <td>The login client (<code>meho-cli</code>) requires a PKCE method, and the CLI is older than 0.44.0. Those versions send no PKCE at the device login, and Keycloak checks PKCE there too. A realm made with MEHO 0.40.0, 0.41.0, 0.42.0 or 0.43.0 (the built-in Keycloak, or <code>meho admin keycloak bootstrap-clients</code>) set <code>S256</code> on it.</td>
-<td>Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client: in the admin console (Advanced → Proof Key for Code Exchange, set it to empty), or with the operation <code>keycloak.client.update</code> and the representation <code>{"attributes": {"pkce.code.challenge.method": ""}}</code> (an empty value removes the attribute). Step 2.</td>
+<td>Update the CLI to 0.44.0 or later. Or clear the PKCE method on the login client in the Keycloak admin console (Advanced → Proof Key for Code Exchange, set it to empty). In MEHO's own login realm, MEHO refuses this change through the operation <code>keycloak.client.update</code> (the key <code>attributes</code>). Step 2.</td>
 </tr>
 <tr>
 <td>Token issued, every call 401s with <code>invalid_audience</code> / <code>missing_tenant_claim</code> / <code>missing_tenant_role_claim</code></td>

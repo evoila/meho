@@ -38,7 +38,10 @@ backslashes that a double quote follows end the value, before the
 backslashes: in a JSON string inside a JSON string that is the escaped
 closing quote. There an escaped line end or tab (backslashes before
 ``n``, ``r`` or ``t``) also ends the value, before the backslashes, and
-an escaped line end ends the command of a tool, as a real line end does. A
+an escaped line end ends the command of a tool, as a real line end does.
+Only a run that is a line end at the escape level of the string that holds
+the tool ends the command; a written backslash before ``n`` or ``r``, as
+in a Windows path, does not. A
 form that stands in a quoted command or in a JSON string, also a
 double-quoted string inside a single-quoted command, ends at the closing
 quote of that string, so a JSON log line still parses.
@@ -86,7 +89,7 @@ _ALREADY_HIDDEN: Final = re.compile(
 _BARE: Final = re.compile(r"""[^\s'"\\;|&<>()]+""")
 _DOUBLE_QUOTE_MARK: Final = re.compile(r"""[\\"]""")
 _BACKSLASHES: Final = re.compile(r"\\+")
-#: An escaped line end (backslashes before ``n`` or ``r``) inside a JSON string.
+#: Backslashes before ``n`` or ``r`` inside a JSON string: maybe an escaped line end.
 _ESCAPED_LINE_END: Final = re.compile(r"\\+[nr]")
 
 
@@ -465,10 +468,27 @@ def _option_span(
     return None
 
 
+def _is_escaped_line_end(run: re.Match[str], unit: int) -> bool:
+    """True when the backslashes of *run* write a line end, not a backslash.
+
+    *unit* is how many backslashes a line end takes at the escape level of
+    the string the tool stands in: one in a JSON string, two in a JSON
+    string inside a JSON string. A written backslash doubles that count,
+    so a run is a line end only when its lowest set bit is at most *unit*
+    (``C:\\\\new`` in a JSON string is a path, ``x\\ny`` is a line end).
+    """
+    count = run.end() - run.start() - 1
+    return count & -count <= unit
+
+
 def _segment_spans(
-    text: str, first: int, tool: str, size: int, in_string: bool
+    text: str, first: int, tool: str, size: int, in_string: bool, unit: int = 1
 ) -> tuple[list[tuple[int, int]], int]:
-    """Read one command from the tool that ends at *first*; return spans and the end."""
+    """Read one command from the tool that ends at *first*; return spans and the end.
+
+    *unit* is the number of backslashes of an escaped line end in the
+    string that holds the command (see :func:`_is_escaped_line_end`).
+    """
     spans: list[tuple[int, int]] = []
     tools = {tool}
     pos = first
@@ -476,14 +496,17 @@ def _segment_spans(
     while pos < size:
         gap = _BLANKS.match(text, pos, size)
         pos = pos if gap is None else gap.end()
+        run = _ESCAPED_LINE_END.match(text, pos, size) if in_string else None
         if (
             pos >= size
             or text[pos] in "\n;|&"
-            or (in_string and _ESCAPED_LINE_END.match(text, pos, size) is not None)
+            or (run is not None and _is_escaped_line_end(run, unit))
         ):
             break
         # A whole shell word, so a ``;`` or a space inside quotes does not end it.
-        start, end = pos, _value_end(text, pos, size, in_string=in_string)
+        # Written backslashes before ``n`` or ``r`` (a path) belong to the word.
+        start = pos
+        end = _value_end(text, pos if run is None else run.end(), size, in_string=in_string)
         if end == start:
             # ``< > ( )`` is a word of its own.
             end += 1
@@ -520,9 +543,37 @@ def _is_quoted_executable(text: str, match: re.Match[str], close: int) -> bool:
     return not path or path.endswith("/")
 
 
+class _LastQuote:
+    """The escape level of the last double quote before a position, read left to right.
+
+    The quote that opens the string a tool stands in has one backslash
+    less than a line end in that string: none in a JSON string, one in a
+    JSON string inside a JSON string. Each part of the text is read once.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._seen = 0
+        self._unit = 1
+
+    def unit(self, index: int) -> int:
+        """Backslashes of an escaped line end in the string of the last quote before *index*."""
+        text = self._text
+        if index > self._seen:
+            quote = text.rfind('"', self._seen, index)
+            if quote != -1:
+                run_start = quote
+                while run_start > self._seen and text[run_start - 1] == "\\":
+                    run_start -= 1
+                self._unit = quote - run_start + 1
+            self._seen = index
+        return self._unit
+
+
 def _tool_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
+    last_quote = _LastQuote(text)
     pos = 0
     while (match := _TOOL.search(text, pos)) is not None:
         tool = _tool_name(match.group(0)) or ""
@@ -535,7 +586,8 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
             outer = quotes.end(close + 1)
             first, size = close + 1, len(text) if outer is None else outer
             in_string = _in_double_quotes(text, outer)
-        found, pos = _segment_spans(text, first, tool, size, in_string)
+        unit = last_quote.unit(match.start())
+        found, pos = _segment_spans(text, first, tool, size, in_string, unit)
         spans.extend(found)
         pos = max(pos, match.end())
     return spans

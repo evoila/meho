@@ -781,6 +781,43 @@ def test_an_escaped_line_end_in_a_json_string_ends_the_command_of_a_tool(
         assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
 
 
+#: Windows paths with a backslash before ``n`` or ``r``: a written
+#: backslash, not a line end.
+_PATHS_WITH_N_OR_R: Final = (
+    "C:\\new\\client.cnf",
+    "C:\\Users\\rob\\notes.txt",
+    "\\\\nas\\new\\run.cnf",
+)
+#: (line, its secret values, JSON levels): a path before the password of
+#: each tool. In a JSON string the scan reads on past the path, so the
+#: password after it stays hidden.
+_PASSWORD_AFTER_PATH: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    (line, (PW,), levels)
+    for path in _PATHS_WITH_N_OR_R
+    for line in (
+        f"mysql --defaults-file={path} -p{PW}",
+        f"mariadb {path} -p{PW} db",
+        f"sqlcmd -i {path} -S h -P {PW}",
+        f"bcp t out {path} -P {PW}",
+        f"ldapsearch -f {path} -w {PW} -x",
+        "curl -o " + path + " -u admin" + ":" + PW + " https://h/x",
+        f"smbclient //h/share -A {path} -U bob%{PW}",
+    )
+    for levels in (1, 2)
+]
+
+
+@pytest.mark.parametrize(("line", "secrets", "levels"), _PASSWORD_AFTER_PATH)
+def test_a_backslash_before_n_or_r_in_a_json_string_does_not_end_the_command(
+    line: str, secrets: tuple[str, ...], levels: int
+) -> None:
+    text = _in_json(line, levels)
+    values = tuple(_as_json(secret, levels) for secret in secrets)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, values, policy) == []
+        assert _parses(redact(text, policy).redacted, levels)
+
+
 #: A Windows path in quotes: ``\\u`` there is no Unicode escape.
 _WINDOWS_PATH: Final = 'copy "C:\\users\\public\\file.txt" backup'
 

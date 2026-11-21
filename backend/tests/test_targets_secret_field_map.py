@@ -358,6 +358,16 @@ def test_update_accepts_null_entry_values() -> None:
     assert TargetUpdate(secret_field_map={"a": None}).secret_field_map == {"a": None}
 
 
+def test_update_holds_a_full_removal_and_a_full_new_set() -> None:
+    removals: dict[str, str | None] = {f"old{i}": None for i in range(SECRET_FIELD_MAP_MAX_ENTRIES)}
+    new: dict[str, str | None] = {f"new{i}": "s" for i in range(SECRET_FIELD_MAP_MAX_ENTRIES)}
+    body = TargetUpdate(secret_field_map={**removals, **new})
+    assert body.secret_field_map is not None
+    assert len(body.secret_field_map) == 2 * SECRET_FIELD_MAP_MAX_ENTRIES
+    with pytest.raises(ValidationError):
+        TargetUpdate(secret_field_map={**removals, **new, "one-more": "s"})
+
+
 def test_merge_adds_replaces_and_removes_entries() -> None:
     current = {"a": "1", "b": "2"}
     assert merge_secret_field_map(current, {"b": "20", "c": "3", "a": None}) == {

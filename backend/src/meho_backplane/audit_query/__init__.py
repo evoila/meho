@@ -52,6 +52,7 @@ from .loose_rows import (
     count_loose_rows_in_forest,
     find_loose_rows,
 )
+from .owner_scope import own_rows_sub
 from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
 from .query import DEFAULT_COUNT_WINDOW, UnsupportedFilterError, count_event_classes, query_audit
 from .replay import replay_session
@@ -87,6 +88,7 @@ __all__ = [
     "decode_cursor",
     "encode_cursor",
     "find_loose_rows",
+    "own_rows_sub",
     "parse_duration",
     "query_audit",
     "replay_policy",

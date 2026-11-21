@@ -23,8 +23,10 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 A hosted agent with a ``connectors`` list sees only the targets of those
 connectors (:func:`_rows_the_caller_may_see`):
 
-* when step 1 or 2 finds only targets outside the list, the answer is
-  :exc:`TargetNotFoundError`, the same as for a name with no match;
+* steps 1 and 2 first drop the hits outside the list and then go on as
+  above with the hits that are left. So a name whose exact hits are all
+  outside the list goes on to the alias step, and an alias held by one
+  target inside the list and others outside it finds the target inside;
 * the hits of :exc:`AmbiguousTargetError` and the near-misses of
   :exc:`TargetNotFoundError` name only targets inside the list. The
   near-misses are filtered first and then cut to five.
@@ -153,26 +155,25 @@ async def _not_found(session: AsyncSession, tenant_id: UUID, query: str) -> Targ
 
 
 async def _pick_one(
-    session: AsyncSession,
     tenant_id: UUID,
     query: str,
     hits: list[TargetORM],
     *,
     event: str,
 ) -> TargetORM | None:
-    """The one row of *hits*, or ``None`` when there is none.
+    """The one row of *hits* the caller may see, or ``None`` when there is none.
 
-    More than one hit is :exc:`AmbiguousTargetError`, which names only the
-    hits the caller may see. When the caller may see none of the hits, the
-    answer is the ``no_target`` error, the same as for a name with no hit.
+    Only the hits the caller may see count: a hosted agent with a
+    ``connectors`` list sees only the targets of those connectors. One such
+    hit is the answer. More than one is :exc:`AmbiguousTargetError`, which
+    names only those hits. None is ``None``, so the resolver goes on to the
+    next step, the same as for a name with no hit.
     """
-    if not hits:
-        return None
     visible = await _rows_the_caller_may_see(hits)
     if not visible:
-        raise await _not_found(session, tenant_id, query)
-    if len(hits) == 1:
-        return hits[0]
+        return None
+    if len(visible) == 1:
+        return visible[0]
     summaries = [project_target_to_summary(t) for t in visible]
     _log.warning(
         event,
@@ -214,6 +215,7 @@ async def resolve_target(
     Raises:
         TargetNotFoundError: No target matches *query* in *tenant_id*, or
             a hosted agent's ``connectors`` list leaves out every match.
+            A match the list leaves out does not count in any step.
         AmbiguousTargetError: Multiple targets match *query* (alias collision).
     """
     # Step 1: exact name match.
@@ -232,12 +234,12 @@ async def resolve_target(
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
-    target = await _pick_one(session, tenant_id, query, exact_hits, event="ambiguous_exact_name")
+    target = await _pick_one(tenant_id, query, exact_hits, event="ambiguous_exact_name")
 
     if target is None:
         # Step 2: alias match — dialect-aware.
         alias_hits = await _alias_match(session, tenant_id, query)
-        target = await _pick_one(session, tenant_id, query, alias_hits, event="ambiguous_target")
+        target = await _pick_one(tenant_id, query, alias_hits, event="ambiguous_target")
 
     if target is None:
         # Step 3: near-miss for 404 detail.

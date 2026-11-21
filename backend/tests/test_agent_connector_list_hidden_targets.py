@@ -198,6 +198,50 @@ async def test_resolver_answers_without_a_list_are_unchanged() -> None:
 
 
 @pytest.mark.asyncio
+async def test_alias_of_a_target_inside_and_one_outside_finds_the_inside_target() -> None:
+    """The answer is the same as when only the target inside the list has the alias."""
+    await _add_targets(
+        {
+            "mix-fence": ("fence", ["shared", "solo"]),
+            "mix-other": ("other", ["shared"]),
+        }
+    )
+    with connector_limit(_ONLY_FENCE):
+        assert await _resolver_answer("shared") == "mix-fence"
+        assert await _resolver_answer("solo") == "mix-fence"
+    assert await _resolver_answer("shared") == ("ambiguous_target", ["mix-fence", "mix-other"])
+
+
+@pytest.mark.asyncio
+async def test_name_of_an_outside_target_and_alias_of_an_inside_target_finds_by_alias() -> None:
+    await _add_targets(
+        {
+            "xname": ("other", []),
+            "alias-holder": ("fence", ["xname"]),
+        }
+    )
+    with connector_limit(_ONLY_FENCE):
+        assert await _resolver_answer("xname") == "alias-holder"
+    assert await _resolver_answer("xname") == "xname"
+
+
+@pytest.mark.asyncio
+async def test_alias_of_two_targets_inside_and_one_outside_names_only_the_inside_ones() -> None:
+    await _add_targets(
+        {
+            "trio-fence-a": ("fence", ["trio"]),
+            "trio-fence-b": ("fence", ["trio"]),
+            "trio-other": ("other", ["trio"]),
+        }
+    )
+    with connector_limit(_ONLY_FENCE):
+        assert await _resolver_answer("trio") == (
+            "ambiguous_target",
+            ["trio-fence-a", "trio-fence-b"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_near_matches_are_filtered_before_the_cut_to_five() -> None:
     """Six close targets outside the list come first; the one inside still shows."""
     hidden = {f"near-{i}": ("other", []) for i in range(6)}

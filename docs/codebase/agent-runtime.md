@@ -221,9 +221,15 @@ JSON-shaped (so it can grow without a migration):
     in one read per tenant, so a target of a connector made from a saved
     API file is checked like any other.
   - The target resolver (`targets/resolver.py`) treats a target outside
-    the list as a target that does not exist. When the exact name or the
-    alias finds only targets outside the list, the answer is `no_target`,
-    the same as for a name with no match (`_pick_one`). The hits of an
+    the list as a target that does not exist. The exact-name step and
+    the alias step first drop the hits outside the list, then run as
+    usual on the hits that are left (`_pick_one`): one hit is the
+    answer, more than one is `ambiguous_target`, none goes on to the
+    next step. So an alias held by one target inside the list and one
+    outside finds the target inside, and a name that is the exact name
+    of a target outside the list and an alias of a target inside finds
+    the target inside. When no step finds a target inside the list, the
+    answer is `no_target`, the same as for a name with no match. The hits of an
     `ambiguous_target` answer and the near-matches of a `no_target` answer
     name only targets inside the list; the near-matches are filtered
     first and then cut to five (`_near_misses`). Every tool that looks a

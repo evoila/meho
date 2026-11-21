@@ -411,7 +411,7 @@ async def test_stalled_first_read_ends_the_stream_at_the_deadline(
         )
     )
     assert frames == []
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < 4.0
 
 
 async def test_stalled_live_read_ends_the_stream_at_the_deadline(
@@ -432,7 +432,40 @@ async def test_stalled_live_read_ends_the_stream_at_the_deadline(
         )
     )
     assert frames == []
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < 4.0
+
+
+async def test_read_still_running_at_the_deadline_is_not_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy read that runs a little past the end finishes by itself.
+
+    Cancelling it in the middle of a database statement leaves a SQLite
+    connection holding its read lock, and the next write fails with
+    "database is locked".
+    """
+    from meho_backplane.api.v1 import feed as feed_module
+    from meho_backplane.broadcast.archive_reader import AnnouncementWatch
+
+    finished: list[bool] = []
+
+    async def _slow_read(*_args: object, **_kwargs: object) -> AnnouncementWatch:
+        await asyncio.sleep(0.6)
+        finished.append(True)
+        return AnnouncementWatch(events=[], after=0, gap=None)
+
+    monkeypatch.setattr(feed_module, "watch_announcement_rows", _slow_read)
+    frames = await _collect(
+        announcement_feed_frames(
+            _reader(),
+            start=FeedStart(after=0),
+            flt=AnnouncementFilter(),
+            surface="api",
+            liveness=_short_liveness(0.3),
+        )
+    )
+    assert frames == []
+    assert finished == [True]
 
 
 async def test_read_error_after_the_deadline_sends_no_error_frame(

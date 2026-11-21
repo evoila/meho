@@ -1395,6 +1395,23 @@ these on the same review cadence as `sigstore/cosign-installer`.
 > is still built, signed, attested, and scanned on every main/tag push;
 > consumers roll forward by tracking new GHCR tags / GitHub Releases.
 
+### Flaky tests
+
+A flaky test is a test that sometimes fails with no code change. It gets
+no skip, no sleep, no longer timeout, no higher database wait time and
+no retry until it is green. Those hide the fault, and the fault may be
+real in the product. Find the cause and fix it. If the cause cannot be
+found, delete the test and write down why: what was tried, how often it
+failed, and which other test covers the same behaviour.
+
+Two examples. "database is locked" in the console tests came from a
+background readiness check that outlived its test (#1776); the fix was
+to reset it after every test. "database is locked" in
+`test_feed_stream_ends_with_login.py` came from the announcement stream
+cancelling a read in the middle of a statement; the fix was to let a
+healthy read end by itself. Start by running the failing test file with
+the files of its CI shard, several times, with the CPU busy.
+
 ## Known issues
 
 `/ready` returns 503 until every registered probe passes. After Task

@@ -12,9 +12,13 @@ Two kinds of session get a link:
   with new bytes. For every MCP tool call in the new tails it looks for
   the audit row of that call: same tenant, same person, an MCP tool call
   row (``method = 'MCP'``), the same tool name and the same arguments hash,
-  inside the session's time. Each ``agent_session_id`` it finds (the MCP
-  session id) is stored as one :class:`AgentSessionLink` row, with the
-  newest work reference (ticket id) of those rows.
+  inside the session's time. A call that rows of more than one MCP session
+  match (two sessions of the same person ran ``meho_status`` at the same
+  time) says nothing about which one is this session, so it is skipped.
+  Each ``agent_session_id`` left (the MCP session id) is stored as one
+  :class:`AgentSessionLink` row, with the newest work reference (ticket id)
+  of its rows. A session with no start time gets no link: without it the
+  time window has no start.
 
 A row whose session id is the CLI login session
 (:data:`~meho_backplane.operations._audit.SESSION_FROM_CLIENT_KEY`) gets
@@ -28,6 +32,7 @@ routes do not call it, so they give no hint that a session exists.
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -86,7 +91,11 @@ def _wanted(tool_calls: Sequence[ToolCall]) -> set[tuple[str, str]]:
 
 
 async def _matching_rows(
-    session: AsyncSession, record: AgentSessionRecord, wanted: set[tuple[str, str]]
+    session: AsyncSession,
+    record: AgentSessionRecord,
+    wanted: set[tuple[str, str]],
+    started_at: datetime,
+    now: datetime,
 ) -> list[Any]:
     params_hash = AuditLog.payload["params_hash"].as_string()
     op_id = AuditLog.payload["op_id"].as_string()
@@ -97,11 +106,10 @@ async def _matching_rows(
         AuditLog.agent_session_id.is_not(None),
         params_hash.in_(sorted({digest for _, digest in wanted})),
         agent_session_rows(),
+        AuditLog.occurred_at >= started_at - _TIME_SLACK,
+        # A session that has not ended yet ends at the latest at this upload.
+        AuditLog.occurred_at <= (record.ended_at or now) + _TIME_SLACK,
     ]
-    if record.started_at is not None:
-        conditions.append(AuditLog.occurred_at >= record.started_at - _TIME_SLACK)
-    if record.ended_at is not None:
-        conditions.append(AuditLog.occurred_at <= record.ended_at + _TIME_SLACK)
     result = await session.execute(
         select(AuditLog.agent_session_id, op_id, params_hash, AuditLog.work_ref)
         .where(*conditions)
@@ -121,16 +129,22 @@ async def link_mcp_sessions(
 
     Returns how many new MCP sessions were linked.
     """
-    if not tool_calls:
+    if not tool_calls or record.started_at is None:
         return 0
     # No flush here: a new record is inserted at the caller's commit, which
     # turns a lost race for the first upload into a clean 409.
     with session.no_autoflush:
-        rows = await _matching_rows(session, record, _wanted(tool_calls))
+        rows = await _matching_rows(session, record, _wanted(tool_calls), record.started_at, now)
+        sessions_of_call: dict[tuple[str, str], set[uuid.UUID]] = defaultdict(set)
+        for mcp_session_id, op_id, params_hash, _work_ref in rows:
+            sessions_of_call[(op_id, params_hash)].add(mcp_session_id)
+        # Only a call that rows of one MCP session match names the session.
+        named = {next(iter(ids)) for ids in sessions_of_call.values() if len(ids) == 1}
         work_refs: dict[uuid.UUID, str | None] = {}
         for mcp_session_id, _op_id, _hash, work_ref in rows:
-            # Rows come oldest first, so the newest work reference wins.
-            work_refs[mcp_session_id] = work_ref or work_refs.get(mcp_session_id)
+            if mcp_session_id in named:
+                # Rows come oldest first, so the newest work reference wins.
+                work_refs[mcp_session_id] = work_ref or work_refs.get(mcp_session_id)
         if not work_refs:
             return 0
         existing = {
@@ -178,7 +192,7 @@ async def stored_session_for(
     )
     row = (
         await session.execute(
-            select(AgentSessionRecord.session_id, AgentSessionRecord.app)
+            select(AgentSessionRecord.id, AgentSessionRecord.session_id, AgentSessionRecord.app)
             .where(
                 AgentSessionRecord.tenant_id == tenant_id,
                 or_(
@@ -195,4 +209,6 @@ async def stored_session_for(
     ).first()
     if row is None:
         return None
-    return StoredSessionLink(session_id=row[0], hosted_run=row[1] == HOSTED_RUN_APP)
+    # An upload may name any app, so a hosted run also needs the run id.
+    hosted_run = row.id == agent_session_id and row.app == HOSTED_RUN_APP
+    return StoredSessionLink(session_id=row.session_id, hosted_run=hosted_run)

@@ -433,9 +433,14 @@ stored session:
   (`method = 'MCP'`), the same tool name (`payload.op_id`) and the same
   arguments hash (`payload.params_hash`, the keyed hash of
   `compute_audit_params_hash`), from 5 minutes before `started_at` to 5
-  minutes after `ended_at` (when they are set). Each `agent_session_id` it
-  finds is the MCP session of the call. It is stored as one
-  `agent_session_link` row, with the newest `work_ref` of those audit
+  minutes after `ended_at` (or after the upload time when the session has
+  not ended). A session with no `started_at` gets no link: the time window
+  would have no start. The `agent_session_id` of a matching row is the MCP
+  session of the call. A call that rows of more than one MCP session
+  match is skipped: when the same person runs two agents at the same time
+  and both call `meho_status {}`, that call does not say which session it
+  belongs to. Each MCP session left is stored as one
+  `agent_session_link` row, with the newest `work_ref` of its audit
   rows. Every audit row of that MCP session then links to the uploaded
   session, also the rows of calls whose transcript line did not match.
   The upload's audit row says how many MCP sessions were new
@@ -447,6 +452,13 @@ stored session:
   hash masks those values too. A call whose other arguments the secret
   check changed gets no match; other calls of the same MCP session still
   link it.
+
+  Two known gaps. Matching needs the MCP tool call row (`method = 'MCP'`).
+  With `AUDIT_WRAPPER_ROWS_RETIRED=true` (off by default) MEHO writes no
+  such row for most tools, so most uploads find no MCP session. And a tool
+  that writes its own `op_id` (for example `search_docs` writes
+  `meho.docs.search`) never matches its transcript name. Other calls of
+  the same MCP session can still link it.
 - **A CLI call** (its session id is the `meho login` session, payload key
   `session_from_client`) never links. One login session spans many agent
   sessions, so it does not name one of them.

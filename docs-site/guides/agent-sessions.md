@@ -32,8 +32,11 @@ MEHO keeps:
 - one audit row for each upload, read and delete;
 - the MCP sessions of the session's MEHO calls. MEHO finds them in its
   audit log at upload time: the same person, the same tool and the same
-  arguments. So the audit row of each such call links to the session
-  (see "From an audit row to its session" below).
+  arguments, inside the session's start and end time. So the audit row of
+  each such call links to the session (see "From an audit row to its
+  session" below). A call that two of your agents made at the same time
+  with the same arguments is skipped, because it does not show which
+  agent made it. A session with no start time gets no link.
 
 MEHO never keeps:
 

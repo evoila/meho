@@ -38,7 +38,8 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.operations._validate import compute_audit_params_hash
-from meho_backplane.session_store.hosted_runs import add_run_session
+from meho_backplane.session_store.audit_links import stored_session_for
+from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP, add_run_session
 from meho_backplane.session_store.models import AgentSessionLink
 from meho_backplane.session_store.object_store import set_object_store_for_testing
 from meho_backplane.session_store.tool_calls import tool_calls_in
@@ -127,10 +128,20 @@ def _archive(files: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
-def _upload(client: TestClient, *lines: bytes, started_at: datetime | None = None) -> Any:
-    data = {"session_id": _SID, "project": "infra", "app": "claude-code", "state": "ended"}
-    if started_at is not None:
-        data["started_at"] = started_at.isoformat()
+_NO_START: Any = object()
+
+
+def _upload(
+    client: TestClient,
+    *lines: bytes,
+    started_at: datetime | None = None,
+    app_name: str = "claude-code",
+) -> Any:
+    """Upload one session. With no ``started_at`` it started 10 minutes ago."""
+    data = {"session_id": _SID, "project": "infra", "app": app_name, "state": "ended"}
+    if started_at is not _NO_START:
+        start = started_at or datetime.now(UTC) - timedelta(minutes=10)
+        data["started_at"] = start.isoformat()
     resp = client.post(
         "/api/v1/sessions",
         data=data,
@@ -256,6 +267,76 @@ async def test_rows_that_do_not_match_get_no_link(client: TestClient) -> None:
     assert _stored_session_id(client, other_tenant, tenant=_TENANT_B) is None
     async with get_sessionmaker()() as session:
         assert list(await session.scalars(select(AgentSessionLink))) == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_two_parallel_mcp_sessions_share_names_neither(
+    client: TestClient,
+) -> None:
+    status: dict[str, Any] = {}
+    session_a = uuid.uuid4()
+    session_b = uuid.uuid4()
+    # The same person runs two agents at the same time. Both call
+    # meho_status {}; only session A also lists the pods.
+    await _audit_row(agent_session_id=session_a, op_id="meho_status", arguments=status)
+    await _audit_row(agent_session_id=session_b, op_id="meho_status", arguments=status)
+    row_a = await _audit_row(agent_session_id=session_a)
+    row_b = await _audit_row(agent_session_id=session_b, arguments={"query": "nodes"})
+    _upload(
+        client,
+        _tool_use_line("mcp__meho__meho_status", status),
+        _tool_use_line("mcp__meho__call_operation", _ARGS),
+    )
+
+    assert _stored_session_id(client, row_a) == _SID
+    assert _stored_session_id(client, row_b) is None
+    async with get_sessionmaker()() as session:
+        links = list(await session.scalars(select(AgentSessionLink)))
+    assert [link.mcp_session_id for link in links] == [session_a]
+
+
+@pytest.mark.asyncio
+async def test_only_a_shared_call_links_no_session(client: TestClient) -> None:
+    status: dict[str, Any] = {}
+    row_a = await _audit_row(agent_session_id=uuid.uuid4(), op_id="meho_status", arguments=status)
+    row_b = await _audit_row(agent_session_id=uuid.uuid4(), op_id="meho_status", arguments=status)
+    body = _upload(client, _tool_use_line("mcp__meho__meho_status", status))
+    assert body["outcome"] == "created"
+    for row_id in (row_a, row_b):
+        assert _stored_session_id(client, row_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_start_time_links_nothing(client: TestClient) -> None:
+    row_id = await _audit_row(agent_session_id=uuid.uuid4())
+    _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS), started_at=_NO_START)
+    assert _stored_session_id(client, row_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_call_after_the_upload_time_does_not_match(client: TestClient) -> None:
+    # A session that has not ended yet ends at the latest at the upload.
+    later = await _audit_row(
+        agent_session_id=uuid.uuid4(), occurred_at=datetime.now(UTC) + timedelta(hours=1)
+    )
+    _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS))
+    assert _stored_session_id(client, later) is None
+
+
+@pytest.mark.asyncio
+async def test_an_upload_with_the_hosted_run_app_name_is_not_a_hosted_run(
+    client: TestClient,
+) -> None:
+    mcp_session = uuid.uuid4()
+    await _audit_row(agent_session_id=mcp_session)
+    _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS), app_name=HOSTED_RUN_APP)
+    async with get_sessionmaker()() as session:
+        link = await stored_session_for(
+            session, tenant_id=_TENANT_A, agent_session_id=mcp_session, payload={}
+        )
+    assert link is not None
+    assert link.session_id == _SID
+    assert link.hosted_run is False
 
 
 @pytest.mark.asyncio

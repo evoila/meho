@@ -57,6 +57,7 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -642,6 +643,34 @@ def test_drawer_replay_link_enabled_for_tenant_admin() -> None:
     assert f"/ui/audit/sessions/{session_uuid}/replay" in body
 
 
+def test_drawer_cli_session_row_has_no_replay_link() -> None:
+    """A CLI login session row shows no replay link and no greyed-out replay button."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_uuid = uuid.uuid4()
+    row_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        op_id="cli.session.op",
+        agent_session_id=session_uuid,
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert f"/ui/audit/sessions/{session_uuid}/replay" not in body
+    assert "Replay agent session" not in body
+    assert "replay session" not in body
+
+
 # ===========================================================================
 # Deep-link: the ?audit_id= page query pre-renders the drawer
 # ===========================================================================
@@ -693,7 +722,7 @@ def test_page_deep_link_unknown_id_renders_page_without_drawer() -> None:
 def test_drawer_renders_resolved_substance() -> None:
     """A row's references resolve to named, linked substance, not raw GUIDs.
 
-    Principal display name (+ service marker for an agent session), target
+    Principal display name (+ service marker for a delegated actor), target
     name linked to its detail page, operation summary + group, and the
     plain-language "what happened" line -- resolved from the stores the
     backplane already has.
@@ -710,6 +739,7 @@ def test_drawer_renders_resolved_substance() -> None:
         payload_extra={"principal_name": "Ada Lovelace"},
         target_id=target_id,
         agent_session_id=uuid.uuid4(),
+        actor_sub="agent-sub-1",
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):

@@ -1280,6 +1280,30 @@ that header from one place, so every verb gets it without its own flag.
   must call `applyRequestContext` too (cobra runs only the nearest hook).
   That root hook runs `applyWorkRef` and then `applyTenant`.
 
+## Login session id (`Meho-Session-Id`)
+
+`meho login` makes a random id for the login session
+(`auth.NewSessionID`, a version-4 UUID) and stores it with the token
+(`StoredToken.SessionID`). The CLI sends it in the `Meho-Session-Id`
+header, next to `Meho-Work-Ref`, on every backplane request.
+
+- The `AuthedClient` request editor calls `api.SetSessionIDHeader`. The
+  hand-rolled backplane requests (`targets import`, `event-source`, the
+  broadcast feed, the `status --watch` feed) call it next to their
+  `Authorization` header, with `AuthedClient.SessionID`.
+- A token refresh keeps the id. The next `meho login` makes a new one. A
+  token stored by an older `meho` has no id, so the CLI sends no header
+  until the next login.
+- The backplane reads the header in the audit middleware
+  (`audit.py`) and binds it for the whole request. It stores the id as
+  `audit_log.agent_session_id` on the rows of the request, but only when
+  no agent run or MCP session is bound. Such a row also gets
+  `payload.session_from_client = true`. That key tells a CLI login
+  session apart from an agent session. The reflex report, the learning
+  numbers and the console's service badge and replay link use it, so
+  they do not count a CLI call as an agent session. A header that is not
+  a UUID is ignored.
+
 ## Current tenant (`meho tenants use`, `MEHO_TENANT`, #5241)
 
 One login can list several tenants. The backplane works in one current

@@ -70,7 +70,11 @@ Tests: `backend/tests/test_shutdown_drain.py`,
      (`agent_session_id`, `parent_audit_id`, `run_id`, `step_id`,
      `work_ref`), taken when the call started. So the session replay and
      the audit filters by session, runbook run or change ticket find an
-     interrupted agent, MCP or runbook call.
+     interrupted agent, MCP or runbook call. When the session id is the
+     login session of the `meho` CLI, the payload also has
+     `session_from_client: true`, as on a finished CLI call. The flag is
+     saved with the running call, because the row is written after the
+     request ended.
 
    The audit write has a 5-second limit and never raises; the log lines
    come first.
@@ -98,6 +102,7 @@ reached the target. The lasting records stay as they are:
 - `RunningOperation`: one running top-level call (op, connector, caller,
   tenant, request id, start time, approved run or not, and the audit
   links: agent session, parent row, runbook run and step, change ticket).
+  `session_from_client` says that the session id came from the CLI.
 - `SHUTTING_DOWN_ERROR_CODE` = `meho_shutting_down`.
 - Setting `shutdown_drain_seconds` (`SHUTDOWN_DRAIN_SECONDS`, default 60).
 

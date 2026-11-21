@@ -44,7 +44,10 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+import hvac.exceptions
+import structlog
 
+from meho_backplane.auth.vault import hide_store_address, store_text_for_log
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
@@ -73,6 +76,8 @@ from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "MESSAGE_SOURCE_KEY",
@@ -169,6 +174,15 @@ MESSAGE_SOURCE_KEY: Final = "message_source"
 MESSAGE_SOURCE_MEHO: Final = "meho"
 
 
+#: The ``exception_message`` of a store refusal: a sentence MEHO wrote. The
+#: store's own text is in the server log only.
+_STORE_REFUSED_TEXT: Final = "The secret store refused the request."
+
+
+#: The ``exception_message`` of any other secret store failure.
+_STORE_FAILED_TEXT: Final = "The secret store returned an error."
+
+
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     """Tier-1-redact, then length-cap, one free-text diagnostic string.
 
@@ -192,13 +206,18 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
     the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
 
+    The configured secret store address (full address and host) is replaced
+    with a fixed mark, so no text of a store error shows where the store is.
+
     Before the Tier-1 pass, the value of each quoted secret-named pair is
     replaced (``"password": "..."`` in a vendor's JSON error body, #5031):
     the Tier-1 patterns need the name right before the ``:`` and do not see
     it behind a quote.
     """
     try:
-        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
+        redacted = redact(
+            hide_store_address(scrub_secret_fields_in_text(text)), get_default_policy()
+        ).redacted
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
@@ -1645,14 +1664,25 @@ def result_connector_error(
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
     """
-    msg = _sanitize_free_text(str(exc))
+    store_error = isinstance(exc, hvac.exceptions.VaultError)
+    if store_error:
+        # The secret store's own text and request address stay in the server log.
+        _log.warning(
+            "vault_request_failed",
+            error_class=type(exc).__name__,
+            store_text=store_text_for_log(exc),
+        )
+        msg = _STORE_FAILED_TEXT
+    else:
+        msg = _sanitize_free_text(str(exc))
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
-    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
-        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    if store_error or (
+        isinstance(exc, ConnectorOwnMessage)
+        and not isinstance(exc, (httpx.HTTPStatusError, ConnectorUpstreamError))
     ):
         # The text of these two holds the URL or the vendor's words, mark or not.
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
@@ -3053,14 +3083,14 @@ def result_connector_vault_forbidden(
             "docs/codebase/error-message-shape.md for the dispatch error "
             "convention."
         )
-        # Target-less denial: the raw Vault text is the only detail.
-        msg = str(exc)
-        if len(msg) > _EXC_MESSAGE_CAP:
-            msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
-        if msg:
-            # hvac renders Forbidden as "permission denied, on GET <url>".
-            summary = f"{summary}{VAULT_SAID}{msg}"
-        extras["exception_message"] = msg
+        # Target-less denial: name only the requested path, never the store's
+        # text or address.
+        requested_path = _vault_path_of(exc)
+        if requested_path:
+            extras["refused_path"] = requested_path
+            summary = f"{summary} The requested path is {requested_path!r}."
+        extras["exception_message"] = _STORE_REFUSED_TEXT
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -3146,9 +3176,6 @@ def result_connector_vault_write_forbidden(
     secret material — and tails the operator-facing string under the
     :data:`_EXC_MESSAGE_CAP` discipline.
     """
-    msg = str(exc)
-    if len(msg) > _EXC_MESSAGE_CAP:
-        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
     path_clause = f" on {write_path!r}" if write_path else ""
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
@@ -3185,10 +3212,6 @@ def result_connector_vault_write_forbidden(
         f"backplane's shared Vault policy — the write grant is per-operator "
         f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
-    if msg:
-        # hvac renders Forbidden as "permission denied, on POST <url>" — the
-        # URL is the operator-supplied data path, never secret material.
-        summary = f"{summary}{VAULT_SAID}{msg}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -3200,7 +3223,8 @@ def result_connector_vault_write_forbidden(
             "identity_hint": identity_hint,
             "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
-            "exception_message": msg,
+            "exception_message": _STORE_REFUSED_TEXT,
+            MESSAGE_SOURCE_KEY: MESSAGE_SOURCE_MEHO,
         },
     )
 

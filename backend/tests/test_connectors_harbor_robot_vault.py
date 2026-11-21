@@ -444,7 +444,10 @@ async def test_refused_vault_login_refuses_the_park(monkeypatch: pytest.MonkeyPa
     _install_vault(monkeypatch, login_exc=hvac.exceptions.Forbidden("role denied"))
     with capture_logs() as logs:
         preflight = await robot_vault_preflight(_ctx(dict(_PARAMS)))
-    assert [e["event"] for e in logs] == ["vault_capability_preflight_failed"]
+    assert [e["event"] for e in logs] == [
+        "vault_login_failed",
+        "vault_capability_preflight_failed",
+    ]
     assert preflight is not None
     assert preflight["will_be_denied"] is True
     assert preflight["reason"] == "probe_failed:VaultRoleDeniedError"

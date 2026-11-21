@@ -47,8 +47,6 @@ from meho_backplane.operations._errors import (
     result_connector_error,
     result_connector_http_403,
     result_connector_http_422,
-    result_connector_vault_forbidden,
-    result_connector_vault_write_forbidden,
 )
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._vendor_text import (
@@ -241,48 +239,6 @@ def test_the_summary_keeps_meho_text_and_drops_what_upstream_said() -> None:
     assert out.error is not None
     meho_part = built.error.split(" Upstream said: ")[0]
     assert out.error == f"{meho_part} Upstream said: {VENDOR_TEXT_WITHHELD}"
-
-
-#: A Vault message that repeats the secret and then quotes an upstream marker.
-#: The rule must cut at the first marker in the text, not at the first marker
-#: in its own list, or the secret in front of the later marker stays.
-_VAULT_TEXT_WITH_LATER_MARKER = f"rejected {_SECRET};{UPSTREAM_SAID}invalid value"
-
-_VAULT_RESULTS: list[tuple[str, _Build]] = [
-    (
-        "vault-forbidden",
-        lambda: result_connector_vault_forbidden(
-            _PINNED_OP, PermissionError(_VAULT_TEXT_WITH_LATER_MARKER), _Target(), 1.0
-        ),
-    ),
-    (
-        "vault-write-forbidden",
-        lambda: result_connector_vault_write_forbidden(
-            _PINNED_OP,
-            PermissionError(_VAULT_TEXT_WITH_LATER_MARKER),
-            1.0,
-            write_path="secret/data/tenants/t/app",
-        ),
-    ),
-]
-
-
-@pytest.mark.parametrize(("_name", "build"), _VAULT_RESULTS, ids=[n for n, _ in _VAULT_RESULTS])
-def test_the_summary_is_cut_at_the_first_marker_in_the_text(_name: str, build: _Build) -> None:
-    built = build()
-    assert built.error is not None
-    # Control: the Vault text, with the secret, sits in front of the upstream marker.
-    assert built.error.index(VAULT_SAID) < built.error.index(UPSTREAM_SAID)
-    assert _SECRET in built.model_dump_json()
-
-    out = withhold_vendor_text(built, op_id=_PINNED_OP, tags=None)
-
-    assert _SECRET not in out.model_dump_json()
-    assert out.error is not None
-    meho_part = built.error.split(VAULT_SAID)[0]
-    assert out.error == f"{meho_part}{VAULT_SAID}{VENDOR_TEXT_WITHHELD}"
-    assert out.extras["exception_message"] == VENDOR_TEXT_WITHHELD
-    assert out.extras["error_code"] == built.extras["error_code"]
 
 
 def test_the_summary_is_cut_at_the_first_marker_whatever_the_list_order() -> None:

@@ -283,6 +283,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
     "AUDIT_EVENT_CLASSES",
+    "AUDIT_LOG_CLIENT_AZP",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
     "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
@@ -726,6 +727,13 @@ class AuditLog(Base):
             "operator_sub",
             postgresql_using="btree",
         ),
+        # Migration ``0172``: the rows of one person, by time.
+        Index(
+            "audit_log_operator_sub_occurred_at_idx",
+            "operator_sub",
+            "occurred_at",
+            postgresql_using="btree",
+        ),
         Index(
             "audit_log_tenant_id_idx",
             "tenant_id",
@@ -762,6 +770,28 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
     )
+
+
+#: The login client (``azp``) that an audit row names in its ``client``
+#: block, as text. ``NULL`` when the row has no such block. The keys are
+#: written into the SQL text, not sent as parameters: the index below
+#: serves a query only when the query has the same expression, and
+#: PostgreSQL cannot match a parameter to it in a reused query plan.
+#: PostgreSQL (JSONB) and SQLite (3.38 and newer) both know ``->`` and
+#: ``->>``.
+AUDIT_LOG_CLIENT_AZP: sa.ColumnElement[str] = AuditLog.payload.op("->")(
+    sa.literal_column("'client'")
+).op("->>", return_type=sa.Text)(sa.literal_column("'azp'"))
+
+# Migration ``0179``: the newest row of one person for one login client
+# (the last use on "Your tools" of the account page).
+Index(
+    "audit_log_operator_sub_client_azp_occurred_at_idx",
+    AuditLog.operator_sub,
+    AUDIT_LOG_CLIENT_AZP,
+    AuditLog.occurred_at,
+    postgresql_using="btree",
+)
 
 
 @sa.event.listens_for(AuditLog, "before_insert")

@@ -115,7 +115,7 @@ The `audit_log.method` column is the **channel** the row was written from; `audi
 
 With `AUDIT_WRAPPER_ROWS_RETIRED=true` (#3757) the chassis HTTP and MCP writers stop writing routine rows. Reads, searches, dry runs, operation calls and validation failures leave only a request usage event; a refused request writes a `policy_decision` row; a MEHO change with no committed record of its own (including a change whose own record rolled back with it) writes an `operation_execution` row. The rules and the startup check are in [`docs/codebase/request-usage.md`](../codebase/request-usage.md#retiring-the-wrapper-rows). The `AGENT` writer is not affected: hosted agent tool calls keep their row (#4234).
 
-`operator_sub` on every `INTERNAL` row is a stable synthetic identity (e.g. `"system"` for the G5.2-T1 memory-expiry sweeper; future writers should pick a stable name like `"system:retention-sweeper"`). Audit-query filters partition system-driven rows from operator-driven rows by `method = 'INTERNAL'` rather than by parsing `operator_sub`.
+`operator_sub` on an `INTERNAL` row is usually a stable system name (for example `system:retention-sweeper`). Two paths name a real person: `auth.tool_sign_out` carries the person who pressed the button, and `runner.principal.revoked` carries the operator who revoked the runner. To keep system rows apart from people's rows, filter on `method = 'INTERNAL'` and leave out these two paths.
 
 ### Known `INTERNAL` `path` values
 

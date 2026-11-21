@@ -23,13 +23,10 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 A hosted agent with a ``connectors`` list sees only the targets of those
 connectors (:func:`_rows_the_caller_may_see`):
 
-* steps 1 and 2 first drop the hits outside the list and then go on as
-  above with the hits that are left. So a name whose exact hits are all
-  outside the list goes on to the alias step, and an alias held by one
-  target inside the list and others outside it finds the target inside;
+* when the hits of step 1 or step 2 are all outside the list, the answer is
+  :exc:`TargetNotFoundError`, the same as for a name with no hit;
 * the hits of :exc:`AmbiguousTargetError` and the near-misses of
-  :exc:`TargetNotFoundError` name only targets inside the list. The
-  near-misses are filtered first and then cut to five.
+  :exc:`TargetNotFoundError` name only targets inside the list.
 
 Without a list every answer is the one described above.
 
@@ -142,9 +139,8 @@ async def _rows_the_caller_may_see(rows: list[TargetORM]) -> list[TargetORM]:
 
 async def _not_found(session: AsyncSession, tenant_id: UUID, query: str) -> TargetNotFoundError:
     """The ``no_target`` error for *query*, with the near-misses the caller may see."""
-    summaries = [
-        project_target_to_summary(t) for t in await _near_misses(session, tenant_id, query)
-    ]
+    near = await _near_misses(session, tenant_id, query)
+    summaries = [project_target_to_summary(t) for t in await _rows_the_caller_may_see(near)]
     _log.info(
         "target_not_found",
         tenant_id=str(tenant_id),
@@ -155,25 +151,28 @@ async def _not_found(session: AsyncSession, tenant_id: UUID, query: str) -> Targ
 
 
 async def _pick_one(
+    session: AsyncSession,
     tenant_id: UUID,
     query: str,
     hits: list[TargetORM],
     *,
     event: str,
 ) -> TargetORM | None:
-    """The one row of *hits* the caller may see, or ``None`` when there is none.
+    """The one row of *hits*, or ``None`` when *hits* is empty.
 
-    Only the hits the caller may see count: a hosted agent with a
-    ``connectors`` list sees only the targets of those connectors. One such
-    hit is the answer. More than one is :exc:`AmbiguousTargetError`, which
-    names only those hits. None is ``None``, so the resolver goes on to the
-    next step, the same as for a name with no hit.
+    More than one hit is :exc:`AmbiguousTargetError`, which names only the
+    hits the caller may see. A hosted agent with a ``connectors`` list sees
+    only the targets of those connectors: when it may see none of the hits,
+    the answer is :exc:`TargetNotFoundError`, the same as for a name with no
+    hit. Without a list every hit counts.
     """
+    if not hits:
+        return None
     visible = await _rows_the_caller_may_see(hits)
     if not visible:
-        return None
-    if len(visible) == 1:
-        return visible[0]
+        raise await _not_found(session, tenant_id, query)
+    if len(hits) == 1:
+        return hits[0]
     summaries = [project_target_to_summary(t) for t in visible]
     _log.warning(
         event,
@@ -214,8 +213,8 @@ async def resolve_target(
 
     Raises:
         TargetNotFoundError: No target matches *query* in *tenant_id*, or
-            a hosted agent's ``connectors`` list leaves out every match.
-            A match the list leaves out does not count in any step.
+            a hosted agent's ``connectors`` list leaves out every hit of
+            the step that found hits.
         AmbiguousTargetError: Multiple targets match *query* (alias collision).
     """
     # Step 1: exact name match.
@@ -234,12 +233,12 @@ async def resolve_target(
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
-    target = await _pick_one(tenant_id, query, exact_hits, event="ambiguous_exact_name")
+    target = await _pick_one(session, tenant_id, query, exact_hits, event="ambiguous_exact_name")
 
     if target is None:
         # Step 2: alias match — dialect-aware.
         alias_hits = await _alias_match(session, tenant_id, query)
-        target = await _pick_one(tenant_id, query, alias_hits, event="ambiguous_target")
+        target = await _pick_one(session, tenant_id, query, alias_hits, event="ambiguous_target")
 
     if target is None:
         # Step 3: near-miss for 404 detail.
@@ -336,56 +335,44 @@ async def _alias_match(
     return [t for t in result.scalars().all() if query in t.aliases]
 
 
-#: The most near-miss targets a ``no_target`` answer names.
-_NEAR_MISS_LIMIT = 5
-
-
 async def _near_misses(
     session: AsyncSession,
     tenant_id: UUID,
     query: str,
 ) -> list[TargetORM]:
-    """Return up to 5 live near-miss targets the caller may see, for the 404 ``matches``.
+    """Return up to 5 live near-miss targets for the 404 ``matches`` field.
 
     ``deleted_at IS NULL`` filter (G0.14-T4 #1145) keeps near-miss
     suggestions to live targets only so an operator typo-correcting
     against a recent deletion is not pointed at the tombstone.
-
-    Without a hosted agent's ``connectors`` list the database returns the
-    first five rows. With a list, every near-miss row is read and the rows
-    the list leaves out are dropped before the cut to five, so a fitting
-    target inside the list is not lost behind rows outside it.
     """
     conn = await session.connection()
     prefix = f"{query}%"
     if conn.dialect.name == "postgresql":
-        stmt = select(TargetORM).where(
-            TargetORM.tenant_id == tenant_id,
-            TargetORM.deleted_at.is_(None),
-            or_(
-                TargetORM.name.ilike(prefix),
-                text("EXISTS (SELECT 1 FROM unnest(aliases) AS a WHERE a ILIKE :p)").bindparams(
-                    p=prefix
+        stmt = (
+            select(TargetORM)
+            .where(
+                TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
+                or_(
+                    TargetORM.name.ilike(prefix),
+                    text("EXISTS (SELECT 1 FROM unnest(aliases) AS a WHERE a ILIKE :p)").bindparams(
+                        p=prefix
+                    ),
                 ),
-            ),
+            )
+            .limit(5)
         )
     else:
         # SQLite: name ILIKE only (no unnest).
-        stmt = select(TargetORM).where(
-            TargetORM.tenant_id == tenant_id,
-            TargetORM.deleted_at.is_(None),
-            TargetORM.name.ilike(prefix),
+        stmt = (
+            select(TargetORM)
+            .where(
+                TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
+                TargetORM.name.ilike(prefix),
+            )
+            .limit(5)
         )
-    if not _caller_has_a_connector_list():
-        result = await session.execute(stmt.limit(_NEAR_MISS_LIMIT))
-        return list(result.scalars().all())
-    result = await session.execute(stmt.order_by(TargetORM.name))
-    visible = await _rows_the_caller_may_see(list(result.scalars().all()))
-    return visible[:_NEAR_MISS_LIMIT]
-
-
-def _caller_has_a_connector_list() -> bool:
-    # Imported here: the operations package imports this module.
-    from meho_backplane.operations._target_connector_limit import allowed_connectors_var
-
-    return allowed_connectors_var.get() is not None
+    result = await session.execute(stmt)
+    return list(result.scalars().all())

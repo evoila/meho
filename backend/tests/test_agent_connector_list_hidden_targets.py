@@ -198,8 +198,7 @@ async def test_resolver_answers_without_a_list_are_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_alias_of_a_target_inside_and_one_outside_finds_the_inside_target() -> None:
-    """The answer is the same as when only the target inside the list has the alias."""
+async def test_alias_of_a_target_inside_and_one_outside_names_only_the_inside_one() -> None:
     await _add_targets(
         {
             "mix-fence": ("fence", ["shared", "solo"]),
@@ -207,13 +206,14 @@ async def test_alias_of_a_target_inside_and_one_outside_finds_the_inside_target(
         }
     )
     with connector_limit(_ONLY_FENCE):
-        assert await _resolver_answer("shared") == "mix-fence"
+        assert await _resolver_answer("shared") == ("ambiguous_target", ["mix-fence"])
         assert await _resolver_answer("solo") == "mix-fence"
     assert await _resolver_answer("shared") == ("ambiguous_target", ["mix-fence", "mix-other"])
 
 
 @pytest.mark.asyncio
-async def test_name_of_an_outside_target_and_alias_of_an_inside_target_finds_by_alias() -> None:
+async def test_name_of_an_outside_target_that_is_an_alias_inside_answers_no_target() -> None:
+    """The exact-name hit outside the list is refused; the lookup does not go on."""
     await _add_targets(
         {
             "xname": ("other", []),
@@ -221,7 +221,7 @@ async def test_name_of_an_outside_target_and_alias_of_an_inside_target_finds_by_
         }
     )
     with connector_limit(_ONLY_FENCE):
-        assert await _resolver_answer("xname") == "alias-holder"
+        assert await _resolver_answer("xname") == ("no_target", [])
     assert await _resolver_answer("xname") == "xname"
 
 
@@ -241,15 +241,30 @@ async def test_alias_of_two_targets_inside_and_one_outside_names_only_the_inside
         )
 
 
+async def _near_match_names(query: str) -> list[str]:
+    """The near-match names of the ``no_target`` answer for *query*, in their order."""
+    async with get_sessionmaker()() as session:
+        with pytest.raises(TargetNotFoundError) as caught:
+            await resolve_target(session, _PERSON.tenant_id, query)
+    detail: dict[str, Any] = caught.value.detail  # type: ignore[assignment]
+    return [m["name"] for m in detail["matches"]]
+
+
 @pytest.mark.asyncio
-async def test_near_matches_are_filtered_before_the_cut_to_five() -> None:
-    """Six close targets outside the list come first; the one inside still shows."""
-    hidden = {f"near-{i}": ("other", []) for i in range(6)}
-    await _add_targets({**hidden, "near-9": ("fence", [])})
+@pytest.mark.parametrize("hidden_count", [2, 6])
+async def test_near_matches_with_a_list_only_leave_out_targets_outside_it(
+    hidden_count: int,
+) -> None:
+    """The list adds no near-match and keeps the order of the answer without a list."""
+    hidden = {f"near-{i}": ("other", []) for i in range(hidden_count)}
+    await _add_targets({"near-a": ("fence", []), **hidden, "near-z": ("fence", [])})
+    without_list = await _near_match_names("near-")
     with connector_limit(_ONLY_FENCE):
-        assert await _resolver_answer("near-") == ("no_target", ["near-9"])
-    error, matches = await _resolver_answer("near-")  # type: ignore[misc]
-    assert (error, len(matches)) == ("no_target", 5)
+        with_list = await _near_match_names("near-")
+    assert len(without_list) <= 5
+    assert with_list == [n for n in without_list if n in {"near-a", "near-z"}]
+    if hidden_count == 2:
+        assert sorted(with_list) == ["near-a", "near-z"]
 
 
 # --- call_operation and preview_operation -------------------------------------

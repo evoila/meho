@@ -396,28 +396,65 @@ def _keyword_secret_spans(text: str) -> list[_Span] | None:
     return spans
 
 
+def _address_password_span(text: str, i: int) -> tuple[_Span | None, int]:
+    """Read the user part of an address that starts at *i*, as libpq does.
+
+    libpq looks for the first ``@`` or ``/``. Only an ``@`` found first ends a
+    user part; its password runs from the first ``:`` to that ``@``. Returns
+    the span of a non-empty password (or ``None``) and the index after the
+    user part.
+    """
+    stop = i
+    while stop < len(text) and text[stop] not in "@/":
+        stop += 1
+    if stop >= len(text) or text[stop] != "@":
+        return None, i
+    colon = text.find(":", i, stop)
+    span = (colon + 1, stop) if colon != -1 and stop > colon + 1 else None
+    return span, stop + 1
+
+
+def _address_query_start(text: str, i: int) -> int | None:
+    """The index of the ``?`` that starts the query part, as libpq reads it.
+
+    Hosts follow at *i*, split by ``,``. A host that starts with ``[`` runs
+    to the next ``]``, so a ``?`` inside it does not count. Returns
+    ``len(text)`` when there is no query part and ``None`` when libpq cannot
+    read the host part.
+    """
+    n = len(text)
+    while True:
+        if i < n and text[i] == "[":
+            close = text.find("]", i + 1)
+            if close in (-1, i + 1) or text[close + 1 : close + 2] not in ("", ":", "/", "?", ","):
+                return None
+            i = close + 1
+        while i < n and text[i] not in "/?,":
+            i += 1
+        if i < n and text[i] == ",":
+            i += 1
+            continue
+        question = text.find("?", i)
+        return n if question == -1 else question
+
+
 def _address_secret_spans(text: str) -> list[_Span] | None:
     """The spans of the secret values of an address form text, as libpq reads it.
 
     Follows ``conninfo_uri_parse_options`` of libpq: the password of the user
-    part (read with ``_URL_PASSWORD``) and the whole value of each query
-    parameter whose name, after percent decoding, is a secret name. A query
-    parameter runs to the next ``&``. Returns ``None`` when libpq cannot read
-    the text (white space, a broken percent code, a query parameter without
-    exactly one ``=``).
+    part and the whole value of each query parameter whose name, after
+    percent decoding, is a secret name. A query parameter runs to the next
+    ``&``. White space is part of a value. Returns ``None`` when libpq cannot
+    read the text (a broken percent code, an unclosed ``[``, a query
+    parameter without exactly one ``=``).
     """
-    if any(char in _ASCII_SPACE for char in text) or _BROKEN_PERCENT.search(text):
+    if _BROKEN_PERCENT.search(text):
         return None
-    spans: list[_Span] = []
-    password = _URL_PASSWORD.match(text)
-    if password is not None:
-        spans.append((password.end("head"), password.end() - 1))
-    after_prefix = text.index("://") + 3
-    at, slash = text.find("@", after_prefix), text.find("/", after_prefix)
-    host_start = at + 1 if at != -1 and (slash == -1 or at < slash) else after_prefix
-    question = text.find("?", host_start)
-    if question == -1:
-        return spans
+    password, host_start = _address_password_span(text, text.index("://") + 3)
+    spans: list[_Span] = [] if password is None else [password]
+    question = _address_query_start(text, host_start)
+    if question is None:
+        return None
     i, n = question + 1, len(text)
     while i < n:
         amp = text.find("&", i)

@@ -384,6 +384,31 @@ _ADDRESS_CASES = [
         "postgresql://db.test/app?password=&sslmode=require",  # trufflehog:ignore
         id="empty-secret-parameter-value",
     ),
+    pytest.param(
+        "postgresql://repl:pw 0815@db.test/app",  # trufflehog:ignore
+        f"postgresql://repl:{_M}@db.test/app",  # trufflehog:ignore
+        id="space-in-the-address-password",
+    ),
+    pytest.param(
+        "postgresql://repl:pw\t0815@db.test/app",  # trufflehog:ignore
+        f"postgresql://repl:{_M}@db.test/app",  # trufflehog:ignore
+        id="tab-in-the-address-password",
+    ),
+    pytest.param(
+        "postgresql://re\u00a0pl:pw\u00a00815@db.test/app",  # trufflehog:ignore
+        f"postgresql://re\u00a0pl:{_M}@db.test/app",  # trufflehog:ignore
+        id="no-break-space-in-the-user-and-the-password",
+    ),
+    pytest.param(
+        "postgresql://repl:pw-0815@db.test/app?application_name=wal receiver",  # trufflehog:ignore
+        f"postgresql://repl:{_M}@db.test/app?application_name=wal receiver",  # trufflehog:ignore
+        id="space-in-a-parameter-value-of-an-address-with-a-password",
+    ),
+    pytest.param(
+        "postgresql://db.test/a?application_name=wal rcv&password=pw-0815",  # trufflehog:ignore
+        f"postgresql://db.test/a?application_name=wal rcv&password={_M}",  # trufflehog:ignore
+        id="space-in-a-parameter-value-before-a-secret-parameter",
+    ),
 ]
 
 #: Texts that libpq cannot read: (value, expected).
@@ -402,11 +427,6 @@ _UNREADABLE_CASES = [
         "=pw-0815 password=pw-0815",  # trufflehog:ignore
         _M,
         id="empty-name-with-a-secret-name",
-    ),
-    pytest.param(
-        "postgresql://repl:pw 0815@db.test/app",  # trufflehog:ignore
-        _M,
-        id="white-space-in-the-address-password",
     ),
     pytest.param(
         "postgresql://db.test/app?password=pw%zz0815",  # trufflehog:ignore
@@ -434,11 +454,6 @@ _UNREADABLE_CASES = [
         id="missing-equals-without-a-secret-name",
     ),
     pytest.param(
-        "postgresql://db.example.test/my db?sslmode=require",
-        "postgresql://db.example.test/my db?sslmode=require",
-        id="white-space-in-an-address-without-a-secret",
-    ),
-    pytest.param(
         "postgresql://db.test/app?sslmode=require&broken",
         "postgresql://db.test/app?sslmode=require&broken",
         id="parameter-without-equals-and-without-a-secret",
@@ -462,6 +477,18 @@ _NO_SECRET_CASES = [
     pytest.param(
         "postgresql://db.test/app?application_name=wal%20receiver#x",
         id="address-with-percent-codes",
+    ),
+    pytest.param(
+        "postgresql://db.example.test/my db?application_name=wal receiver",
+        id="address-with-white-space",
+    ),
+    pytest.param(
+        "postgresql://db.test:5432/app@repl:x",  # trufflehog:ignore
+        id="address-with-an-at-sign-after-the-slash",
+    ),
+    pytest.param(
+        "postgresql://[2001:db8::1?password=x]/app",  # trufflehog:ignore
+        id="address-with-a-question-mark-inside-a-bracket-host",
     ),
 ]
 

@@ -4094,6 +4094,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The default answer of every operation also hides secret-named values in a YAML comment line (<code># dbPassword: ...</code>, with a commented-out value over more lines), in <code>key: value</code> lines of a text that does not read as YAML, and in XML text: a secret-named element, a secret-named attribute, the <code>value</code> and the text of an element whose <code>key</code> or <code>name</code> is a secret name (<code>&lt;add key="DbPassword" value="..."/&gt;</code>), and the <code>&lt;value&gt;</code> of a <code>&lt;name&gt;</code>/<code>&lt;value&gt;</code> pair whose name is a secret name.</td>
+<td>None. A script that reads such a text sees <code>[REDACTED:param_name]</code> in place of the value. A person who needs the value sends the call with <code>reveal_secret: true</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>The default answer of every operation also hides secret-named fields inside text values, for example a password in a JSON or YAML file of a ConfigMap or in the last-applied note of kubectl. <code>k8s.cr.list</code> and <code>k8s.cr.info</code> hide credential fields in <code>spec_excerpt</code>, <code>status_excerpt</code> and <code>fields</code> for every kind, and mask the Helm values of a <code>HelmChartConfig</code>.</td>
 <td>None. A script that reads such a text value sees <code>"[REDACTED:param_name]"</code> in place of the secret. A person who needs the value sends the call with <code>reveal_secret: true</code>.</td>
 </tr>

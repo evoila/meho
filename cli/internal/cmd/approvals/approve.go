@@ -62,7 +62,28 @@ const severalIDsHelp = "With several ids, approve shows each request (what it " 
 	"does, the operation, the connector and its version, the target, the " +
 	"risk level and the parameters) and asks you about each one on its " +
 	"own. Type yes to approve that request; anything else skips it. Each " +
-	"approval is a separate decision about one request."
+	"approval is a separate decision about one request. A request that " +
+	"runs a script gets the same check as with one id (see below), and " +
+	"a refused answer skips it. Give each id once: an id given twice " +
+	"stops the command before anything is approved."
+
+// scriptStepHelp explains the question before an approve of a script.
+const scriptStepHelp = "With one id, when the request runs a script, approve first " +
+	"shows the script's size and SHA-256 and where to read the whole " +
+	"script (`meho approvals show <id>` and the approvals page of the " +
+	"console). Then it asks: Type yes, or the script's SHA-256, to " +
+	"approve. Anything else stops, and nothing is approved. With " +
+	"several ids and with --in-order, a request that runs a script gets " +
+	"the same rule: yes only from a terminal, or the matching SHA-256. From a " +
+	"terminal, yes approves. When input is not a terminal (a pipe), only " +
+	"the matching SHA-256 approves. When MEHO shows no SHA-256 (values " +
+	"that look like secrets were hidden, or MEHO could not check the " +
+	"script), only yes from a terminal approves. There is no flag that " +
+	"skips the question. Your own wrapper script can pass the SHA-256 of " +
+	"the copy you reviewed on standard input:\n\n" +
+	"  printf '%s\\n' \"$REVIEWED_SHA256\" | meho approvals approve <id>\n\n" +
+	"MEHO approves only when the script matches that copy. The browser " +
+	"sign-in still asks you, so the step stays a person's step."
 
 // newApproveCmd returns the `meho approvals approve` command.
 //
@@ -95,7 +116,7 @@ func newApproveCmd() *cobra.Command {
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.\n\n" + approveWaitHelp + "\n\n" + severalIDsHelp +
+			"rationale to the decision row.\n\n" + approveWaitHelp + "\n\n" + severalIDsHelp + "\n\n" + scriptStepHelp +
 			"\n\n" + approveRightsHelp + "\n\n" + inOrderHelp + "\n\n" + approveSignInHelp +
 			"\n\n" + delegatedReasonHelp("approve"),
 		Args:          approveArgs(&workRef, &inOrder),
@@ -197,6 +218,25 @@ func runDecision(
 	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, jsonOut)
 	if cerr != nil {
 		return cerr
+	}
+	if verb == "approve" {
+		// A request that runs a script is shown, and the person is asked,
+		// before the decision goes out (#6630).
+		before, ferr := fetchDetail(cmd.Context(), client, requestID)
+		if ferr != nil {
+			return routeRequestError(cmd, backplaneURL, ferr, jsonOut)
+		}
+		if before == nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("MEHO did not answer with the request, so it was not shown and nothing was approved."),
+				jsonOut,
+			)
+		}
+		if before.Status == api.ApprovalRequestStatusPending {
+			if why := confirmScript(cmd, idArg, before); why != "" {
+				return output.RenderError(cmd.ErrOrStderr(), output.Usage(why), jsonOut)
+			}
+		}
 	}
 	detail, answer, err := postDecision(cmd.Context(), client, requestID, verb, reason)
 	var noBrowser *auth.NoBrowserError

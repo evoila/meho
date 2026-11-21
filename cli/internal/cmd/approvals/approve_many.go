@@ -43,11 +43,17 @@ type manyResult struct {
 // skipped. The run stops at the first request MEHO refuses.
 func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut bool, backplaneOverride string) error {
 	ids := make([]uuid.UUID, 0, len(idArgs))
+	seen := make(map[uuid.UUID]bool, len(idArgs))
 	for _, a := range idArgs {
 		id, err := parseRequestID(a)
 		if err != nil {
 			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 		}
+		if seen[id] {
+			return output.RenderError(cmd.ErrOrStderr(), output.Usage(fmt.Sprintf(
+				"the id %s is given twice. Give each id once. Nothing was approved.", id)), jsonOut)
+		}
+		seen[id] = true
 		ids = append(ids, id)
 	}
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
@@ -62,6 +68,7 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 	ctx := cmd.Context()
 	signIn := newApprovalSignIn(client, cmd.ErrOrStderr())
 	in := bufio.NewReader(cmd.InOrStdin())
+	terminal := inputIsTerminal(cmd.InOrStdin())
 	body := api.DecideRequestBody{Decision: "approved"}
 	if reason != "" {
 		r := reason
@@ -84,9 +91,8 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 			res.Outcome, res.Detail = manySkipped, fmt.Sprintf("it is %s, not pending", detail.Status)
 		default:
 			showRequest(cmd.ErrOrStderr(), fmt.Sprintf("Request %d of %d:", i+1, len(ids)), detail)
-			prompt := fmt.Sprintf("Type yes to approve request %d of %d. Anything else skips it: ", i+1, len(ids))
-			if !askYes(in, cmd.ErrOrStderr(), prompt) {
-				res.Outcome, res.Detail = manySkipped, "you did not type yes"
+			if why := askMany(in, terminal, cmd.ErrOrStderr(), detail, i+1, len(ids)); why != "" {
+				res.Outcome, res.Detail = manySkipped, why
 				break
 			}
 			resp, err := sendDecide(ctx, client, id, body, signIn, isDestructive(detail))
@@ -112,6 +118,21 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 	}
 	printManySummary(cmd, results, jsonOut)
 	return nil
+}
+
+// askMany asks about request n of total. It returns "" when the person
+// may approve, or why the request is skipped. A request that runs a script
+// gets the same check as a one-id approve: yes only from a terminal, or
+// the script's matching SHA-256.
+func askMany(in *bufio.Reader, terminal bool, w io.Writer, detail *api.ApprovalRequestView, n, total int) string {
+	if preview := scriptPreview(detail.ProposedEffect); preview != nil {
+		return askScript(in, terminal, w, preview, fmt.Sprintf(
+			"Type yes, or the script's SHA-256, to approve request %d of %d. Anything else skips it: ", n, total))
+	}
+	if !askYes(in, w, fmt.Sprintf("Type yes to approve request %d of %d. Anything else skips it: ", n, total)) {
+		return "you did not type yes"
+	}
+	return ""
 }
 
 func printManyResult(w io.Writer, res manyResult) {

@@ -487,6 +487,21 @@ a bound blast-radius preview) does not apply here — `file.write` is
 `dangerous`, not `destructive`, because its backup + rollback make it
 recoverable.
 
+`sysctl.write` of a key or a value that can make the kernel run a program
+or write a file is a credential call: a person approves each call, and no
+standing grant, no agent grant and no run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+A key that MEHO cannot read as a plain parameter name waits too.
+`connectors/linux/op_classes.py` tells these calls apart from the params
+(`sysctl_write_can_run_a_program`, registered with
+`declare_credential_check`). The key check that runs before any command
+(`validate_sysctl_key` in `connectors/linux/ops_host.py`) also refuses, with
+a message, a key that `sysctl` would not read as a parameter name, on both
+`sysctl.read` and `sysctl.write`. The published key schema of the two
+operations stays the same. A plain tuning key with a number keeps the
+rules of the op: a standing grant still covers it. The approval card shows
+the key and the value (the generic params echo).
+
 `script.run` is the **intentional arbitrary-code surface** — a typed verb
 governed by approval, not an interactive shell. It exists so the aborted
 first-boot script can be re-run (or a multi-step fix applied) *through* the

@@ -72,8 +72,8 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.health import ProbeResult
+from meho_backplane.own_message import ConnectorOwnMessage
 from meho_backplane.settings import Settings, get_settings
 
 _log = structlog.get_logger(__name__)

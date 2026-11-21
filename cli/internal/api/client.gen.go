@@ -4586,7 +4586,7 @@ type ClassificationPreviewRow struct {
 	OpId        string               `json:"op_id"`
 }
 
-// ClassificationRequestResponse The answer to an edit request: it waits until a second tenant admin approves it.
+// ClassificationRequestResponse The answer to an edit request: it waits until a tenant admin approves it in the console.
 type ClassificationRequestResponse struct {
 	ApprovalRequestId *string `json:"approval_request_id"`
 	ChangedOperations int     `json:"changed_operations"`
@@ -6263,10 +6263,10 @@ type DroppedOpModel struct {
 // surface as a confusing 400 "at least one field must be set"
 // from the route layer).
 type EditGroupBody struct {
-	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console.
 	Category *string `json:"category"`
 
-	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console.
 	Labels    *map[string]string `json:"labels"`
 	Name      *string            `json:"name"`
 	WhenToUse *string            `json:"when_to_use"`
@@ -6308,12 +6308,12 @@ type EditGroupBody struct {
 // 422 “extra_forbidden“ — same fail-loud posture as every other
 // public v1 request schema.
 type EditOpBody struct {
-	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console.
 	Category          *string `json:"category"`
 	CustomDescription *string `json:"custom_description"`
 	IsEnabled         *bool   `json:"is_enabled"`
 
-	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console.
 	Labels           *map[string]string     `json:"labels"`
 	Reason           *string                `json:"reason"`
 	RequiresApproval *bool                  `json:"requires_approval"`

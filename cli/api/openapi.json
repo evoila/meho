@@ -2184,7 +2184,7 @@
           "policy"
         ],
         "summary": "Import Policy",
-        "description": "Show what the file would change (``?preview=true``), or ask to import it.\n\nThe import replaces the whole policy of *scope*: an entry that is not in\nthe file is removed. It waits until a second admin approves it.",
+        "description": "Show what the file would change (``?preview=true``), or ask to import it.\n\nThe import replaces the whole policy of *scope*: an entry that is not in\nthe file is removed. It waits until an admin approves it in the web console.",
         "operationId": "import_policy_api_v1_policy_import_post",
         "parameters": [
           {
@@ -5567,7 +5567,7 @@
           "connectors"
         ],
         "summary": "Edit Group Endpoint",
-        "description": "Edit a group's ``when_to_use`` / ``name`` overrides.\n\nAt least one of the two body fields must be set; an empty body\nyields 400. Writes one ``meho_connector_edit_group`` audit row\nvia the service layer. Returns 204 on success.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; another tenant admin must approve it. Sent with other fields: 400.",
+        "description": "Edit a group's ``when_to_use`` / ``name`` overrides.\n\nAt least one of the two body fields must be set; an empty body\nyields 400. Writes one ``meho_connector_edit_group`` audit row\nvia the service layer. Returns 204 on success.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.",
         "operationId": "edit_group_endpoint_api_v1_connectors__connector_id__groups__group_key__patch",
         "parameters": [
           {
@@ -5614,7 +5614,7 @@
             "description": "Successful Response"
           },
           "202": {
-            "description": "category / labels were sent: the change waits until another tenant admin approves it.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5643,7 +5643,7 @@
           "connectors"
         ],
         "summary": "Edit Op Endpoint",
-        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; another tenant admin must approve it. Sent with other fields: 400.",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.",
         "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
         "parameters": [
           {
@@ -5697,7 +5697,7 @@
             }
           },
           "202": {
-            "description": "category / labels were sent: the change waits until another tenant admin approves it.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6116,7 +6116,7 @@
           "policy"
         ],
         "summary": "Request Classification",
-        "description": "Ask for one edit. It waits until another tenant admin approves it.\n\nRefused with ``400`` (nothing asked) when the edit is not valid, matches\nno operation, or would give an operation a conflict: run the preview\nfirst to see why.",
+        "description": "Ask for one edit. It waits until a tenant admin approves it in the web console.\n\nRefused with ``400`` (nothing asked) when the edit is not valid, matches\nno operation, or would give an operation a conflict: run the preview\nfirst to see why.",
         "operationId": "request_classification_api_v1_policy_classification_post",
         "parameters": [
           {
@@ -6142,7 +6142,7 @@
         },
         "responses": {
           "202": {
-            "description": "The change waits until another tenant admin approves it.",
+            "description": "The change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6224,7 +6224,7 @@
           "connectors"
         ],
         "summary": "Classify Connector",
-        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
+        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until a tenant admin approves it in the web console. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
         "operationId": "classify_connector_api_v1_connectors__connector_id__classification_patch",
         "parameters": [
           {
@@ -6259,7 +6259,7 @@
         },
         "responses": {
           "202": {
-            "description": "The change waits until another tenant admin approves it.",
+            "description": "The change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -17941,7 +17941,7 @@
           "ui-policy"
         ],
         "summary": "Ui Policy Classify Request",
-        "description": "Ask for the change. It waits until another tenant admin approves it.",
+        "description": "Make the change. A tenant admin's change of rights in the console runs at once.",
         "operationId": "ui_policy_classify_request_ui_policy_classify_request_post",
         "requestBody": {
           "content": {
@@ -32675,7 +32675,7 @@
           "changed_operations"
         ],
         "title": "ClassificationRequestResponse",
-        "description": "The answer to an edit request: it waits until a second tenant admin approves it."
+        "description": "The answer to an edit request: it waits until a tenant admin approves it in the console."
       },
       "ClassificationTaxonomyOut": {
         "properties": {
@@ -35559,7 +35559,7 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "nullable": true,
             "title": "Category",
-            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it."
+            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console."
           },
           "labels": {
             "additionalProperties": {
@@ -35569,7 +35569,7 @@
             "maxProperties": 32,
             "nullable": true,
             "title": "Labels",
-            "description": "Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin."
+            "description": "Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console."
           }
         },
         "additionalProperties": false,
@@ -35619,7 +35619,7 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "nullable": true,
             "title": "Category",
-            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it."
+            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console."
           },
           "labels": {
             "additionalProperties": {
@@ -35629,7 +35629,7 @@
             "maxProperties": 32,
             "nullable": true,
             "title": "Labels",
-            "description": "Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin."
+            "description": "Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console."
           }
         },
         "additionalProperties": false,

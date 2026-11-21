@@ -94,9 +94,10 @@ side.
 
 ### 2. Role `meho-mcp`
 
-Bound to the Keycloak realm and to the backplane's audience, on the
-dedicated `jwt` mount from surface 1. Default role name `meho-mcp`
-per [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
+Bound to the Keycloak realm, to the backplane's audience and to the
+addresses MEHO uses, on the dedicated `jwt` mount from surface 1. Default
+role name `meho-mcp` per
+[`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
 `VAULT_OIDC_ROLE`; configurable via env var if a different name fits
 the operator's Vault conventions.
 
@@ -105,27 +106,45 @@ vault write auth/jwt/role/meho-mcp \
   role_type=jwt \
   user_claim=sub \
   bound_audiences=<keycloak-audience> \
+  token_bound_cidrs=<meho-address-1>,<meho-address-2> \
   policies=meho-mcp \
-  token_ttl=1h
+  token_ttl=5m
 ```
 
 The `bound_audiences` value must match `KEYCLOAK_AUDIENCE` in the
 backplane's ConfigMap. (Substitute `jwt` with your chosen mount path
 if you didn't use the default.)
 
+`token_bound_cidrs` lists the addresses MEHO's pods use to reach your
+Vault. Bind the role to them: only MEHO needs to reach the Vault login
+path, and the token Vault issues works only from those addresses.
+`token_ttl=5m` is enough, because MEHO revokes its Vault token after each
+use.
+
+The binding uses the address Vault sees on the connection. When MEHO
+reaches Vault through a proxy, a load balancer or node address
+translation, Vault may see another address. Then bind the address Vault
+sees: check it in the Vault audit log (`remote_address`) after a first
+login.
+
 ### 3. Policy `meho-mcp`
 
-Grants the role the read paths the backplane exercises. v0.1 needs
-**read** on the entire `secret/meho/*` subtree because operators
-delegate per-secret authorisation to their Keycloak group
-membership (groups → Vault external-group bindings → richer
-policies) rather than per-path Vault policy:
+One recipe: the per-tenant policy. Each tenant reads only
+`secret/tenants/<tenant_id>/`, which is MEHO's default target layout.
+The three per-tenant policies (read-only, operator, admin) and the
+identity wiring that makes them resolve are in
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§2 to §4. Bind them to the role's logins through identity groups, and
+give each tenant's callers the group that matches their `tenant_role`.
+
+The policy `meho-mcp` on the role itself grants only the health test
+secret (surface 5):
 
 ```hcl
-path "secret/data/meho/*" {
+path "secret/data/meho/test/federation" {
   capabilities = ["read"]
 }
-path "secret/metadata/meho/*" {
+path "secret/metadata/meho/test/federation" {
   capabilities = ["read"]
 }
 ```
@@ -429,21 +448,15 @@ the policy needs `read` on `secret/data/tenants/+/event-sources/*` (and
 the matching `secret/metadata/...` path). Without it, every event source
 with a secret answers 503 and the sender keeps retrying.
 
-Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
-`bound_audiences` as its *only* binding and no `bound_subject` /
-`bound_claims`, paired with a policy that grants read on the whole
-`secret/data/meho/*` subtree. Any Keycloak principal whose token carries
-`aud=<keycloak-audience>` is therefore accepted by it, including a
-confidential service-account client. `check_runner_jwt()` mints the
+Role `meho-mcp` above accepts a token that carries
+`aud=<keycloak-audience>` from the addresses MEHO uses, and its policy is
+the per-tenant policy of surface 3. `check_runner_jwt()` mints the
 runner's token with `audience=KEYCLOAK_AUDIENCE`
 (`backend/src/meho_backplane/auth/runner_identity.py`), and the realm
 recipe in [`docs/deploying.md`](../deploying.md) tells you to give the
-client the matching audience mapper. Net effect of turning the flag on
-with the role as provisioned: Vault accepts the runner principal as-is,
-and every scheduled evaluation runs with read on **all** target
-credentials under `secret/meho/*`. That silently removes the
-"system-initiated calls cannot perform an operator-context Vault read"
-carve-out the rest of the credential layer is built around.
+client the matching audience mapper. To keep the runner's reads to the
+secrets that Sensors evaluate, give the runner a role of its own, as
+below.
 
 Pick one of two guardrails before enabling the flag.
 
@@ -816,7 +829,7 @@ everything it needs from Vault.
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`) |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: …"`; Vault server log shows `error configuring token validator: unsupported config type` | The `meho-mcp` `role_type=jwt` role was created on an `auth/oidc/` mount that's in OIDC-login mode. Vault (≥1.21.2) refuses `role_type=jwt` on an OIDC-configured mount. | Move the JWT method + role to a **dedicated mount** per surface 1 (`vault auth enable -path=jwt jwt`) and set `VAULT_OIDC_MOUNT_PATH` to match. Do not co-locate with an interactive-OIDC-login mount. (evoila/meho#553) |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
-| `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on `secret/meho/*`. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/*` and `secret/metadata/meho/*` |
+| `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on the health test secret. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/test/federation` and `secret/metadata/meho/test/federation` |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: KeyError"` or `read_failed: TypeError` | Vault returned an unexpected payload shape — KV-v1 mount instead of v2, proxy mangling the response, etc. | Verify surface 4 (KV v2 mount); the mount must be type `kv` with `options.version="2"` |
 | Agent-principal registration fails — REST `502 scheduler_vault_write_error`, or MCP `meho_agent_principals_register` JSON-RPC `-32602` "scheduler Vault write failed" — while reads/listing still work | **Under-scoped surface 6** — `VAULT_SCHEDULER_TOKEN` policy grants read but not write on the agent-credentials path, so the secret-mint write is denied (Vault 403). The backplane probed `auth/token/lookup-self` after that 403 and did **not** get a 403 back, so the token is live (or Vault could not answer the probe — check for an outage first) and the policy is the remaining fault. Reads stay healthy because the read path is read-only-sufficient. | Verify surface 6 (`vault token capabilities "$VAULT_SCHEDULER_TOKEN" secret/data/agents/<name>/credentials`); widen the `meho-scheduler` policy to include `create`+`update` on `secret/data/agents/+/credentials` |
 | Agent- or runner-principal registration fails with `scheduler_vault_token_invalid: the scheduler Vault token is invalid or expired …` (REST 502 detail, MCP `-32602` message, `/ui/agents/principals` register banner) | **Dead surface-6 token** — the `VAULT_SCHEDULER_TOKEN` value was revoked, hit its TTL, or is a periodic token whose lease lapsed (a `-period=768h` token expires that long after its *last* renewal, so a scheduler that was down for a month comes back with a dead token). Vault answers both this and the under-scoped-policy case with a 403; the backplane told them apart by getting a 403 from `auth/token/lookup-self` too. **Policy, path pattern, and mount are irrelevant here — do not widen the policy.** | Confirm with `VAULT_TOKEN="$VAULT_SCHEDULER_TOKEN" vault token lookup` (errors on a dead token). Re-mint against the same policy with the surface-6 command above (`vault token create -policy=meho-scheduler -period=768h -field=token`), then update the deployment secret the backplane reads (`VAULT_SCHEDULER_TOKEN`, or the file `VAULT_SCHEDULER_TOKEN_FILE` points at). The file sink is re-read on every use, so a Vault-Agent sidecar rewrite needs no pod restart; an env-var change does need a rollout. Watch the `scheduler_vault_token_verified` log event (`ttl_seconds` / `expire_time`) to confirm recovery |

@@ -308,10 +308,10 @@ Expected outcomes:
   attribution without extra machinery.
   ([Vault audit devices](https://developer.hashicorp.com/vault/docs/audit))
 - **Least privilege.** The templated policy is the *only* grant a
-  connector needs; the backplane never holds a god-mode Vault token.
-  A compromised backplane can read no more than the *currently-acting
-  operator* could — the blast-radius property the operator-context
-  decision buys.
+  connector needs. MEHO has no login of its own for target secrets. The
+  scheduler holds one token, for agent client secrets. Each read runs
+  under the *currently-acting operator's* token — the property the
+  operator-context decision buys.
 - **Never disable HMAC** on the audit device in production; never log
   the credential value. The chassis keeps `{username,password}` /
   kubeconfig out of every log event and every `OperationResult` — the

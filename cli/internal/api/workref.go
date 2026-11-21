@@ -17,6 +17,11 @@ import (
 // reads to stamp audit_log.work_ref on the row for that request.
 const WorkRefHeader = "Meho-Work-Ref"
 
+// SessionIDHeader is the request header that carries the id of the
+// login session. The backplane stores it as the session of the audit
+// rows of the request.
+const SessionIDHeader = "Meho-Session-Id"
+
 // WorkRefEnv is the environment variable the root --work-ref flag
 // falls back to when the flag is not set.
 const WorkRefEnv = "MEHO_WORK_REF"
@@ -103,5 +108,15 @@ func WorkRefFrom(ctx context.Context) string {
 func SetWorkRefHeader(req *http.Request) {
 	if ref := WorkRefFrom(req.Context()); ref != "" {
 		req.Header.Set(WorkRefHeader, ref)
+	}
+}
+
+// SetSessionIDHeader sets the Meho-Session-Id header on req when
+// sessionID is not empty. The AuthedClient request editor calls it for
+// every generated-client call; hand-rolled backplane requests call it
+// next to their Authorization header, with AuthedClient.SessionID.
+func SetSessionIDHeader(req *http.Request, sessionID string) {
+	if sessionID != "" {
+		req.Header.Set(SessionIDHeader, sessionID)
 	}
 }

@@ -5,6 +5,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -689,6 +690,7 @@ func ConvertOAuthToken(tok *oauth2.Token, backplaneURL, issuer, clientID string)
 		RefreshToken: tok.RefreshToken,
 		TokenType:    tok.TokenType,
 		Expiry:       tok.Expiry,
+		SessionID:    NewSessionID(),
 	}
 	// id_token rides in the oauth2.Token Extra() map — it's not a
 	// first-class field because the OAuth 2.0 spec doesn't define it
@@ -752,4 +754,16 @@ func IsInvalidScope(err error) bool {
 		Error string `json:"error"`
 	}
 	return json.Unmarshal(retr.Body, &payload) == nil && payload.Error == "invalid_scope"
+}
+
+// NewSessionID returns a random version-4 UUID in its text form. Login
+// calls it once; the value is the session id of that login.
+func NewSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("meho: no random bytes for the session id: " + err.Error())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

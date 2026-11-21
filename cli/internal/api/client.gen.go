@@ -1914,9 +1914,10 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId string  `json:"connector_id"`
-	CreatedAt   string  `json:"created_at"`
-	DecidedAt   *string `json:"decided_at"`
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	ConnectorId    string              `json:"connector_id"`
+	CreatedAt      string              `json:"created_at"`
+	DecidedAt      *string             `json:"decided_at"`
 
 	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
 	//

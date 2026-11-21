@@ -55,6 +55,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -177,6 +178,7 @@ def _seed_audit_row(
     agent_session_id: uuid.UUID | None = None,
     row_id: uuid.UUID | None = None,
     event_class: str = "legacy_request",
+    payload_extra: dict[str, object] | None = None,
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id."""
     resolved_id = row_id or uuid.uuid4()
@@ -194,7 +196,7 @@ def _seed_audit_row(
                     path="/mcp",
                     status_code=status_code,
                     duration_ms=Decimal("1.0"),
-                    payload={"op_id": op_id, "op_class": op_class},
+                    payload={"op_id": op_id, "op_class": op_class, **(payload_extra or {})},
                     work_ref=work_ref,
                     agent_session_id=agent_session_id,
                     event_class=event_class,
@@ -780,6 +782,43 @@ def test_replay_pivot_absent_when_row_has_no_session() -> None:
     assert response.status_code == 200, response.text
     # No replay affordance (enabled or disabled) for a session-less row.
     assert "/replay" not in response.text
+
+
+def test_replay_pivot_absent_for_cli_login_session_row() -> None:
+    """A row whose session id came from the CLI renders no replay pivot.
+
+    The link "Replay agent session" shows only on a row of an agent session.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    agent_session = uuid.uuid4()
+    cli_session = uuid.uuid4()
+    _seed_audit_row(
+        tenant_id=_TENANT_A, second=0, op_id="agent.session.op", agent_session_id=agent_session
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="cli.session.op",
+        agent_session_id=cli_session,
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/audit/results")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "cli.session.op" in body
+    assert f"Replay agent session {agent_session}" in body
+    assert f"/ui/audit/sessions/{cli_session}/replay" not in body
+    assert f"Replay agent session {cli_session}" not in body
 
 
 # ===========================================================================

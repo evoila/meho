@@ -742,6 +742,7 @@ def test_show_returns_reviewer_context(client: TestClient) -> None:
 
     target_id = uuid.uuid4()
     request_id = uuid.uuid4()
+    session_id = uuid.uuid4()
     op_id = "POST:/vcenter/vm/{vm}/power?action=start"
 
     async def _seed() -> None:
@@ -770,6 +771,7 @@ def test_show_returns_reviewer_context(client: TestClient) -> None:
                     proposed_effect={"op_id": op_id, "connector_id": "vmware-rest-9.0"},
                     status=ApprovalRequestStatus.PENDING.value,
                     work_ref="gh:evoila/meho#42",
+                    agent_session_id=session_id,
                 )
             )
 
@@ -783,6 +785,8 @@ def test_show_returns_reviewer_context(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["work_ref"] == "gh:evoila/meho#42"
+    assert body["agent_session_id"] == str(session_id)
     rc = body["reviewer_context"]
     assert rc is not None
     assert rc["target_name"] == "lab-vcenter"

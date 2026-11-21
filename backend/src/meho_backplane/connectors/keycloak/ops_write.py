@@ -543,6 +543,16 @@ async def keycloak_protocol_mapper_create(
             )
     representation = dict(params["representation"])
     mapper_name = _opt_str(representation.get("name"))
+    client_path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
+        "keycloak.protocol_mapper.create",
+        realms.managed_realm,
+        await self._get_admin_json(target, client_path, operator=operator),
+        named=client_id,
+    )
     result = await self._write_admin(
         target,
         "POST",

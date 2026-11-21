@@ -3,8 +3,9 @@
 
 """Keycloak writes keep MEHO's own sign-in clients and its login realm working.
 
-Drives ``keycloak.client.update``, ``keycloak.client.delete`` and
-``keycloak.realm.update`` through the real dispatch stack against a
+Drives ``keycloak.client.update``, ``keycloak.client.delete``,
+``keycloak.realm.update``, ``keycloak.protocol_mapper.create`` and
+``keycloak.client_scope.protocol_mapper.update`` through the real dispatch stack against a
 respx-mocked Keycloak Admin REST API (made-up names and ids). The target
 manages MEHO's own login realm. What is proven:
 
@@ -21,10 +22,13 @@ manages MEHO's own login realm. What is proven:
   MEHO cannot read the realm, or the realm comes back without its name,
   the run is refused;
 * an approval client keeps its own login flow;
+* a new mapper on each of MEHO's own sign-in clients, and a mapper change on
+  a client scope such a client uses, are refused like the client change;
 * each allowed change waits for approval and runs;
 * the same writes on another client, or in another realm, are not refused;
-* the refusal text names no client the caller did not name and gives no
-  advice to change rights.
+* the refusal text names no client the caller did not name, gives no
+  advice to change rights, and says where a realm administrator makes the
+  change.
 
 Nothing is written to Keycloak when MEHO refuses.
 """
@@ -91,7 +95,24 @@ _CLIENT_DELETE = "keycloak.client.delete"
 _REALM_UPDATE = "keycloak.realm.update"
 
 #: Words of advice to change rights or to go around the check; no refusal text has them.
-_ADVICE = ("give a second person", "ask another", "admin console", "first give", "then send")
+_ADVICE = ("give a second person", "ask another", "first give", "then send")
+#: The words of each refusal that say where the change is made.
+_WHERE = "Use the Keycloak admin console as a realm admin."
+
+_MAPPER_CREATE = "keycloak.protocol_mapper.create"
+_SCOPE_MAPPER_UPDATE = "keycloak.client_scope.protocol_mapper.update"
+_OWN_SCOPE_UUID = "51111111-1111-1111-1111-111111111111"
+_OTHER_SCOPE_UUID = "52222222-2222-2222-2222-222222222222"
+_OWN_SCOPE = "tenant-claims"
+_OTHER_SCOPE = "event-claims"
+_MAPPER_UUID = "a1111111-1111-1111-1111-111111111111"
+_NEW_MAPPER = {
+    "name": "extra-claim",
+    "protocol": "openid-connect",
+    "protocolMapper": "oidc-hardcoded-claim-mapper",
+    "config": {"claim.name": "extra", "claim.value": "x"},
+}
+_MAPPER_CHANGE = {"config": {"claim.value": "y"}}
 
 
 @pytest.fixture(autouse=True)
@@ -142,6 +163,8 @@ def _client(client_uuid: str, client_id: str) -> dict[str, Any]:
         "webOrigins": ["+"],
         "attributes": {"post.logout.redirect.uris": "+"},
         "authenticationFlowBindingOverrides": {"browser": "made-up-flow-id"},
+        "defaultClientScopes": ["basic", _OWN_SCOPE if client_uuid == _OWN_UUID else _OTHER_SCOPE],
+        "optionalClientScopes": [],
     }
 
 
@@ -168,9 +191,21 @@ class _Keycloak:
             _OWN_UUID: _client(_OWN_UUID, _ADMIN_CLIENT),
             _OTHER_UUID: _client(_OTHER_UUID, _OTHER_CLIENT),
         }
+        self.scopes = {
+            _OWN_SCOPE_UUID: {"id": _OWN_SCOPE_UUID, "name": _OWN_SCOPE},
+            _OTHER_SCOPE_UUID: {"id": _OTHER_SCOPE_UUID, "name": _OTHER_SCOPE},
+        }
         base = re.escape(f"/admin/realms/{quote(realm, safe='')}")
         mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
             200, json={"access_token": "kc-admin-token", "expires_in": 300}
+        )
+        mock.post(url__regex=rf".*{base}/clients/[^/]+/protocol-mappers/models$").respond(201)
+        mapper = rf".*{base}/client-scopes/[^/]+/protocol-mappers/models"
+        mock.route(url__regex=rf"{mapper}/[^/?]+$").mock(side_effect=self._mapper)
+        mock.get(url__regex=rf"{mapper}$").mock(side_effect=self._mappers)
+        mock.get(url__regex=rf".*{base}/client-scopes/[^/?]+$").mock(side_effect=self._scope)
+        mock.get(url__regex=rf".*{base}/client-scopes$").mock(
+            side_effect=lambda _r: httpx.Response(200, json=list(self.scopes.values()))
         )
         mock.route(url__regex=rf".*{base}/clients/[^/?]+(\?.*)?$").mock(side_effect=self._one)
         mock.get(url__regex=rf".*{base}/clients(\?.*)?$").mock(side_effect=self._find)
@@ -194,6 +229,22 @@ class _Keycloak:
             del self.clients[client_uuid]
             return httpx.Response(204)
         return httpx.Response(200, json=client)
+
+    def _scope(self, request: httpx.Request) -> httpx.Response:
+        scope = self.scopes.get(request.url.path.rsplit("/", 1)[1])
+        return httpx.Response(404) if scope is None else httpx.Response(200, json=scope)
+
+    def _mappers(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[self._mapper_rep()])
+
+    def _mapper(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(204)
+        return httpx.Response(200, json=self._mapper_rep())
+
+    @staticmethod
+    def _mapper_rep() -> dict[str, Any]:
+        return {**_NEW_MAPPER, "id": _MAPPER_UUID}
 
     def _realm(self, request: httpx.Request) -> httpx.Response:
         if request.method == "PUT":
@@ -947,3 +998,205 @@ def test_a_redirect_list_may_only_grow() -> None:
     assert blocked_changes(current, shrunk, OWN_CLIENT_CHANGES) == ["redirectUris"]
     odd = {"redirectUris": "not-a-list"}
     assert blocked_changes(copy.deepcopy(current), odd, OWN_CLIENT_CHANGES) == ["redirectUris"]
+
+
+# ---------------------------------------------------------------------------
+# Mapper writes follow the rule of the client change
+# ---------------------------------------------------------------------------
+
+#: Each sign-in client MEHO uses, with the settings of the fixture below.
+_OWN_CLIENTS = [
+    _ADMIN_CLIENT,
+    "check-runner",
+    "meho-backplane",
+    "meho-cli",
+    "meho-cli-approve",
+    "meho-web",
+    "meho-web-approve",
+    "meho-mcp",
+    "meho-mcp-code",
+    "meho-mcp-desktop",
+]
+
+
+@pytest.fixture
+def _every_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECK_RUNNER_CLIENT_ID", "check-runner")
+    monkeypatch.setenv("KEYCLOAK_CLI_CLIENT_ID", "meho-cli")
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
+    get_settings.cache_clear()
+
+
+def _mapper_create(client_uuid: str = _OWN_UUID) -> dict[str, Any]:
+    return {"id": client_uuid, "representation": dict(_NEW_MAPPER)}
+
+
+def _scope_mapper_update(scope_uuid: str = _OWN_SCOPE_UUID) -> dict[str, Any]:
+    return {
+        "scope_id": scope_uuid,
+        "mapper_id": _MAPPER_UUID,
+        "representation": copy.deepcopy(_MAPPER_CHANGE),
+    }
+
+
+_SCOPE_WORDS = "a client MEHO signs in with uses this scope"
+
+
+@pytest.mark.usefixtures("_every_own_client")
+@pytest.mark.parametrize("own_client", _OWN_CLIENTS)
+async def test_a_new_mapper_on_meho_own_client_is_refused(
+    kc: KeycloakConnector,  # noqa: F811
+    own_client: str,
+) -> None:
+    assert own_client.casefold() in meho_own_client_ids()
+    params = _mapper_create()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _LOGIN_REALM)
+        api.clients[_OWN_UUID]["clientId"] = own_client
+        call = await _call(_MAPPER_CREATE, params)
+        result = await _run(_MAPPER_CREATE, params)
+        written = _writes(mock)
+    _refused_before_approval(call, _OWN_CLIENT_WORDS)
+    assert "adding a protocol mapper" in call["error"]
+    _refused_on_run(result, "meho_own_client")
+    assert written == []
+
+
+@pytest.mark.usefixtures("_every_own_client")
+@pytest.mark.parametrize("own_client", _OWN_CLIENTS)
+@pytest.mark.parametrize("kind", ["defaultClientScopes", "optionalClientScopes"])
+async def test_a_mapper_change_on_a_scope_of_meho_own_client_is_refused(
+    kc: KeycloakConnector,  # noqa: F811
+    own_client: str,
+    kind: str,
+) -> None:
+    params = _scope_mapper_update()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _LOGIN_REALM)
+        own = api.clients[_OWN_UUID]
+        own["clientId"] = own_client
+        own["defaultClientScopes"], own["optionalClientScopes"] = ["basic"], []
+        own[kind] = [_OWN_SCOPE]
+        call = await _call(_SCOPE_MAPPER_UPDATE, params)
+        result = await _run(_SCOPE_MAPPER_UPDATE, params)
+        written = _writes(mock)
+    _refused_before_approval(call, _SCOPE_WORDS)
+    assert own_client not in call["error"]
+    _refused_on_run(result, "meho_own_client")
+    assert written == []
+
+
+async def test_a_mapper_change_is_refused_on_run_when_meho_cannot_read_the_clients(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    params = _scope_mapper_update(_OTHER_SCOPE_UUID)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _LOGIN_REALM)
+        api.clients[_OTHER_UUID]["defaultClientScopes"] = "not-a-list"
+        api.clients[_OWN_UUID]["defaultClientScopes"] = "not-a-list"
+        call = await _call(_SCOPE_MAPPER_UPDATE, params)
+        result = await _run(_SCOPE_MAPPER_UPDATE, params)
+        written = _writes(mock)
+    # Before approval clients MEHO cannot read are left to the run.
+    assert call["status"] == "awaiting_approval", call
+    _refused_on_run(result, "meho_access_not_checked")
+    assert written == []
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params", "written"),
+    [
+        (
+            _MAPPER_CREATE,
+            _mapper_create(_OTHER_UUID),
+            f"POST /admin/realms/{_LOGIN_REALM}/clients/{_OTHER_UUID}/protocol-mappers/models",
+        ),
+        (
+            _SCOPE_MAPPER_UPDATE,
+            _scope_mapper_update(_OTHER_SCOPE_UUID),
+            f"PUT /admin/realms/{_LOGIN_REALM}/client-scopes/{_OTHER_SCOPE_UUID}"
+            f"/protocol-mappers/models/{_MAPPER_UUID}",
+        ),
+    ],
+    ids=["new-mapper", "scope-mapper"],
+)
+async def test_a_mapper_write_on_another_client_runs(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    params: dict[str, Any],
+    written: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _Keycloak(mock, _LOGIN_REALM)
+        call = await _call(op_id, params)
+        assert call["status"] == "awaiting_approval", call
+        result = await _run(op_id, params)
+        writes = _writes(mock)
+    assert result["status"] == "ok", result
+    assert writes == [written]
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params", "written"),
+    [
+        (
+            _MAPPER_CREATE,
+            _mapper_create(),
+            f"POST /admin/realms/{_OTHER_REALM}/clients/{_OWN_UUID}/protocol-mappers/models",
+        ),
+        (
+            _SCOPE_MAPPER_UPDATE,
+            _scope_mapper_update(),
+            f"PUT /admin/realms/{_OTHER_REALM}/client-scopes/{_OWN_SCOPE_UUID}"
+            f"/protocol-mappers/models/{_MAPPER_UUID}",
+        ),
+    ],
+    ids=["new-mapper", "scope-mapper"],
+)
+async def test_the_mapper_writes_in_another_realm_are_not_refused(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    params: dict[str, Any],
+    written: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _Keycloak(mock, _OTHER_REALM)
+        result = await _run(op_id, params, target=_OTHER_REALM_TARGET)
+        writes = _writes(mock)
+    assert result["status"] == "ok", result
+    assert writes == [written]
+
+
+# ---------------------------------------------------------------------------
+# The refusal says where the change is made
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("op_id", "params", "words", "code"), _REFUSED, ids=_REFUSED_IDS)
+async def test_the_refusal_names_the_keycloak_admin_console(
+    kc: KeycloakConnector,  # noqa: F811
+    op_id: str,
+    params: dict[str, Any],
+    words: str,
+    code: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _Keycloak(mock, _LOGIN_REALM)
+        call = await _call(op_id, params)
+        result = await _run(op_id, params)
+    assert _WHERE in call["error"], call["error"]
+    message = result["extras"]["exception_message"]
+    # keycloak.realm.update can send a secret, so MEHO withholds its error text.
+    assert "withheld" in message or _WHERE in message, message
+
+
+async def test_a_refusal_when_meho_cannot_check_names_the_keycloak_admin_console(
+    spelled_target: str,
+) -> None:
+    params = {"id": _OWN_UUID, "representation": {"enabled": False}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        api = _Keycloak(mock, _SPELLED_REALM)
+        api.realm_read_fails = True
+        result = await _run(_CLIENT_UPDATE, params, target=spelled_target)
+    _refused_on_run(result, "meho_access_not_checked")
+    assert _WHERE in result["extras"]["exception_message"]

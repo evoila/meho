@@ -11,7 +11,13 @@ In MEHO's own login realm
   :data:`OWN_CLIENT_CHANGES` (on an approval client:
   :data:`APPROVAL_CLIENT_CHANGES`);
 * ``keycloak.realm.update`` of the login realm, unless every change is on
-  :data:`LOGIN_REALM_CHANGES`.
+  :data:`LOGIN_REALM_CHANGES`;
+* ``keycloak.protocol_mapper.create`` on a client MEHO itself uses: a new
+  mapper is a change of the client's ``protocolMappers``, which
+  ``keycloak.client.update`` refuses too;
+* ``keycloak.client_scope.protocol_mapper.update`` on a client scope that
+  such a client has as a default or optional scope
+  (:func:`refuse_scope_mapper_write`).
 
 **MEHO's own clients** (:func:`meho_own_client_ids`) come from MEHO's
 settings: ``KEYCLOAK_ADMIN_CLIENT_ID``, ``CHECK_RUNNER_CLIENT_ID``,
@@ -38,7 +44,7 @@ realm counts as the login realm.
 
 The check runs before the request waits for approval
 (:func:`register_meho_own_login_checks`) and again when the call runs, in
-the handlers of the three writes. So no approval and no standing grant lets
+the handlers of the five writes. So no approval and no standing grant lets
 such a write through. On doubt MEHO refuses at the run: when it cannot read
 its settings or the realm, or the client or realm comes back in an odd
 shape. Before approval, a client or realm MEHO cannot read is left to the
@@ -47,9 +53,10 @@ run.
 Each refusal is a
 :exc:`~.ops_user_meho_access_guard.MehoAccessRefusedError` with the code
 ``meho_own_client``, ``meho_login_realm`` or ``meho_access_not_checked``.
-Its text says what was refused and why. It names the keys the caller sent,
-never a client the caller did not name, and gives no advice to change
-rights.
+Its text says what was refused and why, and that a realm administrator
+makes such a change in the Keycloak admin console. It names the keys the
+caller sent, never a client the caller did not name, and gives no advice
+to change rights.
 """
 
 from __future__ import annotations
@@ -58,7 +65,11 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
+from meho_backplane.connectors.keycloak._paths import (
+    _ADMIN_REALM_PATH,
+    _CLIENTS_PATH,
+    fill_path,
+)
 from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
     NO_APPROVAL,
     MehoAccessRefusedError,
@@ -80,24 +91,33 @@ __all__ = [
     "APPROVAL_CLIENT_CHANGES",
     "CLIENT_UPDATE_OP",
     "LOGIN_REALM_CHANGES",
+    "MAPPER_CREATE_OP",
     "OWN_CLIENT_CHANGES",
     "REALM_UPDATE_OP",
+    "SCOPE_MAPPER_UPDATE_OP",
     "blocked_changes",
     "login_realm_park_reason",
     "meho_approval_client_ids",
     "meho_own_client_ids",
     "refuse_login_realm_write",
     "refuse_own_client_write",
+    "refuse_scope_mapper_write",
     "register_meho_own_login_checks",
+    "scope_mapper_park_reason",
 ]
 
 CLIENT_UPDATE_OP: Final = "keycloak.client.update"
 REALM_UPDATE_OP: Final = "keycloak.realm.update"
+MAPPER_CREATE_OP: Final = "keycloak.protocol_mapper.create"
+SCOPE_MAPPER_UPDATE_OP: Final = "keycloak.client_scope.protocol_mapper.update"
 
 _OWN_CLIENT: Final = "meho_own_client"
 _LOGIN_REALM: Final = "meho_login_realm"
 _NOT_CHECKED: Final = "meho_access_not_checked"
 _REFUSED: Final = "this write was refused"
+#: Where such a change is made when it is really needed. It comes right after
+#: the reason: MEHO shows the first 256 characters of a refusal.
+_WHERE: Final = "Use the Keycloak admin console as a realm admin."
 
 #: Keycloak's own browser login flow; setting it back is the way back from a
 #: login flow that a MEHO write set up.
@@ -245,7 +265,16 @@ def _not_checked(op_id: str, what: str) -> MehoAccessRefusedError:
         op_id,
         _NOT_CHECKED,
         f"{_REFUSED}: MEHO could not check that this write keeps its own sign-in working "
-        f"({what}). Nothing was changed.",
+        f"({what}). {_WHERE} Nothing was changed.",
+    )
+
+
+def _own_client_refused(op_id: str, subject: str, action: str) -> MehoAccessRefusedError:
+    return MehoAccessRefusedError(
+        op_id,
+        _OWN_CLIENT,
+        f"{_REFUSED}: {subject}, and {action} can stop MEHO's sign-in from working. "
+        f"{_WHERE} {NO_APPROVAL} Nothing was changed.",
     )
 
 
@@ -341,18 +370,15 @@ async def refuse_own_client_write(
         return
     if op_id == CLIENT_DELETE_OP:
         action = "deleting it"
+    elif op_id == MAPPER_CREATE_OP:
+        action = "adding a protocol mapper to it"
     else:
         allowed = _client_changes(op_id, client, named_text)
         blocked = blocked_changes(client, requested or {}, allowed)
         if not blocked:
             return
         action = f"changing {', '.join(blocked)}"
-    raise MehoAccessRefusedError(
-        op_id,
-        _OWN_CLIENT,
-        f"{_REFUSED}: this client is one that MEHO itself signs in with, and {action} "
-        f"can stop MEHO's sign-in from working. Nothing was changed. {NO_APPROVAL}",
-    )
+    raise _own_client_refused(op_id, "this client is one that MEHO itself signs in with", action)
 
 
 def refuse_login_realm_write(realm: str, stored: Any, requested: dict[str, Any]) -> None:
@@ -373,9 +399,110 @@ def refuse_login_realm_write(realm: str, stored: Any, requested: dict[str, Any])
         REALM_UPDATE_OP,
         _LOGIN_REALM,
         f"{_REFUSED}: this realm is the realm MEHO itself signs in with, and changing "
-        f"{', '.join(blocked)} can lock everybody out of MEHO. Nothing was changed. "
-        f"{NO_APPROVAL}",
+        f"{', '.join(blocked)} can lock everybody out of MEHO. {_WHERE} {NO_APPROVAL} "
+        "Nothing was changed.",
     )
+
+
+def _scopes_of(client: dict[str, Any]) -> set[str] | None:
+    """The names (lower case) of the default and optional scopes; ``None`` for an odd shape."""
+    names: set[str] = set()
+    for key in ("defaultClientScopes", "optionalClientScopes"):
+        value = client.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            return None
+        names.update(name.casefold() for name in map(_text, value) if name is not None)
+    return names
+
+
+async def _own_client_uses_scope(
+    connector: Any, operator: Any, target: Any, realm: str, scope_name: str | None
+) -> bool | None:
+    """Whether a client MEHO itself uses has the scope; ``None`` when MEHO cannot tell."""
+    if scope_name is None:
+        return None
+    try:
+        own = meho_own_client_ids()
+        rows = await connector._get_admin_list(
+            target, fill_path(_CLIENTS_PATH, {"realm": realm}), operator=operator, strict=True
+        )
+    except Exception:
+        return None
+    unsure = False
+    for row in rows:
+        stored = _text(row.get("clientId")) if isinstance(row, dict) else None
+        if stored is None:
+            unsure = True
+        elif stored.casefold() in own:
+            scopes = _scopes_of(row)
+            if scopes is None:
+                unsure = True
+            elif scope_name.casefold() in scopes:
+                return True
+    return None if unsure else False
+
+
+async def refuse_scope_mapper_write(
+    connector: Any,
+    operator: Any,
+    target: Any,
+    realm: str,
+    scope_name: str | None,
+    *,
+    refuse_unread: bool = True,
+) -> None:
+    """Raise :exc:`MehoAccessRefusedError` when the mapper is on a scope MEHO's own client uses.
+
+    *realm* is the realm of the target and *scope_name* the name of the
+    client scope as Keycloak stores it. The realm is MEHO's login realm as
+    for :func:`refuse_own_client_write`, and MEHO reads the realm only when
+    a client it uses may have the scope. When MEHO cannot read the clients
+    or the realm, it refuses; with *refuse_unread* off (before approval) it
+    leaves the write to the run.
+    """
+    uses = await _own_client_uses_scope(connector, operator, target, realm, scope_name)
+    if uses is False:
+        return
+    if not is_meho_login_realm(realm):
+        answered = await _answered_login_realm(connector, operator, target, realm)
+        if answered is None and refuse_unread:
+            raise _not_checked(SCOPE_MAPPER_UPDATE_OP, "MEHO could not read the realm")
+        if not answered:
+            return
+    if uses is None:
+        if refuse_unread:
+            raise _not_checked(SCOPE_MAPPER_UPDATE_OP, "MEHO could not read the clients")
+        return
+    raise _own_client_refused(
+        SCOPE_MAPPER_UPDATE_OP,
+        "a client MEHO signs in with uses this scope",
+        "changing its mappers",
+    )
+
+
+async def scope_mapper_park_reason(ctx: PreviewContext, scope_name: str | None) -> str | None:
+    """The check of ``keycloak.client_scope.protocol_mapper.update`` before approval.
+
+    *scope_name* is the stored name of the scope the request names. Returns
+    the refusal reason, or ``None``.
+    """
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    try:
+        await refuse_scope_mapper_write(
+            connector,
+            ctx.operator,
+            ctx.target,
+            resolve_realm_config(ctx.target).managed_realm,
+            scope_name,
+            refuse_unread=False,
+        )
+    except MehoAccessRefusedError as exc:
+        return exc.reason
+    return None
 
 
 def _live_connector(ctx: PreviewContext) -> Any:
@@ -446,11 +573,13 @@ async def login_realm_park_reason(ctx: PreviewContext) -> str | None:
 
 
 def register_meho_own_login_checks() -> None:
-    """Run the check before a client update or delete waits for approval.
+    """Run the check before a client update, delete or new mapper waits for approval.
 
     ``keycloak.realm.update`` runs :func:`login_realm_park_reason` from its
     own check (:mod:`.ops_write_realm_smtp`), after the check of the SMTP
-    password.
+    password. ``keycloak.client_scope.protocol_mapper.update`` runs
+    :func:`scope_mapper_park_reason` from its own check
+    (:mod:`.ops_write_scope_mapper`), after the check of its names.
     """
-    for op_id in (CLIENT_UPDATE_OP, CLIENT_DELETE_OP):
+    for op_id in (CLIENT_UPDATE_OP, CLIENT_DELETE_OP, MAPPER_CREATE_OP):
         register_park_check(op_id, _client_park_check(op_id))

@@ -3879,15 +3879,28 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <li>Any other key in the object is ignored.</li>
 <li><code>meta_tools</code> and <code>connectors</code> must be lists of strings. Anything else
   (for example a single string) makes the run fail.</li>
-<li>The <code>connectors</code> list limits <code>call_operation</code> and
-  <code>preview_operation</code>, and <code>meho_connector_list</code> shows only the
-  connectors in the list. When the agent asks for a connector that is not in
-  the list, MEHO refuses the call and tells the agent which connectors it
-  may use.
-  <code>result_query</code> reads only results that were stored under the list.
-  With the setting <code>AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST</code> on, an agent
-  with a <code>connectors</code> list does not get <code>query_topology</code>; the setting is
-  off by default.</li>
+<li>The <code>connectors</code> list limits these tools:</li>
+<li><code>call_operation</code>, <code>preview_operation</code>, <code>list_operation_groups</code> and
+    <code>search_operations</code> answer only for connectors in the list. When the
+    agent asks for a connector that is not in the list, MEHO refuses the
+    call and tells the agent which connectors it may use.</li>
+<li><code>meho_connector_list</code> shows only the connectors in the list.</li>
+<li><code>list_targets</code> shows only the targets of connectors in the list.
+    Its page cursor also names only such a target.</li>
+<li>When the agent names a target that MEHO does not find, or a name
+    that fits more than one target, the answer lists close target names.
+    It lists only targets of connectors in the list.</li>
+<li><code>result_query</code> reads only results that were stored under the list.</li>
+<li>With the setting <code>AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST</code> on, an agent
+    with a <code>connectors</code> list does not get <code>query_topology</code>. The setting is
+    off by default.</li>
+<li>The <code>connectors</code> list does <strong>not</strong> limit Memory, the knowledge base or
+  the activity feed. <code>search_memory</code>, <code>search_knowledge</code>,
+  <code>read_context_resource</code>, <code>broadcast_recent</code> and <code>broadcast_watch</code> show
+  the same entries as for an agent without a list. These entries can be
+  about any connector. They are shared on purpose, so that agents learn
+  from each other and see what other agents do. If an agent must not see
+  them, leave these tools out of <code>meta_tools</code>.</li>
 </ul>
 <h3 id="the-tool-names">The tool names<a class="headerlink" href="#the-tool-names" title="Permanent link">&para;</a></h3>
 <p>These are the names you can put in <code>meta_tools</code>:</p>

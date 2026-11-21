@@ -1152,6 +1152,61 @@
         }
       }
     },
+    "/api/v1/targets/outside-tenant-folder": {
+      "get": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Outside Tenant Folder",
+        "description": "List the live targets whose own secret path is outside the tenant's folder.\n\nRegistered before ``GET /{name}`` so the literal segment is not read as\na target name.",
+        "operationId": "outside_tenant_folder_api_v1_targets_outside_tenant_folder_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutsideTenantFolderList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -39829,6 +39884,68 @@
         ],
         "title": "OutcomeUnknownView",
         "description": "Why an approved request is on the \"outcome unknown\" list (#5026)."
+      },
+      "OutsideTenantFolderItem": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "secret_ref": {
+            "type": "string",
+            "title": "Secret Ref"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "secret_ref",
+          "reason"
+        ],
+        "title": "OutsideTenantFolderItem",
+        "description": "One target whose secret path is outside the tenant's folder, and why."
+      },
+      "OutsideTenantFolderList": {
+        "properties": {
+          "all_tenants": {
+            "type": "boolean",
+            "title": "All Tenants"
+          },
+          "check_off": {
+            "type": "boolean",
+            "title": "Check Off"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OutsideTenantFolderItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_tenants",
+          "check_off",
+          "items"
+        ],
+        "title": "OutsideTenantFolderList",
+        "description": "The targets outside the folder; ``all_tenants`` says how far the list goes."
       },
       "PairAddonRequest": {
         "properties": {

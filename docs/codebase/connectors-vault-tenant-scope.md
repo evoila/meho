@@ -130,6 +130,34 @@ keep that inside each sensor's tenant:
   `docs/cross-repo/vault-provisioning.md`, "Bounding the check-runner
   principal".
 
+## Warning for every caller
+
+The check-runner and a tenant with its own Vault role are refused when a
+target's own path is outside the tenant's folder. Every other caller is
+checked too, and gets a warning instead of a refusal. The read goes on.
+
+- **Where.** The shared loader (`_resolve_and_load` in
+  `connectors/_shared/vault_creds.py`) calls
+  `outside_tenant_folder_reason` for every store read of a target's own
+  Vault secret. The helper never raises. It uses the same rules as
+  `enforce_tenant_scope`: the same path joining, the same segment border
+  and `PLATFORM_EXEMPT_PATHS` for reads. A test pins the two together.
+- **The warning.** The server log gets `target_secret_ref_outside_tenant_folder`
+  with the target id and name, the tenant id and `secret_ref_prefix`, the
+  first part of the path. There is at most one warning per target per
+  process per hour. Nothing goes into the answer, the trace or the audit
+  row.
+- **Check off.** When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty and the tenant
+  has no own Vault role, the helper answers "not outside" and nothing is
+  logged. Only Vault and OpenBao paths are checked, not `gsm:` or
+  `wrapped:` refs.
+- **The list.** `GET /api/v1/targets/outside-tenant-folder` and
+  `meho targets outside-folder` list the targets whose path is outside the
+  folder, read from the targets table when asked. A tenant admin sees their
+  own tenant. A platform admin sees every tenant, or one with `tenant_id`.
+  A path MEHO built from the target name is inside by design and is not
+  listed. With the check off, the answer has `check_off: true` and no rows.
+
 ## The namespace convention
 
 The rule is configured by one setting,

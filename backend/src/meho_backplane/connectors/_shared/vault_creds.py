@@ -91,6 +91,7 @@ any durable artifact.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
@@ -683,6 +684,8 @@ async def _resolve_and_load(
         # a gsm: ref in a parameter is. Checked here, not in the backend, so
         # the readiness probe's own probe secret stays outside the rule.
         check_gsm_target_ref(store_ref, target_name=target.name)
+    if kind == "vault":
+        _warn_if_outside_tenant_folder(target, operator, store_ref=store_ref, mount=mount)
     backend = resolve_credential_backend(kind)
     try:
         secret_data = await backend.load_secret_data(
@@ -859,6 +862,56 @@ async def missing_secret_field_map_sources(
         return []
     _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
     return sorted({src for src in field_map.values() if src not in secret_data})
+
+
+#: At most one folder warning per target per process in this many seconds.
+_FOLDER_WARNING_INTERVAL_SECONDS = 3600.0
+
+#: ``(tenant id, target id or name)`` -> monotonic time of the last warning.
+_folder_warning_last: dict[tuple[str, str], float] = {}
+
+
+def _warn_if_outside_tenant_folder(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    store_ref: str,
+    mount: str,
+) -> None:
+    """Log a warning when a target's own Vault path is outside the tenant's folder.
+
+    Runs for the callers whose read is not refused for this reason: the
+    check runner and a tenant with its own Vault login role are refused in
+    :meth:`VaultCredentialBackend.load_secret_data`. The read goes on
+    either way. The log line holds the target id and name, the tenant id and
+    the first part of the path (``secret_ref_prefix``), at most once per
+    target per hour. Nothing reaches the answer, the trace or the audit row.
+    Does nothing when the folder check is off.
+    """
+    if operator.check_runner_dispatch or _tenant_has_own_vault_role(operator):
+        return
+    from meho_backplane.connectors.vault.tenant_scope import outside_tenant_folder_reason
+
+    reason = outside_tenant_folder_reason(
+        operator.tenant_id, mount=mount, path=store_ref, read_only=True
+    )
+    if reason is None:
+        return
+    target_id = str(getattr(target, "id", "") or "")
+    key = (str(operator.tenant_id), target_id or target.name)
+    now = time.monotonic()
+    last = _folder_warning_last.get(key)
+    if last is not None and now - last < _FOLDER_WARNING_INTERVAL_SECONDS:
+        return
+    _folder_warning_last[key] = now
+    first_part = store_ref.strip().strip("/").split("/", 1)[0]
+    structlog.get_logger(__name__).warning(
+        "target_secret_ref_outside_tenant_folder",
+        target_id=target_id,
+        target_name=target.name,
+        tenant_id=str(operator.tenant_id),
+        secret_ref_prefix=first_part,
+    )
 
 
 def _tenant_has_own_vault_role(operator: Operator) -> bool:

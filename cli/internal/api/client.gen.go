@@ -8919,6 +8919,22 @@ type OutcomeUnknownView struct {
 	RunStartedAt *string              `json:"run_started_at"`
 }
 
+// OutsideTenantFolderItem One target whose secret path is outside the tenant's folder, and why.
+type OutsideTenantFolderItem struct {
+	Name      string             `json:"name"`
+	Reason    string             `json:"reason"`
+	SecretRef string             `json:"secret_ref"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+}
+
+// OutsideTenantFolderList The targets outside the folder; “all_tenants“ says how far the list goes.
+type OutsideTenantFolderList struct {
+	AllTenants bool                      `json:"all_tenants"`
+	CheckOff   bool                      `json:"check_off"`
+	Items      []OutsideTenantFolderItem `json:"items"`
+	Message    *string                   `json:"message"`
+}
+
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
 //
 // “addon_contract_version“ is the contract version the add-on speaks;
@@ -14425,6 +14441,12 @@ type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams defines parameters for OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet.
+type OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams struct {
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // DeleteTargetApiV1TargetsNameDeleteParams defines parameters for DeleteTargetApiV1TargetsNameDelete.
 type DeleteTargetApiV1TargetsNameDeleteParams struct {
 	Force         *bool   `form:"force,omitempty" json:"force,omitempty"`
@@ -18263,6 +18285,9 @@ type ClientInterface interface {
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet request
+	OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteTargetApiV1TargetsNameDelete request
 	DeleteTargetApiV1TargetsNameDelete(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22695,6 +22720,18 @@ func (c *Client) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx contex
 
 func (c *Client) DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -41298,6 +41335,70 @@ func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *Dis
 	return req, nil
 }
 
+// NewOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetRequest generates requests for OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet
+func NewOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetRequest(server string, params *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/outside-tenant-folder")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDeleteTargetApiV1TargetsNameDeleteRequest generates requests for DeleteTargetApiV1TargetsNameDelete
 func NewDeleteTargetApiV1TargetsNameDeleteRequest(server string, name string, params *DeleteTargetApiV1TargetsNameDeleteParams) (*http.Request, error) {
 	var err error
@@ -55736,6 +55837,9 @@ type ClientWithResponsesInterface interface {
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
 
+	// OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetWithResponse request
+	OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse, error)
+
 	// DeleteTargetApiV1TargetsNameDeleteWithResponse request
 	DeleteTargetApiV1TargetsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteTargetApiV1TargetsNameDeleteResponse, error)
 
@@ -61524,6 +61628,29 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OutsideTenantFolderList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69918,6 +70045,15 @@ func (c *ClientWithResponses) DiscoverTargetsApiV1TargetsDiscoverGetWithResponse
 		return nil, err
 	}
 	return ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp)
+}
+
+// OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetWithResponse request returning *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse
+func (c *ClientWithResponses) OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse, error) {
+	rsp, err := c.OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse(rsp)
 }
 
 // DeleteTargetApiV1TargetsNameDeleteWithResponse request returning *DeleteTargetApiV1TargetsNameDeleteResponse
@@ -80049,6 +80185,39 @@ func ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp *http.Response) (*D
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest TargetsDiscoverResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse parses an HTTP response from a OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetWithResponse call
+func ParseOutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse(rsp *http.Response) (*OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OutsideTenantFolderList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

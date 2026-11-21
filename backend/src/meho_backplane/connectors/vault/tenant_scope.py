@@ -81,8 +81,10 @@ __all__ = [
     "VaultTenantScopeError",
     "count_tenants_with_own_vault_role",
     "effective_tenant_scope_template",
+    "effective_tenant_scope_template_for_tenant",
     "enforce_tenant_scope",
     "is_plain_kv_path",
+    "outside_tenant_folder_reason",
     "rendered_tenant_prefix",
     "tenant_has_own_vault_role",
 ]
@@ -163,10 +165,11 @@ DEFAULT_TENANT_SCOPE_TEMPLATE = "secret/tenants/{tenant_id}/"
 
 def tenant_has_own_vault_role(operator: Operator) -> bool:
     """Whether *operator*'s tenant has an entry in ``VAULT_OIDC_ROLE_BY_TENANT``."""
-    return (
-        _resolve_role_for_tenant(get_settings().vault_oidc_role_by_tenant, operator.tenant_id)
-        is not None
-    )
+    return _tenant_id_has_own_vault_role(operator.tenant_id)
+
+
+def _tenant_id_has_own_vault_role(tenant_id: UUID) -> bool:
+    return _resolve_role_for_tenant(get_settings().vault_oidc_role_by_tenant, tenant_id) is not None
 
 
 def count_tenants_with_own_vault_role(overrides_csv: str) -> int:
@@ -195,10 +198,15 @@ def effective_tenant_scope_template(operator: Operator) -> str:
       own Vault login role;
     * else empty.
     """
+    return effective_tenant_scope_template_for_tenant(operator.tenant_id)
+
+
+def effective_tenant_scope_template_for_tenant(tenant_id: UUID) -> str:
+    """Return the folder template for the tenant *tenant_id*; ``""`` means no folder check."""
     template = get_settings().vault_kv_tenant_scope_prefix.strip()
     if template:
         return template
-    if tenant_has_own_vault_role(operator):
+    if _tenant_id_has_own_vault_role(tenant_id):
         return DEFAULT_TENANT_SCOPE_TEMPLATE
     return ""
 
@@ -241,6 +249,35 @@ def is_plain_kv_path(candidate: str) -> bool:
     if any(char in candidate for char in _REFUSED_CHARACTERS):
         return False
     return not any(segment in _REFUSED_SEGMENTS for segment in candidate.split("/"))
+
+
+def outside_tenant_folder_reason(
+    tenant_id: UUID, *, mount: str, path: str, read_only: bool = True
+) -> str | None:
+    """Say why a store path is outside the tenant's folder, or ``None`` when it is not.
+
+    Never raises. It uses the same rules as :func:`enforce_tenant_scope`: the
+    same path joining, the same segment border and, for reads, the same
+    :data:`PLATFORM_EXEMPT_PATHS`. When the folder check is off for the
+    tenant (:func:`effective_tenant_scope_template_for_tenant` is empty) or
+    the tenant is the system shim, the answer is ``None``: nothing is
+    outside a folder that is not checked.
+
+    The answer is :data:`REASON_PATH_COULD_MOVE` or
+    :data:`REASON_OUTSIDE_TENANT`.
+    """
+    template = effective_tenant_scope_template_for_tenant(tenant_id)
+    if not template or tenant_id == _SYSTEM_TENANT_ID:
+        return None
+    candidate = _normalised_logical_path(mount, path)
+    if not is_plain_kv_path(candidate):
+        return REASON_PATH_COULD_MOVE
+    if read_only and candidate in PLATFORM_EXEMPT_PATHS:
+        return None
+    normalised_prefix = template.format(tenant_id=tenant_id).strip().strip("/")
+    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
+        return None
+    return REASON_OUTSIDE_TENANT
 
 
 def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only: bool) -> None:

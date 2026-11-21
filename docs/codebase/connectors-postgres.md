@@ -79,7 +79,7 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **a connection text is hidden** (a non-empty value of `primary_conninfo` is the fixed mark `[REDACTED:param_name]`) |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **the secret part of a connection text is hidden**: in a value of `primary_conninfo` the fixed mark `[REDACTED:param_name]` stands in place of the password (and of `sslpassword` and `oauth_client_secret`, in the key word form and in the address form); the rest of the value, and a value with no secret part, stay as they are |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
 | `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
@@ -174,7 +174,9 @@ role's rights. So the free-form op adds three checks:
    `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
    quotes or after a comment, also a nested one. The refusal for settings names
    `postgres.settings`, which puts the fixed mark `[REDACTED:param_name]` in
-   place of a non-empty value of such a setting, for every caller. The refusal for
+   place of the password (and of `sslpassword` and `oauth_client_secret`) in
+   the value of such a setting, for every caller. The rest of the value, and a
+   value with no secret part, stay as they are. The refusal for
    sessions names `postgres.activity`, which reads the same
    view without the `query` column. Views that show no secret value stay
    allowed: `pg_roles` and `pg_user` (the password is shown as stars),

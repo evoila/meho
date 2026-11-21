@@ -37,6 +37,7 @@ from meho_backplane.connectors.postgres import PostgresConnector, PostgresReadOn
 from meho_backplane.connectors.postgres import connector as connector_module
 from meho_backplane.connectors.postgres.query_guard import (
     ALLOW_SUPERUSER_QUERY_EXTRA,
+    CONNECTION_TEXT_SECRET_KEYWORDS,
     CONNECTION_TEXT_SETTINGS,
     DENIED_RELATIONS,
     assert_no_secret_catalogs,
@@ -358,7 +359,9 @@ def test_the_upgrade_row_names_every_refused_name() -> None:
     names = _code_names(note)
     assert names >= DENIED_RELATIONS
     assert names >= CONNECTION_TEXT_SETTINGS
-    assert names - DENIED_RELATIONS - CONNECTION_TEXT_SETTINGS == _OTHER_REFUSED_NAMES
+    assert names >= CONNECTION_TEXT_SECRET_KEYWORDS
+    named = names - DENIED_RELATIONS - CONNECTION_TEXT_SETTINGS - CONNECTION_TEXT_SECRET_KEYWORDS
+    assert named == _OTHER_REFUSED_NAMES
 
 
 def test_the_connector_page_names_every_refused_name() -> None:

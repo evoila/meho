@@ -39,8 +39,8 @@ it. So ``postgres.query`` adds three checks:
   ``SHOW ALL`` and a ``SHOW`` of a setting in
   :data:`CONNECTION_TEXT_SETTINGS`. The check holds for every login, also
   on a target that allows a superuser. Settings are read with the curated
-  ``postgres.settings``, which puts a fixed mark in place of a connection
-  text.
+  ``postgres.settings``, which puts a fixed mark in place of the password
+  in a connection text and keeps the rest of the value.
 
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
@@ -84,6 +84,7 @@ from meho_backplane.connectors.postgres.session import (
 
 __all__ = [
     "ALLOW_SUPERUSER_QUERY_EXTRA",
+    "CONNECTION_TEXT_SECRET_KEYWORDS",
     "CONNECTION_TEXT_SETTINGS",
     "DENIED_FUNCTIONS",
     "DENIED_FUNCTION_PREFIXES",
@@ -206,7 +207,7 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
         "pg_stat_statements",
         "pg_stat_statements_info",
         # Server settings. A setting can hold a connection string with a
-        # password; postgres.settings hides such a value.
+        # password; postgres.settings hides that password.
         "pg_settings",
         "pg_file_settings",
         "pg_show_all_settings",
@@ -223,8 +224,18 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
 
 #: Settings (lower case) whose value is a connection text. ``postgres.query``
 #: refuses a ``SHOW`` of them, and ``postgres.settings`` puts a fixed mark in
-#: place of their value.
+#: place of each secret part of their value (see
+#: :data:`CONNECTION_TEXT_SECRET_KEYWORDS`). The rest of the value stays.
 CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
+
+#: The key words of a connection text whose value is a secret. Pinned to the
+#: libpq page "Parameter Key Words"
+#: (https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS):
+#: ``password``, ``sslpassword`` (the key of the client certificate) and
+#: ``oauth_client_secret``.
+CONNECTION_TEXT_SECRET_KEYWORDS: frozenset[str] = frozenset(
+    {"password", "sslpassword", "oauth_client_secret"}
+)
 
 _SETTINGS_OP = "postgres.settings"
 

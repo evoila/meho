@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``postgres.settings`` hides the value of a connection-text setting.
+"""``postgres.settings`` hides the secret parts of a connection-text setting.
 
-The stand-in server answers with a setting from ``CONNECTION_TEXT_SETTINGS``
-next to a plain one. Through ``dispatch``, for a person, an agent login and
-a service login, the fixed hide mark is in the result in place of the value.
-The value is in none of the result, the flight recorder trace, the event
-outbox (the activity feed) and the audit row. The trace of a typed read
+In a value of a setting from ``CONNECTION_TEXT_SETTINGS`` the fixed hide mark
+stands in place of the password (and of ``sslpassword`` and
+``oauth_client_secret``), in the key word form and in the address form. The
+rest of the value stays character for character, and a value with no secret
+part stays as it is.
+
+Through ``dispatch``, for a person, an agent login and a service login, the
+made-up password is in none of the result, the flight recorder trace, the
+event outbox (the activity feed) and the audit row. The trace of a typed read
 holds its span names, and a dispatch adds no event to the feed, so the mark
 is checked in the result. The plain setting keeps its value.
 """
@@ -41,8 +45,10 @@ _CONNECTOR_ID = "postgres-wire-16"
 _OP_ID = "postgres.settings"
 _SETTING = sorted(CONNECTION_TEXT_SETTINGS)[0]
 
-#: A made-up value. It must never show up in any output.
-_CONNECTION_TEXT = "made-up-connection-text-0815-abcdef"
+#: A made-up password. It must never show up in any output.
+_PASSWORD = "made-up-pw-0815-abcdef"
+_CONNECTION_TEXT = f"host=standby.example.test port=5432 user=replicator password={_PASSWORD}"
+_VISIBLE_PART = "host=standby.example.test port=5432 user=replicator password="
 
 
 @pytest.fixture(autouse=True)
@@ -173,10 +179,11 @@ async def test_settings_put_the_hide_mark_in_place_of_a_connection_text(
         params={"names": [_SETTING, "work_mem"]},
     )
     assert result.status == "ok", result.error
-    assert _CONNECTION_TEXT not in repr(result.model_dump())
+    assert _PASSWORD not in repr(result.model_dump())
     rows = {row["name"]: row for row in (result.result or {})["settings"]}
     hidden = rows[_SETTING]
-    assert hidden["setting"] == hidden["boot_val"] == hidden["reset_val"] == SECRET_FIELD_MARKER
+    expected = f"{_VISIBLE_PART}{SECRET_FIELD_MARKER}"
+    assert hidden["setting"] == hidden["boot_val"] == hidden["reset_val"] == expected
     assert rows["work_mem"]["setting"] == "4096"
 
     traces = await _rows(DispatchTrace) + await _rows(DispatchTraceSpan)
@@ -184,7 +191,7 @@ async def test_settings_put_the_hide_mark_in_place_of_a_connection_text(
     assert traces
     assert audit
     for row in [*traces, *await _rows(EventOutbox), *audit]:
-        assert _CONNECTION_TEXT not in _row_text(row), type(row).__name__
+        assert _PASSWORD not in _row_text(row), type(row).__name__
 
 
 class _EmptyConn:
@@ -201,3 +208,72 @@ async def test_settings_keep_an_empty_connection_text_setting_as_it_is() -> None
     assert row["setting"] == ""
     assert row["reset_val"] == ""
     assert row["boot_val"] is None
+
+
+class _ValueConn:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        return [_setting_row(_SETTING, self._value)]
+
+
+async def _hidden(value: str) -> str:
+    result = await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
+    row = result["settings"][0]
+    assert row["setting"] == row["boot_val"] == row["reset_val"]
+    return str(row["setting"])
+
+
+@pytest.mark.asyncio
+async def test_settings_hide_only_the_secret_key_word_values() -> None:
+    value = (
+        "user=replicator password=made-up-bare-0815 host = standby.example.test "
+        "sslpassword = 'made-up \\'quoted\\' 0815' application_name=walreceiver port=5432"
+    )
+    expected = (
+        f"user=replicator password={SECRET_FIELD_MARKER} host = standby.example.test "
+        f"sslpassword = '{SECRET_FIELD_MARKER}' application_name=walreceiver port=5432"
+    )
+    assert await _hidden(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_settings_hide_an_oauth_client_secret_value() -> None:
+    value = "host=standby.example.test oauth_client_secret=made-up-0815 oauth_client_id=meho"
+    expected = (
+        f"host=standby.example.test oauth_client_secret={SECRET_FIELD_MARKER} oauth_client_id=meho"
+    )
+    assert await _hidden(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_settings_keep_a_quoted_value_of_another_key_word() -> None:
+    value = "application_name='app password=made-up' host=standby.example.test"
+    assert await _hidden(value) == value
+
+
+@pytest.mark.asyncio
+async def test_settings_hide_only_the_secret_parts_of_an_address() -> None:
+    value = (
+        "postgresql://replicator:made-up-pw-0815@standby.example.test:5433/postgres"
+        "?sslmode=require&password=made-up-param-0815&application_name=walreceiver"
+    )
+    expected = (
+        f"postgresql://replicator:{SECRET_FIELD_MARKER}@standby.example.test:5433/postgres"
+        f"?sslmode=require&password={SECRET_FIELD_MARKER}&application_name=walreceiver"
+    )
+    assert await _hidden(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "host=standby.example.test port=5432 user=replicator application_name=walreceiver",
+        "postgres://replicator@standby.example.test:5432/postgres?sslmode=require",
+    ],
+    ids=["key-words", "address"],
+)
+@pytest.mark.asyncio
+async def test_settings_keep_a_connection_text_with_no_secret_part(value: str) -> None:
+    assert await _hidden(value) == value

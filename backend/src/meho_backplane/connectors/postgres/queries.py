@@ -20,13 +20,18 @@ from __future__ import annotations
 
 import datetime as _dt
 import ipaddress
+import re
 import uuid
 from decimal import Decimal
 from typing import Any
 
 import asyncpg
 
-from meho_backplane.connectors.postgres.query_guard import CONNECTION_TEXT_SETTINGS
+from meho_backplane.connectors.postgres.query_guard import (
+    CONNECTION_TEXT_SECRET_KEYWORDS,
+    CONNECTION_TEXT_SETTINGS,
+)
+from meho_backplane.redaction.command_line import _URL_PASSWORD
 from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
 
 __all__ = [
@@ -318,23 +323,73 @@ async def fetch_activity(conn: asyncpg.Connection) -> dict[str, Any]:
 _SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
 
 
+#: The two start words of the address form of a connection text (libpq).
+_ADDRESS_PREFIXES: tuple[str, ...] = ("postgresql://", "postgres://")
+
+#: One ``key=value`` pair of the key word form, as libpq reads it: spaces may
+#: stand around ``=``; a value is bare up to the next space, or in single
+#: quotes with ``\'`` and ``\\`` inside.
+_KEYWORD_PAIR = re.compile(
+    r"(?<!\S)(?P<head>(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*)"
+    r"(?P<value>'(?:\\.|[^'\\])*'|(?:\\.|[^\s\\])*)"
+)
+
+#: A query parameter of the address form whose value is a secret.
+_SECRET_QUERY_PARAMETER = re.compile(
+    r"(?P<head>[?&](?:" + "|".join(sorted(CONNECTION_TEXT_SECRET_KEYWORDS)) + r")=)[^&#]+"
+)
+
+
+def _hide_keyword_value(match: re.Match[str]) -> str:
+    """Put the hide mark in place of the value of a secret key word."""
+    value = match["value"]
+    if match["key"].lower() not in CONNECTION_TEXT_SECRET_KEYWORDS or value in ("", "''"):
+        return match[0]
+    if value.startswith("'"):
+        return f"{match['head']}'{SECRET_FIELD_MARKER}'"
+    return f"{match['head']}{SECRET_FIELD_MARKER}"
+
+
+def _hide_connection_secrets(text: str) -> str:
+    """Put the hide mark in place of each secret part of one connection text.
+
+    The address form hides the password of ``user:password@`` and the value
+    of a secret query parameter. The key word form hides the value of each
+    key word in :data:`CONNECTION_TEXT_SECRET_KEYWORDS`. Everything else
+    stays exactly as the server sent it.
+    """
+    if text.lower().startswith(_ADDRESS_PREFIXES):
+        text = _URL_PASSWORD.sub(lambda match: f"{match['head']}{SECRET_FIELD_MARKER}@", text)
+        return _SECRET_QUERY_PARAMETER.sub(
+            lambda match: f"{match['head']}{SECRET_FIELD_MARKER}", text
+        )
+    return _KEYWORD_PAIR.sub(_hide_keyword_value, text)
+
+
 def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
-    """Put the fixed hide mark in place of the non-empty values of a connection-text setting."""
+    """Put the fixed hide mark in place of the secret parts of a connection-text setting.
+
+    Only the password (and ``sslpassword`` and ``oauth_client_secret``) of a
+    setting in :data:`CONNECTION_TEXT_SETTINGS` is replaced. A value with no
+    secret part, an empty value and a null value stay as they are.
+    """
     if str(row.get("name", "")).lower() not in CONNECTION_TEXT_SETTINGS:
         return row
     for column in _SETTING_VALUE_COLUMNS:
-        if row.get(column):
-            row[column] = SECRET_FIELD_MARKER
+        value = row.get(column)
+        if isinstance(value, str) and value:
+            row[column] = _hide_connection_secrets(value)
     return row
 
 
 async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> dict[str, Any]:
     """Return curated (or caller-named) runtime settings from ``pg_settings``.
 
-    The value of a setting in
+    In the value of a setting in
     :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
-    is replaced by the fixed hide mark, for every caller. An empty value
-    stays empty.
+    the fixed hide mark stands in place of the password (and of
+    ``sslpassword`` and ``oauth_client_secret``), for every caller. The rest
+    of the value stays. A value with no secret part stays as it is.
     """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)

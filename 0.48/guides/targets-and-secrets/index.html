@@ -3614,8 +3614,10 @@ which is why this is the first guide.</p>
 gets <code>403 human_principal_required</code>, also with the <strong>tenant_admin</strong>
 role. It registers a target with the <code>targets.register</code> operation,
 changes one with <code>targets.update</code> and removes one with <code>targets.remove</code>
-(connector <code>targets-registry-1.x</code>). MEHO checks them against the
-<a href="../../reference/words/#approval">approval</a> rules.</p>
+(connector <code>targets-registry-1.x</code>). Each new target and each change waits
+for a person's <a href="../../reference/words/#approval">approval</a>: no standing
+grant, run approval or agent grant covers it. The approval card shows the
+target's values, also its <code>extras</code>.</p>
 <p><strong>The CLI and REST wait for approval.</strong> A change made with your login
 token (<code>meho targets add</code>, <code>update</code>, <code>delete</code>, <code>import</code>, or a script on
 REST) waits until a person approves it. The command prints the approval
@@ -3628,8 +3630,8 @@ targets (<code>list_targets</code>). A session that asked for the <code>mcp:admi
 scope also has <code>meho_targets_register</code> and <code>meho_targets_update</code>
 (tenant_admin only). Through <code>call_operation</code>, the connector
 <code>targets-registry-1.x</code> offers <code>targets.register</code>, <code>targets.update</code>,
-<code>targets.remove</code> and <code>targets.probe</code>; an agent's register and every update
-wait for a person's approval, and <code>targets.remove</code> always waits for one. MEHO has no MCP tool to stage a secret. This is also why
+<code>targets.remove</code> and <code>targets.probe</code>; every register and every update
+waits for a person's approval, and <code>targets.remove</code> always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.</p>
 <h2 id="write-a-targetsyaml">Write a <code>targets.yaml</code><a class="headerlink" href="#write-a-targetsyaml" title="Permanent link">&para;</a></h2>
 <p>The file is a <code>targets:</code> list. A minimal, realistic pair — a

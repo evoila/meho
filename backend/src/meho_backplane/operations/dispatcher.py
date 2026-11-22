@@ -332,7 +332,12 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
-from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
@@ -4013,6 +4018,7 @@ async def _handle_needs_approval(
         reused=reused,
         audit_id=request.request_audit_id,
         note=await rights_change_note(request),
+        already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )
 
 

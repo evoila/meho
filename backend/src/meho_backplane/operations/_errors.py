@@ -1254,6 +1254,7 @@ def result_awaiting_approval(
     reused: bool = False,
     audit_id: uuid.UUID | None = None,
     note: str | None = None,
+    already_approved: bool = False,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1287,6 +1288,11 @@ def result_awaiting_approval(
     rights (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
     is added to ``error`` and kept in ``extras["approval_note"]``; the key is
     absent without a note.
+
+    *already_approved* is ``True`` when a retry with the same key got back a
+    request that a person already approved. Only the ``error`` text changes:
+    it says the request is approved and does not run again. ``status`` and
+    every ``extras`` key stay the same.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1295,6 +1301,12 @@ def result_awaiting_approval(
     if reused:
         extras["approval_request_reused"] = True
     error = f"awaiting_approval: {op_id!r} requires approval before execution"
+    if already_approved:
+        error = (
+            f"awaiting_approval: the approval request {approval_request_id} is already "
+            f"approved. {op_id!r} does not run again. The person who asked reads the "
+            f"result with `meho approvals result {approval_request_id}`"
+        )
     if note:
         extras["approval_note"] = note
         error = f"{error}. {note}"

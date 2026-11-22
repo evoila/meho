@@ -176,6 +176,9 @@ async def test_retried_destructive_call_returns_the_same_park(embedding: list[fl
     assert second["status"] == "awaiting_approval", second
     assert second["extras"]["approval_request_id"] == first["extras"]["approval_request_id"]
     assert second["extras"]["approval_request_reused"] is True
+    # A retry of a request that still waits keeps the waiting text.
+    assert "requires approval before execution" in second["error"]
+    assert "already approved" not in second["error"]
 
     assert await _approval_row_count() == 1
     assert await _request_audit_count() == 1
@@ -689,6 +692,8 @@ async def test_list_and_show_tell_approved_from_executed(embedding: list[float])
     )
     assert retry["extras"]["approval_request_id"] == request_id
     assert retry["extras"]["approval_request_reused"] is True
+    assert "already approved" in retry["error"]
+    assert "requires approval" not in retry["error"]
     assert await _approval_row_count() == 1
 
 
@@ -757,3 +762,36 @@ async def test_view_preview_hash_is_none_for_non_destructive_row() -> None:
     view = _view(row, operator=person)
     assert view.preview_hash is None
     assert view.result_state is None
+
+
+@pytest.mark.asyncio
+async def test_retry_of_an_approved_request_says_it_is_approved(embedding: list[float]) -> None:
+    """Approved, not yet run: the retry gets the same request and a true text."""
+    connector = _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    request_id = first["extras"]["approval_request_id"]
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
+        await s.commit()
+
+    retry = await call_operation(requester, bound)
+    assert retry["status"] == "awaiting_approval", retry
+    assert retry["extras"]["approval_request_id"] == request_id
+    assert retry["extras"]["approval_request_reused"] is True
+    assert set(retry["extras"]) == set(first["extras"]) | {"approval_request_reused"}
+    assert "already approved" in retry["error"]
+    assert "does not run again" in retry["error"]
+    assert f"meho approvals result {request_id}" in retry["error"]
+    assert "requires approval" not in retry["error"]
+    assert await _approval_row_count() == 1
+    assert connector.calls == []

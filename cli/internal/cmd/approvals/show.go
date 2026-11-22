@@ -179,7 +179,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "May approve:  %s\n", output.SafeText(right))
 	}
 	if d.RightsChange != nil && *d.RightsChange {
-		fmt.Fprintln(w, "Rights change: another admin must approve")
+		fmt.Fprintln(w, "Rights change: approve this change of rights in the web console")
 	}
 	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
 	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))

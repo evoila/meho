@@ -55,12 +55,14 @@
         </h4>
         <p class="text-xs">
           Assigning a realm role is a privilege grant: it gives the user every
-          permission the role carries. It is approval-gated &mdash; confirming
-          parks a request for a reviewer rather than executing immediately.
+          permission the role carries. It is a change of rights. Confirming runs
+          it at once when you may make it alone: in MEHO's own login realm only
+          a platform admin may, after a fresh sign-in. Otherwise it makes a
+          request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>
-          <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>requires approval</span>
+          <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>change of rights</span>
         </div>
       </div>
     </div>
@@ -130,7 +132,7 @@
         </button>
         <button type="submit" data-action="submit" class="btn btn-sm btn-error gap-1">
           {{ icon("shield-check", class="size-4") }}
-          Grant roles (request approval)
+          Grant roles
         </button>
       </div>
     </form>

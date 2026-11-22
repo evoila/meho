@@ -36,8 +36,8 @@ func NewRootCmd() *cobra.Command {
 			"and the routing of approvals (who may approve which changes). " +
 			"A tenant admin works on their own tenant; a platform admin can " +
 			"work on the whole install with --scope install. An import " +
-			"replaces the whole policy and waits until a second admin " +
-			"approves it.",
+			"replaces the whole policy and waits until an admin approves " +
+			"it in the web console.",
 		SilenceUsage: true,
 	}
 	addFileCommands(cmd)

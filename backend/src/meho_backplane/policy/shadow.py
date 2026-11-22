@@ -46,6 +46,7 @@ from meho_backplane.policy.evaluate import (
     Decision,
     Lookups,
     Verdict,
+    admin_console_rights_change,
     evaluate,
 )
 from meho_backplane.policy.stamp import RuleStamp, forget_rule, keep_rule
@@ -112,8 +113,10 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
     )
 
 
-def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
+def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+    from meho_backplane.operations.rights_change_console import params_write_credential
     from meho_backplane.operations.service_grants import (
         delete_grant_reason,
         descriptor_credential_reason,
@@ -126,15 +129,24 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
         "root_shell": is_root_shell(op_id),
         "per_call_approval": needs_per_call_approval(op_id),
         "credential": descriptor_credential_reason(descriptor) is not None,
-        "credential_waits": descriptor_credential_waits(descriptor),
+        "credential_waits": (
+            descriptor_credential_waits(descriptor) or params_write_credential(op_id, params)
+        ),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
+        "rights_change": is_rights_change_op(op_id),
     }
     return frozenset(name for name, on in marks.items() if on)
 
 
-def asked_of(descriptor: EndpointDescriptor, *, connector_id: str | None, target: Any) -> Asked:
-    """The :class:`Asked` of one call of *descriptor*.
+def asked_of(
+    descriptor: EndpointDescriptor,
+    *,
+    connector_id: str | None,
+    target: Any,
+    params: dict[str, Any] | None = None,
+) -> Asked:
+    """The :class:`Asked` of one call of *descriptor* with *params*.
 
     Category and labels stay empty: no customer rule reads them in part 1.
     """
@@ -149,7 +161,7 @@ def asked_of(descriptor: EndpointDescriptor, *, connector_id: str | None, target
         always_wait=bool(descriptor.requires_approval),
         mutating=_is_mutating(descriptor),
         caller_address=has_caller_address(descriptor.parameter_schema),
-        op_class=_op_class(descriptor),
+        op_class=_op_class(descriptor, params),
         target=str(target_id) if target_id is not None else None,
     )
 
@@ -234,7 +246,7 @@ async def evaluate_call(
 
     actor_sub = resolve_actor_sub()
     asker = asker_of(operator, acting_agent=actor_sub)
-    asked = asked_of(descriptor, connector_id=connector_id, target=target)
+    asked = asked_of(descriptor, connector_id=connector_id, target=target, params=params)
     found: dict[str, Any] = {
         "sandbox": sandbox_mode_active(),
         "agent_grant_required": get_settings().agent_grant_required,
@@ -258,6 +270,18 @@ async def evaluate_call(
                 params=params,
             )
         )
+    if admin_console_rights_change(asker, asked):
+        from meho_backplane.operations.rights_change_console import console_check
+
+        check = await console_check(
+            operator,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+        )
+        found["rights_change_refusal"] = check.refusal
+        found["rights_change_waits"] = check.waits
     return evaluate(asker, asked, Lookups(**found))
 
 

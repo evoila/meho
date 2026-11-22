@@ -372,6 +372,14 @@ def _enterprise_pack_rows(record: LiveTestRecord) -> list[str]:
     return rows
 
 
+#: The sentence on Kubernetes API files under the connector index intro.
+_KUBERNETES_FILE_NOTE = (
+    "MEHO refuses a Kubernetes API file whose paths do not start with "
+    "`/api/v1` or `/apis/<group>/<version>`: use the standard API file "
+    "that the cluster serves."
+)
+
+
 def render_connector_index() -> str:
     """Render the connector-inventory page from the v2 registry + catalog."""
     _eager_import_connectors()
@@ -426,7 +434,7 @@ def render_connector_index() -> str:
         "transport where no usable spec exists. The **Kind** column is "
         "populated only where MEHO's published connector-spec catalog states "
         "it, and is blank otherwise — it is a property of how a connector's "
-        "operations are sourced, not something this table infers.",
+        "operations are sourced, not something this table infers. " + _KUBERNETES_FILE_NOTE,
         "",
         "| Connector | Product | What it does | Built for | Tested live on | Kind | Docs |",
         "| --- | --- | --- | --- | --- | --- | --- |",

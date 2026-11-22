@@ -384,3 +384,66 @@ def test_an_edited_written_row_in_deploying_names_its_row_file(
     with pytest.raises(ur.UpgradeRowError, match=r"this row differs from v0\.2\.0/x\.md") as err:
         ur.check_all(tmp_path, rows_dir)
     assert "Move your row" not in str(err.value)
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A git repo whose base commit releases 0.47.0 and holds one old row."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "CHANGELOG.md").write_text("## [Unreleased]\n\n## [0.47.0]\n", encoding="utf-8")
+    _row_file(tmp_path / "docs" / "upgrade-rows", "v0.47.0", "old", _GOOD)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "base")
+    _git(tmp_path, "checkout", "-q", "-b", "pr")
+    return tmp_path
+
+
+def _commit(repo: Path) -> None:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change")
+
+
+def test_new_row_in_released_folder_fails(repo: Path) -> None:
+    _row_file(repo / "docs" / "upgrade-rows", "v0.47.0", "new", _GOOD)
+    _commit(repo)
+    with pytest.raises(ur.UpgradeRowError, match=r"v0.47.0 is released.*git mv"):
+        ur.check_new_rows("main", repo)
+
+
+def test_new_row_in_next_folder_passes(repo: Path) -> None:
+    _row_file(repo / "docs" / "upgrade-rows", "v0.48.0", "new", _GOOD)
+    _commit(repo)
+    assert ur.check_new_rows("main", repo) == ["docs/upgrade-rows/v0.48.0/new.md"]
+
+
+def test_move_from_released_folder_to_next_passes(repo: Path) -> None:
+    next_dir = repo / "docs" / "upgrade-rows" / "v0.48.0"
+    next_dir.mkdir(parents=True)
+    _git(repo, "mv", "docs/upgrade-rows/v0.47.0/old.md", "docs/upgrade-rows/v0.48.0/old.md")
+    _commit(repo)
+    assert ur.check_new_rows("main", repo) == ["docs/upgrade-rows/v0.48.0/old.md"]
+
+
+def test_old_row_in_released_folder_passes(repo: Path) -> None:
+    (repo / "docs" / "upgrade-rows" / "v0.47.0" / "old.md").write_text(
+        "## Note\nFixed typo.\n\n## Action\nWhat to do.\n", encoding="utf-8"
+    )
+    _commit(repo)
+    assert ur.check_new_rows("main", repo) == []
+
+
+def test_release_pull_request_passes(repo: Path) -> None:
+    # The head adds the heading for 0.48.0 and the row folder of 0.48.0 at once.
+    _row_file(repo / "docs" / "upgrade-rows", "v0.48.0", "new", _GOOD)
+    (repo / "CHANGELOG.md").write_text("## [0.48.0]\n\n## [0.47.0]\n", encoding="utf-8")
+    _commit(repo)
+    assert ur.check_new_rows("main", repo) == ["docs/upgrade-rows/v0.48.0/new.md"]

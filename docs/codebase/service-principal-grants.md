@@ -176,6 +176,12 @@ and no run approval covers it.
   have the same form (`/api/v1/namespaces/...`,
   `/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
   gets the same rule. The method is read without case.
+  A stored operation whose path looks like a Kubernetes path without the
+  usual start (`GET:/namespaces/{namespace}/secrets`) gets the answer of
+  the same call on the full path (`full_kubernetes_path`,
+  `connectors/kubernetes/short_paths.py`). No grant, agent grant or run
+  approval covers such a call where it waits, and grant create refuses
+  it. A grant that already names it stays stored.
 - A connector can also tell from the params of one call that it writes a
   credential: `declare_credential_check` (`op_classes.py`). Today three
   operations use it:

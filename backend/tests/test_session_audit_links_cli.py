@@ -248,6 +248,50 @@ def test_command_paths_skip_flags_and_take_each_meho_word() -> None:
     assert "json" not in " ".join(call.paths).split()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "meho --work-ref CHG-1 vmware vm list",
+        "meho --work-ref=CHG-1 vmware vm list",
+        "meho --profile default -v vmware vm list --target vc-1",
+        "meho --config '/tmp/my config.json' vmware vm list",
+    ],
+)
+async def test_a_flag_with_a_value_before_the_command_still_links(
+    client: TestClient, command: str
+) -> None:
+    login = uuid.uuid4()
+    started = datetime.now(UTC) - timedelta(seconds=5)
+    row = await _run_vm_list(client, login)
+    ended = datetime.now(UTC) + timedelta(seconds=1)
+    content = _bash_call(command, started, "b1") + _bash_answer(ended, "b1")
+    _upload(client, content, state="ended", started_at=started - timedelta(minutes=1))
+
+    assert _stored_session_id(client, row.id) == _SID
+
+
+@pytest.mark.parametrize(
+    ("command", "path"),
+    [
+        ("meho --work-ref CHG-1 vmware vm list", "vmware vm list"),
+        ("meho --work-ref=CHG-1 vmware vm list", "vmware vm list"),
+        (
+            "meho vcf-automation --plane tenant catalog item list",
+            "vcf-automation catalog item list",
+        ),
+        ("meho vmware vm list; echo done", "vmware vm list"),
+    ],
+)
+def test_command_paths_skip_flag_values(command: str, path: str) -> None:
+    start = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
+    content = _bash_call(command, start, "b1") + _bash_answer(start, "b1")
+    (call,) = cli_calls_in(content)
+
+    assert path in call.paths
+    assert not any(word in {"CHG-1", "tenant", "echo"} for p in call.paths for word in p.split())
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

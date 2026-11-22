@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -53,6 +54,17 @@ _WORD: Final[re.Pattern[str]] = re.compile(r"[^\s'\"=;&|()]+")
 #: The most command names in a command path (``vcf-automation catalog item list``).
 _MAX_PATH_WORDS: Final[int] = 6
 
+#: The flags that can come before a command name and take the next word as
+#: their value (``meho --work-ref CHG-1 vmware vm list``): the global flags
+#: of the CLI and the group flags of ``meho vcf-automation``. A flag written
+#: as ``--work-ref=CHG-1`` holds its value itself.
+_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
+    {"--config", "--work-ref", "--profile", "--plane", "--fqdn"}
+)
+
+#: The shell signs that end one command (``;``, ``&&``, ``|`` ...).
+_SHELL_SIGNS: Final[frozenset[str]] = frozenset("();<>|&")
+
 
 @dataclass(frozen=True)
 class CliCall:
@@ -62,7 +74,8 @@ class CliCall:
     """The words of the command line (an operation id is one of them)."""
     paths: frozenset[str]
     """The command paths the line may run: for each ``meho`` word, the
-    first one to six words after it that are not flags, joined by a space
+    first one to six words after it that are not flags or flag values, up to
+    the end of that command, joined by a space
     (``vmware``, ``vmware vm``, ``vmware vm list``, ...). The CLI sends the
     path of the running command, so its audit rows carry one of them."""
     started_at: datetime
@@ -141,21 +154,49 @@ def _meho_command(block: dict[str, Any]) -> str | None:
     return None
 
 
+def _shell_words(command: str) -> list[str]:
+    """Split *command* as the shell does: quotes removed, ``=`` kept, shell signs apart."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return command.split()
+
+
+def _command_names(words: list[str]) -> list[str]:
+    """Return the first command names in *words*, without flags and their values."""
+    names: list[str] = []
+    skip_value = False
+    for word in words:
+        if skip_value:
+            skip_value = False
+        elif word and set(word) <= _SHELL_SIGNS:
+            break
+        elif word.startswith("-"):
+            skip_value = word in _VALUE_FLAGS
+        else:
+            names.append(word)
+            if len(names) == _MAX_PATH_WORDS:
+                break
+    return names
+
+
 def _command_paths(words: list[str]) -> frozenset[str]:
     paths: set[str] = set()
     for index, word in enumerate(words):
         if word != "meho" and not word.endswith("/meho"):
             continue
-        names = [w for w in words[index + 1 :] if not w.startswith("-")][:_MAX_PATH_WORDS]
+        names = _command_names(words[index + 1 :])
         paths.update(" ".join(names[: end + 1]) for end in range(len(names)))
     return frozenset(paths)
 
 
 def _cli_call(command: str, started_at: datetime, ended_at: datetime) -> CliCall:
-    words = _WORD.findall(command)
     return CliCall(
-        words=frozenset(words),
-        paths=_command_paths(words),
+        words=frozenset(_WORD.findall(command)),
+        paths=_command_paths(_shell_words(command)),
         started_at=started_at,
         ended_at=ended_at,
     )

@@ -505,7 +505,9 @@ stored session:
     stores it on the rows of a CLI login session (`payload.cli_command`,
     in `_mark_client_session` of `audit_cutover.py`). The worker takes
     the paths of a command line from the words after each `meho` word
-    that are not flags (`CliCall.paths`). So `meho vmware vm list`, whose
+    that are not flags (`CliCall.paths`). A global flag that takes a value
+    (`--work-ref CHG-1`, `--profile default`, also written `--work-ref=CHG-1`)
+    is skipped with its value. So `meho vmware vm list`, whose
     `op_id` is `GET:/vcenter/vm`, links too.
  Each such
   row id is stored as one `agent_session_audit_link` row. The upload's

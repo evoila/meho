@@ -1,0 +1,5 @@
+## Note
+Every call of `k8s.delete`, `k8s.label`, `k8s.annotate` and `k8s.namespace.create` waits for a person. No standing grant, no agent grant, no run approval, no approval override and no approved multi-step run covers it. Grant create, agent grant create and run approval create refuse these four operations. In sandbox mode a delete grant still covers `k8s.delete`, and only that one of the four. `k8s.scale`, `k8s.rollout.restart`, `k8s.cordon` and `k8s.cronjob.run` keep their rules: a standing grant and a run approval still cover them.
+
+## Action
+A service login or an agent that runs one of the four operations under a grant or a run approval now waits for a person at each call: plan for a person to approve each call in the console or the CLI. Find the grants, agent grants and run approvals that name `k8s.delete`, `k8s.label`, `k8s.annotate` or `k8s.namespace.create` with `meho service-principals grants list`, `meho agent grant list` and `meho approvals runs list`, and remove them: they never run such a call. Sandbox delete grants for `k8s.delete` stay. No schema action.

@@ -1864,6 +1864,10 @@ class Settings(BaseModel):
     # written as before, and a dry run lists no entries. It stays off until
     # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
     kb_similar_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on, `search_knowledge` tells the agent to search
+    # with a few key words, and its answer has `word_match` (some / none).
+    # Set via ``KB_SEARCH_WORD_HINT``.
+    kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -3356,6 +3360,7 @@ def get_settings() -> Settings:
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
+        kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

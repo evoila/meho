@@ -417,7 +417,10 @@ Switch: `AUDIT_SECRET_READ_AS` (`Settings.audit_secret_read_as`), off by
 default. MEHO writes the column `audit_log.secret_read_as` on every
 install. With the switch off, no audit read (REST, CLI, MCP, web console)
 shows the field, and every answer is the same as without it. With it on,
-each row in an answer carries the field.
+each row in an answer carries the field. The measurement of the switch is
+tracked in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch (audit
+answers name whose login read the secret) before it is on by default". The
+switch stays off by default until that measurement is done.
 
 How the value gets to the row: the dispatcher opens one scope for each call
 (`auth/secret_read_as.py`), at the start of `dispatch()`, before the first
@@ -427,7 +430,8 @@ opens its own scope too, so the refusal or approval row of a step never holds
 the value of the parent call. Each Vault secret read (the target login read in
 `connectors/_shared/vault_creds.py`, `vault.kv.read`, the secret copy and
 compare reads, the read of the existing sink secret before a `secret.move` with
-`merge: true` writes it (noted also when the write then fails), the pfSense VPN
+`merge: true` writes it (noted also when the write then fails, and also for
+the second read that tells why the write failed), the pfSense VPN
 user read, the KV password read of
 `vault.auth.userpass.write` and `vault.kv.generate`) and the Google Secret Manager read
 (`connectors/_shared/gsm_creds.py`) note the login id after the store returned

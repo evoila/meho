@@ -5,7 +5,8 @@
 
 * The read of the existing sink secret before a ``secret.move`` with
   ``merge: true`` writes it notes the caller's login, also when the write
-  after it is refused. A sink secret that does not exist notes nothing.
+  after it is refused. The second read that tells why the write failed
+  notes it too. A sink secret that does not exist notes nothing.
 * Each call has its own scope from its first check on: a child call that
   the policy refuses, and a step that the step gate of a multi-step call
   refuses, write a refusal row with no value of the parent call.
@@ -31,6 +32,7 @@ from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.secret.endpoints import SecretMaterial
 from meho_backplane.connectors.secret.vault_endpoint import (
+    SecretMergeChangedError,
     SecretMergeRefusedError,
     VaultKvSecretEndpoint,
 )
@@ -165,6 +167,32 @@ async def test_merge_into_a_missing_sink_secret_leaves_it_empty(
     fake.secrets.kv.v2.read_exc = hvac.exceptions.InvalidPath("no secret")
     assert await _merge_in_scope(fake) is None
     assert fake.secrets.kv.v2.put_calls[0]["cas"] == 0
+
+
+@pytest.mark.asyncio
+async def test_read_after_a_failed_merge_write_names_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first read finds no secret, another writer creates it, the write fails."""
+    fake = install_fake_vault(monkeypatch)
+    kv = fake.secrets.kv.v2
+    kv.read_exc = hvac.exceptions.InvalidPath("no secret")
+
+    def _other_writer_wins(**kwargs: Any) -> None:
+        kv.put_calls.append(kwargs)
+        kv.read_exc = None
+        raise hvac.exceptions.InvalidRequest("check-and-set parameter did not match")
+
+    monkeypatch.setattr(kv, "create_or_update_secret", _other_writer_wins)
+    endpoint = VaultKvSecretEndpoint(f"{_LOGIN_PATH}#password")
+    with track_secret_read_as():
+        with pytest.raises(SecretMergeChangedError):
+            await endpoint.write_secret_merged(
+                _operator("person-sub"), _material("made-up-value-0zzz")
+            )
+        assert len(kv.read_calls) == 2
+        assert kv.put_calls[0]["cas"] == 0
+        assert current_secret_read_as() == "person-sub"
 
 
 # ---------------------------------------------------------------------------

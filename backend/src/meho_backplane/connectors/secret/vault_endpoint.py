@@ -361,7 +361,7 @@ class VaultKvSecretEndpoint:
         except (hvac.exceptions.InvalidRequest, hvac.exceptions.Forbidden) as exc:
             # A failed check-and-set (400) or a policy that allows the read
             # but not the write (403).
-            refusal = self._merge_refusal(kv, cas)
+            refusal = self._merge_refusal(kv, cas, operator)
             if expect.secret_missing and isinstance(refusal, SecretMergeChangedError):
                 refusal = SecretSinkChangedError("the sink secret")
             raise refusal from exc
@@ -406,12 +406,13 @@ class VaultKvSecretEndpoint:
             raise SecretSinkChangedError(f"the field {self._field!r} of the sink secret")
         return body, version
 
-    def _merge_refusal(self, kv: Any, cas: int) -> VaultSecretRefError:
+    def _merge_refusal(self, kv: Any, cas: int, operator: Operator) -> VaultSecretRefError:
         """Tell a changed secret from another refusal of the merge write.
 
         Reads the secret's version again. A version other than the one the
         write was guarded with means the secret changed after MEHO read it.
-        Only the version is used; the read data is dropped at once.
+        Only the version is used; the read data is dropped at once. A read
+        that returns the secret notes the caller's login for the audit row.
         """
         try:
             payload = kv.read_secret_version(
@@ -423,7 +424,10 @@ class VaultKvSecretEndpoint:
         except Exception:
             return SecretMergeRefusedError(known=False)
         else:
-            current = (_version_metadata(payload) or {}).get("version")
+            metadata = _version_metadata(payload) or {}
+            if not metadata.get("deletion_time") and metadata.get("destroyed") is not True:
+                record_caller_secret_read(operator)
+            current = metadata.get("version")
         if not isinstance(current, int) or isinstance(current, bool):
             return SecretMergeRefusedError(known=False)  # no version: MEHO cannot tell
         if current != cas:

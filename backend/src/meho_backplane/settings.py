@@ -2018,6 +2018,9 @@ class Settings(BaseModel):
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
     # Off by default; with it off no audit read shows ``secret_read_as``.
+    # Measured in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch
+    # (audit answers name whose login read the secret) before it is on by
+    # default".
     audit_secret_read_as: bool = False
     # Off by default; with it off auth-config lists no per-tool login client.
     mcp_client_per_tool_kind: bool = False

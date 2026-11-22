@@ -17,8 +17,9 @@ A part id starting with "s" is a secret value; "p" is a plain word. A
 difference is one of:
   shown:<part>   the base hides the part, the head shows it
   hidden:<part>  a plain part the base shows is now hidden
-  text           the answer changed in another way; when a secret is newly
-                 hidden, the answer without its secrets ("rest") is compared
+  text           the answer changed in another way; when a part is hidden or
+                 shown, the answer without its planted parts ("rest") is
+                 compared, so this is also found next to a part difference
   removed        the base has the input, the head snapshot does not
 A secret part that the base showed and the head hides passes: that is a fix.
 """
@@ -48,19 +49,14 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
     found = [(*key, "removed") for key in sorted(base.keys() - head.keys())]
     for key in sorted(base.keys() & head.keys()):
         old, new = base[key], head[key]
-        newly_hidden_secret = False
-        for part in sorted(set(old["hidden"]) & set(new["shown"])):
-            found.append((*key, f"shown:{part}"))
-        for part in sorted(set(old["shown"]) & set(new["hidden"])):
-            if part.startswith("s"):
-                newly_hidden_secret = True
-            else:
-                found.append((*key, f"hidden:{part}"))
-        if any(f[:2] == key for f in found):
-            continue
-        # A newly hidden secret changes the whole answer, so compare the answer
-        # without its secrets ("rest") instead: any other change still counts.
-        field = "rest" if newly_hidden_secret else "sha"
+        shown = sorted(set(old["hidden"]) & set(new["shown"]))
+        hidden = sorted(set(old["shown"]) & set(new["hidden"]))
+        found += [(*key, f"shown:{part}") for part in shown]
+        found += [(*key, f"hidden:{part}") for part in hidden if not part.startswith("s")]
+        # A part that is hidden or shown changes the whole answer, so then compare
+        # the answer without its planted parts ("rest"): any other change still counts,
+        # also next to a part difference, and needs its own approved entry.
+        field = "rest" if shown or hidden else "sha"
         if old.get(field) is None or old.get(field) != new.get(field):
             found.append((*key, "text"))
     return found

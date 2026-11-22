@@ -6,7 +6,7 @@
 ``tests/snapshots/redaction_compare.jsonl`` records, for about 1,500 made-up
 inputs and each secret-hiding step, which planted parts the step hides and
 which it shows, a hash of the whole answer, and a hash of the answer
-without its secrets. The CI job "Secret hiding
+without its planted parts. The CI job "Secret hiding
 compared with the base branch" judges this file of a pull request against
 the same file of the base branch. This test keeps the file true to the code.
 
@@ -80,6 +80,11 @@ def test_the_rest_text_is_the_same_when_only_a_secret_is_hidden() -> None:
     before = rest_text('host=plain0 password="Ab3 Cd4" port=443', ["Ab3", "Cd4"])
     assert before == rest_text('host=plain0 password="[REDACTED:password]" port=443', [])
     assert before == rest_text('host=plain0 password="***REDACTED***" port=443', [])
+
+
+def test_the_rest_text_is_the_same_when_only_a_plain_part_is_hidden() -> None:
+    before = rest_text("host=plain0 password=[REDACTED:password]", ["plain0"])
+    assert before == rest_text("host=[REDACTED:hostname] password=[REDACTED:password]", [])
 
 
 def test_the_rest_text_differs_when_more_than_the_secret_changes() -> None:

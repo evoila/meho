@@ -148,6 +148,35 @@ def test_an_approved_entry_for_another_part_does_not_cover_the_difference(tmp_pa
     assert _judge(tmp_path, _record(["s2"], ["p0"]), _record([], ["p0", "s2"], "b"), other) == 1
 
 
+def test_an_approved_part_does_not_approve_another_change_of_the_same_answer(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base = _record(["s2"], ["p0"], "a", "r")
+    head = _record([], ["p0", "s2"], "b", "r-without-a-field")
+    assert _judge(tmp_path, base, head, _APPROVED_SHOWN) == 1
+    out = capfd.readouterr().out
+    assert "form.plain.password.bare redact: text" in out
+    assert "shown:s2" not in out
+
+
+def test_a_hidden_plain_part_with_another_change_fails_as_text(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base = _record(["s2"], ["p0"], "a", "r")
+    head = _record(["p0", "s2"], [], "b", "r-without-a-field")
+    assert _judge(tmp_path, base, head) == 1
+    out = capfd.readouterr().out
+    assert "form.plain.password.bare redact: hidden:p0" in out
+    assert "form.plain.password.bare redact: text" in out
+
+
+def test_an_approved_part_and_an_approved_text_change_pass(tmp_path: Path) -> None:
+    text = _APPROVED_SHOWN.replace("part: s2", "part: text").replace("approved:\n", "")
+    base = _record(["s2"], ["p0"], "a", "r")
+    head = _record([], ["p0", "s2"], "b", "r-without-a-field")
+    assert _judge(tmp_path, base, head, _APPROVED_SHOWN + text) == 0
+
+
 def test_a_record_removed_from_the_head_fails(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:

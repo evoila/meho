@@ -6,9 +6,10 @@
 For each input and step, the record lists the planted parts that the answer
 no longer holds (``hidden``) and the ones it still holds (``shown``), a
 hash of the whole answer (``sha``), and a hash of the answer without its
-secrets (``rest``). For ``rest``, every planted secret value and every
-hiding marker becomes one ``<hidden>`` token, so a fix that only hides a
-secret keeps ``rest`` the same, and any other change of the answer does not.
+planted parts (``rest``). For ``rest``, every planted part (secret or plain)
+and every hiding marker becomes one ``<hidden>`` token. So a change that only
+hides or shows a planted part keeps ``rest`` the same, and any other change
+of the answer does not.
 ``scripts/ci/redaction_compare.py`` writes these records to
 ``tests/snapshots/redaction_compare.jsonl`` and judges two such files
 against each other.
@@ -67,10 +68,10 @@ def answer_text(answer: Any) -> str:
     return json.dumps(answer, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def rest_text(text: str, secrets: list[str]) -> str:
-    """*text* with each secret value and each hiding marker as one ``<hidden>`` token."""
-    for secret in sorted(secrets, key=len, reverse=True):
-        text = text.replace(secret, _HIDDEN)
+def rest_text(text: str, parts: list[str]) -> str:
+    """*text* with each planted part value and each hiding marker as one ``<hidden>`` token."""
+    for value in sorted(parts, key=len, reverse=True):
+        text = text.replace(value, _HIDDEN)
     return _HIDDEN_RUN.sub(_HIDDEN, _MARKER.sub(_HIDDEN, text))
 
 
@@ -86,7 +87,7 @@ def _fresh(payload: Any) -> Any:
 def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]:
     """One record per input and step, sorted by id and step."""
     for item in items if items is not None else secret_inputs():
-        secrets = [p.value for p in item.parts if p.pid.startswith("s")]
+        values = [p.value for p in item.parts if p.value]
         for path in sorted(item.paths):
             text = answer_text(STEPS[path](_fresh(item.payload)))
             yield {
@@ -95,7 +96,7 @@ def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]
                 "hidden": sorted(p.pid for p in item.parts if p.value not in text),
                 "shown": sorted(p.pid for p in item.parts if p.value in text),
                 "sha": _sha(text),
-                "rest": _sha(rest_text(text, secrets)),
+                "rest": _sha(rest_text(text, values)),
             }
 
 

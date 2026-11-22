@@ -18,9 +18,13 @@ behind a single dispatch — one level below the audit row — see the
 
     - A running backplane and a connected client
       ([Connect clients](../clients/index.md)).
-    - Querying needs the **operator** role — and returns your whole
-      tenant's rows, not just your own. Replaying **another** operator's
-      or agent's session end to end needs **tenant_admin**.
+    - Querying needs the **operator** role. A person gets the rows of
+      the whole tenant, not just their own. Replaying **another**
+      operator's or agent's session end to end needs **tenant_admin**.
+    - An agent or service login (an add-on, any client-credentials
+      login) reads only the rows of its own calls, whatever role it has:
+      in lists, filters, counts, single rows and session trees. A row or
+      session of another login answers like one that does not exist.
     - Audit is **GA** — the 1.0 stability promise applies (see the
       [feature-maturity index](../reference/maturity.md#ga-features)).
 
@@ -139,7 +143,9 @@ meho audit query --session-id <agent_session_id> --since 24h
 ```
 
 …or reconstruct the whole session as a parent/child tree. Over MCP an
-operator replays **their own** session:
+operator replays **their own** session: the tree holds only the audit
+rows of your own calls. The `Mcp-Session-Id` header does not change
+which rows you get.
 
 ```json
 // query_audit {"shape": "tree", "agent_session_id": "<your own session id>"}
@@ -174,7 +180,7 @@ themselves broadcast the credential's path.
 |---|---|---|
 | `broadcast_event_id` is `null` on every row | Working as designed — the field is always `null`. The broadcast feed carries only agent notes, which do not link to audit rows. | Filter the audit log by `target`, `principal`, `op_id` and time instead. |
 | `parent_audit_id` returns fewer rows than the full tree | The filter returns direct children only, not grandchildren. | Run it again with a child's `id`, or use `meho audit replay` for a whole session. |
-| `shape="tree"` rejected with `-32602` naming your session | The tree path is **self-session only** for operators — the `agent_session_id` must equal your own MCP session id. | To replay another session, use the tenant_admin `meho audit replay <session-id>`. |
+| `shape="tree"` returns an empty `root` | The tree path is **self-session only** — it holds only the rows of your own calls, and this session has none, so it answers like a session that does not exist. | To replay another session, a person with tenant_admin uses `meho audit replay <session-id>`. |
 | A replay is refused with `session_too_large` | The session exceeds the 10,000-row replay cap. | Narrow with `--since` / `--until` and page the flat `meho audit query --session-id …` shape. |
 | `meho audit query --since Tuesday` errors | `since` / `until` want ISO-8601 or the duration shorthand, not prose. | Use `--since 3d` or `--since 2026-07-28T00:00:00Z`. |
 | An empty result when you expected rows | The tenant boundary is on your JWT — a target/session in another tenant returns zero rows, not another tenant's data. | Confirm you are authenticated to the right tenant. |

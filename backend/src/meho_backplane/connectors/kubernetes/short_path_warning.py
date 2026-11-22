@@ -38,7 +38,6 @@ async def warn_stored_short_kubernetes_paths(
     Returns how many warning lines it wrote. A failed read is logged as a
     warning and does not stop the start.
     """
-    maker = sessionmaker if sessionmaker is not None else get_sessionmaker()
     stmt = select(
         EndpointDescriptor.tenant_id,
         EndpointDescriptor.impl_id,
@@ -46,6 +45,7 @@ async def warn_stored_short_kubernetes_paths(
         EndpointDescriptor.op_id,
     ).where(EndpointDescriptor.source_kind == "ingested")
     try:
+        maker = sessionmaker if sessionmaker is not None else get_sessionmaker()
         async with maker() as session:
             rows = (await session.execute(stmt)).all()
     except Exception as exc:

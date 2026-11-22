@@ -1896,7 +1896,9 @@ per-class `except` arms. The nine siblings and their builders:
   explicit MCP path). Names the upstream URL and the detected
   `content_type` that wasn't a spec (e.g. an HTML login page).
 * `build_unsupported_spec_detail(exc)` — `UnsupportedSpecError`
-  (wrong OpenAPI flavour / unsupported dialect).
+  (wrong OpenAPI flavour / unsupported dialect, or a file whose paths
+  look like Kubernetes paths without the usual start; see
+  "Short Kubernetes paths" under `parse_openapi`).
 * `build_invalid_spec_detail(exc)` — `InvalidSpecError`
   (structurally invalid root document).
 * `build_invalid_schema_detail(exc)` — `InvalidSchemaError`
@@ -2639,6 +2641,47 @@ startup), so every shipped package-data spec and catalog `spec_resource`
 must be metaschema-valid or the backplane crashes on start — the guard
 that keeps a malformed shipped artifact from 500-ing the first ingest
 that touches it (Initiative #1966 boot-validation precedent).
+
+**Short Kubernetes paths.** Right after the server base is worked out,
+`_project_spec_bytes_to_protos` runs every check registered with
+`register_spec_path_refusal(check)`. A check gets each `paths` key that
+has at least one operation, with the relative server base in front. On
+the first refusal text the parser raises `UnsupportedSpecError` with that
+text, so the whole file is refused and nothing is stored. The dry run,
+the ingest and `validate_shipped_artifacts` all use this parser, so all
+three refuse the same file. The hook is modelled on
+`declare_credential_capable_match`.
+
+Today the Kubernetes connector registers one check
+(`connectors/kubernetes/short_paths.py`). It refuses a file when one of
+its paths looks like a Kubernetes path without `/api/v1` or
+`/apis/<group>/<version>`. MEHO reads a Kubernetes call by that start
+([connectors-kubernetes.md](connectors-kubernetes.md)), so it could not
+check these calls. A path that already has the start, read from any
+`/`, is fine. The shapes, where `{x}` is one segment:
+
+* From any `/` of the path: `/namespaces/{x}/secrets` (with or without
+  `/{x}` after it, also with `/watch` in front), a pod's `exec`,
+  `attach`, `portforward` or `proxy`, and a ServiceAccount `token`.
+* Only at the start of the path, or after one leading `/v1`:
+  `/namespaces/{x}/<core plural>` (pods, services, configmaps, secrets,
+  serviceaccounts, persistentvolumeclaims, endpoints, events,
+  limitranges, resourcequotas, replicationcontrollers, podtemplates,
+  bindings), and `/<group>/<version>/namespaces/{x}/{x}` where the group
+  is `apps`, `batch`, `autoscaling`, `policy` or a name that ends in
+  `.k8s.io`.
+
+Not matched on purpose, so the API file of another product loads:
+cluster-wide paths such as `/nodes/{x}` (other APIs use them too), other
+plurals under `/namespaces/{x}/`, custom API groups, and the second shape
+when it does not start the path (for example
+`/api/namespaces/{x}/services` after a relative server base `/api`). The
+check reads only the path keys. The refusal text names up to three of the
+matched paths and says what to do: use the standard API file that the
+cluster serves, or write the start as a relative server address. There
+is no setting that turns it off.
+`tests/test_ingest_refuses_short_kubernetes_paths.py` also runs the check
+over every API file this repo ships.
 
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /

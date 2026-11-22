@@ -40,6 +40,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
+from meho_backplane.connectors.kubernetes.short_paths import full_kubernetes_path
 from meho_backplane.op_classes import declare_credential_capable_match
 
 __all__ = ["ingested_op_is_credential_call"]
@@ -101,11 +102,14 @@ def ingested_op_is_credential_call(op_id: str) -> bool:
 
     *op_id* is ``<METHOD>:<path>``. An op id without a ``:`` is not an
     ingested operation and does not count. A trailing ``/`` counts the same
-    as none. Each rule is read from every ``/`` of the path on.
+    as none. Each rule is read from every ``/`` of the path on. A path that
+    looks like a Kubernetes path without the usual start gets the answer of
+    the same call on the full path (:func:`full_kubernetes_path`).
     """
     method, sep, path = op_id.partition(":")
     if not sep or not path.startswith("/"):
         return False
+    path = full_kubernetes_path(path) or path
     tails = _tails(path.rstrip("/") or "/")
     if any(pattern.fullmatch(tail) for tail in tails for pattern in _ANY_METHOD):
         return True

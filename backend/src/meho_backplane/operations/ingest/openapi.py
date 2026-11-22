@@ -70,7 +70,7 @@ import ipaddress
 import json
 import re
 import socket
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -130,6 +130,7 @@ __all__ = [
     "parse_openapi",
     "parse_openapi_with_provenance",
     "read_spec_info_version",
+    "register_spec_path_refusal",
 ]
 
 #: Prefix of the audit label the catalog shipped-spec on-ramp assigns
@@ -486,8 +487,9 @@ def parse_openapi(
             OpenAPI 3.0/3.1 Specification schema, the URI scheme is
             not ``https``, or the resolved destination is a
             private/loopback/link-local/reserved address.
-        UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
-            document references a cross-document ``$ref``.
+        UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, the
+            document references a cross-document ``$ref``, or a check of
+            :func:`register_spec_path_refusal` refuses its paths.
         UpstreamNotSpecError: HTTP fetch succeeded (2xx) but the
             response's ``Content-Type`` declared a non-spec media type
             (e.g. ``text/html`` from a developer-portal landing page).
@@ -535,6 +537,41 @@ def parse_openapi_with_provenance(
     return protos, provenance
 
 
+#: A check that gets the paths of an API file and returns a refusal text or ``None``.
+SpecPathRefusal = Callable[[Sequence[str]], str | None]
+
+_SPEC_PATH_REFUSALS: list[SpecPathRefusal] = []
+
+
+def register_spec_path_refusal(check: SpecPathRefusal) -> None:
+    """Run *check* on the paths of every API file the parser reads.
+
+    *check* gets each path of the file that has at least one operation,
+    with the relative server base already in front. When it returns a
+    text, the parser refuses the whole file with
+    :exc:`UnsupportedSpecError` and that text. The dry run, the ingest and
+    the start check of the shipped files all use this parser. Safe to call
+    twice with the same check.
+    """
+    if check not in _SPEC_PATH_REFUSALS:
+        _SPEC_PATH_REFUSALS.append(check)
+
+
+def _refuse_spec_paths(paths: dict[str, Any], server_base: str) -> None:
+    """Raise :exc:`UnsupportedSpecError` when a registered check refuses the paths."""
+    folded = [
+        _fold_server_base(server_base, key)
+        for key, item in paths.items()
+        if isinstance(key, str)
+        and isinstance(item, dict)
+        and any(verb in _VERBS and isinstance(op, dict) for verb, op in item.items())
+    ]
+    for check in _SPEC_PATH_REFUSALS:
+        refusal = check(folded)
+        if refusal is not None:
+            raise UnsupportedSpecError(refusal)
+
+
 def _project_spec_bytes_to_protos(
     spec_bytes: bytes,
     *,
@@ -559,6 +596,7 @@ def _project_spec_bytes_to_protos(
 
     components = _require_spec_mapping(spec.get("components") or {}, "components")
     server_base = _server_base_path(spec.get("servers"))
+    _refuse_spec_paths(paths, server_base)
 
     return list(
         _iter_operations(

@@ -1186,8 +1186,13 @@ query and `limit`:
    whose only filters are `product` and/or `version` (each a non-blank
    string; named filters, or the same keys in `filters` /
    `metadata_filters`), with no time window, not `scope="shared"` and
-   no `kind`, still searches the wiki. `search_wiki` then builds the
-   scope with `build_docs_scope(key, product, version)`, and searches
+   no `kind`, still searches the wiki. `search_wiki` then sends
+   `product` and `version` exactly as given, with any spaces at their
+   ends kept (not through `build_docs_scope`, which strips): the index
+   gets the same string the store filters by. The page read for the
+   copy check uses the same values, and `read_docs` (MCP and REST)
+   reads such a hit when the caller sends the same values
+   (`docs/codebase/docs-search.md`, `exact_read_scope`). It searches
    only when the collection sends them to its index as exact filters
    (`backend.ref["scope_filters"] is True` and no soft `scope`, the
    result of `forwarded_scope`). Otherwise the wiki is not searched,

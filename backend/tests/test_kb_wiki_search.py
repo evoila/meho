@@ -46,6 +46,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane.api.v1.read_docs import router as read_docs_router
 from meho_backplane.api.v1.retrieve import router as retrieve_router
 from meho_backplane.auth.corpus import (
     CorpusChunk,
@@ -63,6 +64,8 @@ from meho_backplane.kb.provenance import stamp_provenance
 from meho_backplane.kb.service import KbService
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools.docs import _read_docs_handler
 from meho_backplane.mcp.tools.knowledge import (
     _add_to_knowledge_handler,
     _search_knowledge_handler,
@@ -1230,7 +1233,7 @@ async def test_switch_on_a_copy_is_found_by_a_read_with_the_search_filters(
 
     async def read_page(_operator: Operator, _handle: str, **kwargs: Any) -> UpstreamRead:
         if kwargs.get("filters") != {"product": "vcenter", "version": "9.0"}:
-            raise CorpusReadError("refused", kind=CorpusReadError.KIND_REJECTED, status=404)
+            raise CorpusReadError("refused", kind=CorpusReadError.KIND_NOT_FOUND, status=404)
         return UpstreamRead.model_validate(
             {"mode": "page", "text": _WIKI_CHUNK.content, "disclosure": "full"}
         )
@@ -1293,3 +1296,105 @@ async def test_switch_on_a_padded_value_reaches_the_index_unchanged_over_rest(
     assert corpus.await_args.kwargs["metadata_filters"] == {"version": "9.0 "}
     assert read.await_args.kwargs["filters"] == {"version": "9.0 "}
     assert response.json()["wiki"]["searched"] is True
+
+
+def _index_bound_to(filters: dict[str, str]) -> AsyncMock:
+    """A ``read_corpus`` stand-in that reads ``_HANDLE`` only with *filters*, as an index does."""
+
+    async def read_page(_operator: Operator, handle: str, **kwargs: Any) -> UpstreamRead:
+        if handle != _HANDLE or kwargs.get("filters") != filters:
+            raise CorpusReadError("refused", kind=CorpusReadError.KIND_NOT_FOUND, status=404)
+        return UpstreamRead.model_validate(
+            {"mode": "page", "text": _WIKI_CHUNK.content, "disclosure": "full"}
+        )
+
+    return AsyncMock(side_effect=read_page)
+
+
+@pytest.mark.asyncio
+async def test_switch_on_read_docs_over_mcp_reads_a_wiki_hit_of_a_padded_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handle of a padded search reads with the same values sent to ``read_docs``."""
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    padded = {"product": "vcenter", "version": "9.0 "}
+    read = _index_bound_to(padded)
+    response, _ = await _search(_operator(), read=read, **padded)
+    wiki_hit = response["hits"][1]
+    with patch(_READ_SEAM, new=read):
+        page = await _read_docs_handler(
+            _operator(),
+            {"collection": _WIKI, "read_handle": wiki_hit["read_handle"], "mode": "page", **padded},
+        )
+    assert _WIKI_CHUNK.content in page["text"]
+    assert [call.kwargs["filters"] for call in read.await_args_list] == [
+        {"product": "vcenter", "version": "9.0"},
+        padded,
+    ]
+
+
+def _rest_client(operator: Operator) -> TestClient:
+    rest = FastAPI()
+    rest.include_router(retrieve_router)
+    rest.include_router(read_docs_router)
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    rest.dependency_overrides[verify_jwt_and_bind] = _fake_verify
+    return TestClient(rest)
+
+
+@pytest.mark.asyncio
+async def test_switch_on_read_docs_over_rest_reads_a_wiki_hit_of_a_padded_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"version": "9.0 "})
+    client = _rest_client(_operator())
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+        patch(_CORPUS_SEAM, new=_corpus(_WIKI_CHUNK)),
+        patch(_READ_SEAM, new=read),
+    ):
+        found = client.post(
+            "/api/v1/retrieve",
+            json={"query": "snapshot", "source": "kb", "metadata_filters": {"version": "9.0 "}},
+        )
+        handle = found.json()["wiki"]["hits"][0]["read_handle"]
+        page = client.post(
+            "/api/v1/read_docs",
+            json={"collection": _WIKI, "read_handle": handle, "mode": "page", "version": "9.0 "},
+        )
+    assert page.status_code == 200, page.text
+    assert page.json()["text"] == _WIKI_CHUNK.content
+
+
+@pytest.mark.asyncio
+async def test_read_docs_reads_a_docs_hit_with_the_stripped_values_on_the_first_try() -> None:
+    """A ``search_docs`` handle is bound to the stripped values: one read, as before."""
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"version": "9.0"})
+    with patch(_READ_SEAM, new=read):
+        await _read_docs_handler(
+            _operator(),
+            {"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", "version": " 9.0 "},
+        )
+    read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_read_docs_does_not_read_again_without_padded_values() -> None:
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"version": "other"})
+    with (
+        patch(_READ_SEAM, new=read),
+        pytest.raises(McpInvalidParamsError),
+    ):
+        await _read_docs_handler(
+            _operator(),
+            {"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", "version": "9.0"},
+        )
+    read.assert_awaited_once()

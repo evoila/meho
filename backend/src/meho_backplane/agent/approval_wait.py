@@ -295,7 +295,7 @@ def _build_expired_envelope(
     original_envelope: dict[str, Any],
     approval_request_id: uuid.UUID,
 ) -> dict[str, Any]:
-    """Annotate the original envelope when the request expired undecided.
+    """Annotate the original envelope when the request expired without a run.
 
     Same shape as :func:`_build_rejected_envelope`: ``status`` stays
     ``"awaiting_approval"``, ``extras["error_code"] = "approval_expired"`` and
@@ -305,7 +305,7 @@ def _build_expired_envelope(
     annotated = dict(original_envelope)
     annotated["error"] = (
         f"awaiting_approval: approval request {approval_request_id} expired "
-        "before anyone decided. The operation was not run."
+        "and the operation was not run."
     )
     extras = dict(original_envelope.get("extras") or {})
     extras["error_code"] = "approval_expired"

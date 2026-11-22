@@ -364,7 +364,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 
 	// The policy file (policy: v1): validate / diff / import / export /
 	// history on /api/v1/policy. tenant_admin or platform_admin; an import
-	// waits until a second admin approves it.
+	// waits until an admin approves it in the web console.
 	root.AddCommand(policy.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for

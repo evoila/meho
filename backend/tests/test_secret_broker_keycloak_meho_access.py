@@ -169,13 +169,18 @@ async def test_with_a_second_platform_admin_another_person_approves_the_move(
         request_id = uuid.UUID(waiting["extras"]["approval_request_id"])
         # The person who asked cannot approve it, and an operator cannot either.
         not_allowed = [
-            (_operator(_REQUESTER_UUID), RightsChangeApprovalError),
-            (_operator("made-up-operator", TenantRole.OPERATOR), ApprovalRoleFloorError),
+            _operator(_REQUESTER_UUID),
+            _operator("made-up-operator", TenantRole.OPERATOR),
         ]
-        for approver, error in not_allowed:
+        for approver in not_allowed:
             async with get_sessionmaker()() as session:
-                with pytest.raises(error):
-                    await approve_request(session, request_id, operator=approver, params=None)
+                with pytest.raises((RightsChangeApprovalError, ApprovalRoleFloorError)):
+                    await approve_request(
+                        session,
+                        request_id,
+                        operator=approver.model_copy(update={"web_session": True}),
+                        params=None,
+                    )
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None

@@ -152,7 +152,7 @@ func TestImportPrintsTheWaitingRequest(t *testing.T) {
 	var got seen
 	srv := server(t, 202, `{"preview":false,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
 		`"no_change":false,"file_sha256":"a","based_on":"b","diff":null,`+
-		`"message":"The import waits until a second admin approves it. Nothing changed yet.",`+
+		`"message":"The import waits until an admin approves it in the web console. Nothing changed yet.",`+
 		`"approval_request_id":"11111111-1111-1111-1111-111111111111"}`, &got)
 	stdout, stderr, err := run(t, "import", writeFile(t), "--backplane", srv.URL)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestImportPrintsTheWaitingRequest(t *testing.T) {
 	if strings.Contains(got.query, "preview=true") {
 		t.Errorf("import must not be a preview: %q", got.query)
 	}
-	if !strings.Contains(stdout, "waits until a second admin approves it") ||
+	if !strings.Contains(stdout, "waits until an admin approves it in the web console") ||
 		!strings.Contains(stdout, "Approval request: 11111111-1111-1111-1111-111111111111") {
 		t.Errorf("stdout: %s", stdout)
 	}

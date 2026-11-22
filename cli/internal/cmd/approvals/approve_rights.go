@@ -114,7 +114,7 @@ func approveRightText(may *bool, reason *string) string {
 	case reasonRoleTooLow:
 		return "no, the operation needs a higher role than yours"
 	case reasonRightsChange:
-		return "no, it is a change of rights and another admin must approve it"
+		return "no, it is a change of rights: approve this change of rights in the web console"
 	case reasonNoApprovalAccess:
 		return "no, your role cannot decide approval requests"
 	case reasonNotAPerson:

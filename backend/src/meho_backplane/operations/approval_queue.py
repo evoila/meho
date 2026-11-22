@@ -179,6 +179,7 @@ from meho_backplane.operations.approved_reveal import (
     without_secret_values,
 )
 from meho_backplane.operations.grant_approval import (
+    ASKED_IN_WEB_CONSOLE,
     RIGHTS_CHANGE_REFUSAL,
     check_grant_approval,
     check_rights_change_approval,
@@ -732,17 +733,25 @@ class RightsChangeApprovalError(ApprovalRoleFloorError):
     """The person may not approve this change of rights.
 
     Raised by :func:`approve_request` when the request carries the
-    rights-change mark and the person is the requester or not an admin
-    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+    rights-change mark and the person is not an admin
+    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
+    or approves on the command line or over REST instead of with a click in
+    the web console. *reason* is :data:`RIGHTS_CHANGE_REFUSAL` or
+    :data:`~meho_backplane.operations.grant_approval.RIGHTS_CHANGE_CONSOLE_ONLY`.
     Subclasses :class:`ApprovalRoleFloorError`, so every approve route
     answers 403 with its text.
     """
 
-    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
-        super().__init__(
-            request_id, operator_sub=operator_sub, role=role, denial=RIGHTS_CHANGE_REFUSAL
-        )
-        self.reason_text = RIGHTS_CHANGE_REFUSAL
+    def __init__(
+        self,
+        request_id: uuid.UUID,
+        *,
+        operator_sub: str,
+        role: str,
+        reason: str = RIGHTS_CHANGE_REFUSAL,
+    ) -> None:
+        super().__init__(request_id, operator_sub=operator_sub, role=role, denial=reason)
+        self.reason_text = reason
 
 
 class ResultAccessForbiddenError(ApprovalError):
@@ -1879,6 +1888,15 @@ async def create_pending_request(
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+        # Who asked where: in MEHO's own login realm only a request asked
+        # with a click in the web console is approved by the login that asked.
+        asked_in_console = (
+            requester is None and operator.web_session and is_human_principal(operator)
+        )
+        request.proposed_effect = {
+            **(request.proposed_effect or {}),
+            ASKED_IN_WEB_CONSOLE: asked_in_console,
+        }
     try:
         await stamp_approver_set(
             session, request, category=category, install_category=install_category
@@ -4114,9 +4132,11 @@ def _check_approver_group(
     the risk level of the change; there are no per-system, per-connector
     or time-limited exceptions.
 
-    * A change of rights: only another admin
+    * A change of rights: only an admin, with a click in the web console
       (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
-      No self-approval rule below can allow it.
+      The admin may be the person who asked, or one of the people behind
+      the login that asked: that is recorded as
+      ``sa_operator_self_approval``. No other rule below can allow it.
     * A change of a login's or group's rights:
       :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
     * A request of a machine login with nobody known behind it: only an
@@ -4137,6 +4157,9 @@ def _check_approver_group(
     check_rights_change_approval(operator, request)
     check_grant_approval(operator, request)
     _check_requester_known(operator, request)
+    if is_rights_change(request) and is_self_approval(operator.sub, request):
+        # The checks above decided: an admin, in the web console.
+        return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule

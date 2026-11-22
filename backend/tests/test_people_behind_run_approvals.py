@@ -11,7 +11,7 @@ stored on the list when the add-on asked.
 
 * A person behind it may approve the list only when they are a person who
   may approve their own change.
-* A list with a change of rights needs an admin who is not behind it.
+* A list with a change of rights is refused for every admin.
 * When MEHO knows nobody behind the login, only an Admin may approve.
 * The lookup runs at approve time, so a list that waited across an upgrade
   follows the rule too.
@@ -156,9 +156,10 @@ async def test_only_an_admin_approves_when_nobody_is_known_behind_the_login() ->
     assert (await RunApprovalService().approve(admin, approval_id)).status == "approved"
 
 
-async def test_a_rights_change_list_is_refused_for_an_admin_behind_the_login(
+async def test_a_rights_change_list_is_refused_for_every_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A run approval list never covers a change of rights: a person approves each call."""
     monkeypatch.setitem(_GRANT_OPS, _WRITE_OP, _GrantOp((), ()))
     await give_service_a_known_person(_TENANT_A, _PRINCIPAL, _GIVER)
     approval_id = await _ask()
@@ -167,8 +168,10 @@ async def test_a_rights_change_list_is_refused_for_an_admin_behind_the_login(
         await RunApprovalService().approve(
             _person(_GIVER, role=TenantRole.TENANT_ADMIN), approval_id
         )
-    other_admin = _person("other-admin", role=TenantRole.TENANT_ADMIN)
-    assert (await RunApprovalService().approve(other_admin, approval_id)).status == "approved"
+    with pytest.raises(RunApprovalGroupError, match="rights_change_required"):
+        await RunApprovalService().approve(
+            _person("other-admin", role=TenantRole.TENANT_ADMIN), approval_id
+        )
 
 
 async def test_a_list_that_waited_before_the_grant_is_checked_at_approve_time() -> None:

@@ -380,8 +380,10 @@ it.
   typed operation `policy.apply` (`connectors/policy/apply.py`, connector
   `policy-registry-1.x`) through the dispatcher. It is `dangerous`, waits
   for a person to approve each call, needs the `tenant_admin` role, and
-  carries the rights-change mark: the importer can never approve it;
-  another admin must ([approvals.md](approvals.md)). The params are the
+  carries the rights-change mark: an admin approves it with a click in the
+  web console, and may be the importer ([approvals.md](approvals.md)). An
+  admin's own call in the web console runs at once. The REST import route
+  is a token call, so it waits. The params are the
   scope, the file, its SHA-256 and `based_on`. The approval card shows the
   plan (a preview builder) and who asked (a permission preflight).
 - Only a person asks for an import, and only a platform admin asks for
@@ -401,10 +403,12 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
-- Only the admin who approved runs the import. A run by the login that
-  asked for it (for example its re-run of a failed request,
-  `POST /api/v1/approvals/{id}/rerun`) writes nothing and says: "A policy
-  import runs only from a second admin's approval. Run the import again."
+- A run without an approval, or a run by the login that asked for it (for
+  example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
+  writes only for an admin in the web console. Any other such run writes
+  nothing and says: "A policy import runs at once only for an admin in the
+  web console. Any other import waits until an admin approves it in the web
+  console. Run the import again."
 - The import **replaces the whole policy** of its scope in `tenant_policy`:
   an entry that is not in the file is removed. This also removes entries
   that `policy.classify` wrote. The category and labels on single
@@ -458,7 +462,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
 versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
-approval by a second admin),
+approval by an admin in the web console, an admin's import in the console),
 `backend/tests/test_policy_small_team_parity.py` (the "small team" file:
 round trip and no change over every operation),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,

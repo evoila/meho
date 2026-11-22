@@ -16,7 +16,8 @@ same order, so the sign never says something else than the approve does:
 2. A ``read_only`` person without the ``approver`` flag cannot decide.
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
-   for another admin, whatever the group of the requester; an own change only for
+   for an admin, with a click in the web interface (the admin may be the
+   requester); an own change only for
    a MEHO-Admin, with a click in the web interface when the
    ``caution`` change waited only because it came with a token (#3980),
    or a ``safe`` / ``caution`` change under the break-glass switch;

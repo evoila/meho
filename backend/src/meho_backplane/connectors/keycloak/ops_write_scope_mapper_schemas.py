@@ -8,9 +8,9 @@ The handler is in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_schemas` folds
 :data:`SCOPE_MAPPER_OPS` into the connector's ``WRITE_OPS``. The row is
 ``dangerous`` with ``requires_approval=True``. A mapper decides what goes
-into the login token, so the op is a change of rights: the requester never
-approves it, the approver is another admin, and a person approves each
-call (registered in the handler module).
+into the login token, so the op is a change of rights: an admin approves
+it in the web console, and a person approves each call (registered in the
+handler module).
 """
 
 from __future__ import annotations
@@ -121,7 +121,8 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
             "Finds a client scope and one of its protocol mappers by id or exact "
             "name, then changes only the fields in ``representation``. Other "
             "fields stay. Only ``name`` and ``config`` can change. A change of "
-            "rights: another admin approves each call. requires_approval=True."
+            "rights: a call with a token waits for an admin's approval in the web "
+            "console."
         ),
         parameter_schema=_PARAMS,
         response_schema=_RESULT,
@@ -137,8 +138,8 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
                 "claim in their token. A second hardcoded-claim mapper with the "
                 "same claim name does not add values; it overwrites the first. "
                 "Change the existing mapper instead. This is a change of rights: "
-                "another admin must approve each call, and no standing grant or "
-                "run approval covers it. "
+                "a call with a token waits until an admin approves it in the web "
+                "console, and no standing grant or run approval covers it. "
                 "To add a mapper to a client, use ``keycloak.protocol_mapper.create``."
             ),
             "when_to_call": "When the claim a client scope puts into tokens must change.",

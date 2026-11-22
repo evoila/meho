@@ -510,7 +510,11 @@ async def _verify_session_token(
     # #3980: this is the one place where a call counts as a person in the
     # web interface. Every other way in (REST, MCP, in-process callers)
     # leaves the field off, so the call follows the token rule.
-    web_operator = Operator(**operator.model_dump(exclude={"web_session"}), web_session=True)
+    web_operator = Operator(
+        **operator.model_dump(exclude={"web_session", "web_session_id"}),
+        web_session=True,
+        web_session_id=decrypted.id,
+    )
     bind_request_client(web_operator)
     return web_operator
 

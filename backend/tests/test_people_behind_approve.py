@@ -234,17 +234,19 @@ async def test_a_person_not_behind_the_agent_approves_as_today() -> None:
     assert "approver_behind_requester" not in row.payload
 
 
-async def test_a_rights_change_of_an_agent_needs_an_admin_who_is_not_behind_it() -> None:
+async def test_an_admin_behind_the_agent_approves_its_change_of_rights_in_the_console() -> None:
     await _register_agent()
     request_id = await _park(_agent(), rights=True)
-    admin_behind = _login(_SETTER_UP, role=TenantRole.TENANT_ADMIN)
-    other_admin = _login(_OTHER, role=TenantRole.TENANT_ADMIN)
+    with_a_token = _login(_SETTER_UP, role=TenantRole.TENANT_ADMIN)
+    in_the_console = with_a_token.model_copy(update={"web_session": True})
 
-    assert not await _surfaces_agree(request_id, admin_behind)
+    assert not await _surfaces_agree(request_id, with_a_token)
     with pytest.raises(RightsChangeApprovalError):
-        await _approve(request_id, admin_behind)
-    assert await _surfaces_agree(request_id, other_admin)
-    assert (await _approve(request_id, other_admin)).status == "approved"
+        await _approve(request_id, with_a_token)
+    assert await _surfaces_agree(request_id, in_the_console)
+    decided = await _approve(request_id, in_the_console)
+    assert decided.status == "approved"
+    assert decided._approval_rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL  # type: ignore[attr-defined]
 
 
 # --- Nobody known behind the login ----------------------------------------------------

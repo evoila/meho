@@ -8,13 +8,15 @@ A classification entry gives connectors, operation groups or operations
 category decides who may approve, so every such change is a change of
 rights:
 
-* the operation is ``dangerous`` and always waits for approval, and a
-  person approves each call: no standing grant and no run approval
-  covers it (:func:`~meho_backplane.op_classes.declare_per_call_approval`);
+* an admin's call in the web console runs at once
+  (:mod:`~meho_backplane.operations.rights_change_console`);
+* every other call waits: the operation is ``dangerous`` and always waits
+  for approval, and a person approves each call: no standing grant and no
+  run approval covers it (:func:`~meho_backplane.op_classes.declare_per_call_approval`);
 * every request carries the rights-change mark
   (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`),
-  so the person who asked can never approve it, and the approver must be
-  another admin of the tenant;
+  so only an admin of the tenant approves it, and only with a click in the
+  web console; the admin may be the person who asked;
 * a person needs the ``tenant_admin`` role to ask
   (:func:`~meho_backplane.operations.role_floors.register_role_floor`).
 
@@ -22,15 +24,16 @@ rights:
   :func:`policy_classify_requester_refusal`. The policy gate checks this
   on every path, the approval card records who asked
   (:func:`~meho_backplane.connectors.policy.apply.record_policy_apply_requester`),
-  and the run checks it again. A run by the person who asked (for example
-  a re-run of a failed approved request) changes nothing.
+  and the run checks it again. A run without an approval changes nothing,
+  unless an admin ran it in the web console.
 
 The approval card shows how many operations the entry matches now, the
 first of them, and that a pattern also matches operations added later
 (:func:`build_policy_classify_preview`).
 
-The change runs only after that approval. It is checked again when it
-runs (:func:`~meho_backplane.policy.store.set_classification`): an unknown
+The change runs after that approval, or at once for an admin in the web
+console. It is checked again when it runs
+(:func:`~meho_backplane.policy.store.set_classification`): an unknown
 category, or two entries of the same level that would give one operation
 different categories, refuse it and nothing is written.
 
@@ -79,8 +82,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CARD_FIRST_MATCHES",
+    "CLASSIFY_NEEDS_APPROVAL",
     "CLASSIFY_NEEDS_PERSON",
-    "CLASSIFY_NEEDS_SECOND_ADMIN",
     "GROUP_KEY",
     "GROUP_WHEN_TO_USE",
     "PARAMETER_SCHEMA",
@@ -106,9 +109,11 @@ CLASSIFY_NEEDS_PERSON: Final[str] = (
     "`meho connector classify` or the REST API with your own login."
 )
 
-#: Why a classification change did not run: the login that asked for it ran it.
-CLASSIFY_NEEDS_SECOND_ADMIN: Final[str] = (
-    "A classification change runs only from a second admin's approval. Ask for the change again."
+#: Why a classification change did not run: it was not approved, and no admin ran it in the console.
+CLASSIFY_NEEDS_APPROVAL: Final[str] = (
+    "A classification change runs at once only for an admin in the web console. Any "
+    "other change waits until an admin approves it in the web console. Ask for the "
+    "change again."
 )
 
 #: How many matched operations the approval card names; it counts the rest.
@@ -215,14 +220,15 @@ GROUP_KEY = "policy"
 GROUP_WHEN_TO_USE = (
     "Change how MEHO classifies operations for your tenant: the category, free "
     "labels and the always-wait mark of connectors, operation groups and operations. "
-    "A category decides who may approve, so every change here is a change of rights "
-    "and waits until a second tenant admin approves it. Run the dry run first."
+    "A category decides who may approve, so every change here is a change of rights: "
+    "a call with a token waits until a tenant admin approves it in the web console. "
+    "Run the dry run first."
 )
 
 _DESCRIPTION = (
     "Set the category, labels or always-wait mark of one classification entry of "
     "your tenant, matched by connector, group or operation pattern. A change of "
-    "rights: it waits until another tenant admin approves it."
+    "rights: a call with a token waits until a tenant admin approves it in the web console."
 )
 
 _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
@@ -231,13 +237,13 @@ _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "example network), wants labels on them, or wants them to always wait."
     ),
     "preconditions": (
-        "Needs the tenant_admin role. The call always waits for approval, and the "
-        "person who asked can never approve it: another tenant admin must. The "
+        "Needs the tenant_admin role. A call with a token waits for approval: a tenant "
+        "admin approves it in the web console, and may be the person who asked. The "
         "category must be in the taxonomy."
     ),
     "output_shape": "{'scope', 'rule_ref', 'entry', 'matched_operations'}",
     "next_step": (
-        "Ask another tenant admin to approve the request. After the approval, "
+        "Ask a tenant admin to approve the request in the web console. After the approval, "
         "search_operations and the call contract show the new values."
     ),
 }
@@ -248,19 +254,26 @@ async def policy_classify(
 ) -> dict[str, Any]:
     """Store one classification entry of the operator's tenant.
 
-    Op-id: ``policy.classify``. Targetless. Runs after the approval; the
-    tenant comes from *operator*, never from *params*.
+    Op-id: ``policy.classify``. Targetless. The tenant comes from
+    *operator*, never from *params*.
 
-    Only the admin who approved runs it: a run by the login that asked
-    writes nothing. The card's record of who asked is checked again: it
-    must be a person.
+    It runs after an approval, or at once for an admin in the web console
+    (:func:`~meho_backplane.operations.rights_change_console.runs_at_once_in_console`).
+    A run by the person who asked (also a re-run of a failed approved
+    request) writes only for an admin in the web console. Any other run
+    writes nothing. After an approval, the card's record of who asked is
+    checked again: it must be a person.
     """
     if not classification_enabled():
         raise ValueError(SWITCH_OFF_REFUSAL)
     requester = approved_requester_sub()
     if requester is None or requester == operator.sub:
-        raise ValueError(CLASSIFY_NEEDS_SECOND_ADMIN)
-    if _requester_refusal_at_run() is not None:
+        if not (operator.web_session and operator.may_approve_rights_change()):
+            raise ValueError(CLASSIFY_NEEDS_APPROVAL)
+        refusal = policy_classify_requester_refusal(operator, params)
+    else:
+        refusal = _requester_refusal_at_run()
+    if refusal is not None:
         raise ValueError(CLASSIFY_NEEDS_PERSON)
     edit = ClassificationEdit(
         match=params["match"],

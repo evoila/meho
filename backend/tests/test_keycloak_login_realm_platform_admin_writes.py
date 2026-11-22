@@ -466,13 +466,13 @@ async def test_a_failed_read_refuses_a_tenant_admin(
 async def test_the_run_is_refused_when_the_login_got_platform_admin_rights_while_it_waited(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A change of harmless keys needs a tenant admin until the login gets platform admin rights."""
+    """A change of harmless keys approved as giving no platform admin rights; then it does."""
     _login(keycloak)
     params = {"id": _OTHER_USER, "changes": {"firstName": "Alice"}}
     effect = await _effect(keycloak, "keycloak.user.update", params)
     assert _grant(effect)["platform_admin"] is False
     request_id = await _park(params, effect, op_id="keycloak.user.update")
-    await _approve(request_id, _person("person-admin"), params)
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
     keycloak.lists[f"/users/{_OTHER_USER}/groups"] = [
         {"id": _GROUP_ID, "name": "oncall", "path": "/MEHO-Platform-Admins/oncall"}
     ]

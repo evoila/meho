@@ -167,7 +167,6 @@ the claim; a malformed value is dropped with a warning in the log, and
 the token stays valid.
 """
 
-from collections.abc import Iterable
 from enum import StrEnum
 from typing import Final, NamedTuple
 from uuid import UUID
@@ -459,6 +458,10 @@ class Operator(BaseModel):
     #: and MCP never do. Off means the call came with a token: it follows the
     #: agent rule, so only ``safe`` operations run at once.
     web_session: bool = False
+    #: The id of the web interface session of this call, set next to
+    #: :attr:`web_session` and only there. ``None`` for every other call.
+    #: The console's approval sign-in is kept on that session.
+    web_session_id: UUID | None = None
     #: The MCP tool profile the client named with ``?profile=`` (#4172),
     #: or ``None`` for the full tool list. Only the MCP route sets it, from
     #: the URL; see :mod:`meho_backplane.mcp.profiles`. A built-in profile
@@ -503,22 +506,22 @@ class Operator(BaseModel):
         in_a_self_approval_group = self.self_approver or self.tenant_role == TenantRole.TENANT_ADMIN
         return in_a_self_approval_group and self.tenant_chosen and is_human_principal(self)
 
-    def may_approve_rights_change(self, requester_sub: str, behind: Iterable[str] = ()) -> bool:
-        """Return ``True`` when this person may approve a change of rights.
+    def may_approve_rights_change(self) -> bool:
+        """Return ``True`` when this person is an admin who may make a change of rights.
 
-        The one place that decides it, for every kind of rights change
-        and every approval path (the approve, the "may I approve?" sign and
-        run approvals). True only for a person in a chosen current tenant who
-        is an admin there (the ``tenant_admin`` role or a platform admin)
-        and who is neither *requester_sub* nor one of *behind*, the people
-        behind the agent, service or runner login that asked
-        (:mod:`~meho_backplane.operations.people_behind`): the requester and
-        the people behind it never approve their own change of rights. No
-        group, no risk level and no break-glass switch changes that.
+        The one place that decides who is an admin for a change of rights,
+        for every path: the approve, the "may I approve?" sign, and a
+        change of rights that runs at once in the web console
+        (:mod:`~meho_backplane.operations.rights_change_console`). True
+        only for a person in a chosen current tenant who is an admin there
+        (the ``tenant_admin`` role or a platform admin). The admin may be
+        the person who asked, or a person behind the agent, service or
+        runner login that asked
+        (:mod:`~meho_backplane.operations.people_behind`). No group, no risk
+        level and no break-glass switch changes that. The approve also needs a click in the web
+        console
+        (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
         """
-        mine = self.sub.casefold()
-        if mine == requester_sub.casefold() or mine in {sub.casefold() for sub in behind}:
-            return False
         is_admin = self.tenant_role == TenantRole.TENANT_ADMIN or self.platform_admin
         return is_admin and self.tenant_chosen and is_human_principal(self)
 

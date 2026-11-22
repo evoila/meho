@@ -210,6 +210,16 @@ def _value_now(now: Any, sent: Any) -> Any:
     return now
 
 
+def _stored_client_id(client: dict[str, Any] | None) -> str | None:
+    """The ``clientId`` as Keycloak stores it; ``None`` when MEHO could not read the client.
+
+    The card never names the client from the params alone: the handler
+    changes the client of ``id`` when both are given, so a ``client_id`` in
+    the params can name another client.
+    """
+    return _text(client.get("clientId")) if client is not None else None
+
+
 async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
     """Card for ``keycloak.client.update``: the client, its values now, the new values."""
     requested = _representation(ctx)
@@ -217,7 +227,7 @@ async def _client_update_card(ctx: PreviewContext) -> dict[str, Any] | None:
     card: dict[str, Any] = {
         "resource": "client",
         "id": client_uuid,
-        "client_id": _text(ctx.params.get("client_id")),
+        "client_id": _stored_client_id(current),
         "realm": _managed_realm(ctx),
         "new_values": _hide(ctx, requested),
     }
@@ -247,7 +257,7 @@ async def _protocol_mapper_create_card(ctx: PreviewContext) -> dict[str, Any] | 
     card: dict[str, Any] = {
         "resource": "protocol_mapper",
         "id": client_uuid,
-        "client_id": _text(ctx.params.get("client_id")),
+        "client_id": _stored_client_id(client),
         "realm": _managed_realm(ctx),
         "new_mapper": _hide(ctx, _representation(ctx)),
     }

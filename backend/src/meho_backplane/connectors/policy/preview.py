@@ -134,7 +134,8 @@ _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "When conflict is null and the list is what you expect, call policy.classify "
-        "with the same parameters. It waits until another tenant admin approves it."
+        "with the same parameters. It waits until a tenant admin approves it in the web "
+        "console."
     ),
 }
 

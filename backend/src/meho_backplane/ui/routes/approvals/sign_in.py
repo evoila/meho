@@ -20,9 +20,12 @@ An empty console approval client setting makes ``auto`` record only.
 
 from __future__ import annotations
 
+import time
 import uuid
 
-from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from fastapi import HTTPException
+
+from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.approval_sign_in_flow import SignInLevel, sign_in_level_in_force
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.web_approval_sign_in import (
@@ -34,7 +37,13 @@ from meho_backplane.ui.auth.approval_sign_in_routes import approval_sign_in_loca
 from meho_backplane.ui.auth.approval_token_store import approval_operator
 from meho_backplane.ui.auth.routes import login_location
 
-__all__ = ["approve_sign_in_state", "sign_in_url", "web_approval_auth", "web_sign_in_level"]
+__all__ = [
+    "approve_sign_in_state",
+    "console_run_auth",
+    "sign_in_url",
+    "web_approval_auth",
+    "web_sign_in_level",
+]
 
 
 async def web_sign_in_level() -> SignInLevel:
@@ -64,6 +73,36 @@ async def web_approval_auth(operator: Operator, session_id: uuid.UUID) -> Approv
         level_in_force=level.in_force,
         level_check_failed=level.check_failed,
     )
+
+
+async def console_run_auth(operator: Operator) -> ApprovalAuth | None:
+    """The proof for a direct run of a change of rights in the console, or ``None``.
+
+    The rule of a console approve of such a change: the proof of
+    :func:`web_approval_auth`, and a sign-in no older than the approval
+    window (``FRESH_SIGN_IN_MAX_AGE_SECONDS``), the limit
+    :func:`~meho_backplane.operations.approval_queue.approve_request`
+    applies to a request that is not ``destructive``. ``None`` for a call
+    that did not come from a console session.
+    """
+    if not operator.web_session:
+        return None
+    session_id = operator.web_session_id
+    level = await web_sign_in_level()
+    settings = get_settings()
+    try:
+        auth = check_web_approval_sign_in(
+            operator,
+            await approval_operator(session_id) if session_id is not None else None,
+            settings,
+            level_in_force=level.in_force,
+            level_check_failed=level.check_failed,
+        )
+    except HTTPException:
+        return None
+    if time.time() - auth.auth_time > approval_sign_in_max_age(settings, destructive=False):
+        return None
+    return auth
 
 
 async def approve_sign_in_state(

@@ -99,8 +99,9 @@ def _operator(sub: str = "kc-otp-requester", role: TenantRole = TenantRole.OPERA
 
 def _approver() -> Operator:
     # The write is dangerous: only a tenant admin or a MEHO-SA-Operator may approve it.
+    # A change of rights is approved with a click in the web console.
     return _operator("kc-otp-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"platform_admin": True}
+        update={"platform_admin": True, "web_session": True}
     )
 
 
@@ -516,7 +517,7 @@ async def test_approved_run_acts_on_the_user_id_on_the_card(kc: KeycloakConnecto
 
 
 async def test_a_plain_operator_cannot_approve_the_write(kc: KeycloakConnector) -> None:
-    """The write is a change of rights: only another admin approves it."""
+    """The write is a change of rights: only an admin approves it."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _, put = _mount(mock, ["CONFIGURE_TOTP"])
         request_id = await _park({"username": "event-guest", "remove": ["CONFIGURE_TOTP"]})

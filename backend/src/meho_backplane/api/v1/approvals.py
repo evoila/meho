@@ -113,6 +113,7 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations._preview import (
     proposed_effect_for_agent,
+    without_internal_effect_keys,
     without_person_only_effect_keys,
 )
 from meho_backplane.operations.approval_context import (
@@ -545,7 +546,7 @@ class ApprovalRequestView(BaseModel):
     #: ``may_approve`` true, ``own_change`` means a self-approval is
     #: allowed. ``None`` when ``may_approve`` is ``None``.
     may_approve_reason: str | None = None
-    #: This is a change of rights: another admin must approve it.
+    #: This is a change of rights: only an admin approves it, in the web console.
     rights_change: bool = False
 
 
@@ -766,10 +767,11 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     so the ``env`` values of ``linux.script.run`` and the ``run_commands``
     of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
-    a person (:func:`without_person_only_effect_keys`).
+    a person (:func:`without_person_only_effect_keys`). No caller reads the
+    internal keys (:func:`without_internal_effect_keys`).
     """
     if is_human_principal(operator) and not is_agent_caller(operator):
-        return row.proposed_effect
+        return without_internal_effect_keys(row.proposed_effect)
     if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
         return without_person_only_effect_keys(row.proposed_effect)
     shown = proposed_effect_for_agent(

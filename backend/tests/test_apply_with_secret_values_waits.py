@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors.kubernetes import op_classes
 from meho_backplane.connectors.kubernetes.op_classes import manifest_holds_credential
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus, PermissionVerdict
@@ -105,6 +106,13 @@ spec:
             - {name: API_TOKEN, value: ""}
             - {name: LOG_LEVEL, value: debug}
 """
+_ENV_AT_THE_TOP = """
+apiVersion: example.invalid/v1
+kind: AppSettings
+metadata: {name: web, namespace: apps}
+env:
+  - {name: DB_PASSWORD, value: plain-text-value}
+"""
 _PLAIN_CONFIG_MAP = """
 apiVersion: v1
 kind: ConfigMap
@@ -153,8 +161,9 @@ def _person() -> Operator:
         _ENV_WITH_A_SECRET_NAME,
         _STRING_DATA_IN_A_LIST,
         _PLAIN_CONFIG_MAP + "---\n" + _CONFIG_MAP_WITH_A_SECRET_NAME,
+        _ENV_AT_THE_TOP,
     ],
-    ids=["data-key", "env-shape", "env-name", "list-item", "second-document"],
+    ids=["data-key", "env-shape", "env-name", "list-item", "second-document", "env-at-the-top"],
 )
 def test_a_manifest_with_a_secret_looking_value_counts(manifest: str) -> None:
     assert manifest_holds_credential({"manifest": manifest}) is True
@@ -178,6 +187,49 @@ def test_the_value_check_reads_a_shared_value_once() -> None:
     started = time.perf_counter()
     assert manifest_holds_credential({"manifest": manifest}) is False
     assert time.perf_counter() - started < 30
+
+
+def _count_name_checks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    checked: list[str] = []
+    real_check = op_classes.is_secret_param_name
+
+    def counting_check(name: str) -> bool:
+        checked.append(name)
+        return real_check(name)
+
+    monkeypatch.setattr(op_classes, "is_secret_param_name", counting_check)
+    return checked
+
+
+def test_the_value_check_reads_the_names_of_a_shared_env_list_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many containers that name one long env list through an alias read its names once."""
+    checked = _count_name_checks(monkeypatch)
+    entries = ", ".join(f"{{name: SETTING_{i}, value: v{i}}}" for i in range(1_000))
+    containers = "\n".join(f"    - {{name: c{i}, env: *env}}" for i in range(200))
+    manifest = (
+        f"apiVersion: v1\nkind: Pod\nmetadata: {{name: web}}\n"
+        f"spec:\n  shared: &env [{entries}]\n  containers:\n{containers}\n"
+    )
+
+    assert manifest_holds_credential({"manifest": manifest}) is False
+    assert len(checked) <= 1_000
+
+
+def test_the_value_check_reads_the_keys_of_a_shared_data_map_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many list items that name one large data map through an alias read its keys once."""
+    checked = _count_name_checks(monkeypatch)
+    keys = ", ".join(f"setting_{i}: v{i}" for i in range(1_000))
+    items = "\n".join(
+        f"  - {{kind: ConfigMap, metadata: {{name: c{i}}}, data: *data}}" for i in range(200)
+    )
+    manifest = f"apiVersion: v1\nkind: List\nshared: &data {{{keys}}}\nitems:\n{items}\n"
+
+    assert manifest_holds_credential({"manifest": manifest}) is False
+    assert len(checked) <= 1_000
 
 
 # ---------------------------------------------------------------------------

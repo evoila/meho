@@ -61,15 +61,16 @@ handoff of the run, as a credential write does. Such a call needs
 - a key of its `data` or `stringData` has a secret name (the name rule of
   `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
   example a ConfigMap;
-- an `env` entry at any depth (the containers and init containers of a
-  pod template) has a secret name and a value of its own; an entry that
+- an `env` entry at any depth (the object itself, the containers and init
+  containers of a pod template) has a secret name and a value of its own; an entry that
   reads its value from a Secret (`valueFrom`) does not count;
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
   token with a known vendor prefix).
 
-The check reads each value of the manifest once, also when YAML aliases
-name it many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
+The check reads each value of the manifest once, and the names of each
+`data`, `stringData` and `env` value once, also when YAML aliases name
+them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
 holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of

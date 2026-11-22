@@ -172,56 +172,75 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
     return list(node) if isinstance(node, list) else []
 
 
-def _secret_value_check() -> _Counts:
+class _SecretValueCheck:
     """A check for one manifest: True when an object holds a secret-looking value.
 
     An object holds one when a key of its ``data`` or ``stringData`` has a
     secret name (the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
-    an ``env`` entry at any depth has a secret name and a value, or when a
-    text at any depth has a secret shape
+    an ``env`` entry at any depth, the object itself included, has a secret
+    name and a value, or when a text at any depth has a secret shape
     (:func:`~meho_backplane.redaction.command_line.hide_in_text`). Each value
-    of the manifest is read once, also when YAML aliases name it many times;
-    the ``items`` of a list object are read as objects of their own.
+    of the manifest is read once, and the names of each ``data``,
+    ``stringData`` and ``env`` value are read once, also when YAML aliases
+    name them many times. The ``items`` of a list object are read as objects
+    of their own.
     """
-    seen: set[int] = set()
 
-    def holds(doc: Mapping[str, Any]) -> bool:
-        for field in _NAMED_VALUE_FIELDS:
-            values = doc.get(field)
-            if isinstance(values, Mapping) and any(is_secret_param_name(str(k)) for k in values):
-                return True
-        if id(doc) in seen:
+    def __init__(self) -> None:
+        self._seen: set[int] = set()
+        self._names_read: set[int] = set()
+
+    def _first_visit(self, value: Any, visited: set[int]) -> bool:
+        if id(value) in visited:
             return False
-        seen.add(id(doc))
+        visited.add(id(value))
+        return True
+
+    def _has_secret_key(self, values: Any) -> bool:
+        return (
+            isinstance(values, Mapping)
+            and self._first_visit(values, self._names_read)
+            and any(is_secret_param_name(str(k)) for k in values)
+        )
+
+    def _has_secret_env(self, node: Any) -> bool:
+        env = node.get("env") if isinstance(node, Mapping) else None
+        return (
+            isinstance(env, list)
+            and self._first_visit(env, self._names_read)
+            and any(_is_secret_env_entry(entry) for entry in env)
+        )
+
+    def __call__(self, doc: Mapping[str, Any]) -> bool:
+        if any(self._has_secret_key(doc.get(field)) for field in _NAMED_VALUE_FIELDS):
+            return True
+        if not self._first_visit(doc, self._seen):
+            return False
+        if self._has_secret_env(doc):
+            return True
         stack = _children(doc, skip_items=_is_list_kind(str(doc["kind"])))
         while stack:
             node = stack.pop()
-            if id(node) in seen:
+            if not self._first_visit(node, self._seen):
                 continue
-            seen.add(id(node))
-            if _is_secret_shaped(node):
-                return True
-            env = node.get("env") if isinstance(node, Mapping) else None
-            if isinstance(env, list) and any(_is_secret_env_entry(entry) for entry in env):
+            if _is_secret_shaped(node) or self._has_secret_env(node):
                 return True
             stack.extend(_children(node, skip_items=False))
         return False
-
-    return holds
 
 
 def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
     """True when the ``k8s.apply`` manifest in *params* holds a credential.
 
     A manifest holds one when an object is of a credential kind or holds a
-    secret-looking value (:func:`_secret_value_check`). Any document of a
+    secret-looking value (:class:`_SecretValueCheck`). Any document of a
     multi-document manifest counts, and any item of a list object. A
     manifest MEHO cannot read counts too: it is not text, it is not YAML or
     JSON, a document has no kind, or it has more than
     :data:`MAX_CHECKED_OBJECTS` objects.
     """
-    holds_secret_value = _secret_value_check()
+    holds_secret_value = _SecretValueCheck()
     return _manifest_has(params, lambda doc: _is_credential_kind(doc) or holds_secret_value(doc))
 
 

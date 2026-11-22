@@ -438,10 +438,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
-from meho_backplane.operations._request_preview import (
-    compute_preview_hash,
-    preview_dispatch,
-)
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprint_value,
@@ -3625,7 +3622,7 @@ async def _destructive_binding_refusal(
             "for this (connector_id, op_id, target, params)",
             duration_ms,
         )
-    if compute_preview_hash(authoritative) != preview_hash:
+    if authoritative.get("preview_hash") != preview_hash:
         return result_preview_hash_mismatch(op_id, duration_ms)
 
     # Requirement 3: the mandatory blast-radius statement.

@@ -44,7 +44,11 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.tools.operations import _preview_operation_handler
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
-from meho_backplane.operations._request_preview import PARAMS_DIGEST_KEY, preview_dispatch
+from meho_backplane.operations._request_preview import (
+    PARAMS_DIGEST_KEY,
+    compute_preview_hash,
+    preview_dispatch,
+)
 from meho_backplane.operations.dispatcher import _destructive_binding_refusal
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.redaction import clear_overrides
@@ -193,6 +197,7 @@ def _assert_masked(envelope: dict[str, Any]) -> None:
         "password": _MARK,
         "users": [{"name": "svc", "client_secret": _MARK}],
     }
+    assert PARAMS_DIGEST_KEY not in envelope
     assert _SECRET not in json.dumps(envelope, default=str)
 
 
@@ -285,7 +290,8 @@ async def test_preview_hash_of_a_credential_write_changes_with_a_hidden_value(
 
     assert first["query"] == second["query"]
     assert first["redacted_body"] == second["redacted_body"]
-    assert first[PARAMS_DIGEST_KEY] != second[PARAMS_DIGEST_KEY]
+    assert PARAMS_DIGEST_KEY not in first
+    assert PARAMS_DIGEST_KEY not in second
     assert first["preview_hash"] != second["preview_hash"]
     assert _SECRET not in json.dumps(first, default=str)
 
@@ -340,6 +346,7 @@ async def test_preview_of_a_call_that_is_not_a_credential_write_is_unchanged(
     assert envelope["query"] is None
     assert envelope["redacted_body"] == {"title": "plain", "password": "plain-field-text"}
     assert PARAMS_DIGEST_KEY not in envelope
+    assert envelope["preview_hash"] == compute_preview_hash(envelope)
 
 
 @pytest.mark.asyncio

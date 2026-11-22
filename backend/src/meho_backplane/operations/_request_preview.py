@@ -156,13 +156,12 @@ _PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
 #: Envelope key of the keyed digest of the full params a synthetic preview
 #: carries (:mod:`._composite_preview`). Its ``redacted_body`` is a safe view
 #: that hides values, so the digest is what keeps the hash bound to every
-#: value. An ingested credential write carries it too, over its literal query
-#: and body, because its preview masks secret values. Hashed only when
-#: present: every other ingested preview has no digest.
+#: value. Hashed only when present: an ingested preview has no digest, and
+#: its hash stays what it was.
 PARAMS_DIGEST_KEY: Final[str] = "params_digest"
 
 
-def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
+def compute_preview_hash(envelope: Mapping[str, Any], *, params_digest: str | None = None) -> str:
     """Return a stable SHA-256 hex over a preview's canonicalised resolved envelope.
 
     The preview-result-hash binding for the ``destructive`` tier (#3197,
@@ -175,6 +174,9 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     param-swap between preview and the governed call. A synthetic preview
     also carries :data:`PARAMS_DIGEST_KEY`; it joins the projection when
     present, so a value the safe view hides still changes the hash.
+    ``params_digest`` is the same kind of digest kept out of the envelope:
+    an ingested credential write masks its secret values, so the digest of
+    its literal query and body joins the hash, but not the answer.
 
     Canonicalisation matches the params hashes in
     :mod:`meho_backplane.operations._validate`
@@ -184,6 +186,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     source = {key: envelope.get(key) for key in _PREVIEW_HASH_KEYS}
     if PARAMS_DIGEST_KEY in envelope:
         source[PARAMS_DIGEST_KEY] = envelope[PARAMS_DIGEST_KEY]
+    elif params_digest is not None:
+        source[PARAMS_DIGEST_KEY] = params_digest
     canonical = json.dumps(source, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -909,7 +913,7 @@ def _ok_ingested_envelope(
     )
     # A credential write shows its query inputs with the same mark as its
     # body. The keyed digest of the literal query and body keeps the hash
-    # bound to each hidden value.
+    # bound to each hidden value; it goes into the hash, not the answer.
     credential_write = classify_op(op_id) == "credential_write"
     query = request.query
     if query and credential_write:
@@ -935,11 +939,12 @@ def _ok_ingested_envelope(
         "query": query,
         "redacted_body": redacted_body,
     }
-    if credential_write:
-        envelope[PARAMS_DIGEST_KEY] = compute_params_hash(
-            {"query": request.query, "body": request.body}
-        )
-    envelope["preview_hash"] = compute_preview_hash(envelope)
+    digest = (
+        compute_params_hash({"query": request.query, "body": request.body})
+        if credential_write
+        else None
+    )
+    envelope["preview_hash"] = compute_preview_hash(envelope, params_digest=digest)
     return envelope
 
 

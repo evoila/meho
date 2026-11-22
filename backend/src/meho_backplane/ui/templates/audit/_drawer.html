@@ -51,6 +51,9 @@
                        row is gone (#5238)
     via_label      -- str | None: "<client> (<channel>)" from the row's
                        ``client`` block, or None when it has none
+    secret_read_as -- str | None: the login the secret store accepted for
+                       the call; None when the call read no secret or
+                       AUDIT_SECRET_READ_AS is off
 -#}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
@@ -95,6 +98,10 @@
         {% if via_label %}
           <dt class="opacity-60">Via</dt>
           <dd data-via>{{ via_label }}</dd>
+        {% endif %}
+        {% if secret_read_as %}
+          <dt class="opacity-60">Secret read as</dt>
+          <dd data-secret-read-as class="font-mono text-xs break-all">{{ secret_read_as }}</dd>
         {% endif %}
         <dt class="opacity-60">Operation</dt>
         <dd>{{ operation_ref(references.operation) }}</dd>

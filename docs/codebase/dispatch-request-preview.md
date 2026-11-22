@@ -358,8 +358,10 @@ named-pattern catalogue and policy resolution.
 `***REDACTED***`, in `redacted_body` and in `query`. It uses the same name
 rule and the same mark as the echo of a waiting call
 (`_scrub_secret_param_keys`, then the engine above). The method, the path
-and the other inputs stay as they are. The `preview_hash` is taken over
-what the preview shows, so it does not depend on a hidden value. A preview
+and the other inputs stay as they are. The answer also carries
+`params_digest`: a keyed digest (made with the server key) of the literal
+query and body. `preview_hash` covers it, so a changed hidden value gives a
+new hash, and the hash check refuses the old one. A preview
 sends no request, so the trace has no span of it. It writes no audit row
 and no broadcast event, and its log line holds no input value. A hosted
 agent run stores the answer it got, so it stores the mark too.

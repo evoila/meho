@@ -44,7 +44,8 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.tools.operations import _preview_operation_handler
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
-from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations._request_preview import PARAMS_DIGEST_KEY, preview_dispatch
+from meho_backplane.operations.dispatcher import _destructive_binding_refusal
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.redaction import clear_overrides
 from meho_backplane.settings import get_settings
@@ -258,17 +259,54 @@ async def test_rest_preview_of_a_credential_write_shows_the_mark(
 
 
 @pytest.mark.asyncio
-async def test_preview_hash_of_a_credential_write_does_not_hold_the_value(
+async def test_preview_hash_of_a_credential_write_changes_with_a_hidden_value(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
-    """The hash is taken over what the preview shows, so it does not depend on the value."""
+    """A changed hidden value changes the hash, and the hash check refuses the old hash."""
     await _seed_write_op(session, stub_embedding_service)
     await _seed_target()
+    first_params = _write_arguments(_SECRET)["params"]
+    second_params = _write_arguments(_OTHER_SECRET)["params"]
 
-    first = await preview_operation(_make_operator(), _write_arguments(_SECRET))
-    second = await preview_operation(_make_operator(), _write_arguments(_OTHER_SECRET))
+    first = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id=_WRITE_OP,
+        target=_FakeTarget(name="gh-prod"),
+        params=first_params,
+    )
+    second = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id=_WRITE_OP,
+        target=_FakeTarget(name="gh-prod"),
+        params=second_params,
+    )
 
-    assert first["preview_hash"] == second["preview_hash"]
+    assert first["query"] == second["query"]
+    assert first["redacted_body"] == second["redacted_body"]
+    assert first[PARAMS_DIGEST_KEY] != second[PARAMS_DIGEST_KEY]
+    assert first["preview_hash"] != second["preview_hash"]
+    assert _SECRET not in json.dumps(first, default=str)
+
+    async def _refusal(params: dict[str, Any]) -> Any:
+        return await _destructive_binding_refusal(
+            op_id=_WRITE_OP,
+            connector_id="gh-rest-3",
+            operator=_make_operator(),
+            target=_FakeTarget(name="gh-prod"),
+            params=params,
+            preview_hash=first["preview_hash"],
+            proposed_effect=None,
+            duration_ms=0.0,
+        )
+
+    changed = await _refusal(second_params)
+    assert changed is not None
+    assert changed.extras["error_code"] == "preview_hash_mismatch"
+    same = await _refusal(first_params)
+    assert same is not None
+    assert same.extras["error_code"] == "blast_radius_required"
 
 
 @pytest.mark.asyncio
@@ -301,6 +339,7 @@ async def test_preview_of_a_call_that_is_not_a_credential_write_is_unchanged(
     assert envelope["status"] == "ok"
     assert envelope["query"] is None
     assert envelope["redacted_body"] == {"title": "plain", "password": "plain-field-text"}
+    assert PARAMS_DIGEST_KEY not in envelope
 
 
 @pytest.mark.asyncio

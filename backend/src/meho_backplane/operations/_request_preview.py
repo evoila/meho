@@ -116,6 +116,7 @@ from meho_backplane.operations._target_version_range import version_range_previe
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
+    compute_params_hash,
     params_errors,
     policy_gate,
     validate_params,
@@ -155,8 +156,9 @@ _PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
 #: Envelope key of the keyed digest of the full params a synthetic preview
 #: carries (:mod:`._composite_preview`). Its ``redacted_body`` is a safe view
 #: that hides values, so the digest is what keeps the hash bound to every
-#: value. Hashed only when present: an ingested preview has no digest, and
-#: its hash stays what it was.
+#: value. An ingested credential write carries it too, over its literal query
+#: and body, because its preview masks secret values. Hashed only when
+#: present: every other ingested preview has no digest.
 PARAMS_DIGEST_KEY: Final[str] = "params_digest"
 
 
@@ -906,9 +908,11 @@ def _ok_ingested_envelope(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
     # A credential write shows its query inputs with the same mark as its
-    # body. The hash below is taken over what the preview shows.
+    # body. The keyed digest of the literal query and body keeps the hash
+    # bound to each hidden value.
+    credential_write = classify_op(op_id) == "credential_write"
     query = request.query
-    if query and classify_op(op_id) == "credential_write":
+    if query and credential_write:
         query = _redact_request_body(
             query, connector_id=connector_id, operator=operator, op_id=op_id
         )
@@ -931,6 +935,10 @@ def _ok_ingested_envelope(
         "query": query,
         "redacted_body": redacted_body,
     }
+    if credential_write:
+        envelope[PARAMS_DIGEST_KEY] = compute_params_hash(
+            {"query": request.query, "body": request.body}
+        )
     envelope["preview_hash"] = compute_preview_hash(envelope)
     return envelope
 

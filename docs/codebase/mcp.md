@@ -2228,6 +2228,10 @@ to follow that request: `meho_approvals_get` needs the operator role and
 call_operation(connector_id, op_id, approval_request_id)
 ```
 
+The caller needs the request id. It learns only the state of a request of its own login.
+"Own" means the same login. So an agent that acts for a person reads that person's requests.
+The read checks no agent grant.
+
 - The code is in `mcp/tools/_call_operation_status.py`. The handler hands
   the call over when it has `approval_request_id`. The call runs nothing,
   makes no new request and writes no call record.
@@ -2237,7 +2241,7 @@ call_operation(connector_id, op_id, approval_request_id)
   (`-32602`, `own_request_status_extra_inputs`). `connector_id` and `op_id`
   must be the ones of the request (`request_wrong_operation`). Both checks
   run before anything is read.
-- A request of another person, of another tenant and an unknown id all get
+- A request of another login, of another tenant and an unknown id all get
   `approval_request_not_found`, word for word.
 - Each read writes one `approval.result` audit row, as
   `GET /api/v1/approvals/{id}/result` does

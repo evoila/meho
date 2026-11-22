@@ -2669,6 +2669,7 @@ produce?" — complementary, not a duplicate.
 
 On MCP, with `MCP_OWN_REQUEST_STATUS` on (off by default), the owner makes
 the same read with `call_operation(connector_id, op_id, approval_request_id)`.
+The owner is the same login. The read checks no agent grant.
 It uses `read_approval_result` too, so the owner check and the
 `approval.result` audit row are the same. Another person's request and an
 unknown id both answer `approval_request_not_found`

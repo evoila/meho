@@ -1191,6 +1191,7 @@ async def _gate_subop(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_policy
+    from meho_backplane.operations.service_grants import _sandbox_delete_exception
     from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
     from meho_backplane.policy.stamp import take_rule
 
@@ -1274,7 +1275,12 @@ async def _gate_subop(
     )
     step_rule = take_rule()
     if verdict is PermissionVerdict.AUTO_EXECUTE:
-        if not credential_step_waits_after_approval(op_id) and not descriptor.credential_call:
+        # A step marked for a sandbox delete grant is cleared here only by
+        # that grant: no other grant covers it.
+        if not credential_step_waits_after_approval(op_id) and (
+            not descriptor.credential_call
+            or _sandbox_delete_exception(op_id, None, descriptor, params)
+        ):
             return _GoAhead.NO_PERSON
         _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
         verdict = PermissionVerdict.NEEDS_APPROVAL

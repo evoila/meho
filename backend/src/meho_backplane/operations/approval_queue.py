@@ -1165,6 +1165,74 @@ async def _find_idempotent_request(
     return (await session.execute(stmt)).scalars().first()
 
 
+def _same_call_reuse_applies(
+    run_id: uuid.UUID | None,
+    resume_parent: dict[str, Any] | None,
+    requester: ResumeRequester | None,
+) -> bool:
+    """True when a direct call may get the waiting request of the same call.
+
+    Needs the switch ``APPROVAL_SAME_CALL_REUSE``. A call inside an agent
+    run, a step of a multi-step operation, or a re-run for an earlier
+    requester always gets its own request.
+    """
+    from meho_backplane.settings import get_settings
+
+    if run_id is not None or resume_parent is not None or requester is not None:
+        return False
+    return get_settings().approval_same_call_reuse
+
+
+async def _find_same_call_pending_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+    reveal_secret: bool,
+) -> ApprovalRequest | None:
+    """Return the waiting request of this login for the same call, or ``None``.
+
+    Used only with ``APPROVAL_SAME_CALL_REUSE`` on. Scoped to the tenant and
+    the login, so a caller never learns about the request of another person.
+    Only a ``pending`` request inside its deadline counts: an approved one
+    may have run, and an overdue one can no longer be approved. Nothing is
+    expired here. The match is the same as for a retry key: same operation,
+    connector, target, params, ``preview_hash`` and ``work_ref``, plus the
+    same ``reveal_secret`` choice.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.op_id == op_id,
+            ApprovalRequest.connector_id == connector_id,
+            ApprovalRequest.target_id == target_id
+            if target_id is not None
+            else ApprovalRequest.target_id.is_(None),
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.run_id.is_(None),
+        )
+        .order_by(ApprovalRequest.created_at)
+        .execution_options(populate_existing=True)
+    )
+    for existing in (await session.execute(stmt)).scalars():
+        if (
+            params_hash_matches(params, existing.params_hash)
+            and existing.preview_hash == preview_hash
+            and existing.work_ref == work_ref_var.get()
+            and bool(existing.reveal_secret) == reveal_secret
+            and not _is_overdue_pending(existing)
+        ):
+            return existing
+    return None
+
+
 def _reuse_idempotent_request(
     existing: ApprovalRequest,
     *,
@@ -1765,6 +1833,21 @@ async def create_pending_request(
         )
         if live is not None:
             return _reuse(live)
+
+    if _same_call_reuse_applies(run_id, resume_parent, requester):
+        same_call = await _find_same_call_pending_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params=params,
+            preview_hash=preview_hash,
+            reveal_secret=reveal_secret,
+        )
+        if same_call is not None:
+            return _reuse(same_call)
 
     if proposed_effect is None:
         proposed_effect = {

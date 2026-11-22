@@ -1625,6 +1625,17 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    approval_same_call_reuse:
+        Off by default. When on, a call that must wait for approval gets the
+        request that already waits when the same login in the same tenant
+        already has one for the same call (same operation, connector, target,
+        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice).
+        The answer has that request's id and ``approval_request_reused: true``.
+        It works with no ``idempotency_key`` and with a different key. Only a
+        waiting request inside its deadline is reused; a call inside an agent
+        run or a step of a multi-step operation always gets its own request.
+        When off, every such call makes a new request. Env
+        ``APPROVAL_SAME_CALL_REUSE``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2603,6 +2614,7 @@ class Settings(BaseModel):
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3824,6 +3836,9 @@ def get_settings() -> Settings:
         ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),
+        ),
+        approval_same_call_reuse=parse_bool_env(
+            os.environ.get("APPROVAL_SAME_CALL_REUSE"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

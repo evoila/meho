@@ -2758,8 +2758,38 @@ for approval.
   new one.
 - **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
   requesters, or two runs with different `work_ref` values, never share one
-  request. Without a key, nothing changes: every call that waits for
-  approval makes a new request.
+  request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
+  a call with no key makes a new request every time. With it on, see
+  "The same call without the same key" below.
+
+### The same call without the same key (`APPROVAL_SAME_CALL_REUSE`, off by default)
+
+Two agent sessions can ask for the same change with no key, or with keys
+that differ. Without the switch, each call makes its own request and the
+approver sees the same change twice. With the switch on,
+`create_pending_request` looks for a waiting request before it builds a
+new row (`_find_same_call_pending_request`). It reuses the request when all
+of this is the same:
+
+- the tenant and the login (`principal_sub`), so nobody learns about the
+  request of another person;
+- `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
+  `work_ref` and the `reveal_secret` choice.
+
+The answer is the same as for a retry with the key: the same
+`approval_request_id`, `extras.approval_request_reused: true`, no new row,
+no second `approval.request` audit row and no second `approval.pending`
+event. A key that is different from the key of the waiting request does
+not matter.
+
+- Only a `pending` request inside its deadline is reused. An approved
+  request may have run, so it is never returned. A rejected, withdrawn,
+  expired or overdue request gives a new one. The lookup expires nothing.
+- Only a direct call is checked. A call inside an agent run, a step of a
+  multi-step operation, or a re-run for an earlier requester always gets
+  its own request.
+- Not covered: two calls that arrive at the same moment can still make two
+  requests. There is no database lock for this case.
 
 **Races.** A partial unique index,
 `approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,

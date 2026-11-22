@@ -39,6 +39,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "agent_operation_tools_from_mcp",
         "agent_topology_off_with_connector_list",
         "agent_reads_custom_description",
+        "approval_same_call_reuse",
         "audit_session_links",
         "checks_agent_events",
         "connector_list_product_aliases",

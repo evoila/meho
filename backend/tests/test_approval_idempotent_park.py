@@ -31,6 +31,7 @@ import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -757,3 +758,174 @@ async def test_view_preview_hash_is_none_for_non_destructive_row() -> None:
     view = _view(row, operator=person)
     assert view.preview_hash is None
     assert view.result_state is None
+
+
+# ---------------------------------------------------------------------------
+# The same call from the same login, with no key (APPROVAL_SAME_CALL_REUSE)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def same_call_reuse_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("APPROVAL_SAME_CALL_REUSE", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+async def _park_same_call(
+    *,
+    sub: str = "op-requester",
+    tenant_id: uuid.UUID = _TENANT,
+    key: str | None = None,
+    params: dict[str, Any] | None = None,
+    target_id: uuid.UUID | None = None,
+    preview_hash: str | None = None,
+    run_id: uuid.UUID | None = None,
+    resume_parent: dict[str, Any] | None = None,
+) -> ApprovalRequest:
+    operator = _operator(sub=sub).model_copy(update={"tenant_id": tenant_id})
+    call_params = params if params is not None else {"name": "web-01"}
+    target = SimpleNamespace(id=target_id) if target_id is not None else None
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=operator,
+            connector_id="gh-rest-3",
+            op_id="POST:/vms",
+            target=target,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            idempotency_key=key,
+            preview_hash=preview_hash,
+            run_id=run_id,
+            resume_parent=resume_parent,
+            proposed_effect={"safety_level": "caution"},
+        )
+        await s.commit()
+    return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_same_call_without_a_key_gets_the_waiting_request() -> None:
+    a = await _park_same_call()
+    b = await _park_same_call()
+    assert b.id == a.id
+    assert getattr(b, "_reused", False) is True
+    assert await _approval_row_count() == 1
+    assert await _request_audit_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_same_call_with_another_key_gets_the_waiting_request() -> None:
+    a = await _park_same_call(key="key-a")
+    b = await _park_same_call(key="key-b")
+    assert b.id == a.id
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"params": {"name": "web-02"}},
+        {"target_id": uuid.UUID("00000000-0000-0000-0000-000000006794")},
+        {"preview_hash": "sha256:other"},
+    ],
+)
+async def test_a_different_call_gets_its_own_request(change: dict[str, Any]) -> None:
+    a = await _park_same_call()
+    b = await _park_same_call(**change)
+    assert b.id != a.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_different_work_ref_gets_its_own_request() -> None:
+    token = work_ref_var.set("gh:example/repo#1")
+    try:
+        a = await _park_same_call()
+    finally:
+        work_ref_var.reset(token)
+    token = work_ref_var.set("gh:example/repo#2")
+    try:
+        b = await _park_same_call()
+    finally:
+        work_ref_var.reset(token)
+    assert b.id != a.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_another_login_in_the_same_tenant_gets_its_own_request() -> None:
+    a = await _park_same_call(sub="login-a")
+    b = await _park_same_call(sub="login-b")
+    assert b.id != a.id
+    assert getattr(b, "_reused", False) is False
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_another_tenant_gets_its_own_request() -> None:
+    other_tenant = uuid.UUID("00000000-0000-0000-0000-000000006795")
+    a = await _park_same_call()
+    b = await _park_same_call(tenant_id=other_tenant)
+    assert b.id != a.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+@pytest.mark.parametrize("closing", ["rejected", "withdrawn", "expired", "overdue", "approved"])
+async def test_a_request_that_no_longer_waits_is_not_reused(
+    closing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = await _park_same_call()
+    async with get_sessionmaker()() as s:
+        if closing == "rejected":
+            await reject_request(s, first.id, operator=_operator(sub="op-approver"), reason="no")
+        elif closing == "withdrawn":
+            await approval_queue_module.withdraw_request(
+                s, first.id, operator=_operator(sub="op-requester")
+            )
+        elif closing == "approved":
+            await approve_request(s, first.id, operator=_operator(sub="op-approver"))
+        elif closing == "expired":
+            row = await s.get(ApprovalRequest, first.id)
+            assert row is not None
+            row.status = ApprovalRequestStatus.EXPIRED.value
+        await s.commit()
+    if closing == "overdue":
+        assert first.expires_at is not None
+        late = first.expires_at + timedelta(seconds=1)
+        monkeypatch.setattr(approval_queue_module, "_now", lambda: late)
+
+    second = await _park_same_call()
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_in_an_agent_run_or_a_multi_step_step_parks_again() -> None:
+    first = await _park_same_call()
+    in_run = await _park_same_call(run_id=uuid.uuid4())
+    step = await _park_same_call(resume_parent={"op_id": "composite.op", "params": {}})
+    assert len({first.id, in_run.id, step.id}) == 3
+    assert await _approval_row_count() == 3
+
+
+@pytest.mark.asyncio
+async def test_same_call_without_a_key_parks_again_with_the_switch_off() -> None:
+    a = await _park_same_call()
+    b = await _park_same_call()
+    assert a.id != b.id
+    assert await _approval_row_count() == 2

@@ -30,7 +30,11 @@ during the run keeps its text, its time and a vector of that text.
 No row gets a new ``created_at`` or ``updated_at``: searches filter on these
 times, and a re-embed changes no content.
 
-At the end it stores the set model in ``embedding_state``. It is safe to run
+A row or entry that changed during each of its tries is not written. Then
+the run is not complete: the command still works through every group, but
+it keeps the old model in ``embedding_state`` and exits with 1. Run it again.
+
+When every row is done, it stores the set model in ``embedding_state``. It is safe to run
 twice: a second run writes the same vectors, and passages that already
 belong to the set model are left as they are. Searches mix old and new
 vectors until it ends, so plan a maintenance window.
@@ -60,7 +64,7 @@ from meho_backplane.retrieval.embedding import EmbeddingService, get_embedding_s
 from meho_backplane.retrieval.embedding_state import write_embedding_state
 from meho_backplane.settings import get_settings
 
-__all__ = ["ReembedCounts", "main", "reembed_all"]
+__all__ = ["ReembedCounts", "ReembedIncompleteError", "main", "reembed_all"]
 
 DEFAULT_BATCH_SIZE = 50
 
@@ -75,6 +79,12 @@ class ReembedCounts:
     documents: int = 0
     kb_entries: int = 0
     endpoints: int = 0
+    #: Rows and knowledge entries not written because they changed during each try.
+    skipped: int = 0
+
+
+class ReembedIncompleteError(Exception):
+    """Some rows changed during each try, so the run did not embed them all."""
 
 
 def _document_texts(rows: Sequence[Any]) -> list[str]:
@@ -168,7 +178,8 @@ async def _reembed_table(
     batch_size: int,
     dry_run: bool,
     say: Callable[[str], None],
-) -> int:
+) -> tuple[int, int]:
+    """Return how many rows were embedded and how many were skipped."""
     table = group.table
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -176,8 +187,9 @@ async def _reembed_table(
             await session.scalar(select(func.count()).select_from(table).where(*group.where)) or 0
         )
     if dry_run:
-        return total
+        return total, 0
     done = 0
+    skipped = 0
     last: uuid.UUID | None = None
     while True:
         async with sessionmaker() as session:
@@ -186,7 +198,7 @@ async def _reembed_table(
                 query = query.where(table.id > last)
             rows = list((await session.execute(query.limit(batch_size))).all())
         if not rows:
-            return done
+            return done - skipped, skipped
         last = rows[-1].id
         pending = rows
         for _attempt in range(_ATTEMPTS):
@@ -196,6 +208,7 @@ async def _reembed_table(
             if not pending:
                 break
         if pending:
+            skipped += len(pending)
             say(f"{group.label}: {len(pending)} rows skipped, they changed during each try")
         done += len(rows)
         say(f"{group.label}: {done}/{total}")
@@ -211,8 +224,12 @@ def _current_metadata(current: dict[str, Any] | None) -> dict[str, Any]:
     return current
 
 
-async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> bool:
-    """Rebuild the passages of one entry; return ``False`` when it was skipped."""
+async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> str:
+    """Rebuild the passages of one entry.
+
+    Return ``"done"``, ``"deleted"`` when the entry is gone, or ``"changed"``
+    when another write changed it during each try.
+    """
     for _attempt in range(_ATTEMPTS):
         async with get_sessionmaker()() as session:
             row = (
@@ -225,7 +242,7 @@ async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> bool:
                 )
             ).one_or_none()
         if row is None:  # deleted since the list was read
-            return False
+            return "deleted"
         try:
             await write_entry(
                 tenant_id=tenant_id,
@@ -236,14 +253,15 @@ async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> bool:
                 keep_timestamps=True,
             )
         except _EntryGoneError:
-            return False
+            return "deleted"
         except KbStaleRevisionError:
             continue  # another write got in between; read the entry again
-        return True
-    return False
+        return "done"
+    return "changed"
 
 
-async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
+async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> tuple[int, int]:
+    """Return how many entries were embedded or are gone, and how many were skipped."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         entries = (
@@ -252,13 +270,18 @@ async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
             )
         ).all()
     if dry_run:
-        return len(entries)
+        return len(entries), 0
+    skipped = 0
     for index, (tenant_id, slug) in enumerate(entries, start=1):
-        if not await _reembed_kb_entry(tenant_id, slug):
-            say(f"knowledge entry {slug}: skipped, it was deleted or changed during the run")
+        outcome = await _reembed_kb_entry(tenant_id, slug)
+        if outcome == "deleted":
+            say(f"knowledge entry {slug}: skipped, it was deleted during the run")
+        elif outcome == "changed":
+            skipped += 1
+            say(f"knowledge entry {slug}: skipped, it changed during each try")
         if index % 10 == 0 or index == len(entries):
             say(f"knowledge entries: {index}/{len(entries)}")
-    return len(entries)
+    return len(entries) - skipped, skipped
 
 
 async def reembed_all(
@@ -268,16 +291,30 @@ async def reembed_all(
     service: EmbeddingService | None = None,
     say: Callable[[str], None] = print,
 ) -> ReembedCounts:
-    """Embed every stored vector again, then store the set model. See the module text."""
+    """Embed every stored vector again, then store the set model. See the module text.
+
+    Raise :class:`ReembedIncompleteError`, and keep the old model in the
+    record, when a row or entry changed during each of its tries.
+    """
     if batch_size < 1:
         raise ValueError("batch size must be at least 1")
     model = get_settings().retrieval_embedding_model
     service = service if service is not None else get_embedding_service()
     say(f"model: {model}" + (" (dry run, nothing is written)" if dry_run else ""))
     counts = ReembedCounts()
-    counts.documents = await _reembed_table(_DOCUMENTS, service, batch_size, dry_run, say)
-    counts.kb_entries = await _reembed_kb_entries(dry_run, say)
-    counts.endpoints = await _reembed_table(_ENDPOINTS, service, batch_size, dry_run, say)
+    counts.documents, skipped_documents = await _reembed_table(
+        _DOCUMENTS, service, batch_size, dry_run, say
+    )
+    counts.kb_entries, skipped_entries = await _reembed_kb_entries(dry_run, say)
+    counts.endpoints, skipped_endpoints = await _reembed_table(
+        _ENDPOINTS, service, batch_size, dry_run, say
+    )
+    counts.skipped = skipped_documents + skipped_entries + skipped_endpoints
+    if counts.skipped:
+        raise ReembedIncompleteError(
+            f"{counts.skipped} rows or knowledge entries changed during each try and keep "
+            "their old vector; the record stays on the old model. Run the command again."
+        )
     if not dry_run:
         async with get_sessionmaker()() as session:
             await write_embedding_state(session, model)

@@ -351,9 +351,14 @@ MEHO says nothing about it except the warning at start.
    they replace. Passages that are not rebuilt keep their own times.
    Searches that filter by date give the same rows as before.
 
-   At the end it stores the new model in `embedding_state`.
-4. The command is safe to run twice. If it stops half way, run it again;
-   the record stays on the old model until it ends.
+   A row or entry is tried three times. When it changed during each try,
+   it keeps its old vector. The command still works through every step,
+   then exits with 1 and keeps the old model in `embedding_state`.
+
+   When every row is done, it stores the new model in `embedding_state`.
+4. The command is safe to run twice. If it stops half way or exits with
+   1, run it again; the record stays on the old model until a run ends
+   with every row done.
 
 Searches mix old and new vectors while the command runs, so plan a
 maintenance window. With the shipped default model the command writes the

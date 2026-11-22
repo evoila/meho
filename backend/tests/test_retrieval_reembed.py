@@ -15,6 +15,8 @@ Checks that:
 * an entry edited or deleted during the run is not written back with old
   content, and a row edited while it is encoded keeps its edit and its time
   and gets a vector of the new text;
+* a row or entry that changes during each try makes the run fail and keeps
+  the old model in the record;
 * passages that are not rebuilt keep their own times;
 * a second run, and a dry run, change nothing;
 * a start with another model than the record logs one warning, adds the
@@ -29,7 +31,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -47,7 +49,12 @@ from meho_backplane.retrieval.embedding_state import (
     write_embedding_state,
 )
 from meho_backplane.retrieval.indexer import index_document
-from meho_backplane.retrieval.reembed import ReembedCounts, reembed_all
+from meho_backplane.retrieval.reembed import (
+    ReembedCounts,
+    ReembedIncompleteError,
+    main,
+    reembed_all,
+)
 from meho_backplane.settings import get_settings
 from tests._kb_embedding_stub import fake_embedding_service
 
@@ -383,6 +390,119 @@ async def test_a_row_edited_while_it_is_encoded_keeps_the_edit_and_gets_its_vect
             assert row.description == EDIT
     assert [round(x, 4) for x in row.embedding] == EDITED_VECTOR
     assert row.updated_at.replace(tzinfo=UTC) == EDIT_TIME
+
+
+async def _edit_memory_row_again() -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(Document)
+            .where(Document.source == "memory")
+            .values(body=Document.body + " and again")
+        )
+        await session.commit()
+
+
+async def _edit_operation_row_again() -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(EndpointDescriptor)
+            .where(EndpointDescriptor.op_id == "with-vector")
+            .values(description=EndpointDescriptor.description + " and again")
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_text", "edit"),
+    [
+        ("a made-up note", _edit_memory_row_again),
+        ("Summary of with-vector.", _edit_operation_row_again),
+    ],
+    ids=["documents", "operations"],
+)
+async def test_a_row_edited_during_each_try_fails_the_run_and_keeps_the_old_model(
+    monkeypatch: pytest.MonkeyPatch, first_text: str, edit: Any
+) -> None:
+    await _seed()
+    _use_model(monkeypatch, NEW_MODEL)
+
+    async def encode(texts: list[str]) -> list[list[float]]:
+        if any(first_text in text for text in texts):
+            await edit()
+        return [list(NEW_VECTOR) for _ in texts]
+
+    new = fake_embedding_service(NEW_VECTOR, window=12)
+    new.encode.side_effect = encode
+    lines: list[str] = []
+    with (
+        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=new),
+        pytest.raises(ReembedIncompleteError, match="1 rows or knowledge entries"),
+    ):
+        await reembed_all(service=new, say=lines.append, batch_size=10)
+
+    assert any("1 rows skipped" in line for line in lines)
+    async with get_sessionmaker()() as session:
+        assert await read_embedding_state(session) == (OLD_MODEL, 384)
+        if edit is _edit_memory_row_again:
+            vector = await session.scalar(
+                select(Document.embedding).where(Document.source == "memory")
+            )
+        else:
+            vector = await session.scalar(
+                select(EndpointDescriptor.embedding).where(
+                    EndpointDescriptor.op_id == "with-vector"
+                )
+            )
+    assert vector is not None
+    assert [round(x, 4) for x in vector] == OLD_VECTOR
+
+
+@pytest.mark.asyncio
+async def test_an_entry_edited_during_each_try_fails_the_run_and_keeps_the_old_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed()
+    _use_model(monkeypatch, NEW_MODEL)
+    edits: list[int] = []
+
+    async def write_after_an_edit(**kwargs: Any) -> Any:
+        edits.append(len(edits))
+        await revisions.write_entry(
+            tenant_id=TENANT,
+            slug="guide",
+            body=BODY + f"\n\nEdit {len(edits)}.",
+            metadata_for=lambda m: dict(m or {}),
+        )
+        return await revisions.write_entry(**kwargs)
+
+    lines: list[str] = []
+    new = fake_embedding_service(NEW_VECTOR, window=12)
+    with (
+        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=new),
+        patch("meho_backplane.retrieval.reembed.write_entry", write_after_an_edit),
+        pytest.raises(ReembedIncompleteError),
+    ):
+        await reembed_all(service=new, say=lines.append)
+
+    assert len(edits) == 3
+    assert any("guide: skipped, it changed during each try" in line for line in lines)
+    async with get_sessionmaker()() as session:
+        assert await read_embedding_state(session) == (OLD_MODEL, 384)
+
+
+def test_the_command_exits_with_one_when_the_run_is_not_complete(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    async def incomplete(**_kwargs: Any) -> ReembedCounts:
+        raise ReembedIncompleteError("2 rows or knowledge entries changed during each try")
+
+    with (
+        patch("meho_backplane.retrieval.reembed.reembed_all", incomplete),
+        patch("meho_backplane.retrieval.reembed.get_engine", return_value=AsyncMock()),
+    ):
+        assert main([]) == 1
+    assert "ReembedIncompleteError" in capfd.readouterr().err
 
 
 @pytest.mark.asyncio

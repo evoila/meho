@@ -82,6 +82,7 @@ from meho_backplane.docs_search import (
     CollectionNotReadyError,
     DocsChunk,
     DocsReadError,
+    DocsScope,
     UnknownCollectionError,
     build_docs_scope,
     collection_capability_key,
@@ -174,10 +175,9 @@ def wiki_exact_filters(
     every filter skips the wiki as before. With it on, the answer is a value
     only when the search has no time window, is not in the shared scope, has
     no ``kind``, and its filters are only ``product`` and/or ``version``,
-    each a non-blank string with no space at its start or end. Anything else
-    gives ``None``. A padded value is refused because the knowledge store
-    matches the exact string while the docs scope strips it; the two halves
-    must never filter by different strings.
+    each a string that is not blank. Anything else gives ``None``. A value is
+    kept as the caller gave it, spaces included, so the index gets the same
+    string the knowledge store filters by.
     """
     if not get_settings().kb_wiki_filtered_search:
         return None
@@ -185,9 +185,7 @@ def wiki_exact_filters(
         return None
     if not set(filters) <= {"product", "version"}:
         return None
-    if not all(isinstance(value, str) and value.strip() == value for value in filters.values()):
-        return None
-    if not all(filters.values()):
+    if not all(isinstance(value, str) and value.strip() for value in filters.values()):
         return None
     product, version = filters.get("product"), filters.get("version")
     return WikiExactFilters(
@@ -237,9 +235,13 @@ async def search_wiki(
     try:
         async with get_sessionmaker()() as session:
             collection = await resolve_entitled_ready_collection(session, operator, key)
-        scope = (
-            build_docs_scope(key, exact.product, exact.version) if exact else build_docs_scope(key)
-        )
+        scope = build_docs_scope(key)
+        if exact:
+            # Not built by build_docs_scope: it strips, and the index must get
+            # the same string the store filters by.
+            scope = DocsScope(
+                collection_key=scope.collection_key, product=exact.product, version=exact.version
+            )
         if exact and forwarded_scope(scope, resolve_backend(collection).ref).mode != "filters":
             structlog.contextvars.unbind_contextvars("audit_collection")
             return _not_searched(key, "filtered", _INDEX_CANNOT_FILTER)

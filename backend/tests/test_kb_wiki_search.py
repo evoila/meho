@@ -1250,38 +1250,46 @@ async def test_switch_on_a_copy_is_found_by_a_read_with_the_search_filters(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("padded", ["9.0 ", " 9.0", "\t9.0\n"])
-async def test_switch_on_a_padded_value_is_not_searched_over_mcp(
+async def test_switch_on_a_padded_value_reaches_the_index_unchanged_over_mcp(
     monkeypatch: pytest.MonkeyPatch, padded: str
 ) -> None:
-    """The store matches the exact string, the index scope strips it: so a padded value skips."""
-    import structlog
-
+    """A padded value is a plain string: the index gets it as is, in the search and the read."""
     _switch(monkeypatch, on=True)
     await _seed_wiki_with(_EXACT_ON)
-    structlog.contextvars.clear_contextvars()
-    response, corpus = await _search(_operator(), product="vcenter", version=padded)
-    corpus.assert_not_called()
-    assert (response["wiki"]["searched"], response["wiki"]["reason"]) == (False, "filtered")
-    assert "cannot apply filters" in response["wiki"]["message"]
-    assert _audit_fields() == _SKIPPED_AUDIT
+    slug = await _seed_import(body=_WIKI_CHUNK.content)
+    read = _page(_WIKI_CHUNK.content)
+    response, corpus = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        read=read,
+        product="vcenter",
+        version=padded,
+    )
+    expected = {"product": "vcenter", "version": padded}
+    assert corpus.await_args.kwargs["metadata_filters"] == expected
+    assert read.await_args.kwargs["filters"] == expected
+    assert response["wiki"]["searched"] is True
 
 
 @pytest.mark.asyncio
-async def test_switch_on_a_padded_value_is_not_searched_over_rest(
+async def test_switch_on_a_padded_value_reaches_the_index_unchanged_over_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch(monkeypatch, on=True)
     await _seed_wiki_with(_EXACT_ON)
     corpus = _corpus(_WIKI_CHUNK)
+    read = _page(_WIKI_CHUNK.content)
+    slug = await _seed_import(body=_WIKI_CHUNK.content)
+    hit = _store_hit(slug=slug, metadata=_imported(_PAGE_PATH))
     with (
-        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[])),
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[hit])),
         patch(_CORPUS_SEAM, new=corpus),
+        patch(_READ_SEAM, new=read),
     ):
         response = _retrieve_client(_operator()).post(
             "/api/v1/retrieve",
             json={"query": "snapshot", "source": "kb", "metadata_filters": {"version": "9.0 "}},
         )
-    corpus.assert_not_called()
-    wiki = response.json()["wiki"]
-    assert (wiki["searched"], wiki["reason"]) == (False, "filtered")
-    assert "cannot apply filters" in wiki["message"]
+    assert corpus.await_args.kwargs["metadata_filters"] == {"version": "9.0 "}
+    assert read.await_args.kwargs["filters"] == {"version": "9.0 "}
+    assert response.json()["wiki"]["searched"] is True

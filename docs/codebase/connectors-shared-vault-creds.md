@@ -442,8 +442,10 @@ stops carrying `raw_jwt=""` and `VaultCredentialBackend.load_secret_data`'s
 precondition no longer fires. Whether the read then succeeds is Vault-side
 configuration — and with the role this project documents
 (`docs/cross-repo/vault-provisioning.md`: `role_type=jwt user_claim=sub
-bound_audiences=<keycloak-audience>`, no `bound_subject`, no `bound_claims`,
-policy `read` on all of `secret/data/meho/*`) it succeeds. `check_runner_jwt()`
+bound_audiences=<keycloak-audience>`, bound to MEHO's addresses, no
+`bound_subject`, no `bound_claims`, with the per-tenant policy that reads the
+folder of the tenant the login's Vault entity belongs to) it succeeds for the
+secrets that policy grants the runner's login. `check_runner_jwt()`
 requests `audience=settings.keycloak_audience`, and the realm recipe in
 `docs/deploying.md` has the operator add the matching audience mapper, so
 Vault accepts the runner principal against the **existing** `meho-mcp` role

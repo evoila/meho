@@ -118,14 +118,19 @@ if you didn't use the default.)
 `token_bound_cidrs` lists the addresses MEHO's pods use to reach your
 Vault. Bind the role to them: only MEHO needs to reach the Vault login
 path, and the token Vault issues works only from those addresses.
+Bind an address range (CIDR) that covers every address MEHO can use: the
+pod network range when Vault sees pod addresses. Do not bind a single pod
+address. A pod gets a new address at each restart and rollout, and then
+every Vault login of MEHO fails.
 `token_ttl=5m` is enough, because MEHO revokes its Vault token after each
 use.
 
 The binding uses the address Vault sees on the connection. When MEHO
 reaches Vault through a proxy, a load balancer or node address
-translation, Vault may see another address. Then bind the address Vault
-sees: check it in the Vault audit log (`remote_address`) after a first
-login.
+translation, Vault may see another address. Then bind the addresses
+Vault sees: every node address, or the outbound address of the
+translation. Check the address in the Vault audit log (`remote_address`)
+after a first login.
 
 ### 3. Policy `meho-mcp`
 
@@ -141,8 +146,16 @@ The per-tenant policy grants only the tenant folders. A target whose
 `secret_ref` points somewhere else (for example under `secret/meho/`)
 needs its secret moved first: copy the secret into
 `secret/tenants/<tenant_id>/`, update the target's `secret_ref`, and check
-that the target still answers. Then replace the old policy. The steps are
-in [`vault-per-tenant-migration.md`](./vault-per-tenant-migration.md).
+that MEHO reads the moved secret. Use a check that reads the secret: run a
+read-only operation on the target, or run steps 2 and 3 of
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md) §5
+with your own login. `meho targets probe` alone does not prove it, because
+some connectors probe without a login. Set up the login of every person
+and every agent that uses MEHO (the entity metadata and the group below)
+before you remove the old grants. Otherwise each read of that person or
+agent fails, while the health check still passes. Then replace the old
+policy. The steps are in
+[`vault-per-tenant-migration.md`](./vault-per-tenant-migration.md).
 
 Set the tenant metadata and the group on the entity that the JWT login
 really uses. Vault finds that entity by its alias: the alias name is the
@@ -827,9 +840,10 @@ and in which order.
 
 ## Verification
 
-Run from any host with the operator's Vault token (`vault login`
-against the operator's Keycloak identity, OR a service-account
-JWT bound to the same role).
+Run the login from an address in `token_bound_cidrs` (for example,
+from a MEHO pod), with the operator's Keycloak identity or a
+service-account JWT bound to the same role. The role refuses a login
+from any other address.
 
 ```bash
 # 1. JWT auth method exists with correct discovery URL
@@ -839,9 +853,10 @@ vault read -format=json auth/jwt/config \
 
 # 2. Role exists with correct audience binding
 vault read -format=json auth/jwt/role/meho-mcp \
-  | jq '{bound_audiences, user_claim, role_type, policies}'
+  | jq '{bound_audiences, user_claim, role_type, policies, token_bound_cidrs, token_ttl}'
+# Expect: token_bound_cidrs covers MEHO's addresses, token_ttl is 300.
 
-# 3. Policy grants meho/* read
+# 3. Policy grants read on the health test secret (surface 5)
 vault policy read meho-mcp
 
 # 4. KV mount is v2 at the expected prefix
@@ -875,7 +890,7 @@ everything it needs from Vault.
 | Failure | Diagnostic on the producer side | Consumer-side fix |
 | --- | --- | --- |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultUnreachableError"` | TCP / TLS / timeout to `VAULT_ADDR`. The readiness probe `/ready` also reports `vault` as unhealthy. | Verify `VAULT_ADDR` resolves and is reachable from the backplane Pod's network policy (egress to Vault is in the chart's NetworkPolicy by default — check `networkPolicy.vaultCIDR`) |
-| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`) |
+| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`). The address binding is another cause: compare `remote_address` in the Vault audit log with `token_bound_cidrs` of the role, and bind a range that covers that address |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: …"`; Vault server log shows `error configuring token validator: unsupported config type` | The `meho-mcp` `role_type=jwt` role was created on an `auth/oidc/` mount that's in OIDC-login mode. Vault (≥1.21.2) refuses `role_type=jwt` on an OIDC-configured mount. | Move the JWT method + role to a **dedicated mount** per surface 1 (`vault auth enable -path=jwt jwt`) and set `VAULT_OIDC_MOUNT_PATH` to match. Do not co-locate with an interactive-OIDC-login mount. (evoila/meho#553) |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on the health test secret. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/test/federation` and `secret/metadata/meho/test/federation` |

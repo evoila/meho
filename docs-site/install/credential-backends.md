@@ -175,10 +175,12 @@ other service principals
 
     The conventionally-provisioned `meho-mcp` Vault role accepts a
     principal that carries the backplane audience, from MEHO's
-    addresses. The check-runner carries that audience too. To limit what
-    scheduled evaluations read, give the runner its own, narrower Vault
-    role (`VAULT_CHECK_RUNNER_ROLE`), or bind the existing role to
-    operator-only claims. Both recipes, with verification commands, are in
+    addresses. The check-runner carries that audience too. On Vault the
+    check-runner does not start unless `VAULT_CHECK_RUNNER_ROLE` names a
+    narrower Vault role of its own, other than `VAULT_OIDC_ROLE`. Without
+    one it logs `sensor_runner_refused` and evaluates no Sensor. Binding
+    the existing role to operator-only claims is an extra step; the runner
+    still needs its own role. The recipe, with verification commands, is in
     [`docs/cross-repo/vault-provisioning.md` § Bounding the check-runner principal](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
     The chart prints a note about this at install time when
     `checkRunner.enabled: true` meets the Vault backend.

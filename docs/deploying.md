@@ -299,22 +299,24 @@ and **no** `bound_claims`. Its policy is the per-tenant policy of surface 3
 in the same guide: each login reads the secrets of the tenant its Vault entity belongs to.
 The runner mints its token with `audience=KEYCLOAK_AUDIENCE` from the same
 MEHO pods, and the realm recipe just above tells you to add the matching
-audience mapper. Those facts compose: Vault accepts the runner principal
-against the **existing** role with no further provisioning, and background
-dispatch reads what the role and its per-tenant policy grant the runner's
-login.
+audience mapper. So Vault would accept the runner principal against the
+existing role. MEHO does not use the existing role for the runner: on a
+Vault install the check runner does not start unless
+`VAULT_CHECK_RUNNER_ROLE` names a role of its own, other than
+`VAULT_OIDC_ROLE`. Without one it logs `sensor_runner_refused` and
+evaluates no Sensor.
 
 Concretely, enabling `checkRunner.*` on a Vault install removes the
 "system-initiated calls cannot perform an operator-context Vault read"
 carve-out that the rest of this credential layer is built on — every
 scheduled evaluation can then read the target credentials that the
-per-tenant policy grants the runner's login. That may be exactly what you
-want (it is what makes credentialed Sensors work on Vault), but it is a
-deliberate choice about what MEHO may read, not a no-op.
+runner's own role grants. That may be exactly what you want (it is what
+makes credentialed Sensors work on Vault), but it is a deliberate choice
+about what MEHO may read, not a no-op.
 
-Bound the role first if it isn't:
+Give the runner its own role:
 
-- **Preferred** — give the runner client a **distinct** audience *instead
+- **Required** — give the runner client a **distinct** audience *instead
   of* the backplane audience mapper (Keycloak audience mappers add to `aud`
   rather than replace it, so a client carrying both still passes
   `meho-mcp`'s `bound_audiences`), provision it a **separate**, narrower
@@ -324,7 +326,8 @@ Bound the role first if it isn't:
   `VAULT_OIDC_ROLE`. The inbound event intake reads event source secrets
   with the same token and role, so the role's policy must also cover
   `secret/data/tenants/+/event-sources/*` (the recipe lists the paths).
-- **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
+- **Extra step** (the runner still needs its own role, as above) — add an
+  **exact-match** `bound_claims` to `meho-mcp` keyed
   on a claim value only operator tokens carry, e.g. a dedicated
   `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a
   restriction: it matches any present value, and the runner's
@@ -337,7 +340,7 @@ which one is in force, are in
 The chart prints the same warning in its `helm install` notes whenever
 `checkRunner.enabled: true` meets `config.credentialBackend: vault`.
 
-On a Vault install the backplane requires the preferred recipe: with a
+On a Vault install the backplane requires this recipe: with a
 runner principal and `VAULT_ADDR` set, the check runner does not start
 unless `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not
 `VAULT_OIDC_ROLE`). Set it through `extraEnv`, or turn

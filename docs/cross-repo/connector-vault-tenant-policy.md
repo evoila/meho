@@ -313,7 +313,9 @@ makes the path template render; the second grants the capability set.
 Acquire the **operator's** Vault token by logging in with their Keycloak
 JWT against the `meho-mcp` role (not a root token, which would mask a
 missing grant — same procedure as
-[`connector-vault-policy.md`](./connector-vault-policy.md) §4). Then:
+[`connector-vault-policy.md`](./connector-vault-policy.md) §4). Log in
+from one of MEHO's addresses (for example, from a MEHO pod): the role's
+`token_bound_cidrs` refuses a login from any other address. Then:
 
 ```bash
 # 1. This login uses the entity that carries the tenant_id metadata.

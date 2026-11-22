@@ -4,8 +4,8 @@
 """How many rows the meaning half of the search returns on PostgreSQL (#6785).
 
 The index ``documents_embedding_idx`` is IVFFlat with ``lists = 100``. Migration
-``0003`` builds it on an empty table, as every new install does, so it has no
-group centres. The tests load 300 rows with made-up text for one tenant, run
+``0003`` builds it on an empty table, as every new install does, so it has
+random group centres. The tests load 300 rows with made-up text for one tenant, run
 ``ANALYZE`` (autovacuum does this on a live install), and count the rows that
 ``_cosine_candidates`` returns for a query asking for 50.
 

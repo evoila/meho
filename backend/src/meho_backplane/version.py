@@ -27,8 +27,8 @@ agent sees, keyed by its env name, with its value (for example
 :class:`~meho_backplane.settings.Settings` carries the
 :data:`~meho_backplane.settings.AGENT_FACING` mark. A benchmark run reads
 this list to record which switches were on. The list holds only names and
-``true`` / ``false``. It does not show settings per tenant or per agent
-definition.
+``true`` / ``false`` or a whole number. It does not show settings per
+tenant or per agent definition.
 
 Reading the values from environment variables (rather than baking them
 into a generated ``_version.py``) keeps the runtime image generic and

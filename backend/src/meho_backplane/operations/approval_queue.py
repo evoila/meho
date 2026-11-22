@@ -1078,8 +1078,7 @@ class ApprovalExpiredReason(StrEnum):
     Read off the row, never stored, like :class:`ApprovalResultState`.
 
     * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
-      without a decision, or it was approved and nobody started it before
-      ``expires_at`` (``APPROVAL_DEFAULT_TTL`` after the decision).
+      without a decision.
     * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
       while the request waited (:func:`expire_older_release_requests`).
       Only this path expires a request before its deadline, so an

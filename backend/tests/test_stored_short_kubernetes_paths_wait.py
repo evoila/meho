@@ -64,6 +64,10 @@ _WAITING = [
     "DELETE:/apps/v1/namespaces/{namespace}/deployments/{name}",
     "PATCH:/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}",
     "GET:/x/namespaces/{namespace}/secrets",
+    "GET:/namespaces/{namespace}/pods/{name}/proxy/api/v1/health",
+    "GET:/namespaces/{namespace}/pods/{name}/proxy/apis/apps/v1/status",
+    "GET:/x/namespaces/{namespace}/pods/{name}/proxy/api/v1/health",
+    "GET:/x/namespaces/{namespace}/pods/{name}/proxy/apis/apps/v1/status",
 ]
 
 

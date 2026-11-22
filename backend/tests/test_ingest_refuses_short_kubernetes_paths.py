@@ -87,6 +87,10 @@ _SHAPE_A = [
     "/namespaces/{namespace}/serviceaccounts/{name}/token",
     "/clusters/c-1/namespaces/prod/secrets/db",
     "/namespaces/prod/pods/web-1/exec",
+    "/namespaces/{namespace}/pods/{name}/proxy/api/v1/health",
+    "/namespaces/{namespace}/pods/{name}/proxy/apis/apps/v1/status",
+    "/x/namespaces/{namespace}/pods/{name}/proxy/api/v1/health",
+    "/x/namespaces/{namespace}/pods/{name}/proxy/apis/apps/v1/status",
 ]
 
 _CORE_PLURALS = [
@@ -132,6 +136,8 @@ _NOT_REFUSED = [
     "/persistentvolumes",
     "/things/{id}",
     "/api/v1",
+    "/api/v1/namespaces/{namespace}/pods/{name}/proxy/api/v1/health",
+    "/k8s/clusters/{cluster}/api/v1/namespaces/{namespace}/pods/{name}/proxy/apis/a/v1/x",
 ]
 
 
@@ -147,6 +153,14 @@ _NOT_REFUSED = [
         (
             "/x/namespaces/{n}/pods/{p}/exec/more",
             "/api/v1/namespaces/{n}/pods/{p}/exec/more",
+        ),
+        (
+            "/namespaces/{n}/pods/{p}/proxy/api/v1/health",
+            "/api/v1/namespaces/{n}/pods/{p}/proxy/api/v1/health",
+        ),
+        (
+            "/x/namespaces/{n}/pods/{p}/proxy/apis/apps/v1/status",
+            "/api/v1/namespaces/{n}/pods/{p}/proxy/apis/apps/v1/status",
         ),
     ],
 )

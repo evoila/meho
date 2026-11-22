@@ -46,7 +46,7 @@ __all__ = ["full_kubernetes_path", "refuse_short_kubernetes_paths"]
 
 _SEG = r"[^/]+"
 
-#: A path that already has the full start, read from any ``/``.
+#: The full start, read from any ``/`` in front of the Kubernetes part.
 _FULL_START: Final[re.Pattern[str]] = re.compile(rf"/api/v1(?:/.*)?|/apis/{_SEG}/{_SEG}/.*")
 
 #: Shape A: matched from any ``/`` of the path.
@@ -84,9 +84,11 @@ def _tails(path: str) -> list[str]:
 def full_kubernetes_path(path: str) -> str | None:
     """Return the full Kubernetes path that the short *path* stands for.
 
-    Returns ``None`` when *path* already has the full start, or when it
-    looks like no Kubernetes path. A trailing ``/`` counts the same as
-    none. Examples: ``/x/namespaces/{n}/secrets`` gives
+    Returns ``None`` when the full start comes before the Kubernetes part
+    of *path*, or when *path* looks like no Kubernetes path. A full start
+    after that part, for example in the rest of a pod ``proxy`` path, does
+    not count. A trailing ``/`` counts the same as none. Examples:
+    ``/x/namespaces/{n}/secrets`` gives
     ``/api/v1/namespaces/{n}/secrets``, ``/v1/namespaces/{n}/pods`` gives
     ``/api/v1/namespaces/{n}/pods`` and
     ``/apps/v1/namespaces/{n}/deployments`` gives
@@ -95,15 +97,14 @@ def full_kubernetes_path(path: str) -> str | None:
     path = path.rstrip("/")
     if not path.startswith("/"):
         return None
-    tails = _tails(path)
-    if any(_FULL_START.fullmatch(tail) for tail in tails):
-        return None
     start = path.removeprefix("/v1") if path.startswith("/v1/") else path
     if _SHAPE_B_CORE.fullmatch(start):
         return "/api/v1" + start
     if _SHAPE_B_GROUP.fullmatch(start):
         return "/apis" + start
-    for tail in tails:
+    for tail in _tails(path):
+        if _FULL_START.fullmatch(tail):
+            return None
         if any(pattern.fullmatch(tail) for pattern in _SHAPE_A):
             return "/api/v1" + tail
     return None

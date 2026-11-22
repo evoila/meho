@@ -2657,8 +2657,9 @@ Today the Kubernetes connector registers one check
 its paths looks like a Kubernetes path without `/api/v1` or
 `/apis/<group>/<version>`. MEHO reads a Kubernetes call by that start
 ([connectors-kubernetes.md](connectors-kubernetes.md)), so it could not
-check these calls. A path that already has the start, read from any
-`/`, is fine. The shapes, where `{x}` is one segment:
+check these calls. A path with the start in front of the Kubernetes
+part is fine. A start after that part, for example in the rest of a
+pod's `proxy` path, does not count. The shapes, where `{x}` is one segment:
 
 * From any `/` of the path: `/namespaces/{x}/secrets` (with or without
   `/{x}` after it, also with `/watch` in front), a pod's `exec`,

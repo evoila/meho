@@ -104,7 +104,12 @@ from meho_backplane.db.models import (
     Target,
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
-from meho_backplane.op_classes import is_credential_capable, needs_per_call_approval
+from meho_backplane.op_classes import (
+    is_credential_capable,
+    needs_per_call_approval,
+    params_make_credential_call,
+    sandbox_delete_grant_allowed,
+)
 from meho_backplane.operations._target_connector_limit import target_picks_other_connector
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
@@ -503,6 +508,41 @@ def never_covered_reason(descriptor: EndpointDescriptor) -> tuple[NeverCoveredKi
     return None
 
 
+def _sandbox_delete_exception(
+    op_id: str,
+    stored_op_class: str | None,
+    descriptor: EndpointDescriptor | None,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    """True when a sandbox delete grant may cover *op_id*, although it always waits.
+
+    All of these must hold: the instance is in sandbox mode; the connector
+    marked the op with
+    :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`; the op
+    has no credential class; the params (when known) do not make the call a
+    credential call; no other rule of :func:`never_covered_reason`
+    holds; and the op has a delete sign (:func:`delete_grant_reason`). Only a
+    delete grant may then cover the call: no standing grant, no agent grant
+    and no run approval does.
+    """
+    from meho_backplane.settings import get_settings
+
+    if not sandbox_mode_active() or not sandbox_delete_grant_allowed(op_id):
+        return False
+    if resolve_op_class(op_id, stored_op_class) in CREDENTIAL_CLASSES:
+        return False
+    if params is not None and params_make_credential_call(op_id, params):
+        return False
+    if (
+        per_call_approval_grant_reason(op_id)
+        or caller_address_grant_reason(descriptor)
+        or always_wait_grant_reason(descriptor)
+    ):
+        return False
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    return delete_grant_reason(op_id, patterns, descriptor) is not None
+
+
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
     """Return why *op_id* is delete-shaped by its id alone, or ``None`` (#3349).
 
@@ -829,7 +869,9 @@ class ServicePrincipalGrantService:
             raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _reject_wildcards(payload)
         credential_reason = credential_refusal(payload.op_id)
-        if credential_reason is not None:
+        if credential_reason is not None and not _sandbox_delete_exception(
+            payload.op_id, None, None
+        ):
             raise GrantValidationError(credential_reason)
         per_call_reason = per_call_approval_grant_reason(payload.op_id)
         if per_call_reason is not None:
@@ -846,8 +888,10 @@ class ServicePrincipalGrantService:
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
+        stored_op_class = getattr(descriptor, "op_class", None)
+        sandbox_delete = _sandbox_delete_exception(payload.op_id, stored_op_class, descriptor)
         address_reason = (
-            credential_refusal(payload.op_id, getattr(descriptor, "op_class", None))
+            (None if sandbox_delete else credential_refusal(payload.op_id, stored_op_class))
             or caller_address_grant_reason(descriptor)
             or always_wait_grant_reason(descriptor)
         )
@@ -857,6 +901,13 @@ class ServicePrincipalGrantService:
             payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
         )
         if delete_reason is None:
+            if sandbox_delete:
+                # Not reached: the exception holds only for an op with a
+                # delete sign. Refuse rather than make an ordinary grant.
+                raise GrantValidationError(
+                    f"op {payload.op_id!r} waits for a person on every call; "
+                    "only a delete grant in sandbox mode can cover it"
+                )
             return ServicePrincipalGrant
         if not sandbox_mode_active():
             raise GrantValidationError(delete_reason)
@@ -1526,7 +1577,11 @@ async def consult_and_record_grant(
 
     An op that reads, writes or makes a credential is refused first, before
     any lookup (:func:`credential_grant_reason`): a grant row never clears
-    it, so a person approves each call.
+    it, so a person approves each call. The one exception is in sandbox
+    mode, for an op a connector marked with
+    :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`: only a
+    live delete grant is looked up for it, never an ordinary grant
+    (:func:`_sandbox_delete_exception`).
 
     An op a connector marked with
     :func:`~meho_backplane.op_classes.declare_per_call_approval` is refused
@@ -1542,7 +1597,9 @@ async def consult_and_record_grant(
     **Sandbox mode (#4622).** When the instance runs in sandbox mode and
     the op has any delete sign, a live **delete grant** from
     :class:`~meho_backplane.db.models.SandboxDeleteGrant` is consulted
-    first. For a ``destructive`` op the caller's ``preview_hash`` and
+    first. A delete grant covers a call that always waits only for an op
+    marked with :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`.
+    For a ``destructive`` op the caller's ``preview_hash`` and
     ``params`` are needed: the preview hash is re-computed and compared and
     the blast radius is built and checked (the same checks the park path
     runs) **before** the grant-use row is written, so a refused call leaves
@@ -1575,6 +1632,35 @@ async def consult_and_record_grant(
         return None
 
     never = never_covered_reason(descriptor)
+    if (
+        never is not None
+        and never[0] == "credential"
+        and _sandbox_delete_exception(
+            descriptor.op_id, getattr(descriptor, "op_class", None), descriptor, params
+        )
+    ):
+        # Only a delete grant may cover this call; the ordinary grant
+        # table is never read for it.
+        grant_id = await _consult_delete_grant(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            preview_hash=preview_hash,
+            params=params,
+            record=record,
+        )
+        if grant_id is None:
+            _log.info(
+                "service_grant_refused_credential",
+                op_id=descriptor.op_id,
+                connector_id=connector_id,
+                safety_level=descriptor.safety_level,
+                principal_sub=operator.sub,
+                tenant_id=str(operator.tenant_id),
+                reason=never[1],
+            )
+        return grant_id
     if never is not None and never[0] != "delete_shaped":
         kind, reason = never
         _log.info(

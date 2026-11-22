@@ -69,6 +69,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.db.models import AuditLog, Document
+from meho_backplane.retrieval import retriever as _retriever_module
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
 from meho_backplane.settings import get_settings
@@ -676,8 +677,11 @@ _KBPS_SHORT = "backup job"
 _KBPS_STOP_ONLY = "the of and it is to"
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _kbps_clear_settings_cache() -> Iterator[None]:
+    # Only the tests of this section ask for it (through kbps_corpus), so no
+    # other test of the module sees a cleared settings cache.
+    get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
@@ -696,33 +700,167 @@ def _kbps_probe_every_list(dbapi_connection: Any, *_: Any) -> None:
     cursor.close()
 
 
+def _kbps_reset_probes(dbapi_connection: Any, *_: Any) -> None:
+    # A connection goes back to the pool with the setting of the server again,
+    # so a test of another module never gets the exact meaning search.
+    cursor = dbapi_connection.cursor()
+    cursor.execute("RESET ivfflat.probes")
+    cursor.close()
+
+
 @pytest.fixture
-async def kbps_corpus(pg_engine: None) -> AsyncIterator[None]:
+async def kbps_corpus(pg_engine: None, _kbps_clear_settings_cache: None) -> AsyncIterator[None]:
     engine = get_engine().sync_engine
     event.listen(engine, "checkout", _kbps_probe_every_list)
+    event.listen(engine, "checkin", _kbps_reset_probes)
     fake = _make_stub_embedding_service()
-    with (
-        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
-        patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
-    ):
-        for source, source_id, body in _KBPS_CORPUS:
+    try:
+        with (
+            patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
+            patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
+        ):
+            for source, source_id, body in _KBPS_CORPUS:
+                await index_document(
+                    tenant_id=_KBPS_TENANT_A,
+                    source=source,
+                    source_id=source_id,
+                    kind="kb-entry" if source == "kb" else "memory-tenant",
+                    body=body,
+                )
+            # Tenant B holds a text with many question words. Tenant A must never see it.
             await index_document(
-                tenant_id=_KBPS_TENANT_A,
-                source=source,
-                source_id=source_id,
-                kind="kb-entry" if source == "kb" else "memory-tenant",
-                body=body,
+                tenant_id=_KBPS_TENANT_B,
+                source="kb",
+                source_id="other-tenant",
+                kind="kb-entry",
+                body="Restore the demo share after the nightly backup job failed on the gateway.",
             )
-        # Tenant B holds a text with many question words. Tenant A must never see it.
-        await index_document(
-            tenant_id=_KBPS_TENANT_B,
-            source="kb",
-            source_id="other-tenant",
-            kind="kb-entry",
-            body="Restore the demo share after the nightly backup job failed on the gateway.",
+            yield
+    finally:
+        # Runs also when the set-up above fails.
+        event.remove(engine, "checkout", _kbps_probe_every_list)
+        event.remove(engine, "checkin", _kbps_reset_probes)
+
+
+# The word-search statement of main, before this Task (every word, no any_word
+# bind). The tests below run it as the reference for the switch off.
+_KBPS_MAIN_BM25_SQL = text(
+    r"""
+    SELECT id, ts_rank_cd(
+        to_tsvector('english', body),
+        plainto_tsquery('english', :query)
+    ) AS score
+    FROM documents
+    WHERE tenant_id = :tenant_id
+      AND (
+        CAST(:source AS text) IS NULL
+        OR source = :source
+        OR (CAST(:source AS text) = 'kb' AND source = 'kb-passage')
+      )
+      AND (
+        CAST(:kind AS text) IS NULL
+        OR kind = :kind
+        OR (CAST(:kind AS text) = 'kb-entry' AND kind = 'kb-passage')
+      )
+      AND NOT (
+        source = 'kb'
+        AND EXISTS (
+          SELECT 1 FROM documents AS passage
+          WHERE passage.tenant_id = documents.tenant_id
+            AND passage.source = 'kb-passage'
+            AND passage.metadata @> jsonb_build_object(
+              'kb_passage', jsonb_build_object('entry_id', CAST(documents.id AS text))
+            )
         )
-        yield
-    event.remove(engine, "checkout", _kbps_probe_every_list)
+      )
+      AND (CAST(:metadata_filters AS text) IS NULL
+           OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:updated_after AS timestamptz) IS NULL
+        OR updated_at >= CAST(:updated_after AS timestamptz)
+      )
+      AND (
+        CAST(:updated_before AS timestamptz) IS NULL
+        OR updated_at <= CAST(:updated_before AS timestamptz)
+      )
+      AND (
+        (CAST(:confirmed_after AS timestamptz) IS NULL
+         AND CAST(:confirmed_before AS timestamptz) IS NULL)
+        OR CASE
+          WHEN metadata ->> 'confirmed_at' IS NULL THEN NULL
+          WHEN metadata ->> 'confirmed_at'
+               !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+            THEN NULL
+          WHEN NOT pg_input_is_valid(metadata ->> 'confirmed_at', 'timestamptz') THEN NULL
+          WHEN metadata ->> 'confirmed_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+            THEN CAST(metadata ->> 'confirmed_at' AS timestamptz)
+          ELSE CAST(metadata ->> 'confirmed_at' AS timestamp) AT TIME ZONE 'UTC'
+        END BETWEEN COALESCE(CAST(:confirmed_after AS timestamptz), '-infinity')
+                AND COALESCE(CAST(:confirmed_before AS timestamptz), 'infinity')
+      )
+      AND (
+        CAST(:principal_sub AS text) IS NULL
+        OR source <> 'memory'
+        OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+        OR metadata ->> 'user_sub' = :principal_sub
+      )
+      AND (
+        source <> 'memory'
+        OR (
+          (CAST(:memory_kinds AS text[]) IS NULL
+           OR kind = ANY(CAST(:memory_kinds AS text[])))
+          AND CASE
+            WHEN metadata ->> 'expires_at' IS NULL THEN true
+            WHEN metadata ->> 'expires_at'
+                 !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+              THEN false
+            WHEN NOT pg_input_is_valid(metadata ->> 'expires_at', 'timestamptz') THEN false
+            WHEN metadata ->> 'expires_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+              THEN CAST(metadata ->> 'expires_at' AS timestamptz) > now()
+            ELSE CAST(metadata ->> 'expires_at' AS timestamp) > timezone('UTC', now())
+          END
+        )
+      )
+      AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
+    ORDER BY score DESC
+    LIMIT :limit
+    """
+)
+
+
+_KBPS_MAIN_BM25_CALLS: list[str] = []
+
+
+async def _kbps_main_bm25_candidates(
+    session: Any,
+    tenant_id: uuid.UUID,
+    query: str,
+    source: str | None,
+    kind: str | None,
+    metadata_filters_json: str | None,
+    principal_sub: str | None,
+    memory_kinds: list[str] | None = None,
+    *,
+    time_window: Any = None,
+    **_unused: Any,
+) -> Any:
+    """Main's ``_bm25_candidates``: the statement above with the binds main sent."""
+    _KBPS_MAIN_BM25_CALLS.append(query)
+    result = await session.execute(
+        _KBPS_MAIN_BM25_SQL,
+        {
+            "query": query,
+            "tenant_id": str(tenant_id),
+            "source": source,
+            "kind": kind,
+            "metadata_filters": metadata_filters_json,
+            "principal_sub": principal_sub,
+            "memory_kinds": memory_kinds,
+            "limit": _retriever_module.CANDIDATE_LIMIT,
+            **_retriever_module._time_window_binds(time_window),
+        },
+    )
+    return result.all()
 
 
 async def _kbps_search(query: str, source: str | None = "kb") -> list[RetrievalHit]:
@@ -789,29 +927,36 @@ async def test_switch_on_every_word_match_is_unchanged(
     assert any(row[2] is not None for row in on)
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
-        _KBPS_STOP_ONLY,
-        "demo-share",
-        "backup & job | share",
-        "it's \"quoted\" 'text' (a:b)",
-        "",
-        "   ",
-    ],
-)
-async def test_switch_on_odd_questions_give_no_error(
-    query: str, kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+# (query, ids that get a word score with the switch on, same as off?)
+_KBPS_ODD = [
+    # No word survives: no word hit, and the same as off.
+    (_KBPS_STOP_ONLY, set(), True),
+    ("", set(), True),
+    ("   ", set(), True),
+    # The operators are dropped and every word is found: no fallback.
+    ("backup & job | share", {"restore", "mounts"}, True),
+    # No passage holds "quoted" or "text": nothing to find, also with any word.
+    ("it's \"quoted\" 'text' (a:b)", set(), True),
+    # No passage holds the hyphen word: the any-word search finds the two
+    # passages that hold "demo" and "share".
+    ("demo-share", {"restore", "mounts"}, False),
+]
+
+
+@pytest.mark.parametrize(("query", "scored", "same_as_off"), _KBPS_ODD)
+async def test_switch_on_odd_questions_give_the_expected_hits(
+    query: str,
+    scored: set[str],
+    same_as_off: bool,
+    kbps_corpus: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _kbps_switch(monkeypatch, on=False)
     off = _kbps_shape(await _kbps_search(query))
     _kbps_switch(monkeypatch, on=True)
-    on = await _kbps_search(query)
-    if query.strip() in {"", _KBPS_STOP_ONLY}:
-        # No word survives, so there are no word hits.
-        assert all(h.bm25_score is None for h in on)
-    assert len(on) <= 10
-    assert isinstance(off, list)
+    on_hits = await _kbps_search(query)
+    assert {h.source_id for h in on_hits if h.bm25_score is not None} == scored
+    assert (_kbps_shape(on_hits) == off) is same_as_off
 
 
 async def test_switch_on_hyphen_word_finds_its_passage(
@@ -847,3 +992,71 @@ async def test_second_search_keeps_the_tenant_and_the_filters(
     assert "other-tenant" not in {h.source_id for h in own}
     other = await retrieve(_KBPS_TENANT_B, _KBPS_LONG, source="kb", limit=10)
     assert {h.source_id for h in other} == {"other-tenant"}
+
+
+# Switch off: the same answer as main, tested against main's own word-search statement.
+_KBPS_OFF_CASES = [
+    pytest.param(_KBPS_SHORT, "kb", id="kb-short"),
+    pytest.param(_KBPS_LONG, "kb", id="kb-long"),
+    pytest.param(_KBPS_SHORT, "memory", id="memory-short"),
+    pytest.param(_KBPS_LONG, "memory", id="memory-long"),
+    pytest.param(_KBPS_SHORT, None, id="all-short"),
+    pytest.param(_KBPS_LONG, None, id="all-long"),
+]
+
+
+def _kbps_full(hits: list[RetrievalHit]) -> list[dict[str, Any]]:
+    return [h.model_dump(mode="json") for h in hits]
+
+
+@pytest.mark.parametrize(("query", "source"), _KBPS_OFF_CASES)
+async def test_switch_off_hit_list_is_the_same_as_main(
+    query: str, source: str | None, kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    current = await _kbps_search(query, source=source)
+    _KBPS_MAIN_BM25_CALLS.clear()
+    with patch.object(_retriever_module, "_bm25_candidates", _kbps_main_bm25_candidates):
+        reference = await _kbps_search(query, source=source)
+    assert [query] == _KBPS_MAIN_BM25_CALLS  # the reference ran
+    assert current  # the meaning half always finds rows, so the lists are not empty
+    # Ids, order, fused score, word score and rank, cosine score and rank.
+    assert _kbps_full(current) == _kbps_full(reference)
+
+
+@pytest.mark.parametrize(("query", "source"), _KBPS_OFF_CASES[:2])
+async def test_switch_off_rest_search_answer_is_the_same_as_main(
+    query: str,
+    source: str,
+    kbps_corpus: None,
+    integration_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    key = make_rsa_keypair("kid-kbps-rest")
+
+    async def _post() -> list[dict[str, Any]]:
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            token = mint_token(
+                key,
+                sub="op-kbps",
+                tenant_id=TENANT_A_ID,
+                tenant_role=TenantRole.OPERATOR.value,
+            )
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=integration_app), base_url="https://testserver"
+            ) as client:
+                response = await client.post(
+                    "/api/v1/retrieve",
+                    json={"query": query, "source": source, "limit": 10},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        assert response.status_code == 200, response.text
+        return list(response.json()["hits"])
+
+    current = await _post()
+    with patch.object(_retriever_module, "_bm25_candidates", _kbps_main_bm25_candidates):
+        reference = await _post()
+    assert current
+    assert current == reference

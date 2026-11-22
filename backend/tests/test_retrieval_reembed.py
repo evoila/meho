@@ -13,7 +13,9 @@ Checks that:
   keeps its revision and metadata;
 * no row gets a new ``created_at`` or ``updated_at``;
 * an entry edited or deleted during the run is not written back with old
-  content;
+  content, and a row edited while it is encoded keeps its edit and its time
+  and gets a vector of the new text;
+* passages that are not rebuilt keep their own times;
 * a second run, and a dry run, change nothing;
 * a start with another model than the record logs one warning, adds the
   readiness check and starts, and a start with the same model logs none,
@@ -30,7 +32,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from structlog.testing import capture_logs
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -306,6 +308,124 @@ async def test_an_entry_deleted_during_the_run_stays_deleted(
     assert any("guide: skipped" in line for line in lines)
     async with get_sessionmaker()() as session:
         assert await read_embedding_state(session) == (NEW_MODEL, 384)
+
+
+EDITED_VECTOR = [0.9] * 384
+EDIT = "edited by another writer"
+EDIT_TIME = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+async def _edit_memory_row() -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(Document)
+            .where(Document.source == "memory")
+            .values(body=EDIT, updated_at=EDIT_TIME)
+        )
+        await session.commit()
+
+
+async def _edit_operation_row() -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(EndpointDescriptor)
+            .where(EndpointDescriptor.op_id == "with-vector")
+            .values(description=EDIT, updated_at=EDIT_TIME)
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_text", "edit"),
+    [("a made-up note", _edit_memory_row), ("Summary of with-vector.", _edit_operation_row)],
+    ids=["documents", "operations"],
+)
+async def test_a_row_edited_while_it_is_encoded_keeps_the_edit_and_gets_its_vector(
+    monkeypatch: pytest.MonkeyPatch, first_text: str, edit: Any
+) -> None:
+    await _seed()
+    _use_model(monkeypatch, NEW_MODEL)
+    edited_times: list[object] = []
+
+    async def encode(texts: list[str]) -> list[list[float]]:
+        if not edited_times and any(first_text in text for text in texts):
+            await edit()
+            edited_times.append("done")
+        return [list(EDITED_VECTOR if EDIT in text else NEW_VECTOR) for text in texts]
+
+    new = fake_embedding_service(NEW_VECTOR, window=12)
+    new.encode.side_effect = encode
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=new):
+        await reembed_all(service=new, say=lambda _line: None, batch_size=10)
+
+    assert edited_times == ["done"]
+    async with get_sessionmaker()() as session:
+        if edit is _edit_memory_row:
+            row = (
+                await session.execute(
+                    select(Document.body, Document.embedding, Document.updated_at).where(
+                        Document.source == "memory"
+                    )
+                )
+            ).one()
+            assert row.body == EDIT
+        else:
+            row = (
+                await session.execute(
+                    select(
+                        EndpointDescriptor.description,
+                        EndpointDescriptor.embedding,
+                        EndpointDescriptor.updated_at,
+                    ).where(EndpointDescriptor.op_id == "with-vector")
+                )
+            ).one()
+            assert row.description == EDIT
+    assert [round(x, 4) for x in row.embedding] == EDITED_VECTOR
+    assert row.updated_at.replace(tzinfo=UTC) == EDIT_TIME
+
+
+@pytest.mark.asyncio
+async def test_passages_that_are_not_rebuilt_keep_their_own_times() -> None:
+    small = fake_embedding_service(OLD_VECTOR, window=12)
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=small):
+        await write_entry(
+            tenant_id=TENANT, slug="guide", body=BODY, metadata_for=lambda _m: dict(METADATA)
+        )
+    async with get_sessionmaker()() as session:
+        await write_embedding_state(session, OLD_MODEL)
+        ids = (
+            await session.scalars(
+                select(Document.id)
+                .where(Document.source == KB_PASSAGE_SOURCE)
+                .order_by(Document.id)
+            )
+        ).all()
+        assert len(ids) >= 2
+        for n, passage_id in enumerate(ids):
+            await session.execute(
+                update(Document)
+                .where(Document.id == passage_id)
+                .values(
+                    created_at=datetime(2029, 1, 1 + n, tzinfo=UTC),
+                    updated_at=datetime(2029, 2, 1 + n, tzinfo=UTC),
+                )
+            )
+        await session.commit()
+
+    async def passage_times() -> list[tuple[uuid.UUID, datetime, datetime]]:
+        async with get_sessionmaker()() as session:
+            rows = await session.execute(
+                select(Document.id, Document.created_at, Document.updated_at)
+                .where(Document.source == KB_PASSAGE_SOURCE)
+                .order_by(Document.id)
+            )
+            return [tuple(row) for row in rows.all()]  # type: ignore[misc]
+
+    before = await passage_times()
+    await _run()
+
+    assert await passage_times() == before
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,11 @@ It works through three groups, in batches, and prints progress:
 * every ``endpoint_descriptor`` row: the embedding text is composed again
   from the stored fields and embedded. A row without a vector gets one.
 
+In the first and the third group, each row is read again right before its
+vector is written. A row whose text changed while it was encoded is encoded
+again with the new text, and a deleted row is skipped. So an edit made
+during the run keeps its text, its time and a vector of that text.
+
 No row gets a new ``created_at`` or ``updated_at``: searches filter on these
 times, and a re-embed changes no content.
 
@@ -59,8 +64,8 @@ __all__ = ["ReembedCounts", "main", "reembed_all"]
 
 DEFAULT_BATCH_SIZE = 50
 
-#: How often one knowledge entry is read again after another write changed it.
-_KB_ATTEMPTS = 3
+#: How often a row or a knowledge entry is read again after another write changed it.
+_ATTEMPTS = 3
 
 
 @dataclass
@@ -72,14 +77,103 @@ class ReembedCounts:
     endpoints: int = 0
 
 
-async def _reembed_documents(
-    service: EmbeddingService, batch_size: int, dry_run: bool, say: Callable[[str], None]
+def _document_texts(rows: Sequence[Any]) -> list[str]:
+    return [row.body for row in rows]
+
+
+def _endpoint_texts(rows: Sequence[Any]) -> list[str]:
+    return [
+        build_embedding_text(
+            summary=row.summary or "",
+            description=row.description or "",
+            custom_description=row.custom_description,
+            tags=row.tags,
+        )
+        for row in rows
+    ]
+
+
+@dataclass(frozen=True)
+class _Group:
+    """A table whose rows get a vector made from some of their columns."""
+
+    label: str
+    table: type[Document] | type[EndpointDescriptor]
+    columns: tuple[Any, ...]
+    texts_of: Callable[[Sequence[Any]], list[str]]
+    where: tuple[Any, ...] = ()
+
+
+_DOCUMENTS = _Group(
+    "documents",
+    Document,
+    (Document.body,),
+    _document_texts,
+    where=(Document.source != KB_PASSAGE_SOURCE,),
+)
+_ENDPOINTS = _Group(
+    "operations",
+    EndpointDescriptor,
+    (
+        EndpointDescriptor.summary,
+        EndpointDescriptor.description,
+        EndpointDescriptor.custom_description,
+        EndpointDescriptor.tags,
+    ),
+    _endpoint_texts,
+)
+
+
+async def _read_rows(group: _Group, ids: Sequence[uuid.UUID]) -> list[Any]:
+    table = group.table
+    async with get_sessionmaker()() as session:
+        query = select(table.id, *group.columns).where(table.id.in_(ids)).order_by(table.id)
+        return list((await session.execute(query)).all())
+
+
+async def _write_vectors(
+    group: _Group, rows: Sequence[Any], vectors: Sequence[list[float]]
+) -> list[uuid.UUID]:
+    """Write each vector when its row still holds the content it was made from.
+
+    The rows are read again right before the write, locked on PostgreSQL.
+    A row whose content columns changed since *rows* were read is not
+    written; its id is returned so the caller can encode it again. A
+    deleted row is skipped. A written row keeps the ``updated_at`` it has
+    now, so an edit that committed meanwhile keeps its time.
+    """
+    table = group.table
+    encoded = {row.id: (tuple(row)[1:], vec) for row, vec in zip(rows, vectors, strict=True)}
+    async with get_sessionmaker()() as session:
+        query = select(table.id, table.updated_at, *group.columns).where(table.id.in_(encoded))
+        if (await session.connection()).dialect.name == "postgresql":
+            query = query.with_for_update()
+        changed: list[uuid.UUID] = []
+        writes: list[dict[str, Any]] = []
+        for row in (await session.execute(query)).all():
+            content, vector = encoded[row.id]
+            if tuple(row)[2:] != content:
+                changed.append(row.id)
+                continue
+            writes.append({"id": row.id, "embedding": vector, "updated_at": row.updated_at})
+        if writes:
+            await session.execute(update(table), writes)
+        await session.commit()
+    return changed
+
+
+async def _reembed_table(
+    group: _Group,
+    service: EmbeddingService,
+    batch_size: int,
+    dry_run: bool,
+    say: Callable[[str], None],
 ) -> int:
-    where = Document.source != KB_PASSAGE_SOURCE
+    table = group.table
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         total = int(
-            await session.scalar(select(func.count()).select_from(Document).where(where)) or 0
+            await session.scalar(select(func.count()).select_from(table).where(*group.where)) or 0
         )
     if dry_run:
         return total
@@ -87,28 +181,24 @@ async def _reembed_documents(
     last: uuid.UUID | None = None
     while True:
         async with sessionmaker() as session:
-            query = (
-                select(Document.id, Document.body, Document.updated_at)
-                .where(where)
-                .order_by(Document.id)
-            )
+            query = select(table.id, *group.columns).where(*group.where).order_by(table.id)
             if last is not None:
-                query = query.where(Document.id > last)
-            rows = (await session.execute(query.limit(batch_size))).all()
-            if not rows:
-                return done
-            vectors = await service.encode([row.body for row in rows])
-            await session.execute(
-                update(Document),
-                [
-                    {"id": row.id, "embedding": vec, "updated_at": row.updated_at}
-                    for row, vec in zip(rows, vectors, strict=True)
-                ],
-            )
-            await session.commit()
+                query = query.where(table.id > last)
+            rows = list((await session.execute(query.limit(batch_size))).all())
+        if not rows:
+            return done
         last = rows[-1].id
+        pending = rows
+        for _attempt in range(_ATTEMPTS):
+            vectors = await service.encode(group.texts_of(pending))
+            changed = await _write_vectors(group, pending, vectors)
+            pending = await _read_rows(group, changed) if changed else []
+            if not pending:
+                break
+        if pending:
+            say(f"{group.label}: {len(pending)} rows skipped, they changed during each try")
         done += len(rows)
-        say(f"documents: {done}/{total}")
+        say(f"{group.label}: {done}/{total}")
 
 
 class _EntryGoneError(Exception):
@@ -123,7 +213,7 @@ def _current_metadata(current: dict[str, Any] | None) -> dict[str, Any]:
 
 async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> bool:
     """Rebuild the passages of one entry; return ``False`` when it was skipped."""
-    for _attempt in range(_KB_ATTEMPTS):
+    for _attempt in range(_ATTEMPTS):
         async with get_sessionmaker()() as session:
             row = (
                 await session.execute(
@@ -171,54 +261,6 @@ async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
     return len(entries)
 
 
-async def _reembed_endpoints(
-    service: EmbeddingService, batch_size: int, dry_run: bool, say: Callable[[str], None]
-) -> int:
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        total = int(await session.scalar(select(func.count()).select_from(EndpointDescriptor)) or 0)
-    if dry_run:
-        return total
-    done = 0
-    last: uuid.UUID | None = None
-    while True:
-        async with sessionmaker() as session:
-            query = select(
-                EndpointDescriptor.id,
-                EndpointDescriptor.summary,
-                EndpointDescriptor.description,
-                EndpointDescriptor.custom_description,
-                EndpointDescriptor.tags,
-                EndpointDescriptor.updated_at,
-            ).order_by(EndpointDescriptor.id)
-            if last is not None:
-                query = query.where(EndpointDescriptor.id > last)
-            rows = (await session.execute(query.limit(batch_size))).all()
-            if not rows:
-                return done
-            texts = [
-                build_embedding_text(
-                    summary=row.summary or "",
-                    description=row.description or "",
-                    custom_description=row.custom_description,
-                    tags=row.tags,
-                )
-                for row in rows
-            ]
-            vectors = await service.encode(texts)
-            await session.execute(
-                update(EndpointDescriptor),
-                [
-                    {"id": row.id, "embedding": vec, "updated_at": row.updated_at}
-                    for row, vec in zip(rows, vectors, strict=True)
-                ],
-            )
-            await session.commit()
-        last = rows[-1].id
-        done += len(rows)
-        say(f"operations: {done}/{total}")
-
-
 async def reembed_all(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -233,9 +275,9 @@ async def reembed_all(
     service = service if service is not None else get_embedding_service()
     say(f"model: {model}" + (" (dry run, nothing is written)" if dry_run else ""))
     counts = ReembedCounts()
-    counts.documents = await _reembed_documents(service, batch_size, dry_run, say)
+    counts.documents = await _reembed_table(_DOCUMENTS, service, batch_size, dry_run, say)
     counts.kb_entries = await _reembed_kb_entries(dry_run, say)
-    counts.endpoints = await _reembed_endpoints(service, batch_size, dry_run, say)
+    counts.endpoints = await _reembed_table(_ENDPOINTS, service, batch_size, dry_run, say)
     if not dry_run:
         async with get_sessionmaker()() as session:
             await write_embedding_state(session, model)

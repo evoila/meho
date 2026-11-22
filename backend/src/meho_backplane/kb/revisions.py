@@ -207,8 +207,11 @@ async def write_entry(
     and whether the entry was new when this write read it.
 
     *keep_timestamps* is for a write that only embeds again: the head
-    keeps its ``updated_at``, and new passages take the times of the
-    passages they replace. Searches filter on these times.
+    keeps its ``updated_at``. When the passages are rebuilt, the new
+    passages take the earliest ``created_at`` and the latest
+    ``updated_at`` of the passages they replace. Passages that are kept
+    are not touched, so each keeps its own times. Searches filter on
+    these times.
     """
     log = structlog.get_logger()
     for attempt in range(1, _WRITE_ATTEMPTS + 1):
@@ -407,7 +410,9 @@ async def _publish(
             _add_revision(session, doc, body, plan.revision_id, snapshot.revision_number + 1)
         await session.flush()
         if kept is not None:
-            await _restore_times(session, tenant_id, plan.entry_id, kept)
+            await _restore_times(
+                session, tenant_id, plan.entry_id, kept, passages=plan.rebuild_passages
+            )
         # Read back what this transaction now sees. On SQLite another
         # write can commit between the check above and this write's
         # first statement; then the head no longer holds this body.
@@ -448,9 +453,18 @@ async def _read_times(session: AsyncSession, tenant_id: uuid.UUID, entry_id: uui
 
 
 async def _restore_times(
-    session: AsyncSession, tenant_id: uuid.UUID, entry_id: uuid.UUID, kept: _Times
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    kept: _Times,
+    *,
+    passages: bool,
 ) -> None:
-    """Set the head and passage times back to *kept* (explicit values, so no update default)."""
+    """Set the head time back to *kept*, and the passage times when *passages* were rebuilt.
+
+    Explicit values, so no update default runs. Kept passages are left
+    alone: they can have different times, and each keeps its own.
+    """
     no_sync = {"synchronize_session": False}
     if kept.head_updated_at is not None:
         await session.execute(
@@ -459,7 +473,7 @@ async def _restore_times(
             .values(updated_at=kept.head_updated_at)
             .execution_options(**no_sync)
         )
-    if kept.passage_created_at is not None and kept.passage_updated_at is not None:
+    if passages and kept.passage_created_at is not None and kept.passage_updated_at is not None:
         await session.execute(
             update(Document)
             .where(*_passage_filter(tenant_id, entry_id))

@@ -341,9 +341,15 @@ MEHO says nothing about it except the warning at start.
    - every `endpoint_descriptor` row is embedded from its stored text. A
      row with no vector gets one.
 
-   No row gets a new `created_at` or `updated_at`. New passages take the
-   times of the passages they replace. Searches that filter by date give
-   the same rows as before.
+   In the first and the third step, each row is read again right before
+   its vector is written. A row whose text changed while it was encoded is
+   encoded again with the new text, and a deleted row is skipped. So an
+   edit made during the run keeps its text, its time and a matching vector.
+
+   No row gets a new `created_at` or `updated_at`. Rebuilt passages take
+   the earliest `created_at` and the latest `updated_at` of the passages
+   they replace. Passages that are not rebuilt keep their own times.
+   Searches that filter by date give the same rows as before.
 
    At the end it stores the new model in `embedding_state`.
 4. The command is safe to run twice. If it stops half way, run it again;

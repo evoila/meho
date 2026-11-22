@@ -56,6 +56,13 @@ form that stands in a quoted command or in a JSON string, also a
 double-quoted string inside a single-quoted command, ends at the closing
 quote of that string, so a JSON log line still parses.
 
+A double-quoted string that is a shell word (white space and a word stand
+before its opening quote, as in ``sh -c "..."``) is also read the way a
+shell reads it: a backslash is dropped only before ``"``, a backslash,
+``$`` and a backtick, so ``\\n`` and ``\\u0026`` are text there. The value
+the shell passes is hidden up to the closing quote. This runs on the text
+and on every decoded JSON level, and only adds to the values found above.
+
 A value that an earlier step hid already stays: a ``[REDACTED...]`` mark,
 an older mark (``***REDACTED***``, ``<redacted>``) or only the characters a
 tool prints in place of a typed password, also written as JSON escapes.
@@ -74,9 +81,9 @@ policy without the ``api_key`` rule such a value is not hidden.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
-again, a run of backslashes is passed in one step, each JSON string is
-decoded once per level, and the matches of *leave_to* are found once per
-text.
+again, a run of backslashes is passed in one step, each JSON string and
+each shell word is decoded once per level, and the matches of
+*leave_to* are found once per text.
 """
 
 from __future__ import annotations
@@ -812,24 +819,101 @@ def _decode_json_strings(text: str) -> tuple[str, list[int], list[int]]:
     return "".join(parts), places, ends
 
 
+#: What ends a run of plain characters in a double-quoted shell word.
+_SHELL_MARK: Final = re.compile(r'["\\\n\r]')
+#: The characters a backslash escapes in a double-quoted shell word.
+_SHELL_ESCAPED: Final = frozenset('"\\$`')
+
+
+def _is_shell_word(text: str, opening: int) -> bool:
+    """True when the double quote at *opening* starts a shell word (``sh -c "``).
+
+    White space stands before the quote, and a word before that. A string
+    at the start of the text or after ``{``, ``[``, ``,``, ``:`` or a line
+    end is a JSON or YAML string.
+    """
+    before = opening
+    while before > 0 and text[before - 1] in " \t":
+        before -= 1
+    return 0 < before < opening and text[before - 1] not in "{[,:\n\r"
+
+
+def _decode_shell_strings(text: str) -> tuple[str, list[int], list[int]]:
+    """The double-quoted shell words of *text*, decoded the way a shell does it.
+
+    A backslash is dropped only before ``"``, a backslash, ``$`` and a
+    backtick. Every other backslash stays, so ``\\n`` and ``\\u0026`` are
+    text here, not escapes. A string that is not closed on its line is
+    skipped. Returns the same three lists as :func:`_decode_json_strings`.
+    """
+    parts: list[str] = []
+    places: list[int] = []
+    ends: list[int] = []
+    pos = 0
+    while (opening := text.find('"', pos)) != -1:
+        pos = opening + 1
+        if not _is_shell_word(text, opening):
+            continue
+        string: list[str] = []
+        where: list[int] = []
+        while (mark := _SHELL_MARK.search(text, pos)) is not None:
+            at = mark.start()
+            string.append(text[pos:at])
+            where.extend(range(pos, at))
+            pos = at + 1
+            if text[at] != "\\":
+                break
+            if text[at + 1 : at + 2] in _SHELL_ESCAPED:
+                string.append(text[at + 1])
+                pos = at + 2
+            else:
+                string.append("\\")
+            where.append(at)
+        if mark is None:
+            break
+        if text[mark.start()] == '"':
+            parts.extend(string)
+            places.extend(where)
+            ends.append(len(places))
+            parts.append("\n")
+            places.append(mark.start())
+    return "".join(parts), places, ends
+
+
+def _decoded_spans(decoded: str, ends: list[int], raw: list[int]) -> list[tuple[int, int]]:
+    """The secret values of the decoded strings, each cut at the end of its string."""
+    spans: list[tuple[int, int]] = []
+    for start, end in _plain_spans(decoded):
+        end = min(end, ends[bisect.bisect_left(ends, start)])
+        if start < end:
+            spans.append((raw[start], raw[end]))
+    return spans
+
+
+def _shell_spans(text: str, origin: list[int]) -> list[tuple[int, int]]:
+    """The secret values inside the double-quoted shell words of *text*, read as a shell does."""
+    decoded, places, ends = _decode_shell_strings(text)
+    return _decoded_spans(decoded, ends, [origin[place] for place in places]) if decoded else []
+
+
 def _json_spans(text: str) -> list[tuple[int, int]]:
     """The secret values inside the JSON strings of *text*, up to three levels deep.
 
     Each decoded string is read like plain text. A value found there ends
     at the end of its string and is mapped back to *text*, so a mark
-    replaces whole escapes and every JSON level still parses.
+    replaces whole escapes and every JSON level still parses. On the text
+    and on each decoded level, the double-quoted shell words are also read
+    the way a shell reads them (:func:`_shell_spans`).
     """
-    spans: list[tuple[int, int]] = []
     current, origin = text, list(range(len(text) + 1))
+    spans = _shell_spans(current, origin)
     for _level in range(_JSON_LEVELS):
         decoded, places, ends = _decode_json_strings(current)
         if not decoded:
             break
         raw = [origin[place] for place in places]
-        for start, end in _plain_spans(decoded):
-            end = min(end, ends[bisect.bisect_left(ends, start)])
-            if start < end:
-                spans.append((raw[start], raw[end]))
+        spans.extend(_decoded_spans(decoded, ends, raw))
+        spans.extend(_shell_spans(decoded, raw))
         current, origin = decoded, raw
     return spans
 

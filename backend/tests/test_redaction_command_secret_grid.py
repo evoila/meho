@@ -272,3 +272,124 @@ def test_the_full_grid() -> None:
     print(f"harmless: {harmless_count} texts, {len(changed)} changed")
     assert wrong == {}
     assert changed == {}
+
+
+# -- escapes that a shell keeps as text -----------------------------------------
+
+#: Escapes as text in a command: the ``\u`` escape of ``&``, ``|``, ``;``,
+#: ``<``, ``>``, ``"``, ``'``, a line end, a tab and a carriage return, in
+#: lower and upper case hex digits, and ``\n``, ``\t`` and ``\r``. A shell
+#: keeps them as text (a backslash and letters), so they do not end a word.
+_ESCAPES: Final = (
+    *(f"\\u{ord(char):04{case}}" for char in "&|;<>\"'\n\t\r" for case in "xX"),
+    "\\n",
+    "\\t",
+    "\\r",
+)
+#: Where the escape stands: glued into the value, as a word of its own
+#: before the option, and glued into a word before the option.
+_ESCAPE_PLACES: Final = ("value", "word", "glued word")
+
+
+def _escape_places(form: str) -> tuple[str, ...]:
+    """The places for *form*. A word before ``-p`` of ``sshpass`` is the command it runs."""
+    return ("value",) if form.startswith("sshpass") else _ESCAPE_PLACES
+
+
+def _escaped_command(form: str, escape: str, place: str) -> str:
+    """*form* with *escape* at *place*, and the word after the command."""
+    if place == "value":
+        command = form.format(m="", v=PW[:7] + escape + PW[7:])
+    else:
+        middle = " " + escape if place == "word" else " x" + escape + "y"
+        command = form.format(m=middle, v=PW)
+    return command + " " + _TAIL
+
+
+def _json_levels(levels: int) -> Callable[[str], str]:
+    def encode(text: str) -> str:
+        for _level in range(levels):
+            text = _log(text)
+        return text
+
+    return encode
+
+
+def _parse_levels(levels: int) -> Callable[[str], object]:
+    def parse(text: str) -> object:
+        for _level in range(levels):
+            text = _read_log(text)
+        return text
+
+    return parse
+
+
+#: (name, encode, check that every JSON level of an answer parses): plain,
+#: ``sh -c "..."`` with and without doubled backslashes, ``sh -c '...'``, and
+#: one, two and three JSON levels, of the command and of ``sh -c "..."``.
+_ESCAPE_ENCODINGS: Final[list[tuple[str, Callable[[str], str], Callable[[str], object]]]] = [
+    ("plain", lambda text: text, lambda out: out),
+    ("sh -c", _sh_c, lambda out: out),
+    ("sh -c, single backslashes", lambda text: 'sh -c "' + text.replace('"', '\\"') + '"', str),
+    ("sh -c '...'", lambda text: "sh -c '" + text.replace("'", "'\\''") + "'", str),
+    *(
+        (f"{levels} json levels", _json_levels(levels), _parse_levels(levels))
+        for levels in (1, 2, 3)
+    ),
+    *(
+        (
+            f"{levels} json levels of sh -c",
+            lambda text, levels=levels: _json_levels(levels)(_sh_c(text)),
+            _parse_levels(levels),
+        )
+        for levels in (1, 2, 3)
+    ),
+]
+
+
+def _escape_grid_skips(name: str, command: str) -> tuple[str, ...]:
+    """The problems this grid does not check for *command* in the encoding *name*.
+
+    In ``sh -c '...'`` a single-quoted value is joined with an escaped
+    single quote, a form the rule does not read yet (Task #6747), so the
+    word after it may be hidden too. At three JSON levels of ``sh -c "..."``
+    the ``api_key`` rule reads the label of ``APP_PWD="..."`` and this rule
+    leaves the value to it (``leave_to``), with or without an escape.
+    """
+    if name == "sh -c '...'" and "'" in command:
+        return ("answer lost the word after the command", "trace lost the word after the command")
+    if name == "3 json levels of sh -c" and 'APP_PWD="' in command:
+        return ("answer shows the value", "trace shows the value")
+    return ()
+
+
+def _run_escape_grid(*, full: bool) -> tuple[int, dict[str, list[str]]]:
+    """Every escape at every place in every form and encoding; the sample turns the escape."""
+    count, wrong = 0, {}
+    turn = 0
+    for name, encode, parse in _ESCAPE_ENCODINGS:
+        for form in _FORMS:
+            for place in _escape_places(form):
+                escapes = _ESCAPES if full else (_ESCAPES[turn % len(_ESCAPES)],)
+                turn += 1
+                for escape in escapes:
+                    count += 1
+                    command = _escaped_command(form, escape, place)
+                    skips = _escape_grid_skips(name, command)
+                    found = [p for p in _problems(encode(command), parse) if p not in skips]
+                    if found:
+                        wrong[f"{name}: {command!r}"] = found
+    return count, wrong
+
+
+def test_an_escape_that_a_shell_keeps_as_text_never_shows_the_value() -> None:
+    count, wrong = _run_escape_grid(full=False)
+    assert count == len(_ESCAPE_ENCODINGS) * sum(len(_escape_places(form)) for form in _FORMS)
+    assert wrong == {}
+
+
+@pytest.mark.skipif(not _FULL_GRID, reason="The full grid runs by hand: MEHO_RUN_REDACTION_GRID=1.")
+def test_the_full_escape_grid() -> None:
+    count, wrong = _run_escape_grid(full=True)
+    print(f"escape grid: {count} texts, {len(wrong)} wrong")
+    assert wrong == {}

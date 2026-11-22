@@ -745,8 +745,8 @@ _TOOL_THEN_OTHER: Final = (
 #: a carriage return alone, two line ends, and a blank before the line end.
 _LINE_SPLITS: Final = ("\n", "\r\n", "\r", "\n\n", " \n")
 #: (line, its secret values, JSON levels): inside a JSON string or a
-#: double-quoted command an escaped line end ends the command of the tool,
-#: so the options on the later line stay as on main.
+#: single-quoted command a line end ends the command of the tool, so the
+#: options on the later line stay as on main.
 _COMMAND_ENDS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
     (first + split + later, (PW,) if PW in first else (), levels)
     for firsts, laters in _TOOL_THEN_OTHER
@@ -755,18 +755,11 @@ _COMMAND_ENDS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
     for split in _LINE_SPLITS
     for levels in (1, 2, 3)
 ] + [
-    (line, (PW,) if PW in line else (), levels)
+    ("sh -c '" + first + "\n" + later + "' && echo ok", (PW,) if PW in first else (), levels)
     for firsts, laters in _TOOL_THEN_OTHER
     for first in firsts
     for later in laters
-    for line in (
-        'sh -c "' + first + "\\n" + later + '" && echo ok',
-        'sh -c "' + first + "\\r\\n" + later + '" && echo ok',
-        'sh -c "' + first + "\\r" + later + '" && echo ok',
-        "sh -c '" + first + "\n" + later + "' && echo ok",
-    )
-    for levels in (0, 1, 2)
-    if levels or line.startswith('sh -c "')
+    for levels in (1, 2)
 ]
 
 
@@ -780,6 +773,75 @@ def test_an_escaped_line_end_in_a_json_string_ends_the_command_of_a_tool(
         assert _changes_besides(text, values, policy) == []
         on_main = redact(text, _without_command_rule(policy)).redacted
         assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
+#: The value that the tool of the first line gets from the later line in
+#: ``sh -c "..."``: a shell keeps an escaped line end in double quotes as
+#: text, so the later line is part of the same command.
+_SHELL_VALUE_OF_LATER: Final = {
+    "tar -pcf archive.tar files": "cf",
+    "gcc -pedantic x.c": "edantic",
+    "ssh -P 2222 h": "2222",
+    "mvn -P release package": "release",
+    "grep -w word file": "word",
+    "nc -w 5 h 80": "5",
+    "docker run -u 1000:1000 img": "1000",
+    "rpm -U pkg-1%2.rpm": "2.rpm",
+}
+
+
+def _shell_secrets(first: str, escape: str, later: str) -> tuple[str, ...]:
+    """The values a shell passes for ``sh -c "<first><escape><later>"``.
+
+    A password at the end of the first line runs on into the first word of
+    the later line, and the option of the later line is the tool's own.
+    """
+    value = PW + escape + later.split()[0] if first.endswith(PW) else PW
+    return (*((value,) if PW in first else ()), _SHELL_VALUE_OF_LATER[later])
+
+
+#: (line, its secret values, JSON levels): in ``sh -c "..."`` an escaped line
+#: end is text to the shell, so it does not end the command. Before the
+#: shell reading of double-quoted shell words, these rows expected the later
+#: line to stay as on main; a real shell passes its option to the tool of
+#: the first line, so now that value is hidden.
+_ESCAPE_IN_A_SHELL_WORD: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    (
+        'sh -c "' + first + escape + later + '" && echo ok',
+        _shell_secrets(first, escape, later),
+        levels,
+    )
+    for firsts, laters in _TOOL_THEN_OTHER
+    for first in firsts
+    for later in laters
+    for escape in ("\\n", "\\r\\n", "\\r")
+    for levels in (0, 1, 2)
+]
+
+
+def _last_places(text: str, parts: tuple[str, ...]) -> set[int]:
+    """The places of the last match of each of *parts* (``-u 1000:1000`` hides the second)."""
+    places: set[int] = set()
+    for part in parts:
+        at = text.rfind(part)
+        assert at != -1
+        places.update(range(at, at + len(part)))
+    return places
+
+
+@pytest.mark.parametrize(("line", "secrets", "levels"), _ESCAPE_IN_A_SHELL_WORD)
+def test_an_escaped_line_end_in_a_shell_word_does_not_end_the_command(
+    line: str, secrets: tuple[str, ...], levels: int
+) -> None:
+    text = _in_json(line, levels)
+    values = _last_places(text, tuple(_as_json(secret, levels) for secret in secrets))
+    for policy in (get_default_policy(), _content_policy()):
+        on_main = _hidden_characters(text, _without_command_rule(policy))
+        now = _hidden_characters(text, policy)
+        assert on_main <= now
+        assert now - on_main <= values
+        assert values <= now
+        assert _parses(redact(text, policy).redacted, levels)
 
 
 @pytest.mark.parametrize("levels", [1, 2, 3])

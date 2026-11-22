@@ -789,6 +789,85 @@ def test_an_escaped_carriage_return_ends_the_command_of_a_tool(levels: int) -> N
         assert redact(text, policy).redacted == redact(text, _without_command_rule(policy)).redacted
 
 
+#: Characters that a JSON writer may write as a ``\u`` escape instead
+#: (``\u000d``, ``&``): a line end, a carriage return, a tab and the
+#: operators that end a command.
+_U_ESCAPED: Final = frozenset("\r\n\t;|&")
+
+
+def _in_json_u(line: str, levels: int, hex_format: str = "04x") -> str:
+    """*line* as :func:`_in_json` makes it, with :data:`_U_ESCAPED` written as ``\\u`` escapes."""
+    text = line
+    for level in range(levels):
+        string = "".join(
+            f"\\u{ord(char):{hex_format}}" if char in _U_ESCAPED else json.dumps(char)[1:-1]
+            for char in text
+        )
+        text = '{"log": "' + string + '", "ok": ' + str(level) + "}"
+    return text
+
+
+@pytest.mark.parametrize("hex_format", ["04x", "04X"])
+@pytest.mark.parametrize("levels", [1, 2, 3])
+def test_a_u_escaped_carriage_return_ends_the_command_of_a_tool(
+    levels: int, hex_format: str
+) -> None:
+    text = _in_json_u("mysql --version" + "\r" + "tar -pcf archive.tar files", levels, hex_format)
+    assert "u000" in text
+    for policy in (get_default_policy(), _content_policy()):
+        assert redact(text, policy).redacted == redact(text, _without_command_rule(policy)).redacted
+
+
+#: How the lines are split when each split character is a ``\u`` escape.
+_U_SPLITS: Final = ("\r", "\n", "\r\n", " && ", "&&", " ; ", ";", " | ")
+#: (line, its secret values, JSON levels): a ``\u`` escape of a line end or
+#: of an operator ends the command of the tool, as the short escape does.
+_U_COMMAND_ENDS: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    (first + split + later, (PW,) if PW in first else (), levels)
+    for firsts, laters in _TOOL_THEN_OTHER
+    for first in firsts
+    for later in laters
+    for split in _U_SPLITS
+    for levels in (1, 2, 3)
+]
+
+
+@pytest.mark.parametrize(("line", "secrets", "levels"), _U_COMMAND_ENDS)
+def test_a_u_escaped_line_end_or_operator_ends_the_command_of_a_tool(
+    line: str, secrets: tuple[str, ...], levels: int
+) -> None:
+    text = _in_json_u(line, levels)
+    values = tuple(_as_json(secret, levels) for secret in secrets)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, values, policy) == []
+        on_main = redact(text, _without_command_rule(policy)).redacted
+        assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
+#: What follows the value when each of its split characters is a ``\u`` escape.
+_U_TAILS: Final = ("\rnext", "\nnext", "\tnext", "\r\nnext", " && next", "&&next", ";next", "|next")
+
+
+@pytest.mark.parametrize(
+    ("line", "secret", "levels"),
+    [
+        (form.format(value) + tail, value, levels)
+        for form, value in _LINE_END_FORMS
+        for tail in _U_TAILS
+        for levels in (1, 2, 3)
+    ],
+)
+def test_a_u_escaped_line_end_tab_or_operator_ends_the_value(
+    line: str, secret: str, levels: int
+) -> None:
+    text = _in_json_u(line, levels)
+    value = _as_json(secret, levels)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, (value,), policy) == []
+        on_main = redact(text, _without_command_rule(policy)).redacted
+        assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
 #: Windows paths with a backslash before ``n`` or ``r``: a written
 #: backslash, not a line end.
 _PATHS_WITH_N_OR_R: Final = (

@@ -501,6 +501,7 @@ async def test_left_read_that_never_ends_is_stopped_at_the_limit(
     await seed_announcement(_TENANT, activity="stored before the stream")
     monkeypatch.setattr(archive_reader, "_without_ended_claims", _never_ends)
     monkeypatch.setattr(read_to_end, "LEFT_READ_LIMIT_SECONDS", 0.5)
+    monkeypatch.setattr(read_to_end, "STOP_WAIT_SECONDS", 0.2)
     engine = get_sessionmaker().kw["bind"]
     closed: list[object] = []
     event.listen(engine.sync_engine, "invalidate", lambda *args: closed.append(args[0]))

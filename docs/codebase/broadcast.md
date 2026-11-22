@@ -72,10 +72,17 @@ was closed as not planned).
    (the stream ended, the client left, or the console history page,
    the MCP tenant feed or the MCP watch tool was cancelled) runs on for
    at most 30 seconds (`LEFT_READ_LIMIT_SECONDS`). After that it is
-   stopped, and its database connection is closed, not given back to
-   the pool. MEHO logs `broadcast_archive_read_left` when a read is
-   left, and `broadcast_archive_read_left_ended` or
-   `broadcast_archive_read_stopped` when it ends or is stopped. The
+   stopped in steps, each with a wait of at most 5 seconds
+   (`STOP_WAIT_SECONDS`): first the running statement is interrupted
+   in the SQLite driver, so the read ends with a database error and
+   cleans up normally; then the read task is cancelled (this is what
+   stops a PostgreSQL read); last, the connection is closed at once,
+   without waiting for the read. So the stop always ends within about
+   10 seconds. A stopped read's database connection is closed, not
+   given back to the pool. MEHO logs `broadcast_archive_read_left` when
+   a read is left, and `broadcast_archive_read_left_ended` or
+   `broadcast_archive_read_stopped` (with `read_ended`: did the read
+   end, or was only its connection closed) when it ends or is stopped. The
    lines carry no announcement content. The stream never holds a
    database session while it waits: each archive read opens a short
    session and closes it before the wait.

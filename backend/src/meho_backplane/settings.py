@@ -1626,8 +1626,8 @@ class Settings(BaseModel):
         and makes no new request
         (:mod:`meho_backplane.mcp.tools._call_operation_status`). When off,
         the tool has no text about this and refuses the input. The
-        measurement that must come before it goes on is tracked in the
-        issue for the approval switches. Env ``MCP_OWN_REQUEST_STATUS``.
+        measurement that must come before it goes on is tracked in
+        evoila/meho#6803. Env ``MCP_OWN_REQUEST_STATUS``.
     mcp_approval_exit_code:
         Off by default. When on, the ``resume_outcome`` of an approval on the
         MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has

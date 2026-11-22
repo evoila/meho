@@ -14,6 +14,7 @@ state of the caller's own request and runs nothing, behind the
 * a wrong connector or operation, and extra inputs, are refused and nothing
   is read;
 * a read writes one ``approval.result`` audit row and changes no request;
+* a stored result stays inside the response size limit with the added fields;
 * an approved secret reveal with ``MCP_REVEAL_FETCH`` on still runs the fetch.
 """
 
@@ -31,6 +32,13 @@ from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.schemas import (
+    FetchMore,
+    FetchMoreDrillIn,
+    FetchMoreNativePagination,
+    OperationResult,
+    ResultHandle,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
@@ -38,7 +46,9 @@ from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import create_pending_request
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import with_data_notice
 from tests._reveal_fetch_helpers import (
     CONNECTOR_ID as REVEAL_CONNECTOR,
 )
@@ -230,8 +240,18 @@ async def test_an_approved_request_that_has_not_finished_says_it_runs(
 @pytest.mark.parametrize(
     ("envelope", "state"),
     [
-        ({"status": "ok", "op_id": _OP, "result": {"deleted": True}, "extras": {}}, "executed"),
-        ({"status": "error", "op_id": _OP, "error": "vendor said no", "extras": {}}, "failed"),
+        (
+            OperationResult(
+                status="ok", op_id=_OP, result={"deleted": True}, duration_ms=1.0
+            ).model_dump(mode="json"),
+            "executed",
+        ),
+        (
+            OperationResult(
+                status="error", op_id=_OP, error="vendor said no", duration_ms=1.0
+            ).model_dump(mode="json"),
+            "failed",
+        ),
     ],
     ids=["executed", "failed"],
 )
@@ -253,6 +273,89 @@ async def test_an_approved_request_that_ran_gives_the_stored_result(
     assert answer.get("result") == envelope.get("result")
     assert answer["extras"]["result_state"] == state
     assert answer["extras"]["approval_request_id"] == str(request_id)
+
+
+def _readable_handle() -> ResultHandle:
+    return ResultHandle(
+        handle_id=uuid.uuid4(),
+        summary_md="500 rows",
+        schema_={"type": "array"},
+        total_rows=500,
+        ttl_seconds=3600,
+        fetch_more=FetchMore(
+            drill_in=FetchMoreDrillIn(
+                available=True,
+                rationale="Call result_query with the handle id.",
+                mcp_tool="result_query",
+            ),
+            native_pagination=FetchMoreNativePagination(available=False, rationale="none"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("over", "handle", "delivery"),
+    [
+        (0, None, None),
+        (1, None, "unavailable"),
+        (1, _readable_handle(), "partial"),
+    ],
+    ids=["at-limit", "over-limit", "over-limit-with-handle"],
+)
+async def test_a_stored_result_stays_inside_the_response_size_limit(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    over: int,
+    handle: ResultHandle | None,
+    delivery: str | None,
+) -> None:
+    """The stored result fits alone. The fields the read adds decide if it still fits."""
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    audit_id = uuid.uuid4()
+    stored = OperationResult(
+        status="ok",
+        op_id=_OP,
+        result={"blob": "x" * 4000},
+        duration_ms=12.5,
+        audit_id=audit_id,
+        handle=handle,
+    ).model_dump(mode="json")
+    added = {
+        "approval_request_id": str(request_id),
+        "approval_status": "approved",
+        "result_state": "executed",
+    }
+    full_answer = with_data_notice({**stored, "extras": added})
+    # The limit is the size of the full answer, or one byte less.
+    limit = measure_delivered_wire_bytes(full_answer) - over
+    assert measure_delivered_wire_bytes(stored) <= limit
+    monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(limit))
+    get_settings.cache_clear()
+    await _set(
+        request_id,
+        status=ApprovalRequestStatus.APPROVED.value,
+        resumed_at=datetime.now(UTC),
+        resume_result=stored,
+    )
+    rows_before = await _result_rows()
+
+    answer = _answer(_call(client, request_id))
+
+    assert measure_delivered_wire_bytes(answer) <= limit
+    assert answer["status"] == "ok"
+    assert answer["audit_id"] == str(audit_id)
+    assert answer["delivery"] == delivery
+    assert answer["data_notice"] == full_answer["data_notice"]
+    if delivery is None:
+        assert answer["result"] == stored["result"]
+        assert answer["extras"] == added
+    else:
+        assert answer["result"] is None
+        assert answer["extras"]["retry"] is False
+        assert answer["extras"]["delivery_max_bytes"] == limit
+        assert answer["handle"] == stored["handle"]
+    assert await _result_rows() == rows_before + 1
 
 
 @pytest.mark.parametrize("state", ["rejected", "expired", "withdrawn"])

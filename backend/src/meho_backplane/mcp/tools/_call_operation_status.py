@@ -30,7 +30,9 @@ The answer by state:
   ``extras.result_state`` of ``not_started`` or ``started``;
 * approved and run: the stored result of the run (the same envelope the REST
   read gives), with ``extras.result_state`` and
-  ``extras.approval_request_id`` added;
+  ``extras.approval_request_id`` added. An ``ok`` answer over the response
+  size limit is trimmed by ``bound_complete_response``: the status and the
+  ``audit_id`` stay, and ``delivery`` says what was left out;
 * rejected, expired or withdrawn: ``status="denied"`` with an
   ``extras.error_code`` that names the state.
 """
@@ -60,6 +62,7 @@ from meho_backplane.operations.approval_queue import (
     read_approval_result,
 )
 from meho_backplane.operations.approved_reveal import is_secret_reveal
+from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
@@ -192,6 +195,24 @@ def _answer_for(row: ApprovalRequest) -> dict[str, Any]:
     return _denied(row.op_id, request_id, f"approval_request_{row.status}", message)
 
 
+def _stored_result_answer(envelope: dict[str, Any], extras: dict[str, Any]) -> dict[str, Any]:
+    """The stored result with the approval fields added, inside the response size limit.
+
+    The added fields make the stored result larger, so the limit is checked
+    on the answer that is sent. The limiter also counts ``data_notice``.
+    """
+    stored_extras = envelope.get("extras")
+    merged = {
+        **envelope,
+        "extras": {**(stored_extras if isinstance(stored_extras, dict) else {}), **extras},
+    }
+    bounded = bound_complete_response(
+        OperationResult.model_validate(merged),
+        get_settings().result_complete_response_wire_max_bytes,
+    )
+    return with_data_notice(bounded.model_dump(mode="json"))
+
+
 def _approved_answer(row: ApprovalRequest) -> dict[str, Any]:
     state = approval_result_state(row)
     assert state is not None  # the row is approved
@@ -202,13 +223,7 @@ def _approved_answer(row: ApprovalRequest) -> dict[str, Any]:
     }
     envelope = row.resume_result
     if envelope is not None:
-        answer = dict(envelope)
-        stored_extras = envelope.get("extras")
-        answer["extras"] = {
-            **(stored_extras if isinstance(stored_extras, dict) else {}),
-            **extras,
-        }
-        return with_data_notice(answer)
+        return _stored_result_answer(envelope, extras)
     if is_secret_reveal(row):
         next_step = (
             "Approved. The operation did not run. It runs once, when the person "

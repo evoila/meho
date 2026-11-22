@@ -2249,9 +2249,16 @@ call_operation(connector_id, op_id, approval_request_id)
   withdrawn give `status: "denied"` with `extras.error_code` of
   `approval_request_rejected`, `approval_request_expired` or
   `approval_request_withdrawn`, and a sentence that says to ask again.
+- The stored result goes through the response size limit, with the added
+  fields and the data notice counted (see "Response wire ceiling"). An `ok`
+  answer over the limit keeps its status and `audit_id`. `delivery` is
+  `partial` or `unavailable`, and the added `extras` fields are left out,
+  as for a check of a background call.
 - A hosted agent with a bound connector list gets `connector_not_allowed`
   for a request outside the list.
-- With the switch off, the input and its text are not in the tool.
+- With the switch off, the input and its text are not in the tool. The
+  measurement before it goes on by default is
+  [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).
 - Tests: `tests/test_mcp_call_operation_own_request_status.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)

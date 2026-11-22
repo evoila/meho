@@ -7,8 +7,11 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 
 Every ``k8s.apply`` waits for a person, for every kind of object: there is
-no list of kinds that keep the rules of the operation. No standing grant, no
-agent grant and no run approval covers it. A stored request keeps the
+no list of kinds that keep the rules of the operation. So does every
+``k8s.exec``, ``k8s.delete``, ``k8s.label``, ``k8s.annotate`` and
+``k8s.namespace.create``. No standing grant, no agent grant and no run
+approval covers these calls. In sandbox mode a delete grant still covers
+``k8s.delete``, and only that one of them. A stored request keeps the
 manifest of a Secret, or of an object with a secret-looking value, only in
 the encrypted handoff of the run.
 """
@@ -24,6 +27,7 @@ from meho_backplane.op_classes import (
     declare_hidden_stored_param,
     declare_no_secret_value,
     declare_op_classes,
+    declare_sandbox_delete_grant,
 )
 from meho_backplane.redaction.command_line import hide_in_text
 
@@ -57,12 +61,25 @@ declare_op_classes(
 # runs without waiting for approval (meho_backplane.operations.credential_read).
 declare_no_secret_value(("k8s.secret.compare_to_ref",))
 
-# A command in a container can read or write any credential the container
-# holds. What an apply does to an object depends on the object as it is on
-# the cluster and on the fields other writers own, not only on the manifest.
-# So every call of both waits for a person, and no standing grant, agent
-# grant or run approval covers it.
-declare_credential_capable(("k8s.exec", "k8s.apply"))
+# Every call of these operations waits for a person, and no standing grant,
+# agent grant or run approval covers it:
+# - k8s.exec: a command in a container can read or write any credential the
+#   container holds.
+# - k8s.apply: what an apply does to an object depends on the object as it is
+#   on the cluster and on the fields other writers own, not only on the
+#   manifest.
+# - k8s.delete: it deletes a Pod, a Job or a ReplicaSet.
+# - k8s.label and k8s.annotate: on a Namespace they can set or remove the
+#   labels that decide how the cluster checks the pods in it.
+# - k8s.namespace.create: it makes a new namespace, and MEHO sets no labels
+#   on it.
+declare_credential_capable(
+    ("k8s.exec", "k8s.apply", "k8s.delete", "k8s.label", "k8s.annotate", "k8s.namespace.create")
+)
+
+# In sandbox mode a live delete grant still covers k8s.delete. No other
+# grant covers it, and a delete grant covers none of the other calls above.
+declare_sandbox_delete_grant(("k8s.delete",))
 
 #: Kinds whose objects hold a credential, in lower case. A ServiceAccount
 #: token is a Secret too.

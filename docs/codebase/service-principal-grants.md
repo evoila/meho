@@ -147,7 +147,8 @@ and no run approval covers it.
 - Some operations can read, write or make any credential, because the
   caller says what they do. A connector marks them with
   `declare_credential_capable` (`op_classes.py`; today `k8s.exec`,
-  `k8s.apply`, `proxmox.api.write`, `argocd.app.set`,
+  `k8s.apply`, `k8s.delete`, `k8s.label`, `k8s.annotate`,
+  `k8s.namespace.create`, `proxmox.api.write`, `argocd.app.set`,
   `argocd.appproject.create` and `argocd.appproject.update`). Every
   `k8s.apply` counts, for every kind of object: there is no list of kinds
   that keep the rules of `k8s.apply` (see
@@ -160,6 +161,14 @@ and no run approval covers it.
   `raise_descriptor_for_params` sets `requires_approval` and
   `credential_call` on the row of each of their calls, so a person's own
   call waits too, also when the stored row asks for no approval.
+- One exception: `declare_sandbox_delete_grant` (`op_classes.py`; today
+  only `k8s.delete`). In sandbox mode a live delete grant may still cover
+  an op marked there, and only a delete grant: no standing grant, no
+  agent grant, no run approval and no approval override does. The mark
+  refuses an op with a credential class. `_sandbox_delete_exception` in
+  `service_grants.py` holds the rule, for the grant lookup, for grant
+  create, for a step of a multi-step operation and for the step list
+  (`classify_subop_grantability`).
 - For a family of op ids a connector gives a match function instead:
   `declare_credential_capable_match` (`op_classes.py`). Today the
   Kubernetes connector matches the operations an ingest makes from a
@@ -169,8 +178,10 @@ and no run approval covers it.
   token, and every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path
   of an object or of a collection of objects, of every kind, namespaced
   or cluster-wide, of an ephemeral container, or of the approval of a
-  certificate signing request. A path can have any prefix in front. A
-  `/status` or `/scale` subresource keeps the rules of the operation.
+  certificate signing request, and every write to another sub-part of one
+  object (a path that goes on past the name of the object). A path can
+  have any prefix in front. Only a `status` or `scale` sub-part right
+  after the name of the object keeps the rules of the operation.
   The match reads the path of every operation made from an ingested API
   file, whatever the product: an API file of another product whose paths
   have the same form (`/api/v1/namespaces/...`,
@@ -209,10 +220,12 @@ and no run approval covers it.
 - The rule for writes: a write that chooses what a system runs later, or
   who gets rights, waits for a person on every call. A write that only
   starts what is already defined keeps its rules, because the definition
-  had to pass this rule when it was written. Examples that keep their
+  had to pass this rule when it was written. Writes that wait on every
+  call: `k8s.delete`, `k8s.label`, `k8s.annotate` and
+  `k8s.namespace.create`. Examples that keep their
   rules: `k8s.cronjob.run`, `k8s.scale`, `k8s.rollout.restart`,
-  `linux.service.control`, `argocd.app.sync` without a revision and
-  `argocd.app.rollback`.
+  `k8s.cordon`, `linux.service.control`, `argocd.app.sync` without a
+  revision and `argocd.app.rollback`.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
@@ -689,6 +702,13 @@ What the code does:
   so a `destructive` step or child stays refused. A delete below
   `destructive` needs no hash. With no delete grant the call falls through
   to the rules above, so an ordinary grant never changes its verdict.
+  A delete grant covers a call that always waits (a credential call) only
+  for an op marked with `declare_sandbox_delete_grant` (today only
+  `k8s.delete`). For such an op only the delete grant table is read. A
+  step of a multi-step operation is cleared by the delete grant only in a
+  run that no person approved yet; in a run that goes on after an
+  approval, the step waits for its own approval, as every credential step
+  does.
 - **Role checks in a handler.** A service login has the `operator` role
   on purpose. An op whose handler asks for `tenant_admin` must let a
   service principal through when its call runs at once in sandbox mode,
@@ -702,6 +722,8 @@ What the code does:
   multi-step operation through `parent_audit_id`.
 - **The step list.** `GET /api/v1/operations/governed-subops` (CLI:
   `meho operation subops`) marks delete steps grantable with the mode on.
+  This holds for `k8s.delete` too: it is a credential step, but it has
+  the mark `declare_sandbox_delete_grant`.
 - **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
   for every caller and `features.approval_queue.sandbox_mode`;
   `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line

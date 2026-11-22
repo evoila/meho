@@ -10,7 +10,10 @@ its token claims, a realm setting outside a short list):
 * waits, also for a platform admin in the web console with a fresh sign-in,
   and nothing is written;
 * is never approved by the login that asked, also not in the web console;
-  a second platform admin approves it.
+  a second platform admin approves it;
+* is refused by the sign-in guard of the Keycloak connector when it
+  changes the login flow of an approval client or of the realm, and
+  nothing is written.
 
 After a change of rights that ran alone, the next one still needs the
 approval sign-in level. The marker of where a change of rights was asked
@@ -78,6 +81,8 @@ from tests.test_rights_change_login_realm_platform_admin_alone import _login
 
 _CLIENT_UUID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 _SIGN_IN_TEXT = "can change the sign-in that MEHO asks for before an approval"
+#: The words of a refusal of the sign-in guard that say where the change is made.
+_WHERE = "Use the Keycloak admin console as a realm admin."
 
 
 class _ClientKeycloak(_FakeKeycloak):
@@ -305,6 +310,78 @@ async def test_a_platform_admin_s_update_of_the_approval_client_writes_nothing(
 
     dumped = result.model_dump(mode="json")
     assert dumped["status"] == "awaiting_approval", dumped
+    assert not put.called
+    assert await _run_rows() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_id", "overrides"),
+    [
+        ("meho-web-approve", {"browser": "made-up-flow-id"}),
+        ("meho-web-approve", {"browser": ""}),
+        ("meho-cli-approve", {"browser": "made-up-flow-id"}),
+        ("meho-cli-approve", {"direct_grant": "made-up-flow-id"}),
+    ],
+    ids=["web-new-flow", "web-flow-removed", "cli-new-flow", "cli-direct-grant-flow"],
+)
+async def test_the_sign_in_guard_refuses_a_flow_change_of_an_approval_client(
+    keycloak: KeycloakConnector,  # noqa: F811
+    client_id: str,
+    overrides: dict[str, str],
+) -> None:
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    client_path = f"/admin/realms/{_REALM}/clients/{_CLIENT_UUID}"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        mock.get(client_path).respond(
+            200,
+            json={
+                "id": _CLIENT_UUID,
+                "clientId": client_id,
+                "authenticationFlowBindingOverrides": {"browser": "approval-flow-id"},
+            },
+        )
+        put = mock.put(client_path).respond(204)
+        result = await dispatch(
+            operator=_person(platform_admin=True),
+            connector_id=_CONNECTOR_ID,
+            op_id="keycloak.client.update",
+            target=target,
+            params={
+                "id": _CLIENT_UUID,
+                "representation": {"authenticationFlowBindingOverrides": overrides},
+            },
+        )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "denied", dumped
+    assert _WHERE in str(dumped), dumped
+    assert not put.called
+    assert await _run_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_the_sign_in_guard_refuses_a_new_login_flow_of_the_login_realm(
+    keycloak: KeycloakConnector,  # noqa: F811
+) -> None:
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount(mock, group=_PLAIN_GROUP)
+        put = mock.put(f"/admin/realms/{_REALM}").respond(204)
+        result = await dispatch(
+            operator=_person(platform_admin=True),
+            connector_id=_CONNECTOR_ID,
+            op_id="keycloak.realm.update",
+            target=target,
+            params={"representation": {"browserFlow": "made-up-flow"}},
+        )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "denied", dumped
+    assert _WHERE in str(dumped), dumped
     assert not put.called
     assert await _run_rows() == []
 

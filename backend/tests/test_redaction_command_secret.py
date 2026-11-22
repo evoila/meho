@@ -585,6 +585,16 @@ _INNER_DOUBLE: Final[list[tuple[str, str]]] = [
 #: A quoted tool name inside a single-quoted command: its options end at the
 #: closing quote of that command.
 _QUOTED_TOOL_IN_SINGLE: Final = 'bash -c \'"mysql" -p' + PW + ' db\' && echo "ok"'
+#: (line, its secret value): a quoted value with spaces right before a shell
+#: operator. The policies run the api_key rule after this one, and it would
+#: read a mark with an operator glued after it as a value and hide the label
+#: too. So only the part inside the quotes is hidden, and the quotes stay.
+_QUOTED_BEFORE_OPERATORS: Final[list[tuple[str, tuple[str, ...]]]] = [
+    (f"{form}{quote}made up {PW}{quote}{operator} echo ok", (f"made up {PW}",))
+    for form in ("run --password=", "DB_PASSWORD=")
+    for quote in "'\""
+    for operator in (";", "&&", "|", ")")
+]
 #: Lines of :data:`_SECRETS_OF` that are read in plain text only. In a JSON
 #: string a quoted value starts with an escaped quote, and that ends the value.
 _PLAIN_TEXT_ONLY: Final = {
@@ -619,6 +629,9 @@ _SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
     ("DB_PASSWORD=ab12cd next", ("ab12cd",)),
     ("run --password=ab12cd; echo ok", ()),
     ("DB_PASSWORD=ab12cd; echo ok", ()),
+    *_QUOTED_BEFORE_OPERATORS,
+    (f"docker exec -i mysql mysql -p{PW} appdb", (PW,)),
+    (f"./mysql -p{PW} appdb", (PW,)),
 ]
 #: (line, its secret values, JSON levels): the line as a JSON log line, also
 #: inside more JSON documents. Every level of the answer that parses on main
@@ -1033,6 +1046,19 @@ def test_a_value_the_api_key_rule_would_hide_stays_in_a_policy_with_only_this_ru
     assert redact("run --password=ab12cd next", policy).redacted == f"run --password={_MARK} next"
 
 
+@pytest.mark.parametrize(("line", "secrets"), _QUOTED_BEFORE_OPERATORS)
+def test_a_quoted_password_before_an_operator_is_hidden_inside_its_quotes(
+    line: str, secrets: tuple[str, ...]
+) -> None:
+    """In the answer and the trace, the label, the quotes and the next command stay."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    expected = line.replace(secrets[0], _MARK)
+    for policy in (get_default_policy(), _CONTENT_POLICY):
+        assert redact(line, policy).redacted == expected
+    assert scrub_content(line)[0] == expected
+
+
 #: Ordinary command lines with no secret in them.
 _ORDINARY: Final[list[str]] = [
     *_KEPT,
@@ -1049,6 +1075,13 @@ _ORDINARY: Final[list[str]] = [
     "rsync -avz --delete src/ dest/\nrsync done",
     "docker run --rm -e LOG_LEVEL=debug -p 8080:80 nginx:1.27",
     "don't stop: sh -c 'mysql --version'; echo 'ok'",
+    # A tool name that ends a path outside a folder of programs, or that is
+    # the value of an option, is not the program that runs.
+    "find /tmp/mysql -print",
+    "ls -d /var/lib/mysql -print",
+    "docker run --name mysql -p3306:3306 mysql",
+    "docker run --hostname curl -u1000:1000 -p8080:80 nginx",
+    "kubectl -n mysql get pods -owide -p1",
 ]
 
 

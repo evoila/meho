@@ -17,7 +17,10 @@ option name and the words around it stay readable:
   ``osql`` or ``nsrsqlsv``, ``-w`` after ``ldapsearch`` or ``ldapmodify``,
   the part after the first ``:`` of ``curl -u`` or ``--user``, and the
   part after the first ``%`` of ``smbclient -U``. A tool name in quotes is
-  read too: its options follow the closing quote;
+  read too: its options follow the closing quote. A tool name is read only
+  when it names the program that runs: not at the end of a path outside a
+  ``bin`` or ``sbin`` folder (``find /tmp/mysql``), and not right after an
+  option, whose value it is (``docker run --name mysql``);
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY``.
 
@@ -76,8 +79,12 @@ With *leave_to* (the ``api_key`` pattern in :mod:`.patterns`), the finder
 leaves a value to that rule, so the answer stays as that rule makes it.
 It drops a value when a match of the pattern overlaps it or ends where it
 starts, and when a label of the pattern ends where the value starts and a
-character other than white space or a quote follows the value. In a
-policy without the ``api_key`` rule such a value is not hidden.
+character other than white space or a quote follows the value. The
+policies run this rule first, and the pattern would read a mark with such
+a character after it as a value and hide the label too. When the value is
+one quoted string, the finder hides only the part inside the quotes
+instead, so the label, the quotes and the next command stay. In a policy
+without the ``api_key`` rule such a value is not hidden.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
@@ -422,9 +429,28 @@ _UPPER_P_TOOLS: Final = frozenset({"sqlcmd", "bcp", "osql", "nsrsqlsv"})
 _SSHPASS_VALUE_OPTIONS: Final = frozenset({"-f", "-d", "-P"})
 
 
+def _is_program_folder(path: str) -> bool:
+    """True when *path*, the part of a word before a tool name, is a folder of programs.
+
+    A folder named ``bin`` or ``sbin`` (``/usr/bin/``) or the current or
+    parent folder (``./``) holds the program. A tool name at the end of
+    another path (``/tmp/mysql``) names a file or folder, not the tool.
+    """
+    folder = path.replace("\\", "").rstrip("/").rsplit("/", 1)[-1]
+    return folder in ("", ".", "..", "~") or folder.endswith("bin")
+
+
+def _is_option(word: str) -> bool:
+    """True for an option that may take the next word as its value (``--name``, ``-n``)."""
+    return word.startswith("-") and word != "--" and "=" not in word
+
+
 def _tool_name(word: str) -> str | None:
     """The tool a command word names, with its family folded in, or ``None``."""
-    match = _TOOL.fullmatch(word.rsplit("/", 1)[-1])
+    folder, slash, base = word.rpartition("/")
+    if slash and not _is_program_folder(folder + slash):
+        return None
+    match = _TOOL.fullmatch(base)
     if match is None:
         return None
     name = match.group(0)
@@ -524,6 +550,7 @@ def _segment_spans(
     tools = {tool}
     pos = first
     skip_next = False
+    previous = ""
     while pos < size:
         gap = _BLANKS.match(text, pos, size)
         pos = pos if gap is None else gap.end()
@@ -548,6 +575,7 @@ def _segment_spans(
             end += 1
         token = text[start:end]
         pos = end
+        option_before, previous = _is_option(previous), token
         if skip_next:
             skip_next = False
             continue
@@ -555,9 +583,11 @@ def _segment_spans(
         if span is not None:
             spans.append(span)
             pos = max(pos, span[1])
+            # The option took its value, so the next word is no option value.
+            previous = ""
         elif "sshpass" in tools and token in _SSHPASS_VALUE_OPTIONS:
             skip_next = True
-        elif (name := _tool_name(token)) is not None:
+        elif not option_before and (name := _tool_name(token)) is not None:
             tools.add(name)
         elif "sshpass" in tools and not token.startswith("-"):
             tools.discard("sshpass")
@@ -624,12 +654,45 @@ class _OpenStrings:
         return 1 << (levels[-1] - 1) if levels else 1
 
 
+#: The characters that end a word when it is read back from a tool name.
+_WORD_EDGE: Final = frozenset(" \t\n\r'\"`;|&<>(){}[],=")
+#: How far back a path or the word before a tool name is read.
+_LOOK_BACK: Final = 256
+
+
+def _word_back(text: str, end: int) -> str:
+    """The word that ends at *end*, read back to white space, a quote or an operator."""
+    begin = end
+    while begin > max(0, end - _LOOK_BACK) and text[begin - 1] not in _WORD_EDGE:
+        begin -= 1
+    return text[begin:end]
+
+
+def _runs_tool(text: str, match: re.Match[str]) -> bool:
+    """True when the tool name at *match* is the program that runs, not an argument.
+
+    It is not when it ends a path outside a folder of programs
+    (``find /tmp/mysql``), or when an option stands right before it
+    (``docker run --name mysql``): then it is a file or the option's value.
+    """
+    path = _word_back(text, match.start())
+    if path and not _is_program_folder(path):
+        return False
+    blank = match.start() - len(path)
+    while blank > 0 and text[blank - 1] in " \t":
+        blank -= 1
+    return blank == match.start() - len(path) or not _is_option(_word_back(text, blank))
+
+
 def _tool_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
     open_strings = _OpenStrings(text)
     pos = 0
     while (match := _TOOL.search(text, pos)) is not None:
+        if not _runs_tool(text, match):
+            pos = match.end()
+            continue
         tool = _tool_name(match.group(0)) or ""
         close = quotes.end(match.start())
         first, size = match.end(), len(text) if close is None else close
@@ -726,6 +789,35 @@ def _after_label(text: str, start: int, leave_to: re.Pattern[str]) -> bool:
     return any(m.end() == len(probe) and m.start() < cut for m in leave_to.finditer(probe))
 
 
+#: A value that is one quoted string: its quote (also written as a JSON
+#: escape, ``\\"``) and the part inside it.
+_QUOTED_VALUE: Final = re.compile(r"""(\\*['"])(.+)\1""", re.DOTALL)
+#: The mark the policies write in place of a value of this rule.
+_OWN_MARK: Final = "[REDACTED:command_line_secret]"
+
+
+def _inside_quotes(
+    text: str, start: int, end: int, leave_to: re.Pattern[str]
+) -> tuple[int, int] | None:
+    """The part inside the quotes of a quoted value, when *leave_to* then keeps the label.
+
+    The policies run this rule before *leave_to*. A mark that a character
+    such as ``;`` follows is read by *leave_to* as a value, and it would
+    hide the label too. A mark inside the quotes is not, so the quotes
+    stay and only the part inside them is hidden.
+    """
+    quoted = _QUOTED_VALUE.fullmatch(text, start, end)
+    if quoted is None:
+        return None
+    inner = quoted.span(2)
+    begin = max(0, start - _LABEL_WINDOW)
+    probe = text[begin : inner[0]] + _OWN_MARK + text[inner[1] : end + _LABEL_WINDOW]
+    cut = inner[0] - begin
+    if any(m.start() < cut < m.end() for m in leave_to.finditer(probe)):
+        return None
+    return inner
+
+
 def _left_to(
     text: str, spans: list[tuple[int, int]], leave_to: re.Pattern[str]
 ) -> list[tuple[int, int]]:
@@ -746,7 +838,10 @@ def _left_to(
         follows = text[end : end + 1]
         glued = bool(follows) and not follows.isspace() and follows not in "'\""
         if glued and _after_label(text, start, leave_to):
-            continue
+            inner = _inside_quotes(text, start, end, leave_to)
+            if inner is None:
+                continue
+            start, end = inner
         kept.append((start, end))
     return kept
 

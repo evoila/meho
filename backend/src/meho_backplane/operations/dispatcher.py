@@ -4105,6 +4105,11 @@ async def dispatch(
     claim was already taken are not new work and go on. Every top-level
     call is kept in the list of running calls, so the stopping pod can wait
     for it and record it when it does not finish.
+
+    A call of a person an admin blocked is refused before anything is sent
+    (:mod:`._principal_block_gate`). Each step of a multi-step operation
+    checks the block list again, so a block made while the operation runs
+    stops its next step.
     """
     # #6044: no policy rule until this call's own policy gate runs. A step
     # of a multi-step operation that is refused before its gate (wrong
@@ -4113,6 +4118,18 @@ async def dispatch(
     rule_token = policy_rule_var.set(None)
     try:
         if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+            # A step of a multi-step operation: the person may be blocked
+            # since the operation started, so each step checks again.
+            blocked_step = await refuse_if_principal_blocked(
+                op_id, operator.sub, operator.tenant_id
+            )
+            if blocked_step is not None:
+                _log.info(
+                    "dispatch_step_refused_principal_blocked",
+                    op_id=op_id,
+                    operator_sub=operator.sub,
+                )
+                return blocked_step
             with agent_no_grant_log_scope():
                 return await _dispatch_now(
                     operator=operator,

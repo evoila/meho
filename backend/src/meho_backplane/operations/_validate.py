@@ -47,6 +47,12 @@ from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.operations.caller_address import has_caller_address
+from meho_backplane.operations.rights_change_console import (
+    CONSOLE_RUN_REASON,
+    console_check,
+    keep_console_run_sign_in,
+    runs_at_once_in_console,
+)
 from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -898,19 +904,20 @@ async def _non_agent_verdict(
     ``read_scope_denied`` reason. Calls that park keep today's rules
     (grants or approval).
 
-    A person below the op's role floor (:func:`_person_role_floor_denial`)
-    is ``DENY`` before any other rule. These two are the only ``DENY``
-    verdicts this branch returns.
+    A person below the op's role floor is ``DENY`` before any other rule.
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
     is_service = operator.principal_kind is PrincipalKind.SERVICE
-    role_denial = _person_role_floor_denial(operator, descriptor, target_id_str)
-    if role_denial is not None:
+    if (role_denial := _person_role_floor_denial(operator, descriptor, target_id_str)) is not None:
         return PermissionVerdict.DENY, role_denial
     gate_reason = _non_agent_park_reason(
         operator, descriptor, is_service=is_service, decide_only=decide_only
     )
-
+    console = await _console_rights_verdict(
+        operator, descriptor, target, connector_id, params, gate_reason
+    )
+    if console is not None:
+        return console
     if gate_reason is None and is_service:
         denial = await _service_read_scope_denial(operator=operator, target=target)
         if denial is not None:
@@ -968,6 +975,39 @@ async def _non_agent_verdict(
         target_id=target_id_str,
     )
     return PermissionVerdict.NEEDS_APPROVAL, gate_reason
+
+
+async def _console_rights_verdict(
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    params: dict[str, Any] | None,
+    gate_reason: str | None,
+) -> tuple[PermissionVerdict, str | None] | None:
+    """An admin's change of rights in the web console: run at once, deny, or ``None``.
+
+    ``None`` when the call would not wait (*gate_reason* is ``None``), is no
+    such change, or waits all the same.
+    See :mod:`~meho_backplane.operations.rights_change_console`.
+    """
+    if gate_reason is None or not runs_at_once_in_console(operator, descriptor, params=params):
+        return None
+    check = await console_check(
+        operator, connector_id=connector_id, descriptor=descriptor, target=target, params=params
+    )
+    if check.refusal is not None:
+        return PermissionVerdict.DENY, check.refusal
+    if check.waits:
+        return None
+    keep_console_run_sign_in(check.sign_in)
+    _log.info(
+        "policy_gate_rights_change_console_run",
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        op_id=descriptor.op_id,
+    )
+    return PermissionVerdict.AUTO_EXECUTE, CONSOLE_RUN_REASON
 
 
 def _requester_denial(

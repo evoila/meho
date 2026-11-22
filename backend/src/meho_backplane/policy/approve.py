@@ -9,11 +9,12 @@
 1. **Floor:** only a person approves. Agents, services and runners never do.
 2. A ``read_only`` person without the approver flag cannot decide.
 3. Only a pending request can be approved.
-4. **Floor:** a change of rights only another admin approves; the person
-   who asked never does, and neither do the people behind the agent,
-   service or runner login that asked. A change of a login's or a group's
-   rights also follows the rules on who the change is for
-   (``grant_refusal``).
+4. **Floor:** only an admin approves a change of rights, and only with a
+   click in the web interface. The admin may be the person who asked, or a
+   person behind the agent, service or runner login that asked. A change of
+   a login's or a group's rights also follows the rules on who the change
+   is for (``grant_refusal``); in MEHO's own login realm the login that
+   asked never approves it.
 5. A machine login asked and MEHO knows nobody behind it: only an admin.
 6. An own change, also for the people behind the login that asked: a
    MEHO-Admin may approve it; a person may approve their own ``caution``
@@ -90,13 +91,21 @@ def _is_admin(asker: Asker) -> bool:
     return is_admin and asker.tenant_chosen
 
 
+def _rights_change_refusal(asker: Asker) -> tuple[bool, RuleRef] | None:
+    if not _is_admin(asker):
+        return _no("rights_change", "only an admin approves a change of rights", source="floor")
+    if asker.via != "web":
+        return _no(
+            "rights_change",
+            "approve this change of rights in the web console",
+            source="floor",
+        )
+    return None
+
+
 def _is_own(asker: Asker, ask: ApprovalAsk) -> bool:
     mine = asker.sub.casefold()
     return mine == ask.requester_sub.casefold() or mine in ask.people_behind
-
-
-def _may_approve_rights_change(asker: Asker, ask: ApprovalAsk) -> bool:
-    return not _is_own(asker, ask) and _is_admin(asker)
 
 
 def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
@@ -111,14 +120,14 @@ def _own_change(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
 
 
 def _group_rule(asker: Asker, ask: ApprovalAsk) -> tuple[bool, RuleRef]:
-    if ask.rights_change and not _may_approve_rights_change(asker, ask):
-        return _no(
-            "rights_change", "only another admin approves a change of rights", source="floor"
-        )
+    if ask.rights_change and (refusal := _rights_change_refusal(asker)) is not None:
+        return refusal
     if ask.grant_refusal is not None:
         return _no("grant_change", ask.grant_refusal, source="floor")
     if ask.requester_unknown and not _is_admin(asker):
         return _no("requester_not_known", "only an admin approves when nobody is known behind")
+    if ask.rights_change and _is_own(asker, ask):
+        return _yes("sa_operator_self_approval", "an admin's own change of rights, in the web")
     if asker.sub == ask.requester_sub or asker.sub.casefold() in ask.people_behind:
         return _own_change(asker, ask)
     if ask.risk not in _HIGH_RISK:

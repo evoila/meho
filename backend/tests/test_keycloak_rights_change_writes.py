@@ -11,11 +11,13 @@ tests check:
   fails here until it gets this decision;
 * every change of rights is registered as one and carries the per-call
   mark, from the register function alone;
-* for each change of rights: the requester cannot approve their own
-  request, a MEHO-SA-Operator who is not an admin cannot approve it,
-  another admin can, no standing grant can be made for it, an older grant
-  row does not clear the wait, a run approval cannot list it or clear the
-  wait, and an agent's call waits even with a grant that would run it.
+* for each change of rights: a requester who is not an admin cannot
+  approve their own request, a MEHO-SA-Operator who is not an admin cannot
+  approve it, an admin can in the web console (also the admin who asked),
+  no admin can with a token, no standing grant can be made for it, an
+  older grant row does not clear the wait, a run approval cannot list it
+  or clear the wait, and an agent's call waits even with a grant that
+  would run it.
 
 Fixture values are made up.
 """
@@ -105,7 +107,11 @@ _RUN_REF = "run-keycloak-0001"
 
 
 def _person(
-    sub: str, *, role: TenantRole = TenantRole.TENANT_ADMIN, sa_operator: bool = False
+    sub: str,
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    sa_operator: bool = False,
+    web: bool = True,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -113,6 +119,7 @@ def _person(
         tenant_id=_TENANT_A,
         tenant_role=role,
         self_approver=sa_operator,
+        web_session=web,
     )
 
 
@@ -255,8 +262,10 @@ async def _status(request_id: uuid.UUID) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _RIGHTS)
-async def test_the_requester_cannot_approve_their_own_request(op_id: str) -> None:
-    requester = _person(_REQUESTER, sa_operator=True)
+async def test_a_requester_who_is_not_an_admin_cannot_approve_their_own_request(
+    op_id: str,
+) -> None:
+    requester = _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True)
     request_id = await _park(op_id, requester)
 
     with pytest.raises(RightsChangeApprovalError):
@@ -278,12 +287,35 @@ async def test_an_sa_operator_who_is_not_an_admin_cannot_approve(op_id: str) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _RIGHTS_NOT_GRANT)
-async def test_another_admin_approves(op_id: str) -> None:
+async def test_another_admin_approves_in_the_console(op_id: str) -> None:
     request_id = await _park(op_id, _person(_REQUESTER, role=TenantRole.OPERATOR))
 
     await _approve(request_id, _person("person-admin"))
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _RIGHTS_NOT_GRANT)
+async def test_the_admin_who_asked_approves_in_the_console(op_id: str) -> None:
+    request_id = await _park(op_id, _person(_REQUESTER))
+
+    await _approve(request_id, _person(_REQUESTER))
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _RIGHTS)
+async def test_no_admin_approves_with_a_token(op_id: str) -> None:
+    request_id = await _park(op_id, _person(_REQUESTER))
+
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person(_REQUESTER, web=False))
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person("person-admin", web=False))
+
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -467,7 +499,7 @@ async def test_an_edit_that_turns_approval_off_is_refused(op_id: str) -> None:
         overrides = (await session.execute(select(OperationPolicyOverride))).scalars().all()
 
     assert caught.value.code == "approval_off_rights_change"
-    assert "another admin" in str(caught.value)
+    assert "an admin approves it in the web console" in str(caught.value)
     assert overrides == []
 
 
@@ -494,7 +526,7 @@ async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -
         sub=_REQUESTER,
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT_A,
-        tenant_role=TenantRole.TENANT_ADMIN,
+        tenant_role=TenantRole.OPERATOR,
         web_session=True,
     )
 

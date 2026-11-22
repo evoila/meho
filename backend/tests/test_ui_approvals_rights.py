@@ -187,15 +187,20 @@ def _rights_change_request() -> uuid.UUID:
     return rid
 
 
-def test_a_marked_request_says_another_admin_must_approve() -> None:
+def _console(operator: Operator) -> Operator:
+    """*operator* as the web console's own sign-in builds it."""
+    return operator.model_copy(update={"web_session": True})
+
+
+def test_a_marked_request_says_only_an_admin_approves() -> None:
     rid = _rights_change_request()
 
-    body = _modal(_operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN), rid)
+    body = _modal(_console(_operator(tenant_id=_TENANT_A, sub="person-op")), rid)
 
     assert "data-approval-rights-change" in body
-    assert "Another admin must approve" in body
+    assert "An admin approves it in the web console" in body
     assert 'data-approve-reason="rights_change"' in body
-    assert "This is a change of rights. Another admin must approve it." in body
+    assert "This is a change of rights. Only an admin may approve it." in body
     assert "disabled" in _approve_button(body)
 
 
@@ -203,11 +208,31 @@ def test_a_marked_request_may_be_approved_by_another_admin() -> None:
     rid = _rights_change_request()
     admin = _operator(tenant_id=_TENANT_A, role=TenantRole.TENANT_ADMIN, sub="second-admin")
 
-    body = _modal(admin, rid)
+    body = _modal(_console(admin), rid)
 
     assert "data-approval-rights-change" in body
     assert 'data-approve-right="yes"' in body
     assert 'data-approve-reason="ok"' in body
+
+
+def test_the_admin_who_asked_may_approve_their_own_marked_request() -> None:
+    rid = _rights_change_request()
+
+    body = _modal(_console(_admin()), rid)
+
+    assert "data-approval-rights-change" in body
+    assert 'data-approve-right="yes"' in body
+    assert 'data-approve-reason="own_change"' in body
+    assert "disabled" not in _approve_button(body)
+
+
+def test_the_admin_who_asked_approves_their_own_marked_request_with_a_click() -> None:
+    rid = _rights_change_request()
+
+    response = _post_decision(_console(_admin()), rid)
+
+    assert response.status_code == 200, response.text  # type: ignore[attr-defined]
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
 
 
 def test_the_button_matches_what_the_click_does() -> None:

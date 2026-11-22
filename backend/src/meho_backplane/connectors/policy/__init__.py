@@ -46,6 +46,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.op_policy import register_policy_repair_op
+from meho_backplane.operations.rights_change_console import register_no_login_realm_op
 from meho_backplane.operations.role_floors import register_requester_check, register_role_floor
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
@@ -54,6 +55,7 @@ register_typed_op_registrar(register_policy_classify_preview_operation)
 register_role_floor(POLICY_CLASSIFY_OP_ID, TenantRole.TENANT_ADMIN)
 register_role_floor(POLICY_CLASSIFY_PREVIEW_OP_ID, TenantRole.TENANT_ADMIN)
 register_rights_change_op(POLICY_CLASSIFY_OP_ID)
+register_no_login_realm_op(POLICY_CLASSIFY_OP_ID)
 declare_per_call_approval([POLICY_CLASSIFY_OP_ID])
 register_requester_check(POLICY_CLASSIFY_OP_ID, policy_classify_requester_refusal)
 register_preview_builder(POLICY_CLASSIFY_OP_ID, build_policy_classify_preview)
@@ -62,6 +64,7 @@ register_permission_preflight(POLICY_CLASSIFY_OP_ID, record_policy_apply_request
 register_typed_op_registrar(register_policy_apply_operation)
 register_role_floor(POLICY_APPLY_OP_ID, TenantRole.TENANT_ADMIN)
 register_rights_change_op(POLICY_APPLY_OP_ID)
+register_no_login_realm_op(POLICY_APPLY_OP_ID)
 declare_per_call_approval([POLICY_APPLY_OP_ID])
 register_requester_check(POLICY_APPLY_OP_ID, policy_apply_requester_refusal)
 register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)

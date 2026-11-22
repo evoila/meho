@@ -14,7 +14,7 @@ category, labels and the "always wait" mark (see
   Nothing is written.
 * ``POST /api/v1/policy/classification`` -- ask for the edit. It is a
   change of rights, so the answer is ``202`` with the id of the approval
-  request: a second tenant admin must approve it.
+  request: a tenant admin must approve it in the web console.
 * ``PATCH /api/v1/connectors/{connector_id}/classification`` -- the same
   request for one whole connector.
 
@@ -197,7 +197,7 @@ class ClassificationPreviewResponse(BaseModel):
 
 
 class ClassificationRequestResponse(BaseModel):
-    """The answer to an edit request: it waits until a second tenant admin approves it."""
+    """The answer to an edit request: it waits until a tenant admin approves it in the console."""
 
     status: str
     approval_request_id: str | None
@@ -275,7 +275,7 @@ async def classification_request_response(
         status=status,
         approval_request_id=extras.get("approval_request_id"),
         message=(
-            "The change waits until another tenant admin approves it."
+            "The change waits until a tenant admin approves it in the web console."
             if status == "awaiting_approval"
             else str(result.get("error") or "The change is stored.")
         ),
@@ -309,7 +309,8 @@ CLASSIFICATION_PATCH_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
         "model": ClassificationRequestResponse,
         "description": (
-            "category / labels were sent: the change waits until another tenant admin approves it."
+            "category / labels were sent: the change waits until a tenant admin "
+            "approves it in the web console."
         ),
     },
 }
@@ -320,8 +321,8 @@ def classification_patch(
 ) -> ClassificationEdit | None:
     """The classification edit in a PATCH *body*, or ``None`` when it sets none.
 
-    ``category`` and ``labels`` are a change of rights that waits for a
-    second admin, so they cannot ride along with fields that are stored at
+    ``category`` and ``labels`` are a change of rights that waits for an
+    admin's approval, so they cannot ride along with fields that are stored at
     once: a body with both is refused with ``400``. The route edits one
     group or operation, so an id with ``*``, ``?`` or ``[`` is refused with
     ``400`` too.
@@ -335,7 +336,7 @@ def classification_patch(
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=(
-                "classification_mixed: category and labels wait for another tenant admin, "
+                "classification_mixed: category and labels wait for a tenant admin's approval, "
                 f"so send them in a request of their own, without {', '.join(mixed)}."
             ),
         )
@@ -392,7 +393,7 @@ async def preview_classification(
 _REQUEST_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
         "model": ClassificationRequestResponse,
-        "description": "The change waits until another tenant admin approves it.",
+        "description": "The change waits until a tenant admin approves it in the web console.",
     },
 }
 
@@ -406,7 +407,7 @@ _REQUEST_RESPONSES: dict[int | str, dict[str, Any]] = {
 async def request_classification(
     body: ClassificationEditBody, operator: Operator = _require_admin
 ) -> JSONResponse:
-    """Ask for one edit. It waits until another tenant admin approves it.
+    """Ask for one edit. It waits until a tenant admin approves it in the web console.
 
     Refused with ``400`` (nothing asked) when the edit is not valid, matches
     no operation, or would give an operation a conflict: run the preview
@@ -429,7 +430,7 @@ async def classify_connector(
     """Ask to set the category, labels or "always wait" of one whole connector.
 
     Its groups and operations take these values unless they have their own.
-    Waits until another tenant admin approves it. A connector id with
+    Waits until a tenant admin approves it in the web console. A connector id with
     ``*``, ``?`` or ``[`` is refused with ``400``: this route edits one
     connector, never a pattern.
     """

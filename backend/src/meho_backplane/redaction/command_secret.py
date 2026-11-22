@@ -21,10 +21,17 @@ option name and the words around it stay readable:
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY``.
 
-Connection strings, a ``password=`` word outside an option, a database
-login with user, password and service, the text of an XML element named
-like a secret, a quoted value that runs over a line break, and strings
-inside JSON strings are not read by this rule yet, see Task #6747.
+Each JSON string of the text is decoded and read like plain text, also a
+JSON string inside another one, up to three levels deep. So the forms are
+hidden there too. A value found there ends at the end of its string, and
+the mark replaces whole escapes, so every JSON level still parses.
+
+Not read by this rule yet, see Task #6747: connection strings, a
+``password=`` word outside an option, a database login with user,
+password and service, the text of an XML element named like a secret, a
+single-quoted command that is joined with an escaped single quote before
+the option, a quoted command or value that runs over a line break, tool
+names in capitals or with ``.EXE``, and the other forms that Task lists.
 
 A value is read the way a shell reads one word: it ends at white space or
 at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
@@ -64,11 +71,13 @@ policy without the ``api_key`` rule such a value is not hidden.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
-again, and the matches of *leave_to* are found once per text.
+again, each JSON string is decoded once per level, and the matches of
+*leave_to* are found once per text.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
 from typing import Final
 
@@ -715,9 +724,101 @@ def _left_to(
     return kept
 
 
+# -- JSON strings -----------------------------------------------------------------
+
+_JSON_ESCAPES: Final[dict[str, str]] = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "b": "\b",
+    "f": "\f",
+}
+_HEX4: Final = re.compile(r"[0-9A-Fa-f]{4}")
+#: What ends a run of plain characters in a JSON string.
+_STRING_MARK: Final = re.compile(r'["\\\n\r]')
+#: How many JSON strings inside each other are decoded.
+_JSON_LEVELS: Final = 3
+
+
+def _decode_json_strings(text: str) -> tuple[str, list[int], list[int]]:
+    """The JSON strings of *text*, decoded, each followed by a line end.
+
+    A double quote opens a string and the next unescaped double quote
+    closes it. An invalid escape or a raw line end means there is no
+    string here; the scan goes on after it, so each character is read
+    once. Returns the decoded text, the place in *text* of each of its
+    characters (the closing quote for each added line end, and the start
+    of the escape for a decoded escape), and the places of the added line
+    ends in the decoded text.
+    """
+    parts: list[str] = []
+    places: list[int] = []
+    ends: list[int] = []
+    pos = 0
+    while (opening := text.find('"', pos)) != -1:
+        string: list[str] = []
+        where: list[int] = []
+        pos = opening + 1
+        while (mark := _STRING_MARK.search(text, pos)) is not None:
+            at = mark.start()
+            string.append(text[pos:at])
+            where.extend(range(pos, at))
+            pos = at + 1
+            if text[at] != "\\":
+                break
+            escape = text[at + 1 : at + 2]
+            if escape in _JSON_ESCAPES:
+                string.append(_JSON_ESCAPES[escape])
+                pos = at + 2
+            elif escape == "u" and _HEX4.fullmatch(text, at + 2, at + 6):
+                string.append(chr(int(text[at + 2 : at + 6], 16)))
+                pos = at + 6
+            else:
+                break
+            where.append(at)
+        if mark is None:
+            break
+        if text[mark.start()] == '"':
+            parts.extend(string)
+            places.extend(where)
+            ends.append(len(places))
+            parts.append("\n")
+            places.append(mark.start())
+    return "".join(parts), places, ends
+
+
+def _json_spans(text: str) -> list[tuple[int, int]]:
+    """The secret values inside the JSON strings of *text*, up to three levels deep.
+
+    Each decoded string is read like plain text. A value found there ends
+    at the end of its string and is mapped back to *text*, so a mark
+    replaces whole escapes and every JSON level still parses.
+    """
+    spans: list[tuple[int, int]] = []
+    current, origin = text, list(range(len(text) + 1))
+    for _level in range(_JSON_LEVELS):
+        decoded, places, ends = _decode_json_strings(current)
+        if not decoded:
+            break
+        raw = [origin[place] for place in places]
+        for start, end in _plain_spans(decoded):
+            end = min(end, ends[bisect.bisect_left(ends, start)])
+            if start < end:
+                spans.append((raw[start], raw[end]))
+        current, origin = decoded, raw
+    return spans
+
+
+def _plain_spans(text: str) -> list[tuple[int, int]]:
+    return [*_long_option_spans(text), *_tool_spans(text), *_environment_spans(text)]
+
+
 def _value_spans(text: str) -> list[tuple[int, int]]:
-    """The secret values of every form, sorted and merged."""
-    return merge_spans([*_long_option_spans(text), *_tool_spans(text), *_environment_spans(text)])
+    """The secret values of every form, also in decoded JSON strings, sorted and merged."""
+    return merge_spans([*_plain_spans(text), *_json_spans(text)])
 
 
 class CommandSecretFinder:

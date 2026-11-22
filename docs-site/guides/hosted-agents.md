@@ -168,8 +168,8 @@ More rules:
     It lists only targets of connectors in the list.
   - When every target that the exact-name step of the lookup finds is
     outside the list, or every target that the alias step finds is
-    outside the list, MEHO answers "no target" (`no_target`), in the same
-    form as for a name that no target has.
+    outside the list, MEHO answers "no target" (`no_target`) with no close
+    names.
   - An answer never names a target outside the list, and never names its
     product.
   - The close target names of a "no target" answer leave out the targets

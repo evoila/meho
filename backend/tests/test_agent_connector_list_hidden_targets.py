@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A hosted agent with a connector list gets the same answer for a target
-outside its list as for a name that does not exist.
+"""A hosted agent with a connector list gets ``no_target`` for a target
+outside its list.
 
 With a ``connectors`` list on the agent's toolset, a name or alias that
-fits only targets outside the list answers ``no_target``, with near-match
-targets from inside the list only. This holds for ``call_operation``,
+fits only targets outside the list answers ``no_target`` with no close
+names. This holds for ``call_operation``,
 ``preview_operation``, the ``target`` filter of ``meho_connector_list`` and
 the docs tools: all of them look the target up with the target resolver.
 
@@ -239,6 +239,38 @@ async def test_alias_of_two_targets_inside_and_one_outside_names_only_the_inside
             "ambiguous_target",
             ["trio-fence-a", "trio-fence-b"],
         )
+
+
+@pytest.mark.asyncio
+async def test_shared_alias_outside_the_list_adds_no_close_name() -> None:
+    """A target inside the list whose name starts with the alias is not suggested."""
+    await _add_targets(
+        {
+            "dup-out-a": ("other", ["dup"]),
+            "dup-out-b": ("other", ["dup"]),
+            "dup-inside": ("fence", []),
+        }
+    )
+    with connector_limit(_ONLY_FENCE):
+        assert await _resolver_answer("dup") == ("no_target", [])
+    assert await _resolver_answer("dup") == ("ambiguous_target", ["dup-out-a", "dup-out-b"])
+
+
+@pytest.mark.asyncio
+async def test_name_and_alias_of_one_target_outside_the_list_add_no_close_name() -> None:
+    """Targets inside the list whose names start with the name or alias are not suggested."""
+    await _add_targets(
+        {
+            "one-out": ("other", ["one-al"]),
+            "one-out-inside": ("fence", []),
+            "one-al-inside": ("fence", []),
+        }
+    )
+    with connector_limit(_ONLY_FENCE):
+        assert await _resolver_answer("one-out") == ("no_target", [])
+        assert await _resolver_answer("one-al") == ("no_target", [])
+    assert await _resolver_answer("one-out") == "one-out"
+    assert await _resolver_answer("one-al") == "one-out"
 
 
 async def _near_match_names(query: str) -> list[str]:

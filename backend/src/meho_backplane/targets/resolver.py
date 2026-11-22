@@ -24,7 +24,7 @@ A hosted agent with a ``connectors`` list sees only the targets of those
 connectors (:func:`_rows_the_caller_may_see`):
 
 * when the hits of step 1 or step 2 are all outside the list, the answer is
-  :exc:`TargetNotFoundError`, the same as for a name with no hit;
+  :exc:`TargetNotFoundError` with no close names;
 * the hits of :exc:`AmbiguousTargetError` and the near-misses of
   :exc:`TargetNotFoundError` name only targets inside the list.
 
@@ -151,7 +151,6 @@ async def _not_found(session: AsyncSession, tenant_id: UUID, query: str) -> Targ
 
 
 async def _pick_one(
-    session: AsyncSession,
     tenant_id: UUID,
     query: str,
     hits: list[TargetORM],
@@ -163,14 +162,15 @@ async def _pick_one(
     More than one hit is :exc:`AmbiguousTargetError`, which names only the
     hits the caller may see. A hosted agent with a ``connectors`` list sees
     only the targets of those connectors: when it may see none of the hits,
-    the answer is :exc:`TargetNotFoundError`, the same as for a name with no
-    hit. Without a list every hit counts.
+    the answer is :exc:`TargetNotFoundError` with no close names. Without a
+    list every hit counts.
     """
     if not hits:
         return None
     visible = await _rows_the_caller_may_see(hits)
     if not visible:
-        raise await _not_found(session, tenant_id, query)
+        _log.info("target_not_found", tenant_id=str(tenant_id), query=query, near_misses=[])
+        raise TargetNotFoundError(query, [])
     if len(hits) == 1:
         return hits[0]
     summaries = [project_target_to_summary(t) for t in visible]
@@ -233,12 +233,12 @@ async def resolve_target(
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
-    target = await _pick_one(session, tenant_id, query, exact_hits, event="ambiguous_exact_name")
+    target = await _pick_one(tenant_id, query, exact_hits, event="ambiguous_exact_name")
 
     if target is None:
         # Step 2: alias match — dialect-aware.
         alias_hits = await _alias_match(session, tenant_id, query)
-        target = await _pick_one(session, tenant_id, query, alias_hits, event="ambiguous_target")
+        target = await _pick_one(tenant_id, query, alias_hits, event="ambiguous_target")
 
     if target is None:
         # Step 3: near-miss for 404 detail.

@@ -223,8 +223,8 @@ JSON-shaped (so it can grow without a migration):
   - The target resolver (`targets/resolver.py`, `_pick_one`) does three
     things with a list:
     - When every hit of the exact-name step, or every hit of the alias
-      step, is outside the list, the answer is `no_target`, in the same
-      form as for a name that no target has.
+      step, is outside the list, the answer is `no_target` with no close
+      names.
     - An answer never names a target outside the list, and never names
       its product.
     - The near-matches of a `no_target` answer leave out the targets

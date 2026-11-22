@@ -345,12 +345,14 @@ class VaultKvSecretEndpoint:
         value = material.value.decode("utf-8")
         expect = _approved_sink_expectation()
         async with self._client(operator, "vault.kv.patch") as client:
-            await asyncio.to_thread(self._merge_write, client, value, expect)
+            await asyncio.to_thread(self._merge_write, client, value, expect, operator)
 
-    def _merge_write(self, client: hvac.Client, value: str, expect: _SinkExpectation) -> None:
+    def _merge_write(
+        self, client: hvac.Client, value: str, expect: _SinkExpectation, operator: Operator
+    ) -> None:
         """Blocking read-modify-write with CAS (runs in a worker thread)."""
         kv = client.secrets.kv.v2
-        body, cas = self._merge_read(kv, expect)
+        body, cas = self._merge_read(kv, expect, operator)
         body[self._field] = value
         try:
             kv.create_or_update_secret(
@@ -364,11 +366,15 @@ class VaultKvSecretEndpoint:
                 refusal = SecretSinkChangedError("the sink secret")
             raise refusal from exc
 
-    def _merge_read(self, kv: Any, expect: _SinkExpectation) -> tuple[dict[str, Any], int]:
+    def _merge_read(
+        self, kv: Any, expect: _SinkExpectation, operator: Operator
+    ) -> tuple[dict[str, Any], int]:
         """Read the sink secret for a merge: its data and the version to guard with.
 
         ``({}, 0)`` when the secret does not exist. Refuses a deleted latest
-        version and a sink that differs from what the approval said.
+        version and a sink that differs from what the approval said. A read
+        that returns the secret notes the caller's login for the audit row,
+        also when the write after it fails or is refused.
         """
         try:
             payload = kv.read_secret_version(
@@ -381,10 +387,13 @@ class VaultKvSecretEndpoint:
             if expect.secret_missing:
                 raise SecretSinkChangedError("the sink secret") from None
             raise SecretMergeDeletedVersionError from None
+        metadata = _version_metadata(payload) or {}
+        deleted = bool(metadata.get("deletion_time")) or metadata.get("destroyed") is True
+        if not deleted:
+            record_caller_secret_read(operator)
         if expect.secret_missing:
             raise SecretSinkChangedError("the sink secret")
-        metadata = _version_metadata(payload) or {}
-        if metadata.get("deletion_time") or metadata.get("destroyed") is True:
+        if deleted:
             raise SecretMergeDeletedVersionError
         body = dict(_structural_unwrap(payload, path=self._path))
         version = metadata.get("version")

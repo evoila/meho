@@ -539,19 +539,19 @@ def _rights_approver(
     )
 
 
-def test_a_second_admin_may_approve_a_rights_change() -> None:
-    assert _rights_approver().may_approve_rights_change("requester") is True
+def test_an_admin_may_approve_a_rights_change() -> None:
+    assert _rights_approver().may_approve_rights_change() is True
 
 
 def test_a_platform_admin_may_approve_a_rights_change() -> None:
     operator = _rights_approver(role=TenantRole.OPERATOR, platform_admin=True)
-    assert operator.may_approve_rights_change("requester") is True
+    assert operator.may_approve_rights_change() is True
 
 
-@pytest.mark.parametrize("sub", ["requester", "REQUESTER"])
-def test_the_requester_never_approves_their_own_rights_change(sub: str) -> None:
-    operator = _rights_approver(sub, platform_admin=True, self_approver=True)
-    assert operator.may_approve_rights_change("requester") is False
+def test_the_admin_who_asked_may_approve_their_own_rights_change() -> None:
+    """The check names no requester: the admin who asked is an admin too."""
+    operator = _rights_approver("requester")
+    assert operator.may_approve_rights_change() is True
 
 
 @pytest.mark.parametrize(
@@ -567,4 +567,4 @@ def test_the_requester_never_approves_their_own_rights_change(sub: str) -> None:
     ids=["operator", "sa-operator", "reader", "agent", "service", "no-tenant-chosen"],
 )
 def test_others_may_not_approve_a_rights_change(operator: Operator) -> None:
-    assert operator.may_approve_rights_change("requester") is False
+    assert operator.may_approve_rights_change() is False

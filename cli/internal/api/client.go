@@ -154,6 +154,7 @@ func NewAuthedClient(ctx context.Context, backplaneURL string, opts AuthedClient
 		req.Header.Set("Authorization", authorizationHeader(bearer))
 		SetSessionIDHeader(req, box.sessionID())
 		SetWorkRefHeader(req)
+		SetCommandHeader(req)
 		SetTenantHeader(req)
 		return nil
 	}

@@ -1183,7 +1183,7 @@ app.include_router(api_v1_tenants_router)
 app.include_router(api_v1_instance_settings_router)
 # The policy file (policy: v1): /api/v1/policy/validate, /import
 # (?preview=true), /export, /history. tenant_admin or platform_admin; the
-# import is human-only and waits for a second admin. REST + CLI only.
+# import is human-only and waits for an admin's approval. REST + CLI only.
 app.include_router(api_v1_policy_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
@@ -1240,7 +1240,7 @@ app.include_router(api_v1_connectors_ingest_router)
 # approval flags, and the "operations running with reduced approval" list.
 app.include_router(api_v1_operation_overrides_router)
 # #6038 -- read and edit the classification of operations (category,
-# labels, "always wait"): dry run, then a request a second admin approves.
+# labels, "always wait"): dry run, then a request an admin approves.
 app.include_router(api_v1_policy_classification_router)
 app.include_router(api_v1_connector_classification_router)
 # #5029 -- each tenant turns built-in operations on or off for itself.

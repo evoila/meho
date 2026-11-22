@@ -14,7 +14,8 @@ Two places hold classification entries:
 :func:`classify_rows` reads both and returns the classified values of
 each operation row (:func:`~meho_backplane.policy.classification.classify`).
 :func:`set_classification` changes one entry of a tenant's document. It
-runs only after a second admin approved the change (the
+runs after an admin approved the change, or at once for an admin in the
+web console (the
 ``policy.classify`` operation, :mod:`meho_backplane.connectors.policy`).
 
 Nothing here runs while the ``POLICY_CLASSIFICATION`` switch is off

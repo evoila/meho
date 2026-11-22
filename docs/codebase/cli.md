@@ -1304,6 +1304,22 @@ header, next to `Meho-Work-Ref`, on every backplane request.
   they do not count a CLI call as an agent session. A header that is not
   a UUID is ignored.
 
+## Command path (`Meho-Command`)
+
+The root `PersistentPreRunE` (`applyCommand` in `tenant_header.go`) puts
+the path of the running command, without the program name, into the
+command context (`api.WithCommand`), for example `vmware vm list`. Only
+command names go into it, never an argument or a flag. The request
+editor and the hand-rolled requests send it in the `Meho-Command` header
+(`api.SetCommandHeader`, next to `api.SetWorkRefHeader`).
+
+The backplane reads it in the audit middleware. With the switch
+`AUDIT_SESSION_LINKS` on, a row of a CLI login session stores it as
+`payload.cli_command`. A command such as `meho vmware vm list` picks its
+operation itself (`GET:/vcenter/vm`), so the command path is how an
+uploaded agent session finds the audit rows of the commands it ran (see
+`session-store.md`). A value that is not a command path is ignored.
+
 ## Current tenant (`meho tenants use`, `MEHO_TENANT`, #5241)
 
 One login can list several tenants. The backplane works in one current

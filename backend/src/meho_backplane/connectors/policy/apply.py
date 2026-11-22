@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``policy.apply`` operation: import a whole policy file, after a second admin approves.
+"""The ``policy.apply`` operation: import a whole policy file.
 
 ``meho policy import`` and ``POST /api/v1/policy/import`` plan the file
 and then call this operation. The call waits for approval with the plan
@@ -11,10 +11,14 @@ SHA-256 and the SHA-256 of the stored policy it was planned against
 
 An import is a change of rights:
 
-* the operation is ``dangerous`` and always waits; a person approves each
-  call, and no standing grant and no run approval covers it;
-* every request carries the rights-change mark, so the person who asked
-  can never approve it, and the approver is another admin of the tenant;
+* an admin's call in the web console runs at once
+  (:mod:`~meho_backplane.operations.rights_change_console`);
+* every other call waits: the operation is ``dangerous`` and always
+  waits, a person approves each call, and no standing grant and no run
+  approval covers it;
+* every request carries the rights-change mark, so only an admin approves
+  it, and only with a click in the web console; the admin may be the
+  person who asked;
 * a person needs the ``tenant_admin`` role to ask;
 * only a person asks (no agent, service login or hosted agent run), and
   only a platform admin asks for ``scope: install``
@@ -23,7 +27,7 @@ An import is a change of rights:
   the plan is built. The approval card records who asked
   (:func:`record_policy_apply_requester`), and the run checks it again.
 
-When it runs (after the approval) it plans again
+When it runs it plans again
 (:func:`~meho_backplane.policy.service.apply_policy`). When the stored
 policy changed after the plan, it writes nothing and says so. The
 install's policy (``scope: install``) is imported only when a platform
@@ -60,6 +64,7 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "IMPORT_NEEDS_APPROVAL",
     "POLICY_APPLY_OP_ID",
     "SWITCH_OFF_IMPORT",
     "build_policy_apply_preview",
@@ -94,9 +99,10 @@ INSTALL_ASK_NEEDS_PLATFORM_ADMIN: Final[str] = (
     "Only a platform admin can ask to import the install's policy."
 )
 
-#: Why an import did not run: the login that asked for it ran it.
-IMPORT_NEEDS_SECOND_ADMIN: Final[str] = (
-    "A policy import runs only from a second admin's approval. Run the import again."
+#: Why an import did not run: it was not approved, and no admin ran it in the web console.
+IMPORT_NEEDS_APPROVAL: Final[str] = (
+    "A policy import runs at once only for an admin in the web console. Any other "
+    "import waits until an admin approves it in the web console. Run the import again."
 )
 
 _SHA256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
@@ -157,14 +163,15 @@ RESPONSE_SCHEMA: Final[dict[str, Any]] = {
 _GROUP_KEY = "policy-file"
 _GROUP_WHEN_TO_USE = (
     "Import a whole policy file (policy: v1): the categories and classifications of "
-    "your tenant, or of the whole install. An import is a change of rights and waits "
-    "until a second admin approves it. Use `meho policy import` to plan it first."
+    "your tenant, or of the whole install. An import is a change of rights: a call "
+    "with a token waits until an admin approves it in the web console. Use "
+    "`meho policy import` to plan it first."
 )
 
 _DESCRIPTION = (
     "Replace the whole policy of your tenant (or of the install) with a policy file. "
-    "A change of rights: it waits until another admin approves it, then checks that "
-    "the stored policy did not change since the plan."
+    "A change of rights: a call with a token waits until an admin approves it in the web "
+    "console, then checks that the stored policy did not change since the plan."
 )
 
 _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
@@ -173,11 +180,14 @@ _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "POST /api/v1/policy/import: they plan the file and fill file_sha256 and based_on."
     ),
     "preconditions": (
-        "Needs the tenant_admin role. The call always waits for approval, and the person "
-        "who asked can never approve it. scope install needs a platform admin to approve."
+        "Needs the tenant_admin role. A call with a token waits for approval; an admin "
+        "approves it in the web console, and may be the person who asked. scope install "
+        "needs a platform admin to approve."
     ),
     "output_shape": "{'scope', 'applied', 'message', 'revision_id', 'summary'}",
-    "next_step": "Ask another admin to approve the request; then `meho policy history`.",
+    "next_step": (
+        "Ask an admin to approve the request in the web console; then `meho policy history`."
+    ),
 }
 
 
@@ -207,6 +217,13 @@ async def record_policy_apply_requester(ctx: PreviewContext) -> dict[str, Any]:
     }
 
 
+def _console_run_refusal(operator: Operator, params: dict[str, Any]) -> str | None:
+    """Why a run without an approval writes nothing, or ``None`` for an admin in the console."""
+    if not (operator.web_session and operator.may_approve_rights_change()):
+        return IMPORT_NEEDS_APPROVAL
+    return policy_apply_requester_refusal(operator, params)
+
+
 def _requester_refusal_at_run(scope: str) -> str | None:
     """Check the card's record of who asked again; no record is a refusal."""
     requester = approved_requester_subject()
@@ -224,22 +241,26 @@ def _requester_refusal_at_run(scope: str) -> str | None:
 async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Import the file in *params* for the operator's tenant, or for the install.
 
-    Op-id: ``policy.apply``. Targetless. Runs after the approval; the
-    tenant comes from *operator*, never from *params*.
+    Op-id: ``policy.apply``. Targetless. The tenant comes from *operator*,
+    never from *params*.
 
-    Only the admin who approved runs it. A run by the login that asked
-    (for example its re-run of a failed approved request) writes nothing,
-    so the history never names the importer as the approver. The person
-    who asked is checked again from the request: a person, and for
-    ``scope: install`` a platform admin.
+    It runs after an approval, or at once for an admin in the web console
+    (:func:`~meho_backplane.operations.rights_change_console.runs_at_once_in_console`).
+    A run by the person who asked (also a re-run of a failed approved
+    request) writes only for an admin in the web console. Any other run
+    writes nothing. After an approval, the person who asked is checked again
+    from the request: a person, and for ``scope: install`` a platform admin.
+    The admin who approves may be the person who asked.
     """
     if not classification_enabled():
         raise ValueError(SWITCH_OFF_IMPORT)
+    scope = params["scope"]
     importer = approved_requester_sub()
     if importer is None or importer == operator.sub:
-        raise ValueError(IMPORT_NEEDS_SECOND_ADMIN)
-    scope = params["scope"]
-    refusal = _requester_refusal_at_run(scope)
+        importer = operator.sub
+        refusal = _console_run_refusal(operator, params)
+    else:
+        refusal = _requester_refusal_at_run(scope)
     if refusal is not None:
         raise ValueError(refusal)
     if scope == "install" and not operator.platform_admin:
@@ -303,7 +324,7 @@ async def register_policy_apply_operation(
         handler=policy_apply,
         group_key=_GROUP_KEY,
         when_to_use=_GROUP_WHEN_TO_USE,
-        summary="Import a whole policy file, after a second admin approves it.",
+        summary="Import a whole policy file.",
         description=_DESCRIPTION,
         parameter_schema=PARAMETER_SCHEMA,
         response_schema=RESPONSE_SCHEMA,

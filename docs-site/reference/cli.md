@@ -4278,7 +4278,7 @@ meho policy history [flags]
 
 ### `meho policy import`
 
-Ask to import a policy file; a second admin must approve it
+Ask to import a policy file; an admin approves it in the web console
 
 ```
 meho policy import FILE [flags]

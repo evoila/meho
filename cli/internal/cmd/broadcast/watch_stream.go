@@ -138,6 +138,7 @@ func sendFeedRequest(ctx context.Context, client *api.AuthedClient, feedURL, las
 		req.Header.Set("Last-Event-Id", lastEventID)
 	}
 	api.SetWorkRefHeader(req)
+	api.SetCommandHeader(req)
 	api.SetTenantHeader(req)
 	resp, err := client.HTTPClient().Do(req)
 	if err != nil {

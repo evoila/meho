@@ -46,6 +46,7 @@ from meho_backplane.operations import dispatch
 from meho_backplane.operations.approval_queue import (
     ApprovalGroupForbiddenError,
     ApprovalRoleFloorError,
+    RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
 )
@@ -381,6 +382,8 @@ async def _approve_and_run(call: dict[str, Any], approver: Operator | None = Non
     approver = approver or _operator("kc-access-approver").model_copy(
         update={"platform_admin": True}
     )
+    # A change of rights is approved with a click in the web console.
+    approver = approver.model_copy(update={"web_session": True})
     request_id = uuid.UUID(call["extras"]["approval_request_id"])
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
@@ -523,7 +526,9 @@ async def test_with_a_second_platform_admin_another_admin_approves_the_write(
         request_id = uuid.UUID(call["extras"]["approval_request_id"])
         # An operator cannot approve it.
         async with get_sessionmaker()() as session:
-            with pytest.raises((ApprovalGroupForbiddenError, ApprovalRoleFloorError)):
+            with pytest.raises(
+                (ApprovalGroupForbiddenError, ApprovalRoleFloorError, RightsChangeApprovalError)
+            ):
                 await approve_request(
                     session,
                     request_id,
@@ -672,16 +677,10 @@ async def test_the_account_of_the_person_who_runs_the_approved_request_is_refuse
         assert call["status"] == "awaiting_approval", call
         # In the login realm a platform admin approves every Keycloak write.
         approver = _operator(approver_uuid).model_copy(update={"platform_admin": True})
-        if op_id in {"keycloak.user.credential.delete", "keycloak.user.reset_password"}:
-            # MEHO already refuses this approval: the change is for the approver's own login.
-            with pytest.raises(ApprovalRoleFloorError, match="your own login"):
-                await _approve_and_run(call, approver)
-            resumed = None
-        else:
-            resumed = await _approve_and_run(call, approver)
+        # An admin may approve a change of their own login; the run refuses the lock-out.
+        resumed = await _approve_and_run(call, approver)
         written = _writes(mock)
-    if resumed is not None:
-        _refused_after_wait(op_id, resumed.model_dump(mode="json"), "own_account")
+    _refused_after_wait(op_id, resumed.model_dump(mode="json"), "own_account")
     assert written == []
 
 

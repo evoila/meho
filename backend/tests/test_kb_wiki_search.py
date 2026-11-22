@@ -910,3 +910,310 @@ async def test_rest_without_the_setting_has_no_wiki(source: str | None) -> None:
     assert response.status_code == 200
     assert response.json()["wiki"] is None
     corpus.assert_not_called()
+
+
+# --- KB_WIKI_FILTERED_SEARCH: filters the wiki's index can apply ----------------
+
+#: A wiki collection whose index applies ``product`` and ``version`` as exact filters.
+_EXACT_ON: dict[str, Any] = {
+    "type": "corpus-http",
+    "ref": {"read": "upstream", "scope_filters": True},
+}
+_SOFT_AND_EXACT: dict[str, Any] = {
+    "type": "corpus-http",
+    "ref": {"scope": "soft", "scope_filters": True},
+}
+_SKIPPED_AUDIT = {"audit_wiki_status": "filtered"}
+
+
+def _switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    monkeypatch.setenv("KB_WIKI_FILTERED_SEARCH", "true" if on else "false")
+    get_settings.cache_clear()
+
+
+async def _seed_wiki_with(backend: dict[str, Any]) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI, backend=backend)
+
+
+def _audit_fields() -> dict[str, Any]:
+    import structlog
+
+    return {
+        k: v for k, v in structlog.contextvars.get_contextvars().items() if k.startswith("audit_")
+    }
+
+
+def test_the_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_WIKI_FILTERED_SEARCH", raising=False)
+    get_settings.cache_clear()
+    assert get_settings().kb_wiki_filtered_search is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env", [None, "false"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"product": "vcenter"},
+        {"product": "vcenter", "version": "9.0"},
+        {"status": "confirmed"},
+        {"updated_after": "2026-11-01"},
+        {"scope": "shared"},
+    ],
+)
+async def test_switch_off_a_filter_skips_the_wiki_as_before_over_mcp(
+    monkeypatch: pytest.MonkeyPatch, env: str | None, arguments: dict[str, Any]
+) -> None:
+    """Off (unset or false): the answer and the audit fields are the ones of the old code."""
+    import structlog
+
+    if env is None:
+        monkeypatch.delenv("KB_WIKI_FILTERED_SEARCH", raising=False)
+    else:
+        monkeypatch.setenv("KB_WIKI_FILTERED_SEARCH", env)
+    get_settings.cache_clear()
+    await _seed_wiki_with(_EXACT_ON)
+    structlog.contextvars.clear_contextvars()
+    response, corpus = await _search(_operator(), **arguments)
+    corpus.assert_not_called()
+    if arguments.get("scope") != "shared":
+        assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
+    assert response["wiki"] == {
+        "collection": _WIKI,
+        "searched": False,
+        "reason": "filtered",
+        "message": (
+            f"Your wiki (docs collection `{_WIKI}`) was not searched: it cannot apply "
+            "filters, a time window or scope `shared`; search again without them to include it."
+        ),
+        "hit_count": 0,
+        "duplicate_count": 0,
+    }
+    assert _audit_fields() == _SKIPPED_AUDIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"metadata_filters": {"product": "vcenter"}},
+        {"metadata_filters": {"product": "vcenter", "version": "9.0"}},
+        {"kind": "kb-entry"},
+    ],
+)
+async def test_switch_off_a_filter_skips_the_wiki_as_before_over_rest(
+    monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
+) -> None:
+    import structlog
+
+    _switch(monkeypatch, on=False)
+    await _seed_wiki_with(_EXACT_ON)
+    corpus = _corpus(_WIKI_CHUNK)
+    bound: dict[str, Any] = {}
+    real_bind = structlog.contextvars.bind_contextvars
+
+    def record(**values: Any) -> Any:
+        bound.update(values)
+        return real_bind(**values)
+
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+        patch(_CORPUS_SEAM, new=corpus),
+        patch("structlog.contextvars.bind_contextvars", new=record),
+    ):
+        response = _retrieve_client(_operator()).post(
+            "/api/v1/retrieve", json={"query": "snapshot", "source": "kb", **body}
+        )
+    corpus.assert_not_called()
+    wiki = response.json()["wiki"]
+    assert (wiki["searched"], wiki["reason"], wiki["hits"]) == (False, "filtered", [])
+    assert wiki["message"] == (
+        f"Your wiki (docs collection `{_WIKI}`) was not searched: it cannot apply "
+        "filters, a time window or scope `shared`; search again without them to include it."
+    )
+    assert bound["audit_wiki_status"] == "filtered"
+    assert "audit_collection" not in bound
+    assert "audit_wiki_hit_count" not in bound
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"product": "vcenter", "version": "9.0"},
+        {"product": "vcenter"},
+        {"filters": {"version": "9.0"}},
+    ],
+)
+async def test_switch_on_product_and_version_reach_the_index_as_exact_filters(
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
+) -> None:
+    import structlog
+
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    structlog.contextvars.clear_contextvars()
+    response, corpus = await _search(_operator(), **arguments)
+    corpus.assert_awaited_once()
+    sent = corpus.await_args.kwargs
+    expected = {
+        k: v for k, v in {**arguments.get("filters", {}), **arguments}.items() if k != "filters"
+    }
+    assert sent["metadata_filters"] == expected
+    assert sent["soft_scope"] is None
+    wiki = response["wiki"]
+    assert (wiki["searched"], wiki["hit_count"]) == (True, 1)
+    assert response["hits"][1]["source"] == "wiki"
+    assert _audit_fields() == {
+        "audit_collection": _WIKI,
+        "audit_wiki_status": "searched",
+        "audit_wiki_hit_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param({"type": "corpus-http"}, id="no-gate"),
+        pytest.param({"type": "corpus-http", "ref": {"scope": "soft"}}, id="soft-scope"),
+        pytest.param(_SOFT_AND_EXACT, id="soft-wins-over-exact"),
+        pytest.param({"type": "corpus-http", "ref": {"scope_filters": "true"}}, id="not-true"),
+    ],
+)
+async def test_switch_on_an_index_without_exact_filters_is_not_searched(
+    monkeypatch: pytest.MonkeyPatch, backend: dict[str, Any]
+) -> None:
+    import structlog
+
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(backend)
+    structlog.contextvars.clear_contextvars()
+    response, corpus = await _search(_operator(), product="vcenter", version="9.0")
+    corpus.assert_not_called()
+    wiki = response["wiki"]
+    assert (wiki["searched"], wiki["reason"], wiki["hit_count"]) == (False, "filtered", 0)
+    assert "index does not apply product and version as exact filters" in wiki["message"]
+    assert _audit_fields()["audit_wiki_status"] == "filtered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"product": "vcenter", "status": "confirmed"},
+        {"product": "vcenter", "tags": ["snapshots"]},
+        {"product": "vcenter", "filters": {"kind": "kb-entry"}},
+        {"product": "vcenter", "filters": {"source_kind": "import"}},
+        {"product": "vcenter", "updated_after": "2026-11-01"},
+        {"product": "vcenter", "scope": "shared"},
+        {"filters": {"product": "  "}},
+        {"filters": {"product": 9}},
+    ],
+)
+async def test_switch_on_any_other_filter_is_not_searched(
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    response, corpus = await _search(_operator(), **arguments)
+    corpus.assert_not_called()
+    assert response["wiki"]["reason"] == "filtered"
+    assert "cannot apply filters" in response["wiki"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_switch_on_without_a_filter_searches_without_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    response, corpus = await _search(_operator())
+    assert corpus.await_args.kwargs["metadata_filters"] is None
+    assert response["wiki"]["searched"] is True
+
+
+@pytest.mark.asyncio
+async def test_switch_on_an_imported_copy_is_still_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI, backend=_EXACT_ON)
+    slug = await _seed_import()
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        product="vcenter",
+    )
+    assert [hit["slug"] for hit in response["hits"]] == [slug]
+    assert (response["wiki"]["searched"], response["wiki"]["duplicate_count"]) == (True, 1)
+    assert response["wiki"]["hit_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_switch_on_an_index_that_does_not_answer_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    down = AsyncMock(side_effect=CorpusUnavailable("corpus unreachable: ConnectError"))
+    response, _ = await _search(_operator(), corpus=down, product="vcenter")
+    assert response["wiki"]["reason"] == "index_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "searched"),
+    [
+        ({"metadata_filters": {"product": "vcenter"}}, True),
+        ({"metadata_filters": {"product": "vcenter", "version": "9.0"}}, True),
+        ({"metadata_filters": {"product": "vcenter", "kind": "kb-entry"}}, False),
+        ({"metadata_filters": {"product": "vcenter", "status": "confirmed"}}, False),
+        ({"kind": "kb-entry"}, False),
+        ({"kind": "kb-entry", "metadata_filters": {"product": "vcenter"}}, False),
+    ],
+)
+async def test_switch_on_rest_metadata_filters_follow_the_same_rule(
+    monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], searched: bool
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    corpus = _corpus(_WIKI_CHUNK)
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        response = _retrieve_client(_operator()).post(
+            "/api/v1/retrieve", json={"query": "snapshot", "source": "kb", **body}
+        )
+    wiki = response.json()["wiki"]
+    assert wiki["searched"] is searched
+    if searched:
+        assert corpus.await_args.kwargs["metadata_filters"] == body["metadata_filters"]
+        assert len(wiki["hits"]) == 1
+    else:
+        corpus.assert_not_called()
+        assert wiki["reason"] == "filtered"
+
+
+@pytest.mark.asyncio
+async def test_switch_on_rest_without_exact_filters_is_not_searched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with({"type": "corpus-http"})
+    corpus = _corpus(_WIKI_CHUNK)
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[])),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        response = _retrieve_client(_operator()).post(
+            "/api/v1/retrieve",
+            json={"query": "snapshot", "source": "kb", "metadata_filters": {"product": "vcenter"}},
+        )
+    corpus.assert_not_called()
+    wiki = response.json()["wiki"]
+    assert (wiki["searched"], wiki["reason"]) == (False, "filtered")
+    assert "index does not apply product and version" in wiki["message"]

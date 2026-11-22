@@ -85,7 +85,9 @@ from meho_backplane.docs_search import (
     UnknownCollectionError,
     build_docs_scope,
     collection_capability_key,
+    forwarded_scope,
     read_docs,
+    resolve_backend,
     resolve_entitled_ready_collection,
     search_docs,
 )
@@ -93,6 +95,7 @@ from meho_backplane.kb.file_walker import KbFileParseError, parse_front_matter
 from meho_backplane.kb.page_export import KbExportPage, KbExportRemoval, KbExportSkip, plan_entry
 from meho_backplane.kb.provenance import read_provenance
 from meho_backplane.kb.schemas import KB_SOURCE
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -102,9 +105,11 @@ if TYPE_CHECKING:
 __all__ = [
     "DOCS_ADDON_CAPABILITY",
     "KbWikiSearch",
+    "WikiExactFilters",
     "WikiSkipReason",
     "search_wiki",
     "wiki_collection_of",
+    "wiki_exact_filters",
     "wiki_note_for",
 ]
 
@@ -145,6 +150,46 @@ class KbWikiSearch(BaseModel):
     duplicate_count: int = 0
 
 
+class WikiExactFilters(BaseModel):
+    """The ``product`` and ``version`` a knowledge search sends to the wiki's index."""
+
+    model_config = ConfigDict(frozen=True)
+
+    product: str | None = None
+    version: str | None = None
+
+
+def wiki_exact_filters(
+    filters: Mapping[str, object] | None,
+    *,
+    has_time_window: bool = False,
+    shared_scope: bool = False,
+    kind: str | None = None,
+) -> WikiExactFilters | None:
+    """Return the filters the wiki's index may apply, or ``None``.
+
+    The same rule for ``search_knowledge`` and ``POST /api/v1/retrieve``.
+    With ``KB_WIKI_FILTERED_SEARCH`` off the answer is always ``None``, so
+    every filter skips the wiki as before. With it on, the answer is a value
+    only when the search has no time window, is not in the shared scope, has
+    no ``kind``, and its filters are only ``product`` and/or ``version``,
+    each a non-blank string. Anything else gives ``None``.
+    """
+    if not get_settings().kb_wiki_filtered_search:
+        return None
+    if has_time_window or shared_scope or kind is not None or not filters:
+        return None
+    if not set(filters) <= {"product", "version"}:
+        return None
+    if not all(isinstance(value, str) and value.strip() for value in filters.values()):
+        return None
+    product, version = filters.get("product"), filters.get("version")
+    return WikiExactFilters(
+        product=product if isinstance(product, str) else None,
+        version=version if isinstance(version, str) else None,
+    )
+
+
 async def wiki_collection_of(tenant_id: uuid.UUID) -> str | None:
     """Return the docs collection key where *tenant_id* keeps its lessons, or ``None``."""
     async with get_sessionmaker()() as session:
@@ -161,6 +206,7 @@ async def search_wiki(
     limit: int,
     stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     filtered: bool,
+    exact: WikiExactFilters | None = None,
 ) -> KbWikiSearch | None:
     """Search the caller's wiki collection; ``None`` when the tenant has none.
 
@@ -169,21 +215,28 @@ async def search_wiki(
     holds as imported copies.
     *filtered* is true when the search uses filters, a time window or the
     shared scope: the wiki cannot apply them, so it is not searched.
+    *exact* (from :func:`wiki_exact_filters`) names filters the wiki can
+    apply. Then a filtered search still runs, but only when the collection
+    sends them to its index as exact filters (``scope_filters``); else the
+    wiki is not searched and the answer says the index cannot apply them.
     """
     key = await wiki_collection_of(operator.tenant_id)
     if key is None:
         return None
     if DOCS_ADDON_CAPABILITY not in operator.capabilities:
         return _not_searched(key, "docs_addon_off")
-    if filtered:
+    if filtered and exact is None:
         return _not_searched(key, "filtered")
     structlog.contextvars.bind_contextvars(audit_collection=key)
     try:
         async with get_sessionmaker()() as session:
             collection = await resolve_entitled_ready_collection(session, operator, key)
-        result = await search_docs(
-            operator, query, scope=build_docs_scope(key), collection=collection, limit=limit
+        scope = (
+            build_docs_scope(key, exact.product, exact.version) if exact else build_docs_scope(key)
         )
+        if exact and forwarded_scope(scope, resolve_backend(collection).ref).mode != "filters":
+            return _not_searched(key, "filtered", _INDEX_CANNOT_FILTER)
+        result = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
     except CollectionForbiddenError:
         return _not_searched(key, "not_entitled")
     except UnknownCollectionError:
@@ -235,10 +288,20 @@ async def wiki_note_for(entry: KbEntry) -> dict[str, str] | None:
     return {"collection": key, "export": export, "message": f"{lead} {tail}"}
 
 
-def _not_searched(key: str, reason: WikiSkipReason) -> KbWikiSearch:
+#: Why the wiki is not searched when a product or version filter cannot be applied.
+_INDEX_CANNOT_FILTER: Final[str] = (
+    "its index does not apply product and version as exact filters; "
+    "search again without them to include it"
+)
+
+
+def _not_searched(key: str, reason: WikiSkipReason, why: str | None = None) -> KbWikiSearch:
     structlog.contextvars.bind_contextvars(audit_wiki_status=reason)
     return KbWikiSearch(
-        collection=key, searched=False, reason=reason, message=_message(key, reason)
+        collection=key,
+        searched=False,
+        reason=reason,
+        message=_message(key, reason) if why is None else _wiki_not_searched(key, why),
     )
 
 
@@ -256,6 +319,10 @@ def _message(key: str, reason: WikiSkipReason) -> str:
             "search again without them to include it"
         ),
     }[reason]
+    return _wiki_not_searched(key, why)
+
+
+def _wiki_not_searched(key: str, why: str) -> str:
     return f"Your wiki (docs collection `{key}`) was not searched: {why}."
 
 

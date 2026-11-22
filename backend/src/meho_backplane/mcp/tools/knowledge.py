@@ -85,7 +85,12 @@ from meho_backplane.kb.schemas import (
 from meho_backplane.kb.service import KbSearchScope, KbService
 from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
 from meho_backplane.kb.stale_revision import KbStaleRevisionError
-from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki, wiki_note_for
+from meho_backplane.kb.wiki_search import (
+    KbWikiSearch,
+    search_wiki,
+    wiki_exact_filters,
+    wiki_note_for,
+)
 from meho_backplane.lesson_header import LessonHeaderError, may_confirm
 from meho_backplane.lessons.retrievals import record_kb_retrievals
 from meho_backplane.mcp.registry import (
@@ -232,6 +237,9 @@ async def _search_knowledge_handler(
         limit=limit,
         stored=[(hit.tenant_id, hit.slug, hit.metadata) for hit in hits],
         filtered=bool(filters) or time_window is not None or scope == "shared",
+        exact=wiki_exact_filters(
+            filters, has_time_window=time_window is not None, shared_scope=scope == "shared"
+        ),
     )
     payloads = [_hit_payload(hit) for hit in hits]
     if wiki is not None:

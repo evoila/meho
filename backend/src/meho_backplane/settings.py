@@ -1583,6 +1583,16 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    kb_wiki_filtered_search:
+        Off by default. When on, a knowledge search whose only filters are
+        ``product`` and/or ``version`` still searches the tenant's wiki
+        (:func:`meho_backplane.kb.wiki_search.wiki_exact_filters`), and
+        sends them to its index as exact filters. It does so only when the
+        wiki's collection has ``scope_filters`` on; else the wiki is still
+        not searched and the answer says ``filtered``. Any other filter, a
+        time window or scope ``shared`` skips the wiki as before. When off,
+        every filter skips the wiki. It stays off until a measurement shows
+        it helps. Env ``KB_WIKI_FILTERED_SEARCH``.
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
@@ -2597,6 +2607,7 @@ class Settings(BaseModel):
         default=False, json_schema_extra=AGENT_FACING
     )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_filtered_search: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3806,6 +3817,9 @@ def get_settings() -> Settings:
         ),
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
+        ),
+        kb_wiki_filtered_search=parse_bool_env(
+            os.environ.get("KB_WIKI_FILTERED_SEARCH"),
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),

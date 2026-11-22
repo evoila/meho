@@ -93,7 +93,9 @@ from meho_backplane.auth.current_tenant import tenant_role_source_from_context
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
+    CLI_COMMAND_KEY,
     SESSION_FROM_CLIENT_KEY,
+    client_command_var,
     client_session_id_var,
     parent_audit_id_var,
     resolve_audit_session_id,
@@ -350,7 +352,11 @@ def _mark_client_session(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) 
         payload = {}
     if not isinstance(payload, dict):
         return
-    kwargs["payload"] = {**payload, SESSION_FROM_CLIENT_KEY: True}
+    marked = {**payload, SESSION_FROM_CLIENT_KEY: True}
+    command = client_command_var.get()
+    if command is not None and get_settings().audit_session_links:
+        marked[CLI_COMMAND_KEY] = command
+    kwargs["payload"] = marked
 
 
 @event.listens_for(Session, "after_commit")

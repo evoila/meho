@@ -51,9 +51,20 @@ Where the list is checked:
 | `dispatch()` (`operations/dispatcher.py`) | Every top-level call, which covers hosted agent runs and scheduled runs. A `denied` result, and the vendor gets no call. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
+A block in one tenant holds only where the person works in that tenant.
+A person with several tenants who has not picked one yet is checked
+against blocks in every tenant only. So the person can sign in and pick
+a tenant where no block holds. On the console's tenant picker and switch
+(`/ui/tenant`, `/ui/tenant/switch`) a block in the session's tenant does
+not hold either; the switch checks the tenant it moves to and refuses a
+tenant where the person is blocked. A block in every tenant holds
+everywhere, also at sign-in and on the picker.
+
 Block and unblock each write one audit row in the same transaction as
-the change. The row holds the admin, the blocked `sub`, the scope and the
-reason the admin typed (`op_id` `principal.block` or `principal.unblock`).
+the change (`op_id` `principal.block` or `principal.unblock`). The block
+row holds the admin, the blocked `sub`, the scope and the reason the
+admin typed. The unblock row holds the admin, the `sub` and each removed
+block with its scope and reason (`removed_blocks`).
 
 REST routes (`/api/v1/principals/blocked`):
 

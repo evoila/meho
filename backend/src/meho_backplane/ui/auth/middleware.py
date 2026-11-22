@@ -451,8 +451,13 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
             )
         ).one_or_none()
     # The admin block list is read on every request (a few seconds old at
-    # most), not only at the drift-gated token check below.
-    if await is_principal_blocked(decrypted.operator_sub, decrypted.tenant_id):
+    # most), not only at the drift-gated token check below. A block in the
+    # session's tenant does not hold on the tenant picker and switch, so a
+    # person with several tenants can move to a tenant where no block
+    # holds; the switch checks the tenant it moves to.
+    works_in_tenant = decrypted.tenant_chosen and path not in _TENANT_CHOICE_PATHS
+    block_tenant = decrypted.tenant_id if works_in_tenant else None
+    if await is_principal_blocked(decrypted.operator_sub, block_tenant):
         raise PrincipalBlockedError
     # ``None`` means the stored token failed the JWT chain terminally;
     # collapse to the same redirect-to-login as a missing session.

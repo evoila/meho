@@ -35,7 +35,7 @@ from sqlalchemy import select
 
 import meho_backplane.auth.principal_block as block_module
 import meho_backplane.operations.dispatcher as dispatcher_module
-from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     BLOCK_CACHE_SECONDS,
@@ -261,6 +261,53 @@ async def test_tenant_admin_block_holds_in_their_tenant_only(
     assert len(await _rows(_BLOCKED)) == 1
 
 
+def _two_tenant_token(key: Any) -> str:
+    """A token of the blocked login that lists tenant A first, then tenant B."""
+    entries = [f"{_TENANT_A}:block-a:Readers", f"{_TENANT_B}:block-b:Operators"]
+    return mint_token(key, sub=_BLOCKED, extra_claims={"meho_tenants": entries})
+
+
+@pytest.mark.asyncio
+async def test_block_in_the_first_tenant_holds_only_when_that_tenant_is_chosen(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key, tenant=_TENANT_A))).status_code == 201
+    bearer = f"Bearer {_two_tenant_token(key)}"
+
+    # Sign-in and status answers pick no tenant: the block in tenant A does not hold.
+    unchosen = await verify_jwt_for_audience(
+        bearer, expected_audience=AUDIENCE, allow_unchosen=True
+    )
+    assert unchosen.tenant_chosen is False
+    in_b = await verify_jwt_for_audience(
+        bearer, expected_audience=AUDIENCE, requested_tenant=str(_TENANT_B)
+    )
+    assert in_b.tenant_id == _TENANT_B
+    with pytest.raises(HTTPException) as refused:
+        await verify_jwt_for_audience(
+            bearer, expected_audience=AUDIENCE, requested_tenant=str(_TENANT_A)
+        )
+    assert refused.value.status_code == 403
+    assert str(refused.value.detail).startswith("principal_blocked")
+
+
+@pytest.mark.asyncio
+async def test_block_in_every_tenant_holds_before_a_tenant_is_chosen(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _platform_admin(key))).status_code == 201
+
+    with pytest.raises(HTTPException) as refused:
+        await verify_jwt_for_audience(
+            f"Bearer {_two_tenant_token(key)}", expected_audience=AUDIENCE, allow_unchosen=True
+        )
+    assert refused.value.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_platform_admin_block_holds_in_every_tenant(
     _client: tuple[httpx.AsyncClient, Any],
@@ -370,6 +417,33 @@ async def test_block_and_unblock_each_write_one_audit_row(
     assert len(unblock_rows) == 1
     assert unblock_rows[0].operator_sub == "admin-person"
     assert unblock_rows[0].payload["op_id"] == "principal.unblock"
+    assert unblock_rows[0].payload["removed_blocks"] == [
+        {"scope": str(_TENANT_A), "reason": "reason typed by the admin"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_unblock_audit_row_names_each_removed_block_and_reason(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    await _block(ac, _admin(key, tenant=_TENANT_A), reason="reason in tenant a")
+    await _block(ac, _admin(key, tenant=_TENANT_B), reason="reason in tenant b")
+    await _block(ac, _platform_admin(key), reason="reason everywhere")
+    removed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(_platform_admin(key)))
+    assert removed.json() == {"sub": _BLOCKED, "removed": 3}
+
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    (unblock_row,) = [r for r in rows if r.payload.get("unblocked_sub") == _BLOCKED]
+    assert unblock_row.operator_sub == "platform-person"
+    assert unblock_row.payload["removed_blocks"] == [
+        {"scope": "*", "reason": "reason everywhere"},
+        {"scope": str(_TENANT_A), "reason": "reason in tenant a"},
+        {"scope": str(_TENANT_B), "reason": "reason in tenant b"},
+    ]
+    assert unblock_row.payload["scopes"] == ["*", str(_TENANT_A), str(_TENANT_B)]
 
 
 @pytest.mark.asyncio

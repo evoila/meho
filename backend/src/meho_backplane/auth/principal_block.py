@@ -201,17 +201,17 @@ async def unblock_principal(operator: Operator, sub: str) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
     A platform admin removes every block of the login. A tenant admin
-    removes the block of their own tenant only. Raises
+    removes the block of their own tenant only. The audit row names each
+    removed block with its scope and reason. Raises
     :class:`PrincipalNotBlockedError` when there is none.
     """
     condition = PrincipalBlock.sub == sub
     if not operator.platform_admin:
         condition = condition & (PrincipalBlock.scope == str(operator.tenant_id))
     async with get_sessionmaker()() as session:
-        scopes = list(
-            (await session.execute(select(PrincipalBlock.scope).where(condition))).scalars()
-        )
-        if not scopes:
+        query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(condition)
+        removed = sorted((await session.execute(query)).tuples())
+        if not removed:
             raise PrincipalNotBlockedError
         await session.execute(delete(PrincipalBlock).where(condition))
         add_audit_row(
@@ -220,11 +220,15 @@ async def unblock_principal(operator: Operator, sub: str) -> int:
             op_id="principal.unblock",
             method="DELETE",
             path=f"/api/v1/principals/blocked/{sub}",
-            payload={"unblocked_sub": sub, "scopes": sorted(scopes)},
+            payload={
+                "unblocked_sub": sub,
+                "scopes": [scope for scope, _reason in removed],
+                "removed_blocks": [{"scope": scope, "reason": reason} for scope, reason in removed],
+            },
         )
         await session.commit()
     reset_block_cache()
-    return len(scopes)
+    return len(removed)
 
 
 async def list_blocked(operator: Operator) -> list[BlockedPerson]:

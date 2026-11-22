@@ -1,0 +1,14 @@
+# Example question file for scripts.retrieval_eval.agent_search.
+# All names and paths are made up. A real question set is kept elsewhere.
+questions:
+  - id: example-meaning
+    question: How do I roll back a failed upgrade of the sample product?
+    expect: products/sample/upgrade-rollback.md
+    kind: meaning
+  - id: example-exact
+    question: sample-cli --reset-cache
+    expect: products/sample/cli-reference.md
+    repo: sample-knowledge
+    kind: exact
+    filters:
+      kind: kb-entry

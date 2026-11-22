@@ -22,9 +22,9 @@ What is proven:
   that matches two is an error too;
 * a vendor error is an error, not a success;
 * the approval gate holds, and the audit row names the scope and the mapper;
-* the op is a change of rights: the requester never approves it, the
-  approver is another admin, and no standing grant, run approval or agent
-  grant clears the wait;
+* the op is a change of rights: no approval with a token counts, the
+  approver is an admin in the web console, and no standing grant, run
+  approval or agent grant clears the wait;
 * the card shows the mapper as it is now (type, protocol, claim name, old
   values) next to the new values, and the approved run is refused when the
   mapper's content changed after approval;
@@ -520,7 +520,7 @@ async def test_change_waits_for_approval_then_runs_and_audit_names_both(
 ) -> None:
     requester = _operator("kc-mapper-requester")
     approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"platform_admin": True}
+        update={"platform_admin": True, "web_session": True}
     )
     args = {
         "connector_id": _CONNECTOR_ID,
@@ -586,7 +586,7 @@ async def _card(request_id: uuid.UUID) -> dict[str, Any]:
 
 async def _approve_and_resume(request_id: uuid.UUID) -> Any:
     approver = _operator("kc-mapper-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"platform_admin": True}
+        update={"platform_admin": True, "web_session": True}
     )
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
@@ -803,7 +803,7 @@ def test_op_is_a_change_of_rights_approved_call_by_call() -> None:
     ],
     ids=["tenant-admin", "sa-operator"],
 )
-async def test_the_requester_cannot_approve_their_own_request(
+async def test_the_requester_cannot_approve_their_own_request_with_a_token(
     kc: KeycloakConnector, requester: Operator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")

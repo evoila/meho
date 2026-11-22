@@ -405,7 +405,7 @@ async def test_a_user_renamed_to_the_sign_in_user_while_the_request_waits_is_ref
     The target manages ``master``, where a Platform Admin approves a Keycloak write.
     """
     approver = _operator("kc-guard-approver", TenantRole.TENANT_ADMIN).model_copy(
-        update={"platform_admin": True}
+        update={"platform_admin": True, "web_session": True}
     )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         api = _Keycloak(mock, _ADMIN_REALM)

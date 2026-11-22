@@ -11,9 +11,9 @@ see ``docs/codebase/policy.md``. The work is in
 * ``POST /api/v1/policy/import?preview=true`` -- the mistakes and the diff
   (added, changed, removed per section; per classification entry how many
   operations it matches and changes). Writes nothing.
-* ``POST /api/v1/policy/import`` -- makes a request that waits until a
-  second admin approves it (the ``policy.apply`` operation). Nothing changes
-  yet. 202 with the request id; 200 "No change." when the file changes
+* ``POST /api/v1/policy/import`` -- makes a request that waits until an
+  admin approves it in the web console (the ``policy.apply`` operation).
+  Nothing changes yet. 202 with the request id; 200 "No change." when the file changes
   nothing; 422 with the mistakes; 409 while the ``POLICY_CLASSIFICATION``
   switch is off.
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
@@ -248,7 +248,9 @@ async def _request_import(operator: Operator, plan: PolicyPlan, content: bytes) 
     body = _plan_response(
         plan,
         preview=False,
-        message="The import waits until a second admin approves it. Nothing changed yet.",
+        message=(
+            "The import waits until an admin approves it in the web console. Nothing changed yet."
+        ),
     ).model_copy(update={"approval_request_id": UUID(str(request_id))})
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=body.model_dump(mode="json"))
 
@@ -269,7 +271,7 @@ async def import_policy(
     """Show what the file would change (``?preview=true``), or ask to import it.
 
     The import replaces the whole policy of *scope*: an entry that is not in
-    the file is removed. It waits until a second admin approves it.
+    the file is removed. It waits until an admin approves it in the web console.
     """
     _check_scope(operator, scope)
     content = await _read_file(request)

@@ -3,18 +3,15 @@
 
 """Who may approve a change that gives a login more rights.
 
-* The login a group or role change is for is never the approver.
+* An admin may approve a change of their own login, and a change of a
+  group they are in (in the web console, like every change of rights).
 * A change whose login or group MEHO could not establish cannot be approved.
-* A group attribute change is never approved by a person in the group.
-* In MEHO's own login realm the change needs a second person who is a
-  tenant admin (a platform admin for the platform admin group or role).
+* In MEHO's own login realm the change needs a platform admin.
 * A normal change for another login keeps the usual rules.
 * The decision audit row names the login the change is for.
 * Right before the approved change runs, the login and the group must
-  still have the ids the approver saw.
-* Right before the approved change runs, the approver must still be
-  outside the group whose attributes change, and the change must not need
-  a stricter approval than the one it got.
+  still have the ids the approver saw, and the change must not need a
+  stricter approval than the one it got.
 """
 
 from __future__ import annotations
@@ -46,10 +43,10 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approval_rerun import _object_changed
 from meho_backplane.operations.approval_rights import approve_right
 from meho_backplane.operations.grant_approval import (
-    GRANT_REASON_APPROVER_IN_GROUP,
     GRANT_REASON_CHANGED,
     GRANT_REASON_STRICTER,
     GRANT_REASON_UNREADABLE,
+    RIGHTS_CHANGE_CONSOLE_ONLY,
     RIGHTS_CHANGE_REFUSAL,
     grant_changed_since_request,
 )
@@ -78,6 +75,7 @@ def _person(
     role: TenantRole = TenantRole.TENANT_ADMIN,
     sa_operator: bool = False,
     platform_admin: bool = False,
+    web: bool = True,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -86,6 +84,7 @@ def _person(
         tenant_role=role,
         self_approver=sa_operator,
         platform_admin=platform_admin,
+        web_session=web,
     )
 
 
@@ -171,29 +170,43 @@ async def _decision_payload(request_id: uuid.UUID) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("login_realm", [True, False])
-async def test_a_login_cannot_approve_its_own_group_add(login_realm: bool) -> None:
-    """The second login of one person approves the add of itself: refused."""
+async def test_an_admin_approves_the_add_of_their_own_login(login_realm: bool) -> None:
+    """An admin may change their own login; the audit row says the change is for them."""
     params = {"group_id": _GROUP, "user_id": _USER}
     request_id = await _park(params, _grant(login_realm=login_realm))
 
-    with pytest.raises(ApprovalRoleFloorError) as exc:
-        await _approve(request_id, _person(_USER), params)
+    await _approve(request_id, _person(_USER, platform_admin=login_realm), params)
 
-    assert "your own login" in exc.value.reason_text
-    assert "second login of the same person does not count" in exc.value.reason_text
-    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    payload = await _decision_payload(request_id)
+    assert payload["grant_user_id"] == _USER
+    assert payload["grant_for_approver"] is True
 
 
 @pytest.mark.asyncio
-async def test_a_user_name_is_resolved_before_the_approval_compares_it() -> None:
+async def test_an_admin_approves_a_credential_delete_on_their_own_login() -> None:
+    params = {"id": _USER, "credential_ids": ["credential-1"]}
+    effect = _grant(user_id=_USER, group_id=None)
+    effect["preview"]["will_remove"] = [{"id": "credential-1"}]
+    request_id = await _park(params, effect, op_id="keycloak.user.credential.delete")
+
+    await _approve(request_id, _person(_USER, platform_admin=True), params)
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+    assert (await _decision_payload(request_id))["grant_for_approver"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_user_name_is_resolved_before_the_audit_row_names_it() -> None:
     """A request that names the user by user name still names the id the approver has."""
     params = {"group_id": _GROUP, "username": "second-login"}
     request_id = await _park(params, _grant(user_id=_USER))
 
-    with pytest.raises(ApprovalRoleFloorError):
-        await _approve(request_id, _person(_USER), params)
+    await _approve(request_id, _person(_USER, platform_admin=True), params)
 
-    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    payload = await _decision_payload(request_id)
+    assert payload["grant_user_id"] == _USER
+    assert payload["grant_for_approver"] is True
 
 
 @pytest.mark.asyncio
@@ -229,36 +242,31 @@ async def test_a_change_for_an_unknown_group_cannot_be_approved() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_person_in_the_group_cannot_approve_a_change_of_its_attributes() -> None:
-    """The attributes of a group give its members their rights."""
+async def test_an_admin_in_the_group_approves_a_change_of_its_attributes() -> None:
     params = {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}
     request_id = await _park(params, _grant(members=[_OTHER_USER, _USER]), op_id=_ATTRS)
 
-    with pytest.raises(ApprovalRoleFloorError) as exc:
-        await _approve(request_id, _person(_USER), params)
+    await _approve(request_id, _person(_USER, platform_admin=True), params)
 
-    assert "you are in this group" in exc.value.reason_text
-    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
 
 
 @pytest.mark.asyncio
-async def test_a_group_change_with_unknown_members_cannot_be_approved() -> None:
+async def test_a_group_change_with_unknown_members_is_approved_by_an_admin() -> None:
     params = {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}
     request_id = await _park(params, _grant(members=None), op_id=_ATTRS)
 
-    with pytest.raises(ApprovalRoleFloorError) as exc:
-        await _approve(request_id, _person("person-admin"), params)
+    await _approve(request_id, _person("person-admin", platform_admin=True), params)
 
-    assert "could not read who is in this group" in exc.value.reason_text
-    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
 
 
 @pytest.mark.asyncio
-async def test_a_tenant_admin_outside_the_group_approves_its_attribute_change() -> None:
+async def test_a_platform_admin_outside_the_group_approves_its_attribute_change() -> None:
     params = {"id": _GROUP, "attributes": {"tenant_role": ["admin"]}}
     request_id = await _park(params, _grant(members=[_OTHER_USER]), op_id=_ATTRS)
 
-    await _approve(request_id, _person("person-admin"), params)
+    await _approve(request_id, _person("person-admin", platform_admin=True), params)
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
@@ -306,11 +314,16 @@ async def test_an_sa_operator_who_is_not_a_tenant_admin_cannot_approve_in_the_lo
 
 
 @pytest.mark.asyncio
-async def test_a_second_tenant_admin_approves_and_the_audit_row_names_the_user() -> None:
+async def test_in_the_login_realm_a_tenant_admin_is_refused_and_a_platform_admin_approves() -> None:
     params = {"group_id": _GROUP, "user_id": _OTHER_USER}
     request_id = await _park(params, _grant())
 
-    await _approve(request_id, _person("person-admin"), params)
+    with pytest.raises(ApprovalRoleFloorError) as exc:
+        await _approve(request_id, _person("person-admin"), params)
+    assert "platform admin must approve it" in exc.value.reason_text
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     payload = await _decision_payload(request_id)
@@ -413,15 +426,20 @@ async def test_other_operations_are_not_affected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_approve_right_read_shows_the_same_refusal() -> None:
+async def test_the_approve_right_read_shows_the_same_answer() -> None:
     params = {"group_id": _GROUP, "user_id": _USER}
     request_id = await _park(params, _grant())
     request = await _row(request_id)
 
-    right = approve_right(_person(_USER), request)
+    in_console = approve_right(_person(_USER, platform_admin=True), request)
+    with_token = approve_right(_person(_USER, platform_admin=True, web=False), request)
+    not_admin = approve_right(_person(_USER, role=TenantRole.OPERATOR), request)
 
-    assert right.may_approve is False
-    assert "your own login" in right.message
+    assert in_console.may_approve is True
+    assert with_token.may_approve is False
+    assert with_token.message == RIGHTS_CHANGE_CONSOLE_ONLY
+    assert not_admin.may_approve is False
+    assert not_admin.message == RIGHTS_CHANGE_REFUSAL
 
 
 # ---------------------------------------------------------------------------
@@ -560,105 +578,24 @@ def _live_group(members: list[str] | None, **more: Any) -> dict[str, Any]:
 
 
 async def _approved_group_change() -> ApprovalRequest:
-    """A group attribute change that the approver passed while outside the group."""
+    """A group attribute change that an admin approved."""
     request_id = await _park(_ATTR_PARAMS, _grant(members=[_OTHER_USER]), op_id=_ATTRS)
-    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
+    await _approve(request_id, _person(_APPROVER, platform_admin=True), _ATTR_PARAMS)
     return await _row(request_id)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approver", [_APPROVER, _APPROVER.upper()])
-async def test_the_run_is_refused_when_the_approver_joined_the_group(
-    monkeypatch: pytest.MonkeyPatch, approver: str
-) -> None:
-    """The saved member list does not have the approver. The live one does."""
-    request = await _approved_group_change()
-    _live_grant(monkeypatch, _live_group([_OTHER_USER, approver]))
-
-    # The run uses the identity of the requester, not the approver.
-    reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
-
-    assert reason == GRANT_REASON_APPROVER_IN_GROUP
-
-
-@pytest.mark.asyncio
-async def test_the_resume_check_refuses_when_the_approver_joined_the_group(
+async def test_the_run_goes_ahead_when_the_approver_is_in_the_group_now(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An admin may change a group they are in, so joining it later does not block the run."""
     request = await _approved_group_change()
-    _live_grant(monkeypatch, _live_group([_APPROVER]))
-
-    refusal = await refuse_resume_if_preview_changed(
-        _person(_REQUESTER), request, None, _ATTR_PARAMS
-    )
-
-    assert refusal is not None
-    assert refusal.extras is not None
-    assert refusal.extras["error_code"] == "object_changed_since_approval"
-    assert refusal.extras["reason"] == GRANT_REASON_APPROVER_IN_GROUP
-
-
-@pytest.mark.asyncio
-async def test_a_retry_is_refused_when_the_approver_joined_the_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = await _approved_group_change()
-    _live_grant(monkeypatch, _live_group([_APPROVER]))
-
-    assert await _object_changed(_person(_REQUESTER), request, None, _ATTR_PARAMS) is True
-
-
-@pytest.mark.asyncio
-async def test_a_retry_goes_ahead_when_the_approver_is_outside_the_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = await _approved_group_change()
-    _live_grant(monkeypatch, _live_group([_OTHER_USER]))
-
-    assert await _object_changed(_person(_REQUESTER), request, None, _ATTR_PARAMS) is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("live", [_live_group(None), {**_live_group(None), "members": "odd"}])
-async def test_the_run_is_refused_when_members_cannot_be_read_again(
-    monkeypatch: pytest.MonkeyPatch, live: dict[str, Any]
-) -> None:
-    request = await _approved_group_change()
-    _live_grant(monkeypatch, live)
+    _live_grant(monkeypatch, _live_group([_OTHER_USER, _APPROVER]))
 
     reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
-
-    assert reason == GRANT_REASON_UNREADABLE
-
-
-@pytest.mark.asyncio
-async def test_the_run_is_refused_when_the_approver_is_not_recorded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A group change with no approver on the row is refused, never allowed."""
-    request_id = await _park(_ATTR_PARAMS, _grant(members=[_OTHER_USER]), op_id=_ATTRS)
-    request = await _row(request_id)
-    assert request.reviewed_by is None
-    _live_grant(monkeypatch, _live_group([_OTHER_USER]))
-
-    reason = await grant_changed_since_request(_person(_REQUESTER), request, None, _ATTR_PARAMS)
-
-    assert reason == GRANT_REASON_UNREADABLE
-
-
-@pytest.mark.asyncio
-async def test_a_group_change_outside_the_login_realm_reads_no_members_at_the_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request_id = await _park(_ATTR_PARAMS, _grant(login_realm=False, members=None), op_id=_ATTRS)
-    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
-    _live_grant(monkeypatch, _live_group(None, login_realm=False))
-
-    reason = await grant_changed_since_request(
-        _person(_REQUESTER), await _row(request_id), None, _ATTR_PARAMS
-    )
 
     assert reason is None
+    assert await _object_changed(_person(_REQUESTER), request, None, _ATTR_PARAMS) is False
 
 
 @pytest.mark.asyncio
@@ -676,7 +613,7 @@ async def test_the_run_is_refused_when_the_change_needs_a_stricter_approval_now(
 ) -> None:
     grant = _grant(**{"members": [_OTHER_USER], **approved})
     request_id = await _park(_ATTR_PARAMS, grant, op_id=_ATTRS)
-    await _approve(request_id, _person(_APPROVER), _ATTR_PARAMS)
+    await _approve(request_id, _person(_APPROVER, platform_admin=True), _ATTR_PARAMS)
     _live_grant(monkeypatch, {**_live_group([_OTHER_USER]), **live_change})
 
     reason = await grant_changed_since_request(

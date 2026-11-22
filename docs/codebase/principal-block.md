@@ -31,6 +31,8 @@ The text names no admin and no reason.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
+- `meho_backplane/agent/principal_block_gate.py`: the check for hosted
+  agent runs (`PrincipalBlockGate`).
 - CLI: `cli/internal/cmd/principal/`.
 
 ## Control flow
@@ -48,8 +50,13 @@ Where the list is checked:
 |---|---|
 | `verify_jwt_for_audience` (`auth/jwt.py`) | Every REST and MCP request. 403 `principal_blocked`. It runs after the current tenant is chosen. |
 | `UISessionMiddleware` (`ui/auth/middleware.py`) | Every console request, not only the 300-second token check. 403 with the plain text above. |
-| `dispatch()` (`operations/dispatcher.py`) | Every top-level call, which covers hosted agent runs and scheduled runs. A `denied` result, and the vendor gets no call. |
+| `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. A `denied` result, and the vendor gets no call. |
+| `PrincipalBlockGate` (`agent/principal_block_gate.py`) | Every tool call and every model request of a hosted agent run and of its child runs (`invoke_agent`). The tool does not run, the model gets no further request, and the run ends failed with the refusal text. The audit row of the refused tool call has status 403 (503 when the list cannot be read). |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
+
+A hosted agent run acts as the person who started it, so it stops when
+that person is blocked. A scheduled run acts as the agent's own login, so
+it is refused only when that login is blocked.
 
 A block in one tenant holds only where the person works in that tenant.
 A person with several tenants who has not picked one yet is checked

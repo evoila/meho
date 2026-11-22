@@ -21,8 +21,12 @@ Where it is checked (all through :func:`is_principal_blocked`):
   (:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`);
 * every page request of the web console
   (:mod:`meho_backplane.ui.auth.middleware`);
-* every top-level operation call, which covers hosted agent runs and
-  scheduled runs (:func:`~meho_backplane.operations.dispatcher.dispatch`);
+* every top-level operation call
+  (:func:`~meho_backplane.operations.dispatcher.dispatch`);
+* every tool call and model request of a hosted agent run
+  (:class:`~meho_backplane.agent.principal_block_gate.PrincipalBlockGate`).
+  A scheduled run acts as the agent's own login, so it is refused only
+  when that login is blocked;
 * an approved call, which does not run while the person who asked is
   blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`).
 

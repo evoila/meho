@@ -403,6 +403,7 @@ Field-to-source mapping:
 | `actor_sub` | `audit_log.actor_sub` (#5773) — the agent that acted for the person in `principal_sub`, in an agent run the person started (`agent:<name>`). `None` when nobody acted for another login, for example a person's own call or an agent that runs on its own login. |
 | `actor_name` | The agent's name, read from `actor_sub` (the part after `agent:`). `None` when `actor_sub` is `None` or has another form. The CLI shows the actor in `audit show`, in the PRINCIPAL column of `audit query` (`<principal> via <actor>`) and at the end of each `audit replay` line. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
+| `stored_session_id` | Only in the answer of `GET /api/v1/audit/show/{audit_id}` (`AuditEntryDetail`, #4904); the list, query and replay answers and the MCP audit tools do not have the field. The stored agent session the row belongs to: a hosted run, an uploaded session whose MCP calls MEHO matched to this row's `agent_session_id`, or an uploaded session whose `meho` command wrote this CLI row. Sent only with the switch `AUDIT_SESSION_LINKS` on (off by default), to a person who may read sessions, for a row with a stored session; otherwise the answer has no such field. `meho audit show` prints it as `stored_session:`. See [session-store.md](session-store.md#links-from-audit-rows). |
 
 The three computed fields use the same rules the audit writers apply when
 they store the row, so a row returned by the query API and the stored row

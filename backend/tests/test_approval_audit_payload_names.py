@@ -361,7 +361,7 @@ async def test_console_drawer_shows_an_old_form_row_with_the_main_columns() -> N
     async with get_sessionmaker()() as s:
         stored = await s.get(AuditLog, row.id)
         assert stored is not None
-        context = await _build_drawer_context(s, stored, is_admin=False)
+        context = await _build_drawer_context(s, stored, is_admin=False, may_read_sessions=False)
 
     shown = context["request_payload"]
     assert isinstance(shown, dict)

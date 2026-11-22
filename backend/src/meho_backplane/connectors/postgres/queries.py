@@ -335,11 +335,12 @@ _ASCII_SPACE = frozenset(" \t\n\r\v\f")
 #: or the forbidden ``%00``.
 _BROKEN_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})|%00")
 
-#: The parameter key words libpq reads, pinned to the PostgreSQL 16 page
-#: "Parameter Key Words"
-#: (https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-PARAMKEYWORDS),
-#: plus the ``oauth_*`` key words of the current page, where
-#: ``oauth_client_secret`` comes from. libpq refuses a text with any other name.
+#: The parameter key words libpq reads, pinned to the pages "Parameter Key
+#: Words" of PostgreSQL 15 to 18, the releases this connector supports
+#: (https://www.postgresql.org/docs/18/libpq-connect.html#LIBPQ-PARAMKEYWORDS
+#: and the same page of 15, 16 and 17). A name of any of these releases counts,
+#: so a text that a server of one supported release accepts is read on all of
+#: them. libpq refuses a text with any other name.
 _LIBPQ_KEYWORDS: frozenset[str] = frozenset(
     {
         "host",
@@ -365,9 +366,11 @@ _LIBPQ_KEYWORDS: frozenset[str] = frozenset(
         "gssencmode",
         "sslmode",
         "requiressl",
+        "sslnegotiation",
         "sslcompression",
         "sslcert",
         "sslkey",
+        "sslkeylogfile",
         "sslpassword",
         "sslcertmode",
         "sslrootcert",
@@ -377,9 +380,13 @@ _LIBPQ_KEYWORDS: frozenset[str] = frozenset(
         "requirepeer",
         "ssl_min_protocol_version",
         "ssl_max_protocol_version",
+        "min_protocol_version",
+        "max_protocol_version",
         "krbsrvname",
         "gsslib",
         "gssdelegation",
+        "scram_client_key",
+        "scram_server_key",
         "service",
         "target_session_attrs",
         "load_balance_hosts",
@@ -566,9 +573,10 @@ def _connection_text_secret_spans(text: str) -> list[_Span] | None:
     The address form (the text starts with ``postgresql://`` or
     ``postgres://``, in any case) and the key word form follow the PostgreSQL
     pages "Connection Strings" and "Parameter Key Words"
-    (https://www.postgresql.org/docs/16/libpq-connect.html). The value of
-    ``password``, ``sslpassword`` and ``oauth_client_secret`` (any case) is a
-    secret. Returns ``None`` when libpq cannot read the text.
+    (https://www.postgresql.org/docs/18/libpq-connect.html). The value of
+    each name in
+    :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SECRET_KEYWORDS`
+    (any case) is a secret. Returns ``None`` when libpq cannot read the text.
     """
     if text.lower().startswith(_ADDRESS_PREFIXES):
         return _address_secret_spans(text)
@@ -625,7 +633,8 @@ async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> d
     :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
     is read with the rules of libpq, for every caller. The fixed hide mark
     stands in place of each secret value (``password``, ``sslpassword``,
-    ``oauth_client_secret`` and the password of an address); every other
+    ``oauth_client_secret``, ``scram_client_key``, ``scram_server_key`` and
+    the password of an address); every other
     character stays. A value that libpq cannot read stays as it is when it
     holds no secret name and no address password. When it holds one, the call
     is refused with :class:`PostgresSettingsRefusedError`. The curated list

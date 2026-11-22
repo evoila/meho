@@ -252,10 +252,17 @@ CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
 #: The key words of a connection text whose value is a secret. Pinned to the
 #: libpq page "Parameter Key Words"
 #: (https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS):
-#: ``password``, ``sslpassword`` (the key of the client certificate) and
-#: ``oauth_client_secret``.
+#: ``password``, ``sslpassword`` (the key of the client certificate),
+#: ``oauth_client_secret``, and the two SCRAM keys of PostgreSQL 18,
+#: ``scram_client_key`` and ``scram_server_key``.
 CONNECTION_TEXT_SECRET_KEYWORDS: frozenset[str] = frozenset(
-    {"password", "sslpassword", "oauth_client_secret"}
+    {
+        "password",
+        "sslpassword",
+        "oauth_client_secret",
+        "scram_client_key",
+        "scram_server_key",
+    }
 )
 
 _SETTINGS_OP = "postgres.settings"

@@ -337,6 +337,23 @@ _KEY_WORD_CASES = [
         "application_name='app password=pw-0815' host=db.example.test",  # trufflehog:ignore
         id="quoted-value-of-another-name",
     ),
+    pytest.param(
+        "host=db.example.test sslnegotiation=direct password=pw-0815",  # trufflehog:ignore
+        f"host=db.example.test sslnegotiation=direct password={_M}",  # trufflehog:ignore
+        id="postgresql-17-name-sslnegotiation",
+    ),
+    pytest.param(
+        "min_protocol_version=3.0 max_protocol_version=latest"
+        " sslkeylogfile=keys.log password=pw-0815",  # trufflehog:ignore
+        "min_protocol_version=3.0 max_protocol_version=latest"
+        f" sslkeylogfile=keys.log password={_M}",  # trufflehog:ignore
+        id="postgresql-18-names",
+    ),
+    pytest.param(
+        "host=db.test scram_client_key=ck-0815 scram_server_key=sk-0815",  # trufflehog:ignore
+        f"host=db.test scram_client_key={_M} scram_server_key={_M}",
+        id="postgresql-18-scram-keys",
+    ),
 ]
 
 #: Address form: (value, expected).
@@ -415,6 +432,21 @@ _ADDRESS_CASES = [
         "postgresql://db.test/a?application_name=wal rcv&password=pw-0815",  # trufflehog:ignore
         f"postgresql://db.test/a?application_name=wal rcv&password={_M}",  # trufflehog:ignore
         id="space-in-a-parameter-value-before-a-secret-parameter",
+    ),
+    pytest.param(
+        "postgresql://repl:pw-0815@db.test/app?sslnegotiation=direct",  # trufflehog:ignore
+        f"postgresql://repl:{_M}@db.test/app?sslnegotiation=direct",
+        id="postgresql-17-parameter-sslnegotiation",
+    ),
+    pytest.param(
+        "postgresql://db.test/app?sslnegotiation=direct&password=pw-0815",  # trufflehog:ignore
+        f"postgresql://db.test/app?sslnegotiation=direct&password={_M}",  # trufflehog:ignore
+        id="postgresql-17-parameter-before-a-secret-parameter",
+    ),
+    pytest.param(
+        "postgresql://db.test/a?scram_client_key=ck-1&scram_server_key=sk-1",  # trufflehog:ignore
+        f"postgresql://db.test/a?scram_client_key={_M}&scram_server_key={_M}",
+        id="postgresql-18-scram-key-parameters",
     ),
 ]
 

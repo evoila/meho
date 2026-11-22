@@ -308,6 +308,60 @@ lowest-ranked hits are left out, `delivery` is `partial` and
 `omitted_hits` says how many. A passage is never cut. Snippets,
 passage texts and heading titles are wrapped as untrusted text.
 
+### Agent search runner
+
+A check that asks the knowledge index directly cannot see what MEHO does
+with the hits (the filter skip and the merge of store and knowledge repo
+hits). `backend/scripts/retrieval_eval/agent_search.py` asks a running
+MEHO instead. For each question it sends one MCP `tools/call` of
+`search_knowledge` (`query`, `limit: 10`, the question's `filters`) and
+reads `hits` in the order an agent gets them. It is test tooling: it
+adds no route, setting or operation.
+
+Run it from `backend/`:
+
+```bash
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
+  --url <meho-address> --questions <file.yaml> --report report.md
+```
+
+The token comes from the environment variable named by `--token-env`
+(default `MEHO_TOKEN`). It is never printed or written to the report.
+Exit code 0 means every question was asked, 1 means a call failed, 2
+means the arguments or the question file are wrong.
+
+**Question file.** A YAML file with `questions:`. Each question has `id`
+(used once), `question`, `expect` (the page path), and optionally `repo`,
+`kind` (`meaning` or `exact`, default `meaning`) and `filters` (a mapping
+that can be sent as JSON, with no NaN or infinity). A missing or unknown
+field stops the run. The
+example `agent_search_questions_example.yaml` is made up; a real set is
+kept with the team's knowledge repo.
+
+**Hit rule.** The runner looks at every hit MEHO returns, also after
+place 10 (MEHO can add knowledge repo hits after ten store hits). The
+expected page is at place *n* when hit *n* is a
+knowledge repo hit (`source: wiki`) whose `document_id`, or the path after
+`blob/<commit>/` in its `source_url`, equals `expect`; or a store hit whose
+provenance `relative_path` equals `expect`. When the question names `repo`
+and the hit carries a repository name (`collection` on the hit, else
+`wiki.collection`), the names must match. Store hits carry no repository
+name, so `repo` does not limit them.
+
+**Numbers.** One line per question (hit or miss, place, and `wiki.reason`
+when the knowledge repo was not searched). Then three summary lines: all
+questions, `meaning` and `exact`. Each has the count of expected pages in
+the top 3, the share found in the top 10, and MRR (the mean of 1 divided
+by the real place, also after place 10, and 0 when not found). Then the
+count per `wiki.reason`, the count of `partial` answers and the count of
+failed calls. A failed call is never counted as a miss: the three summary
+lines leave it out, and only the failed-call line counts it.
+
+**Report.** `--report` writes Markdown: the summary lines, a table with id,
+kind, result, place and reason, the knowledge search switch values from
+`GET /version` ("not shown" when the server does not list them), the
+version and the date. It holds no question text.
+
 ### Offline KB passage benchmark (#3765)
 
 Before anyone changes a retrieval default (model, prefixes, reranker),

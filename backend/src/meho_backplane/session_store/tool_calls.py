@@ -13,7 +13,10 @@ A ``meho`` CLI command is a ``Bash`` tool call whose ``command`` runs
 ``meho``. Its answer is a ``{"type": "tool_result", "tool_use_id": ...}``
 block in a later line. Each line has a ``timestamp``, so the command ran
 between the time of its call line and the time of its answer line
-(:class:`CliCall`).
+(:class:`CliCall`). An upload can end between the call line and its
+answer line. The next upload then holds the answer in its new part, and
+:func:`cli_calls_in` finds the call line in the part an earlier upload
+stored (``earlier``).
 
 :func:`tool_calls_in` runs in the upload worker (:mod:`.prepare`), so it
 does no I/O and imports nothing heavy. It reads the checked bytes: a
@@ -27,6 +30,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
+
+from meho_backplane.session_store.secret_check import check_part
 
 __all__ = ["MAX_TOOL_CALLS", "CliCall", "ToolCall", "cli_calls_in", "tool_calls_in"]
 
@@ -45,6 +50,9 @@ _MEHO_COMMAND: Final[re.Pattern[str]] = re.compile(r"(?:^|[\s;&|(/])meho(?=\s)")
 #: The words of a command line, without quotes and shell signs.
 _WORD: Final[re.Pattern[str]] = re.compile(r"[^\s'\"=;&|()]+")
 
+#: The most command names in a command path (``vcf-automation catalog item list``).
+_MAX_PATH_WORDS: Final[int] = 6
+
 
 @dataclass(frozen=True)
 class CliCall:
@@ -52,6 +60,11 @@ class CliCall:
 
     words: frozenset[str]
     """The words of the command line (an operation id is one of them)."""
+    paths: frozenset[str]
+    """The command paths the line may run: for each ``meho`` word, the
+    first one to six words after it that are not flags, joined by a space
+    (``vmware``, ``vmware vm``, ``vmware vm list``, ...). The CLI sends the
+    path of the running command, so its audit rows carry one of them."""
     started_at: datetime
     """The time of the call line."""
     ended_at: datetime
@@ -128,33 +141,93 @@ def _meho_command(block: dict[str, Any]) -> str | None:
     return None
 
 
-def cli_calls_in(content: bytes, *, limit: int = MAX_TOOL_CALLS) -> list[CliCall]:
-    """Return up to *limit* ``meho`` commands of the JSON lines in *content*.
+def _command_paths(words: list[str]) -> frozenset[str]:
+    paths: set[str] = set()
+    for index, word in enumerate(words):
+        if word != "meho" and not word.endswith("/meho"):
+            continue
+        names = [w for w in words[index + 1 :] if not w.startswith("-")][:_MAX_PATH_WORDS]
+        paths.update(" ".join(names[: end + 1]) for end in range(len(names)))
+    return frozenset(paths)
 
-    A command whose answer line is not in *content*, or a line with no
-    valid ``timestamp`` (with its time zone), is left out.
+
+def _cli_call(command: str, started_at: datetime, ended_at: datetime) -> CliCall:
+    words = _WORD.findall(command)
+    return CliCall(
+        words=frozenset(words),
+        paths=_command_paths(words),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def _entry_of(line: bytes) -> tuple[datetime, list[dict[str, Any]]] | None:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    when = _line_time(entry) if isinstance(entry, dict) else None
+    if when is None:
+        return None
+    return when, _blocks(entry)
+
+
+def _start_in_earlier(earlier: bytes, call_id: str) -> tuple[str, datetime] | None:
+    """Find the ``meho`` call line of *call_id* in the part an earlier upload stored.
+
+    The line is checked again (:func:`.secret_check.check_part`), as the
+    earlier upload did, before its command is read.
     """
-    started: dict[str, tuple[str, datetime]] = {}
+    at = earlier.rfind(json.dumps(call_id).encode())
+    if at < 0:
+        return None
+    begin = earlier.rfind(b"\n", 0, at) + 1
+    end = earlier.find(b"\n", at)
+    line = check_part(earlier[begin : len(earlier) if end < 0 else end]).content
+    parsed = _entry_of(line)
+    if parsed is None:
+        return None
+    when, blocks = parsed
+    for block in blocks:
+        command = _meho_command(block)
+        if command is not None and block.get("id") == call_id:
+            return command, when
+    return None
+
+
+def cli_calls_in(
+    content: bytes, *, limit: int = MAX_TOOL_CALLS, earlier: bytes = b""
+) -> list[CliCall]:
+    """Return up to *limit* ``meho`` commands whose answer line is in *content*.
+
+    The call line is in *content* or in *earlier* (the part of the same file
+    that an earlier upload stored). A command whose answer line is not in
+    *content*, or a line with no valid ``timestamp`` (with its time zone), is
+    left out.
+    """
+    started: dict[str, tuple[str, datetime] | None] = {}
     calls: list[CliCall] = []
     for line in content.splitlines():
         if len(calls) >= limit:
             break
         if b"tool_use" not in line and b"tool_result" not in line:
             continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
+        parsed = _entry_of(line)
+        if parsed is None:
             continue
-        when = _line_time(entry) if isinstance(entry, dict) else None
-        if when is None:
-            continue
-        for block in _blocks(entry):
-            command = _meho_command(block)
-            if command is not None and isinstance(block.get("id"), str):
-                started[block["id"]] = (command, when)
-            elif block.get("type") == "tool_result":
-                begin = started.pop(str(block.get("tool_use_id")), None)
+        when, blocks = parsed
+        for block in blocks:
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                command = _meho_command(block)
+                # Every call of this part is noted, so the answer of a
+                # call that is not ``meho`` is not looked up in *earlier*.
+                started[block["id"]] = (command, when) if command is not None else None
+            elif block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                call_id = block["tool_use_id"]
+                if call_id in started:
+                    begin = started.pop(call_id)
+                else:
+                    begin = _start_in_earlier(earlier, call_id) if earlier else None
                 if begin is not None and begin[1] <= when:
-                    words = frozenset(_WORD.findall(begin[0]))
-                    calls.append(CliCall(words=words, started_at=begin[1], ended_at=when))
+                    calls.append(_cli_call(begin[0], begin[1], when))
     return calls[:limit]

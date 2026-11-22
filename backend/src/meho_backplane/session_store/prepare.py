@@ -96,7 +96,10 @@ def prepare_upload(
             limit = MAX_TOOL_CALLS - len(tool_calls)
             tool_calls.extend(tool_calls_in(part.content, limit=limit))
             cli_limit = MAX_TOOL_CALLS - len(cli_calls)
-            cli_calls.extend(cli_calls_in(part.content, limit=cli_limit))
+            # A command can start before this upload and end in it, so
+            # its call line is looked up in the part stored before.
+            stored_part = files[path][:offset]
+            cli_calls.extend(cli_calls_in(part.content, limit=cli_limit, earlier=stored_part))
     packed = write_archive(checked)
     archive = CheckedArchive(packed, sha256_hex(packed), unclear, redactions, meta)
     return PreparedUpload(

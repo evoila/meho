@@ -317,8 +317,9 @@ At upload time MEHO finds the audit rows of the session's MEHO calls:
   made at the same time with the same arguments is skipped, because it
   does not show which agent made it. A session with no start time gets no
   link.
-- a `meho` command the agent ran: the same person, the operation the
-  command names, written while the command ran. Two agents that share one
+- a `meho` command the agent ran: the same person, the operation or the
+  command (for example `meho vmware vm list`), written while the command
+  ran. A command that was still running at one upload links at the next. Two agents that share one
   `meho login` still get their own rows. A row that both of them could
   have written gets no link.
 

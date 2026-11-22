@@ -491,15 +491,27 @@ stored session:
   instead. The worker finds the `meho` commands in the checked tails
   (`cli_calls_in` in `tool_calls.py`): a `Bash` tool call whose `command`
   runs `meho`, and the `tool_result` line of its answer. The `timestamp`
-  of the two lines is when the command ran. A command whose answer line
-  is not in the same upload is left out. A CLI row then links when it has
-  the same tenant and person, its `op_id` is a word of the command, and it
-  was written while the command ran (30 seconds of clock slack). Each such
+  of the two lines is when the command ran. An upload can end between the
+  two lines. The next upload then has the answer line in its new part,
+  and the worker finds the call line in the part an earlier upload stored
+  (the `earlier` argument; that line is checked for secrets again before
+  it is read). A CLI row then links when it has the same tenant and
+  person, it was written while the command ran (30 seconds of clock
+  slack), and one of these is true:
+  - its `op_id` is a word of the command (`meho call k8s pods.list`);
+  - its command path is a path of the command. The CLI sends the path of
+    the running command in the `Meho-Command` header (`vmware vm list`,
+    no arguments or flags). With the switch on, the audit middleware
+    stores it on the rows of a CLI login session (`payload.cli_command`,
+    in `_mark_client_session` of `audit_cutover.py`). The worker takes
+    the paths of a command line from the words after each `meho` word
+    that are not flags (`CliCall.paths`). So `meho vmware vm list`, whose
+    `op_id` is `GET:/vcenter/vm`, links too.
+ Each such
   row id is stored as one `agent_session_audit_link` row. The upload's
   audit row counts the new ones (`linked_cli_rows`). A row that two stored
   sessions claim (two conversations of one login ran the same operation
-  at the same time) links to neither. A command that names no `op_id`
-  (for example `meho vmware vm list`) links no row.
+  at the same time) links to neither.
 
 **Who sees the link.** Only a person with the `read` right of the store
 (`may_read_sessions`: `operator` and up, not an agent, service or runner

@@ -25,8 +25,11 @@ Two kinds of session get a link:
   (:data:`~meho_backplane.operations._audit.SESSION_FROM_CLIENT_KEY`).
   Many agent sessions share one login, so that id names none of them.
   :func:`link_cli_calls` links each row on its own instead: same tenant,
-  same person, a CLI row, its ``op_id`` is a word of the command, and it
-  was written while the command ran (30 seconds of slack). The row id is
+  same person, a CLI row, its ``op_id`` is a word of the command or its
+  command path (``payload["cli_command"]``, sent by the CLI) is a path of
+  the command, and it was written while the command ran (30 seconds of
+  slack). The path is what links a command such as ``meho vmware vm list``,
+  whose ``op_id`` (``GET:/vcenter/vm``) the CLI picks itself. The row id is
   stored as one :class:`AgentSessionAuditLink` row. A row that two stored
   sessions claim (two conversations of one login ran the same operation at
   the same time) links to neither.
@@ -55,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS, Operator
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations._audit import (
+    CLI_COMMAND_KEY,
     SESSION_FROM_CLIENT_KEY,
     agent_session_rows,
     payload_session_from_client,
@@ -91,7 +95,7 @@ _MCP_METHOD: Final[str] = "MCP"
 #: tells which command wrote a row.
 _CLI_SLACK: Final[timedelta] = timedelta(seconds=30)
 
-#: How many command words go into one ``IN`` list of the CLI row query.
+#: How many command words or paths go into one ``IN`` list of the CLI row query.
 _WORDS_PER_QUERY: Final[int] = 500
 
 
@@ -274,14 +278,14 @@ async def _stored_session_of_cli_row(
     return StoredSessionLink(session_id=rows[0].session_id, hosted_run=False)
 
 
-def _cli_row_matches(op_id: object, occurred_at: datetime, calls: Sequence[CliCall]) -> bool:
-    if not isinstance(op_id, str):
-        return False
+def _cli_row_matches(
+    op_id: object, command: object, occurred_at: datetime, calls: Sequence[CliCall]
+) -> bool:
     if occurred_at.tzinfo is None:
         # SQLite gives the stored UTC time without its time zone.
         occurred_at = occurred_at.replace(tzinfo=UTC)
     return any(
-        op_id in call.words
+        (op_id in call.words or command in call.paths)
         and call.started_at - _CLI_SLACK <= occurred_at <= call.ended_at + _CLI_SLACK
         for call in calls
     )
@@ -291,25 +295,34 @@ async def _matching_cli_rows(
     session: AsyncSession, record: AgentSessionRecord, calls: Sequence[CliCall]
 ) -> set[uuid.UUID]:
     op_id = AuditLog.payload["op_id"].as_string()
-    words = sorted(set().union(*(call.words for call in calls)))
+    command = AuditLog.payload[CLI_COMMAND_KEY].as_string()
+    # A row matches by its op_id (``meho call k8s pods.list``) or by the
+    # command path the CLI sent (``meho vmware vm list``).
+    lookups = [
+        (op_id, sorted(set().union(*(call.words for call in calls)))),
+        (command, sorted(set().union(*(call.paths for call in calls)))),
+    ]
     begin = min(call.started_at for call in calls) - _CLI_SLACK
     end = max(call.ended_at for call in calls) + _CLI_SLACK
     matched: set[uuid.UUID] = set()
-    for start in range(0, len(words), _WORDS_PER_QUERY):
-        result = await session.execute(
-            select(AuditLog.id, op_id, AuditLog.occurred_at).where(
-                AuditLog.tenant_id == record.tenant_id,
-                AuditLog.operator_sub == record.uploaded_by_sub,
-                AuditLog.agent_session_id.is_not(None),
-                AuditLog.payload[SESSION_FROM_CLIENT_KEY].as_boolean().is_(True),
-                op_id.in_(words[start : start + _WORDS_PER_QUERY]),
-                AuditLog.occurred_at >= begin,
-                AuditLog.occurred_at <= end,
+    for column, values in lookups:
+        for start in range(0, len(values), _WORDS_PER_QUERY):
+            result = await session.execute(
+                select(AuditLog.id, op_id, command, AuditLog.occurred_at).where(
+                    AuditLog.tenant_id == record.tenant_id,
+                    AuditLog.operator_sub == record.uploaded_by_sub,
+                    AuditLog.agent_session_id.is_not(None),
+                    AuditLog.payload[SESSION_FROM_CLIENT_KEY].as_boolean().is_(True),
+                    column.in_(values[start : start + _WORDS_PER_QUERY]),
+                    AuditLog.occurred_at >= begin,
+                    AuditLog.occurred_at <= end,
+                )
             )
-        )
-        matched.update(
-            row_id for row_id, row_op, when in result.all() if _cli_row_matches(row_op, when, calls)
-        )
+            matched.update(
+                row_id
+                for row_id, row_op, row_command, when in result.all()
+                if _cli_row_matches(row_op, row_command, when, calls)
+            )
     return matched
 
 

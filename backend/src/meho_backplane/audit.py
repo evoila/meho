@@ -159,8 +159,10 @@ from meho_backplane.broadcast import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
+    client_command_var,
     client_session_id_var,
     decode_work_ref_header,
+    parse_command_header,
     work_ref_var,
 )
 from meho_backplane.request_usage.collector import open_request_usage
@@ -199,6 +201,12 @@ _WORK_REF_HEADER: Final[bytes] = b"meho-work-ref"
 #: ``audit_log.agent_session_id``. Like ``Meho-Work-Ref`` it is read off the
 #: raw scope and is not part of the OpenAPI schema.
 _SESSION_ID_HEADER: Final[bytes] = b"meho-session-id"
+
+#: Lower-cased name of the request header in which the ``meho`` CLI sends the
+#: path of the running command (``vmware vm list``). Bound onto
+#: :data:`~meho_backplane.operations._audit.client_command_var` for the whole
+#: request. Like ``Meho-Session-Id`` it is not part of the OpenAPI schema.
+_COMMAND_HEADER: Final[bytes] = b"meho-command"
 
 #: Lower-cased response-header name carrying the id of the request's
 #: audit record (#4976). See "Audit receipt header" in the module docstring.
@@ -677,6 +685,14 @@ def _extract_session_id(scope: Scope) -> uuid.UUID | None:
     return None
 
 
+def _extract_command(scope: Scope) -> str | None:
+    """Return the inbound ``Meho-Command`` header as a command path, or ``None``."""
+    for name, value in scope.get("headers", ()):
+        if name.lower() == _COMMAND_HEADER:
+            return parse_command_header(value)
+    return None
+
+
 def _resolve_tenant_id(
     *,
     operator_sub: str,
@@ -908,6 +924,7 @@ class AuditMiddleware:
         if work_ref_header is not None:
             work_ref_token = work_ref_var.set(work_ref_header)
         session_token = client_session_id_var.set(_extract_session_id(scope))
+        command_token = client_command_var.set(_extract_command(scope))
         try:
             # G0.5-T5 (#250): MCP requests are audited at per-operation
             # granularity by the MCP handlers themselves, not at the
@@ -922,6 +939,7 @@ class AuditMiddleware:
                 return
             await self._run_and_finalize(scope, receive, send, start)
         finally:
+            client_command_var.reset(command_token)
             client_session_id_var.reset(session_token)
             if work_ref_token is not None:
                 work_ref_var.reset(work_ref_token)

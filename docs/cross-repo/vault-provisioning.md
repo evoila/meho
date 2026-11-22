@@ -137,6 +137,13 @@ identity wiring that makes them resolve are in
 §2 to §4. Bind them to the role's logins through identity groups, and
 give each tenant's callers the group that matches their `tenant_role`.
 
+The per-tenant policy grants only the tenant folders. A target whose
+`secret_ref` points somewhere else (for example under `secret/meho/`)
+needs its secret moved first: copy the secret into
+`secret/tenants/<tenant_id>/`, update the target's `secret_ref`, and check
+that the target still answers. Then replace the old policy. The steps are
+in [`vault-per-tenant-migration.md`](./vault-per-tenant-migration.md).
+
 Set the tenant metadata and the group on the entity that the JWT login
 really uses. Vault finds that entity by its alias: the alias name is the
 caller's `sub` claim (`user_claim=sub`), on the accessor of the `jwt`

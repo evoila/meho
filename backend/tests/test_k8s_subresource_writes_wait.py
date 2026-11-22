@@ -163,3 +163,35 @@ def test_the_class_the_agent_sees_does_not_read_the_rule(
     monkeypatch.setattr(op_classes, "_CREDENTIAL_CAPABLE_MATCHES", [])
     assert op_classes.is_credential_capable(op_id) is False
     assert (resolve_op_class(op_id, None), classify_op(op_id)) == seen
+
+
+#: Writes whose last segment ``status`` or ``scale`` comes right after a
+#: ``namespaces/{namespace}`` part, so the path also reads as a collection.
+_COLLECTION_LIKE_WRITES: list[str] = [
+    "PUT:/api/v1/namespaces/{namespace}/scale",
+    "POST:/apis/apps/v1/namespaces/{namespace}/status",
+    "PATCH:/apis/apps/v1/namespaces/{namespace}/scale",
+    "POST:/apis/widgets.example.test/v1/namespaces/{namespace}/status",
+]
+
+
+@pytest.mark.parametrize("op_id", _with_prefixes(_COLLECTION_LIKE_WRITES))
+def test_a_status_or_scale_path_that_reads_as_a_collection_waits(op_id: str) -> None:
+    assert ingested_op_is_credential_call(op_id) is True
+    assert credential_grant_reason(op_id) is not None
+
+
+@pytest.mark.parametrize("op_id", _with_prefixes(["PUT:/api/v1/namespaces/{namespace}/status"]))
+def test_the_status_of_a_core_namespace_keeps_its_rules(op_id: str) -> None:
+    assert ingested_op_is_credential_call(op_id) is False
+    assert credential_grant_reason(op_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", _PREFIXES, ids=["plain", "prefix"])
+async def test_a_status_path_that_reads_as_a_collection_waits_for_every_login(
+    prefix: str,
+) -> None:
+    row = await _store(f"POST:{prefix}/apis/apps/v1/namespaces/{{namespace}}/status")
+    params = {"namespace": "apps", "name": "a", "cluster": "c-1"}
+    await _assert_waits_for_every_login(row, params)

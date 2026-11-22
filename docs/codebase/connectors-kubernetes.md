@@ -83,7 +83,11 @@ right after the name of the object, keep the rules of the operation, for
 every kind. A `status` write is where a controller reports what it sees;
 it does not change what the object asks the cluster to run. A `scale`
 write changes only the number of copies of a workload, the same change
-as `k8s.scale`. A longer path, such as `.../status/<more>`, waits. A
+as `k8s.scale`. A longer path, such as `.../status/<more>`, waits.
+`status` and `scale` keep their rules only as a sub-part of one object:
+a path that also reads as a write to a collection, such as
+`/apis/<group>/<version>/namespaces/{namespace}/status`, waits, except
+the `status` of a core Namespace. A
 trailing `/` counts the same as none. A path can have any prefix in
 front, for example the base path of a proxy. A read keeps the rules of
 the operation

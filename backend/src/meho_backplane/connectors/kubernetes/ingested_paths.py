@@ -29,7 +29,10 @@ the name of the object: ``status`` and ``scale``. A ``status`` write is where
 a controller reports what it sees; it does not change what the object asks
 the cluster to run. A ``scale`` write changes only the number of copies of a
 workload, the same change as ``k8s.scale``. A longer path, such as
-``.../status/<more>``, waits.
+``.../status/<more>``, waits. ``status`` and ``scale`` keep their rules only
+as a sub-part of one object: a path that also reads as a write to a
+collection, such as ``/apis/<group>/<version>/namespaces/{namespace}/status``,
+waits, except the ``status`` of a core Namespace.
 
 A path segment in braces or with a value counts the same, so the names of
 the path params in the API file do not matter. A path can have any prefix
@@ -88,8 +91,12 @@ _ONE_OBJECT = (
     rf"|/apis/{_SEG}/{_SEG}{_NS}/{_SEG})/{_SEG}"
 )
 
-#: The ``status`` or ``scale`` sub-part right after the name of an object keeps its rules.
+#: The ``status`` or ``scale`` sub-part right after the name of an object keeps its rules,
+#: unless the path also reads as a write to a collection or to a whole object.
 _KEPT_SUBRESOURCE: Final[re.Pattern[str]] = re.compile(rf"{_ONE_OBJECT}/(?:status|scale)")
+
+#: The ``status`` of a core Namespace keeps its rules, though it also reads as a collection.
+_NAMESPACE_STATUS: Final[re.Pattern[str]] = re.compile(rf"/api/v1/namespaces/{_SEG}/status")
 
 #: A sub-part of one object: one or more segments past its name.
 _SUBRESOURCE: Final[re.Pattern[str]] = re.compile(rf"{_ONE_OBJECT}(?:/{_SEG})+")
@@ -106,9 +113,11 @@ def _write_waits(tail: str) -> bool:
     """True when a write to the path *tail* is a credential call."""
     if any(pattern.fullmatch(tail) for pattern in _WRITE_SUBRESOURCES):
         return True
-    if _KEPT_SUBRESOURCE.fullmatch(tail):
+    if _NAMESPACE_STATUS.fullmatch(tail):
         return False
-    return any(pattern.fullmatch(tail) for pattern in (_CORE_OBJECT, _GROUP_OBJECT, _SUBRESOURCE))
+    if any(pattern.fullmatch(tail) for pattern in (_CORE_OBJECT, _GROUP_OBJECT)):
+        return True
+    return not _KEPT_SUBRESOURCE.fullmatch(tail) and bool(_SUBRESOURCE.fullmatch(tail))
 
 
 def ingested_op_is_credential_call(op_id: str) -> bool:

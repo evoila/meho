@@ -93,7 +93,8 @@ satellite ladder.
 `may_approve(asker, ask) -> (bool, RuleRef)` answers with today's rules,
 in the order of `approve_right`: only a person approves (floor); a
 `read_only` person needs the approver flag; only a pending request; a
-change of rights only another admin (floor); the checks of who a login or
+change of rights only an admin, with a click in the web interface (floor);
+the checks of who a login or
 group change is for; own changes (MEHO-Admins, a web
 click on a token-only `caution` wait, the break-glass switch for a lower
 risk level); another person's `dangerous` or `destructive` change only a
@@ -407,7 +408,7 @@ its own issue; when it is fixed, its line goes away.
   these checks. The sandbox cases without a hash are in
   `test_policy_shadow.py`.
 - A change of rights on the call side (#6595). `Decision.approvers` does
-  not know it yet (only another admin approves it), so the call table
+  does not know it yet (only an admin approves it), so the call table
   uses no such operation. The approval table covers it.
 - Approver routing (#6596). The evaluator does not know approver routing
   (`POLICY_APPROVER_ROUTING`): `Decision.approvers` and `may_approve`

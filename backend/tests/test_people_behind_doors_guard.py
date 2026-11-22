@@ -91,6 +91,7 @@ def test_the_single_request_doors_reach_the_shared_check() -> None:
         shared
     )
     assert "is_person_behind" in _calls(approval_queue._check_self_approval)
+    assert "is_self_approval" in shared
 
 
 def test_the_run_approval_door_reaches_the_check() -> None:
@@ -102,4 +103,4 @@ def test_the_policy_evaluator_knows_the_people_behind() -> None:
     source = inspect.getsource(policy_approve._group_rule)
     assert "people_behind" in source
     assert "requester_unknown" in source
-    assert "_may_approve_rights_change" in _calls(policy_approve._group_rule)
+    assert "_is_own" in _calls(policy_approve._group_rule)

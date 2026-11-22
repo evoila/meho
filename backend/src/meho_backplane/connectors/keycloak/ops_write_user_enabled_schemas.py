@@ -92,8 +92,11 @@ _NEXT_DISABLE = (
 _NEXT_ENABLE = "The person can sign in again. To turn the account off, run keycloak.user.disable."
 
 _PRECONDITIONS = (
-    "The user exists in the target's managed realm. A second person with the "
-    "right to approve a dangerous change approves the call."
+    "The user exists in the target's managed realm. The call waits for a "
+    "person with the right to approve it. keycloak.user.enable is a change "
+    "of rights: an admin approves it in the web console. In MEHO's own login "
+    "realm only a platform admin approves it, or makes it alone in the web "
+    "console after a fresh sign-in."
 )
 
 USER_ENABLED_OPS: tuple[KeycloakOp, ...] = (

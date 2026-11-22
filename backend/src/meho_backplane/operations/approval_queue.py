@@ -114,6 +114,7 @@ from meho_backplane.broadcast.events import (
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
+    ApprovalRequestKey,
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
@@ -1151,18 +1152,61 @@ async def _find_idempotent_request(
     its locked re-read missed; by then the row may have been approved on
     another connection. Without the refresh the session would keep the
     cached ``pending`` state, treat the row as overdue again, and loop.
+
+    A key that a same-call reuse linked to a request
+    (:class:`ApprovalRequestKey`) gets that request back too, so each key
+    a caller got the request with keeps working after the approval.
     """
+    live_for_caller = (
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == principal_sub,
+        ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+    )
     stmt = (
         select(ApprovalRequest)
-        .where(
-            ApprovalRequest.tenant_id == tenant_id,
-            ApprovalRequest.principal_sub == principal_sub,
-            ApprovalRequest.idempotency_key == idempotency_key,
-            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
-        )
+        .where(ApprovalRequest.idempotency_key == idempotency_key, *live_for_caller)
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(stmt)).scalars().first()
+    found = (await session.execute(stmt)).scalars().first()
+    if found is not None:
+        return found
+    linked = (
+        select(ApprovalRequest)
+        .join(ApprovalRequestKey, ApprovalRequestKey.approval_request_id == ApprovalRequest.id)
+        .where(ApprovalRequestKey.idempotency_key == idempotency_key, *live_for_caller)
+        .order_by(ApprovalRequest.created_at.desc())
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(linked)).scalars().first()
+
+
+async def _link_reuse_key(
+    session: AsyncSession, request: ApprovalRequest, idempotency_key: str | None
+) -> None:
+    """Link *idempotency_key* to the reused *request*, so a later retry finds it.
+
+    Nothing to do without a key, or when the row already holds this key.
+    The insert runs in a savepoint: when a call that arrives at the same
+    moment already linked the same key, the duplicate is dropped and the
+    outer transaction stays usable.
+    """
+    if idempotency_key is None or request.idempotency_key == idempotency_key:
+        return
+    try:
+        async with session.begin_nested():
+            session.add(
+                ApprovalRequestKey(
+                    approval_request_id=request.id,
+                    idempotency_key=idempotency_key,
+                    created_at=_now(),
+                )
+            )
+            await session.flush()
+    except IntegrityError:
+        _log().info(
+            "approval_request_reuse_key_already_linked",
+            approval_request_id=str(request.id),
+        )
 
 
 def _same_call_reuse_applies(
@@ -1201,9 +1245,12 @@ async def _find_same_call_pending_request(
     the login, so a caller never learns about the request of another person.
     Only a ``pending`` request inside its deadline counts: an approved one
     may have run, and an overdue one can no longer be approved. Nothing is
-    expired here. The match is the same as for a retry key: same operation,
-    connector, target, params, ``preview_hash`` and ``work_ref``, plus the
-    same ``reveal_secret`` choice.
+    expired here. A request of an agent run or of a step of a multi-step
+    operation (``resume_parent`` set) never counts: approving it runs that
+    run or that multi-step operation, not this direct call. The match is the
+    same as for a retry key: same operation, connector, target, params,
+    ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
+    choice.
     """
     stmt = (
         select(ApprovalRequest)
@@ -1222,8 +1269,11 @@ async def _find_same_call_pending_request(
         .execution_options(populate_existing=True)
     )
     for existing in (await session.execute(stmt)).scalars():
+        # Checked here, not in SQL: a JSON column can hold JSON ``null``
+        # instead of SQL NULL for a direct call.
         if (
-            params_hash_matches(params, existing.params_hash)
+            existing.resume_parent is None
+            and params_hash_matches(params, existing.params_hash)
             and existing.preview_hash == preview_hash
             and existing.work_ref == work_ref_var.get()
             and bool(existing.reveal_secret) == reveal_secret
@@ -1847,7 +1897,9 @@ async def create_pending_request(
             reveal_secret=reveal_secret,
         )
         if same_call is not None:
-            return _reuse(same_call)
+            reused = _reuse(same_call)
+            await _link_reuse_key(session, reused, idempotency_key)
+            return reused
 
     if proposed_effect is None:
         proposed_effect = {

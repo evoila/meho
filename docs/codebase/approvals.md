@@ -2780,7 +2780,11 @@ The answer is the same as for a retry with the key: the same
 `approval_request_id`, `extras.approval_request_reused: true`, no new row,
 no second `approval.request` audit row and no second `approval.pending`
 event. A key that is different from the key of the waiting request does
-not matter.
+not matter. MEHO keeps that other key in the table `approval_request_key`
+(one row per key, linked to the request; migration `0182`). The key lookup
+(`_find_idempotent_request`) reads it too, so a later retry with that key
+gets the same request back, also after the request was approved. The table
+keeps no tenant or login: they come from the request row.
 
 - Only a `pending` request inside its deadline is reused. An approved
   request may have run, so it is never returned. A rejected, withdrawn,
@@ -2788,6 +2792,10 @@ not matter.
 - Only a direct call is checked. A call inside an agent run, a step of a
   multi-step operation, or a re-run for an earlier requester always gets
   its own request.
+- Only a stored direct request is reused. A stored request of an agent run
+  (`run_id` set) or of a step of a multi-step operation (`resume_parent`
+  set) is never returned to a direct call: approving it would run that run
+  or that multi-step operation, not the direct call.
 - Not covered: two calls that arrive at the same moment can still make two
   requests. There is no database lock for this case.
 

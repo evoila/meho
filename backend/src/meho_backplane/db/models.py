@@ -7752,6 +7752,42 @@ class ApprovalRequest(Base):
     )
 
 
+class ApprovalRequestKey(Base):
+    """One more retry key that gets an approval request back.
+
+    With ``APPROVAL_SAME_CALL_REUSE`` on, a call with retry key B can get
+    the waiting request of the same call that was made with key A. That
+    request row holds only key A in ``idempotency_key``. This row keeps key
+    B, so a later retry with key B gets the same request, also after it was
+    approved. Read by the key lookup in
+    :mod:`meho_backplane.operations.approval_queue`. Added by migration
+    ``0182``.
+
+    Columns
+    -------
+
+    * ``approval_request_id`` -- the request the key gets back. Deleted
+      with the request.
+    * ``idempotency_key`` -- the retry key.
+    * ``created_at`` -- when the key was linked.
+
+    The tenant and the login come from the request row, so a key never
+    matches the request of another tenant or another login.
+    """
+
+    __tablename__ = "approval_request_key"
+
+    approval_request_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("approval_request.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("approval_request_key_key_idx", "idempotency_key"),)
+
+
 #: Where a passkey touch for an approval was started (#6214): the web
 #: console, a link the command line prints, or a link a REST answer carries.
 APPROVAL_PRESENCE_CHANNELS: tuple[str, ...] = ("web", "cli_link", "rest_link")

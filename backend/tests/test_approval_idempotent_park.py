@@ -828,6 +828,64 @@ async def test_same_call_with_another_key_gets_the_waiting_request() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_retry_with_the_second_key_gets_the_request_after_approval() -> None:
+    a = await _park_same_call(key="key-a")
+    b = await _park_same_call(key="key-b")
+    assert b.id == a.id
+    async with get_sessionmaker()() as s:
+        await approve_request(s, a.id, operator=_operator(sub="op-approver"))
+        await s.commit()
+
+    retry_b = await _park_same_call(key="key-b")
+    retry_a = await _park_same_call(key="key-a")
+
+    assert retry_b.id == a.id
+    assert getattr(retry_b, "_reused", False) is True
+    assert retry_a.id == a.id
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_the_second_key_still_refuses_a_different_call() -> None:
+    a = await _park_same_call(key="key-a")
+    await _park_same_call(key="key-b")
+    with pytest.raises(IdempotencyKeyConflictError) as exc:
+        await _park_same_call(key="key-b", params={"name": "web-02"})
+    assert exc.value.request_id == a.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_the_second_key_of_another_login_gets_its_own_request() -> None:
+    a = await _park_same_call(sub="login-a", key="key-a")
+    await _park_same_call(sub="login-a", key="key-b")
+    other = await _park_same_call(sub="login-b", key="key-b")
+    assert other.id != a.id
+    assert getattr(other, "_reused", False) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"run_id": uuid.UUID("00000000-0000-0000-0000-000000006797")},
+        {"resume_parent": {"op_id": "composite.op", "params": {}}},
+    ],
+)
+async def test_a_direct_call_never_gets_a_stored_run_or_multi_step_request(
+    stored: dict[str, Any],
+) -> None:
+    first = await _park_same_call(**stored)
+    direct = await _park_same_call()
+    assert direct.id != first.id
+    assert getattr(direct, "_reused", False) is False
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
 @pytest.mark.parametrize(
     "change",
     [

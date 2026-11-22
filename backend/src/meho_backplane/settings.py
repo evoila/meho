@@ -1631,6 +1631,15 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    audit_session_links:
+        Off by default. When on, an upload of an agent session links its
+        MCP calls and ``meho`` commands to their audit rows. Then
+        ``GET /api/v1/audit/show/{id}``, ``meho audit show`` and the
+        console's audit drawer name the stored session of a row, the session
+        read lists its MCP sessions, and the upload audit row counts the new
+        links. When off, MEHO stores no new link and these answers are the
+        same as before. It stays off until model tests show it helps. Env
+        ``AUDIT_SESSION_LINKS``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -2603,6 +2612,7 @@ class Settings(BaseModel):
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
     policy_approver_routing: bool = False
     #: Absolute URL of the external vendor-document corpus search
@@ -3828,6 +3838,9 @@ def get_settings() -> Settings:
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
+        ),
+        audit_session_links=parse_bool_env(
+            os.environ.get("AUDIT_SESSION_LINKS"),
         ),
         policy_engine_shadow=parse_bool_env(
             os.environ.get("POLICY_ENGINE_SHADOW"),

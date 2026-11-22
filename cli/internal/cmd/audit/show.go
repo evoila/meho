@@ -126,7 +126,7 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 	}
 	if entry == nil {
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditEntry"),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditEntryDetail"),
 			opts.JSONOut,
 		)
 	}
@@ -137,13 +137,13 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 // getEntry drives the typed-client `ShowApiV1AuditShowAuditIdGet`
 // endpoint with a one-shot 401-retry (mirrors `postQuery`). Returns
 // the raw body bytes (for --json verbatim passthrough) plus the
-// decoded `*api.AuditEntry` (for the key-value summary), or an
+// decoded `*api.AuditEntryDetail` (for the key-value summary), or an
 // `*httpResponseError` for a non-2xx status.
 func getEntry(
 	ctx context.Context,
 	client *api.AuthedClient,
 	auditID openapi_types.UUID,
-) ([]byte, *api.AuditEntry, error) {
+) ([]byte, *api.AuditEntryDetail, error) {
 	resp, err := client.ShowApiV1AuditShowAuditIdGetWithResponse(ctx, auditID, nil)
 	if err != nil {
 		return nil, nil, err
@@ -169,7 +169,7 @@ func getEntry(
 // is server text, so it goes through output.SafeText: a control code
 // in a stored request path shows as a visible escape and cannot move
 // the cursor or write a line of its own.
-func printEntrySummary(w io.Writer, e *api.AuditEntry) {
+func printEntrySummary(w io.Writer, e *api.AuditEntryDetail) {
 	field := func(label, value string) {
 		fmt.Fprintf(w, "%-18s %s\n", label, output.SafeText(value))
 	}
@@ -210,6 +210,11 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	}
 	field("parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
 	field("agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
+	// The stored agent session of the row. MEHO fills it only for a person
+	// who may read sessions, so the line is left out when it is empty.
+	if id := strDeref(e.StoredSessionId); id != "" {
+		field("stored_session:", id+" (meho sessions show "+id+")")
+	}
 	field("broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))
 	if len(e.Payload) > 0 {
 		field("payload:", formatPayload(e.Payload))

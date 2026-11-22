@@ -61,7 +61,7 @@ func TestRunShowHappyPath(t *testing.T) {
 		}
 		tname := "vcenter-lab"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.AuditEntry{
+		_ = json.NewEncoder(w).Encode(api.AuditEntryDetail{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
 			PrincipalSub: "operator-a",
@@ -202,7 +202,7 @@ func TestRunShowJSONVerbatim(t *testing.T) {
 // with different optional-field populations.
 func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 	var buf bytes.Buffer
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
 		PrincipalSub: "operator-a",
@@ -249,7 +249,7 @@ func TestPrintEntrySummaryShowsPolicyRule(t *testing.T) {
 	decision := "needs-approval"
 	rule := "default:person.token (shadow)"
 	version := 3
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:             mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:             mustTS(t, "2026-05-13T00:00:00Z"),
 		PrincipalSub:   "alice",
@@ -281,7 +281,7 @@ func TestPrintEntrySummaryShowsPolicyRule(t *testing.T) {
 func TestPrintEntrySummaryShowsActor(t *testing.T) {
 	actor, name := "agent:reader", "reader"
 	var buf bytes.Buffer
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
 		PrincipalSub: "operator-a",
@@ -296,6 +296,33 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q in %s", want, out)
 		}
+	}
+}
+
+// TestPrintEntrySummaryShowsStoredSession — the summary names the stored
+// agent session of the row and how to read it, and prints no
+// "stored_session:" line for a row without one (#4904).
+func TestPrintEntrySummaryShowsStoredSession(t *testing.T) {
+	stored := "claude-session-1"
+	entry := api.AuditEntryDetail{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub: "operator-a",
+		OpId:         "x.y",
+		ResultStatus: "ok",
+		Payload:      map[string]any{},
+	}
+	var without bytes.Buffer
+	printEntrySummary(&without, &entry)
+	if strings.Contains(without.String(), "stored_session:") {
+		t.Errorf("summary shows stored_session with none stored: %s", without.String())
+	}
+	entry.StoredSessionId = &stored
+	var with bytes.Buffer
+	printEntrySummary(&with, &entry)
+	want := "stored_session:    claude-session-1 (meho sessions show claude-session-1)"
+	if !strings.Contains(with.String(), want) {
+		t.Errorf("summary missing %q in %s", want, with.String())
 	}
 }
 
@@ -329,7 +356,7 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printEntrySummary(&buf, &api.AuditEntry{
+			printEntrySummary(&buf, &api.AuditEntryDetail{
 				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
 				PrincipalSub: "operator-a",
@@ -359,7 +386,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	tname := "vcenter-lab"
 	tenantName := "team-a"
 	dur := "12.3"
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:               mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:               mustTS(t, "2026-05-13T00:00:00Z"),
 		TenantId:         mustUUIDPtr(t, "22222222-2222-2222-2222-222222222222"),
@@ -455,7 +482,7 @@ func TestPrintEntrySummaryShowsSecretReadAs(t *testing.T) {
 	}{{"set", &login, true}, {"missing", nil, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printEntrySummary(&buf, &api.AuditEntry{
+			printEntrySummary(&buf, &api.AuditEntryDetail{
 				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
 				PrincipalSub: "operator-a",

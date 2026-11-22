@@ -27,6 +27,7 @@ import hvac
 import pytest
 from sqlalchemy import select
 
+from meho_backplane.api.v1.audit_models import AuditEntryDetail
 from meho_backplane.audit_query.query import _build_audit_entry
 from meho_backplane.audit_query.schemas import AuditQueryResult, ReplayNode
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -330,3 +331,17 @@ async def test_off_answer_equals_the_answer_without_the_field(
     assert with_value.model_dump_json() == without.model_dump_json()
     node = ReplayNode(**with_value.model_dump(), depth=0)
     assert "secret_read_as" not in node.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_show_answer_has_the_field_only_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    row = await _read(_operator("person-sub"), monkeypatch, embedding)
+    entry = _build_audit_entry(row, None)
+    detail = AuditEntryDetail(**{**entry.model_dump(), "secret_read_as": entry.secret_read_as})
+    assert "secret_read_as" not in json.loads(detail.model_dump_json())
+
+    monkeypatch.setenv("AUDIT_SECRET_READ_AS", "true")
+    get_settings.cache_clear()
+    assert json.loads(detail.model_dump_json())["secret_read_as"] == "person-sub"

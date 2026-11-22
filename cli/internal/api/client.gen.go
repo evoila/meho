@@ -2453,6 +2453,45 @@ type AuditEntry struct {
 	WorkRef          *string                `json:"work_ref"`
 }
 
+// AuditEntryDetail The 200 body of “GET /api/v1/audit/show/{audit_id}“: one row, and its stored session.
+//
+// Only this route has “stored_session_id“ (#4904). The list, query and
+// replay answers keep the plain :class:`AuditEntry`.
+type AuditEntryDetail struct {
+	ActorName        *string                `json:"actor_name"`
+	ActorSub         *string                `json:"actor_sub"`
+	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
+	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
+	Id               openapi_types.UUID     `json:"id"`
+	Method           string                 `json:"method"`
+	OpClass          string                 `json:"op_class"`
+	OpId             string                 `json:"op_id"`
+	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
+	Path             string                 `json:"path"`
+	Payload          map[string]interface{} `json:"payload"`
+	PolicyDecision   *string                `json:"policy_decision"`
+	PolicyRule       *string                `json:"policy_rule"`
+	PolicyVersion    *int                   `json:"policy_version"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	RequestId        *openapi_types.UUID    `json:"request_id"`
+	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
+	SecretReadAs     *string                `json:"secret_read_as"`
+	StatusCode       int                    `json:"status_code"`
+
+	// StoredSessionId The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session.
+	StoredSessionId *string             `json:"stored_session_id"`
+	TargetId        *openapi_types.UUID `json:"target_id"`
+	TargetName      *string             `json:"target_name"`
+	TenantId        *openapi_types.UUID `json:"tenant_id"`
+	TenantName      *string             `json:"tenant_name"`
+	Ts              time.Time           `json:"ts"`
+	WorkRef         *string             `json:"work_ref"`
+}
+
 // AuditEventClass What kind of accountable event one “audit_log“ row records (#3733).
 //
 // The set is closed. The database CHECK “ck_audit_log_event_class“
@@ -11369,7 +11408,10 @@ type SessionDetail struct {
 	Files      map[string]SessionFileState `json:"files"`
 
 	// LastSeenAt When MEHO last got an upload for this session.
-	LastSeenAt    time.Time           `json:"last_seen_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+
+	// McpSessions The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on.
+	McpSessions   *[]SessionMcpLink   `json:"mcp_sessions"`
 	Outcome       *string             `json:"outcome"`
 	Project       string              `json:"project"`
 	SessionId     string              `json:"session_id"`
@@ -11393,6 +11435,15 @@ type SessionFileState struct {
 type SessionListResponse struct {
 	Items      []SessionSummary `json:"items"`
 	NextCursor *string          `json:"next_cursor"`
+}
+
+// SessionMcpLink One MCP session whose calls are in this session.
+type SessionMcpLink struct {
+	// McpSessionId The agent_session_id of the audit rows of these calls.
+	McpSessionId openapi_types.UUID `json:"mcp_session_id"`
+
+	// WorkRef The newest work reference (ticket id) on those audit rows, or null.
+	WorkRef *string `json:"work_ref"`
 }
 
 // SessionRetention The retention period of the caller's tenant.
@@ -57967,7 +58018,7 @@ func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) StatusCode() int {
 type ShowApiV1AuditShowAuditIdGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AuditEntry
+	JSON200      *AuditEntryDetail
 	JSON422      *HTTPValidationError
 }
 
@@ -75074,7 +75125,7 @@ func ParseShowApiV1AuditShowAuditIdGetResponse(rsp *http.Response) (*ShowApiV1Au
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AuditEntry
+		var dest AuditEntryDetail
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

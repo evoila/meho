@@ -243,9 +243,11 @@ def generate_with_rules(rules: PasswordRules) -> str:
     return "".join(chars)
 
 
-def _generate_sync(client: Any, plan: PasswordPlan, rules: PasswordRules) -> dict[str, Any]:
+def _generate_sync(
+    client: Any, plan: PasswordPlan, rules: PasswordRules, operator: Operator
+) -> dict[str, Any]:
     """Read, maybe write, with the blocking hvac client (call in a thread)."""
-    found = _read_kv(client, plan)
+    found = _read_kv(client, plan, operator)
     current = found[0].get(plan.field) if found else None
     if found is not None and current not in (None, "") and not plan.rotate:
         if not isinstance(current, str):
@@ -284,7 +286,7 @@ async def vault_kv_generate(
         rotate=rotate,
     )
     async with vault_client_for_target(operator, target) as client:
-        outcome = await asyncio.to_thread(_generate_sync, client, plan, rules)
+        outcome = await asyncio.to_thread(_generate_sync, client, plan, rules, operator)
     return {
         "mount": mount,
         "path": plan.path,

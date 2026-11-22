@@ -8,6 +8,8 @@
 * A passed secret read notes the ``sub`` of the token MEHO sent (the caller's,
   the approver's, an agent's, the check runner's own). A passed login alone
   notes nothing: a refused read and a call that reads no secret stay empty.
+* ``vault.auth.userpass.write`` and ``vault.kv.generate`` note the login when
+  their KV read returns the password, and nothing when the secret is missing.
 * A real dispatch writes the id on the audit row, and nothing else (no store
   path, no address, no token). A call that reads no secret leaves it empty.
 * An audit answer carries ``secret_read_as`` only while ``AUDIT_SECRET_READ_AS``
@@ -19,7 +21,8 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
+from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -40,6 +43,8 @@ from meho_backplane.auth.secret_read_as import (
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
+from meho_backplane.connectors.vault.ops_auth_write import vault_auth_userpass_write
+from meho_backplane.connectors.vault.ops_kv_generate import vault_kv_generate
 from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -294,6 +299,92 @@ async def test_logged_in_call_that_reads_no_secret_leaves_it_empty(
     assert len(fake.auth.jwt.login_calls) == 1
     assert fake.secrets.kv.v2.read_calls == []
     assert (await _row("vault.kv.list")).secret_read_as is None
+
+
+# ---------------------------------------------------------------------------
+# Ops that read a password from KV before they write
+# ---------------------------------------------------------------------------
+
+
+async def _run_in_scope(
+    handler: Callable[[Operator, object, dict[str, Any]], Awaitable[dict[str, Any]]],
+    params: dict[str, Any],
+) -> str | None:
+    with track_secret_read_as():
+        await handler(_operator("person-sub"), _Target(), params)
+        return current_secret_read_as()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param(
+            {"username": "alice", "password_secret_ref": _MARKER_PATH}, id="password-from-kv"
+        ),
+        pytest.param(
+            {"username": "alice", "generate_password": {"path": _MARKER_PATH}},
+            id="generated-password-already-stored",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_userpass_write_notes_the_login_of_its_kv_read(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.secret = {"password": "made-up-value-0zzz"}
+    fake.auth.userpass.users["alice"] = {"token_policies": []}
+    assert await _run_in_scope(vault_auth_userpass_write, params) == "person-sub"
+    assert len(fake.secrets.kv.v2.read_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_userpass_write_with_a_request_password_leaves_it_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    params = {"username": "alice", "password": "made-up-value-0zzz"}
+    assert await _run_in_scope(vault_auth_userpass_write, params) is None
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_kv_generate_notes_the_login_of_its_kv_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.secret = {"password": "made-up-value-0zzz"}
+    params = {"mount": _MARKER_MOUNT, "path": _MARKER_PATH}
+    assert await _run_in_scope(vault_kv_generate, params) == "person-sub"
+    assert len(fake.secrets.kv.v2.read_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        pytest.param("kv-generate", id="kv-generate"),
+        pytest.param("userpass-write", id="userpass-write-generated"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_kv_read_of_a_missing_secret_leaves_it_empty(
+    op: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.read_exc = hvac.exceptions.InvalidPath("no secret")
+    fake.auth.userpass.read_exc = hvac.exceptions.InvalidPath("no login")
+    if op == "kv-generate":
+        value = await _run_in_scope(
+            vault_kv_generate, {"mount": _MARKER_MOUNT, "path": _MARKER_PATH}
+        )
+    else:
+        value = await _run_in_scope(
+            vault_auth_userpass_write,
+            {"username": "alice", "generate_password": {"path": _MARKER_PATH}},
+        )
+    assert value is None
+    assert len(fake.secrets.kv.v2.read_calls) == 1
+    assert len(fake.secrets.kv.v2.put_calls) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -422,7 +422,8 @@ each row in an answer carries the field.
 How the value gets to the row: the dispatcher opens one scope for each call
 (`auth/secret_read_as.py`). Each Vault secret read (the target login read in
 `connectors/_shared/vault_creds.py`, `vault.kv.read`, the secret copy and
-compare reads, the pfSense VPN user read) and the Google Secret Manager read
+compare reads, the pfSense VPN user read, the KV password read of
+`vault.auth.userpass.write` and `vault.kv.generate`) and the Google Secret Manager read
 (`connectors/_shared/gsm_creds.py`) note the login id after the store returned
 the secret. A login that passed, followed by a refused read or by no read at
 all, notes nothing. For Vault the id is the `sub` of the token MEHO sent. The

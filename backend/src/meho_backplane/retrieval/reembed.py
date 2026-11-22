@@ -16,9 +16,14 @@ It works through three groups, in batches, and prints progress:
   path (:func:`~meho_backplane.kb.revisions.write_entry`) with its own body
   and metadata. That path rebuilds the passages when they were made under
   another model, so the passage window and ids follow the new model. The
-  entry keeps its revision and its metadata;
-* every ``endpoint_descriptor`` row that has a vector: the embedding text is
-  composed again from the stored fields and embedded again.
+  entry keeps its revision and its metadata. The write names the revision
+  it read, so an entry that was changed or deleted in the meantime is read
+  again (or skipped when it is gone), never written back with old content;
+* every ``endpoint_descriptor`` row: the embedding text is composed again
+  from the stored fields and embedded. A row without a vector gets one.
+
+No row gets a new ``created_at`` or ``updated_at``: searches filter on these
+times, and a re-embed changes no content.
 
 At the end it stores the set model in ``embedding_state``. It is safe to run
 twice: a second run writes the same vectors, and passages that already
@@ -42,8 +47,9 @@ from sqlalchemy import func, select, update
 
 from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import Document, EndpointDescriptor
-from meho_backplane.kb.revisions import MetadataForWrite, write_entry
+from meho_backplane.kb.revisions import ExpectedRevision, current_revision_id, write_entry
 from meho_backplane.kb.schemas import KB_PASSAGE_SOURCE, KB_SOURCE
+from meho_backplane.kb.stale_revision import KbStaleRevisionError
 from meho_backplane.operations.embed import build_embedding_text
 from meho_backplane.retrieval.embedding import EmbeddingService, get_embedding_service
 from meho_backplane.retrieval.embedding_state import write_embedding_state
@@ -52,6 +58,9 @@ from meho_backplane.settings import get_settings
 __all__ = ["ReembedCounts", "main", "reembed_all"]
 
 DEFAULT_BATCH_SIZE = 50
+
+#: How often one knowledge entry is read again after another write changed it.
+_KB_ATTEMPTS = 3
 
 
 @dataclass
@@ -78,7 +87,11 @@ async def _reembed_documents(
     last: uuid.UUID | None = None
     while True:
         async with sessionmaker() as session:
-            query = select(Document.id, Document.body).where(where).order_by(Document.id)
+            query = (
+                select(Document.id, Document.body, Document.updated_at)
+                .where(where)
+                .order_by(Document.id)
+            )
             if last is not None:
                 query = query.where(Document.id > last)
             rows = (await session.execute(query.limit(batch_size))).all()
@@ -87,7 +100,10 @@ async def _reembed_documents(
             vectors = await service.encode([row.body for row in rows])
             await session.execute(
                 update(Document),
-                [{"id": row.id, "embedding": vec} for row, vec in zip(rows, vectors, strict=True)],
+                [
+                    {"id": row.id, "embedding": vec, "updated_at": row.updated_at}
+                    for row, vec in zip(rows, vectors, strict=True)
+                ],
             )
             await session.commit()
         last = rows[-1].id
@@ -95,8 +111,46 @@ async def _reembed_documents(
         say(f"documents: {done}/{total}")
 
 
-def _keep_metadata(kept: dict[str, Any]) -> MetadataForWrite:
-    return lambda _current: kept
+class _EntryGoneError(Exception):
+    """The knowledge entry was deleted after the command read it."""
+
+
+def _current_metadata(current: dict[str, Any] | None) -> dict[str, Any]:
+    if current is None:
+        raise _EntryGoneError
+    return current
+
+
+async def _reembed_kb_entry(tenant_id: uuid.UUID, slug: str) -> bool:
+    """Rebuild the passages of one entry; return ``False`` when it was skipped."""
+    for _attempt in range(_KB_ATTEMPTS):
+        async with get_sessionmaker()() as session:
+            row = (
+                await session.execute(
+                    select(Document.body, current_revision_id().label("revision_id")).where(
+                        Document.tenant_id == tenant_id,
+                        Document.source == KB_SOURCE,
+                        Document.source_id == slug,
+                    )
+                )
+            ).one_or_none()
+        if row is None:  # deleted since the list was read
+            return False
+        try:
+            await write_entry(
+                tenant_id=tenant_id,
+                slug=slug,
+                body=row.body,
+                metadata_for=_current_metadata,
+                expected=ExpectedRevision(row.revision_id),
+                keep_timestamps=True,
+            )
+        except _EntryGoneError:
+            return False
+        except KbStaleRevisionError:
+            continue  # another write got in between; read the entry again
+        return True
+    return False
 
 
 async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
@@ -110,24 +164,8 @@ async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
     if dry_run:
         return len(entries)
     for index, (tenant_id, slug) in enumerate(entries, start=1):
-        async with sessionmaker() as session:
-            row = (
-                await session.execute(
-                    select(Document.body, Document.doc_metadata).where(
-                        Document.tenant_id == tenant_id,
-                        Document.source == KB_SOURCE,
-                        Document.source_id == slug,
-                    )
-                )
-            ).one_or_none()
-        if row is None:  # deleted since the list was read
-            continue
-        await write_entry(
-            tenant_id=tenant_id,
-            slug=slug,
-            body=row.body,
-            metadata_for=_keep_metadata(dict(row.doc_metadata)),
-        )
+        if not await _reembed_kb_entry(tenant_id, slug):
+            say(f"knowledge entry {slug}: skipped, it was deleted or changed during the run")
         if index % 10 == 0 or index == len(entries):
             say(f"knowledge entries: {index}/{len(entries)}")
     return len(entries)
@@ -136,30 +174,23 @@ async def _reembed_kb_entries(dry_run: bool, say: Callable[[str], None]) -> int:
 async def _reembed_endpoints(
     service: EmbeddingService, batch_size: int, dry_run: bool, say: Callable[[str], None]
 ) -> int:
-    where = EndpointDescriptor.embedding.is_not(None)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        total = int(
-            await session.scalar(select(func.count()).select_from(EndpointDescriptor).where(where))
-            or 0
-        )
+        total = int(await session.scalar(select(func.count()).select_from(EndpointDescriptor)) or 0)
     if dry_run:
         return total
     done = 0
     last: uuid.UUID | None = None
     while True:
         async with sessionmaker() as session:
-            query = (
-                select(
-                    EndpointDescriptor.id,
-                    EndpointDescriptor.summary,
-                    EndpointDescriptor.description,
-                    EndpointDescriptor.custom_description,
-                    EndpointDescriptor.tags,
-                )
-                .where(where)
-                .order_by(EndpointDescriptor.id)
-            )
+            query = select(
+                EndpointDescriptor.id,
+                EndpointDescriptor.summary,
+                EndpointDescriptor.description,
+                EndpointDescriptor.custom_description,
+                EndpointDescriptor.tags,
+                EndpointDescriptor.updated_at,
+            ).order_by(EndpointDescriptor.id)
             if last is not None:
                 query = query.where(EndpointDescriptor.id > last)
             rows = (await session.execute(query.limit(batch_size))).all()
@@ -177,7 +208,10 @@ async def _reembed_endpoints(
             vectors = await service.encode(texts)
             await session.execute(
                 update(EndpointDescriptor),
-                [{"id": row.id, "embedding": vec} for row, vec in zip(rows, vectors, strict=True)],
+                [
+                    {"id": row.id, "embedding": vec, "updated_at": row.updated_at}
+                    for row, vec in zip(rows, vectors, strict=True)
+                ],
             )
             await session.commit()
         last = rows[-1].id

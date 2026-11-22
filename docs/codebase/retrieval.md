@@ -322,8 +322,10 @@ MEHO says nothing about it except the warning at start.
 2. At start MEHO compares the setting with the table `embedding_state`
    (one row: `model`, `dimension`, `updated_at`; migration `0182` writes the
    model the install runs at upgrade). On a difference it logs
-   `embedding_model_mismatch` with both names, the readiness check
-   `embedding_model` shows the same text, and MEHO still starts.
+   `embedding_model_mismatch` with both names, adds the readiness check
+   `embedding_model` with the same text, and still starts. When the
+   models match, there is no such check, so the health answer (and the
+   `meho_status` tool) is the same as before.
 3. In the backplane container run
    `python -m meho_backplane.retrieval.reembed`. Options: `--dry-run`
    counts the rows and writes nothing; `--batch-size N` sets the batch
@@ -333,9 +335,15 @@ MEHO says nothing about it except the warning at start.
    - every knowledge entry goes through the normal write path
      (`kb/revisions.py`), which rebuilds its passages under the new
      model's window and with new passage ids. The entry keeps its
-     revision and metadata;
-   - every `endpoint_descriptor` row that has a vector is embedded again
-     from its stored text. A row with no vector stays without one.
+     revision and metadata. The write names the revision it read, so an
+     entry changed or deleted during the run is read again or skipped,
+     never written back with old content;
+   - every `endpoint_descriptor` row is embedded from its stored text. A
+     row with no vector gets one.
+
+   No row gets a new `created_at` or `updated_at`. New passages take the
+   times of the passages they replace. Searches that filter by date give
+   the same rows as before.
 
    At the end it stores the new model in `embedding_state`.
 4. The command is safe to run twice. If it stops half way, run it again;

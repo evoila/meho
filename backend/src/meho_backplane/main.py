@@ -511,7 +511,6 @@ async def _run_lifespan_startup() -> None:
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
     register_probe("broadcast", broadcast_readiness_probe)
-    register_probe("embedding_model", embedding_model_probe)
     # G4.6-T6 (#1555) — coarse "which search backends are configured"
     # check; observability-only since #1606 (unconfigured optional
     # backends are skipped, never failed — no live round-trip).
@@ -621,7 +620,10 @@ async def _run_lifespan_startup() -> None:
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
     # Warn when the stored vectors come from another model than the set one.
-    await check_embedding_model_at_start()
+    # The readiness check is added only then, so a matching model leaves
+    # the health answer (and so meho_status) as it was.
+    if await check_embedding_model_at_start():
+        register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()

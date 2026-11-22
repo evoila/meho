@@ -10,8 +10,10 @@ keeps starting: stored vectors from another model make searches worse, but
 they do not break MEHO. ``python -m meho_backplane.retrieval.reembed``
 embeds every stored vector again and then calls :func:`write_embedding_state`.
 
-The mismatch is also shown by the readiness check ``embedding_model``
-(:func:`embedding_model_probe`). That check never fails the readiness.
+On a mismatch the start also adds the readiness check ``embedding_model``
+(:func:`embedding_model_probe`), which names both models and never fails
+the readiness. When the models match, no check is added, so the health
+answer (``/ready`` and the ``meho_status`` tool) stays as it was.
 """
 
 from __future__ import annotations
@@ -70,11 +72,12 @@ async def write_embedding_state(session: AsyncSession, model: str) -> None:
         row.updated_at = now
 
 
-async def check_embedding_model_at_start() -> None:
+async def check_embedding_model_at_start() -> bool:
     """Compare the record with the set model; log a warning on a difference.
 
-    Never raises and never loads a model: a missing table or a database
-    error is logged and the start goes on.
+    Return ``True`` only when the record names another model. Never
+    raises and never loads a model: a missing table or a database error
+    is logged and the start goes on.
     """
     global _detail
     log = structlog.get_logger()
@@ -85,7 +88,7 @@ async def check_embedding_model_at_start() -> None:
     except Exception as exc:
         _detail = "record unreadable"
         log.warning("embedding_state_unreadable", error_class=type(exc).__name__)
-        return
+        return False
     if stored is None:
         _detail = f"model={configured} no record"
     elif stored[0] != configured:
@@ -99,10 +102,12 @@ async def check_embedding_model_at_start() -> None:
             configured_model=configured,
             action="run python -m meho_backplane.retrieval.reembed",
         )
+        return True
     else:
         _detail = f"model={configured}"
+    return False
 
 
 def embedding_model_probe() -> ProbeResult:
-    """Readiness detail: the model, or the mismatch. Always ``ok``."""
+    """Readiness detail of a mismatch found at start. Always ``ok``."""
     return ProbeResult(name="embedding_model", ok=True, detail=_detail)

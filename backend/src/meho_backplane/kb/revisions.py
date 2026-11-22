@@ -67,7 +67,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog
-from sqlalchemy import ScalarSelect, delete, select
+from sqlalchemy import ScalarSelect, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -180,6 +180,7 @@ async def write_entry(
     body: str,
     metadata_for: MetadataForWrite,
     expected: ExpectedRevision | None = None,
+    keep_timestamps: bool = False,
 ) -> tuple[Document, uuid.UUID, bool]:
     """Publish the head, its current revision and its passages together.
 
@@ -204,6 +205,10 @@ async def write_entry(
     :data:`_WRITE_ATTEMPTS` failed tries the last error propagates.
     Returns the head row, the id of the revision that holds its body,
     and whether the entry was new when this write read it.
+
+    *keep_timestamps* is for a write that only embeds again: the head
+    keeps its ``updated_at``, and new passages take the times of the
+    passages they replace. Searches filter on these times.
     """
     log = structlog.get_logger()
     for attempt in range(1, _WRITE_ATTEMPTS + 1):
@@ -212,7 +217,9 @@ async def write_entry(
             metadata = metadata_for(snapshot.metadata)
             await _check_expected(tenant_id, slug, snapshot, expected)
             plan = await _prepare(tenant_id, slug, body, metadata, snapshot)
-            doc, revision_id = await _publish(tenant_id, slug, body, metadata, snapshot, plan)
+            doc, revision_id = await _publish(
+                tenant_id, slug, body, metadata, snapshot, plan, keep_timestamps=keep_timestamps
+            )
             return doc, revision_id, snapshot.entry_id is None
         except (IntegrityError, _StaleHeadError) as exc:
             if attempt == _WRITE_ATTEMPTS:
@@ -375,6 +382,8 @@ async def _publish(
     metadata: dict[str, Any],
     snapshot: _Snapshot,
     plan: _Plan,
+    *,
+    keep_timestamps: bool = False,
 ) -> tuple[Document, uuid.UUID]:
     """Write the prepared rows in one transaction; raise when the entry moved."""
     sessionmaker = get_sessionmaker()
@@ -382,6 +391,7 @@ async def _publish(
         await _lock_head(session, tenant_id, slug)
         if await _snapshot_in(session, tenant_id, slug) != snapshot:
             raise _StaleHeadError(f"kb entry {slug!r} changed during write")
+        kept = await _read_times(session, tenant_id, plan.entry_id) if keep_timestamps else None
         if plan.rebuild_passages:
             await session.execute(
                 delete(Document).where(*_passage_filter(tenant_id, plan.entry_id))
@@ -396,6 +406,8 @@ async def _publish(
         if plan.new_revision:
             _add_revision(session, doc, body, plan.revision_id, snapshot.revision_number + 1)
         await session.flush()
+        if kept is not None:
+            await _restore_times(session, tenant_id, plan.entry_id, kept)
         # Read back what this transaction now sees. On SQLite another
         # write can commit between the check above and this write's
         # first statement; then the head no longer holds this body.
@@ -412,6 +424,48 @@ async def _publish(
         passages_rebuilt=plan.rebuild_passages,
     )
     return doc, plan.revision_id
+
+
+@dataclass(frozen=True)
+class _Times:
+    """The times of an entry's head and passages before a write."""
+
+    head_updated_at: datetime | None
+    passage_created_at: datetime | None
+    passage_updated_at: datetime | None
+
+
+async def _read_times(session: AsyncSession, tenant_id: uuid.UUID, entry_id: uuid.UUID) -> _Times:
+    head = await session.scalar(select(Document.updated_at).where(Document.id == entry_id))
+    passages = (
+        await session.execute(
+            select(func.min(Document.created_at), func.max(Document.updated_at)).where(
+                *_passage_filter(tenant_id, entry_id)
+            )
+        )
+    ).one()
+    return _Times(head, passages[0], passages[1])
+
+
+async def _restore_times(
+    session: AsyncSession, tenant_id: uuid.UUID, entry_id: uuid.UUID, kept: _Times
+) -> None:
+    """Set the head and passage times back to *kept* (explicit values, so no update default)."""
+    no_sync = {"synchronize_session": False}
+    if kept.head_updated_at is not None:
+        await session.execute(
+            update(Document)
+            .where(Document.id == entry_id)
+            .values(updated_at=kept.head_updated_at)
+            .execution_options(**no_sync)
+        )
+    if kept.passage_created_at is not None and kept.passage_updated_at is not None:
+        await session.execute(
+            update(Document)
+            .where(*_passage_filter(tenant_id, entry_id))
+            .values(created_at=kept.passage_created_at, updated_at=kept.passage_updated_at)
+            .execution_options(**no_sync)
+        )
 
 
 async def _lock_head(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> list[uuid.UUID]:

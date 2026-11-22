@@ -7,12 +7,17 @@ No model is downloaded: a fake encoder gives every text one fixed vector.
 Checks that:
 
 * the command embeds every ``documents`` row, every knowledge passage and
-  every operation row again, and stores the set model in the record;
+  every operation row (also one with no vector yet), and stores the set
+  model in the record;
 * knowledge passages follow the window of the new model, and the entry
   keeps its revision and metadata;
+* no row gets a new ``created_at`` or ``updated_at``;
+* an entry edited or deleted during the run is not written back with old
+  content;
 * a second run, and a dry run, change nothing;
-* a start with another model than the record logs one warning and starts,
-  and a start with the same model logs none and embeds nothing.
+* a start with another model than the record logs one warning, adds the
+  readiness check and starts, and a start with the same model logs none,
+  adds no check and embeds nothing.
 """
 
 from __future__ import annotations
@@ -30,7 +35,8 @@ from structlog.testing import capture_logs
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document, EmbeddingState, EndpointDescriptor, KbRevision
-from meho_backplane.kb.revisions import write_entry
+from meho_backplane.kb import revisions
+from meho_backplane.kb.revisions import delete_entry_rows, write_entry
 from meho_backplane.kb.schemas import KB_PASSAGE_SOURCE, KB_SOURCE
 from meho_backplane.retrieval.embedding_state import (
     check_embedding_model_at_start,
@@ -120,15 +126,22 @@ async def _snapshot() -> dict[str, object]:
         docs = (
             await session.execute(
                 select(
-                    Document.source, Document.source_id, Document.embedding, Document.doc_metadata
+                    Document.source,
+                    Document.source_id,
+                    Document.embedding,
+                    Document.doc_metadata,
+                    Document.created_at,
+                    Document.updated_at,
                 ).order_by(Document.source, Document.source_id)
             )
         ).all()
         ops = (
             await session.execute(
-                select(EndpointDescriptor.op_id, EndpointDescriptor.embedding).order_by(
-                    EndpointDescriptor.op_id
-                )
+                select(
+                    EndpointDescriptor.op_id,
+                    EndpointDescriptor.embedding,
+                    EndpointDescriptor.updated_at,
+                ).order_by(EndpointDescriptor.op_id)
             )
         ).all()
         revisions = (await session.execute(select(KbRevision.id))).scalars().all()
@@ -137,6 +150,15 @@ async def _snapshot() -> dict[str, object]:
         "docs": [(d.source, d.source_id, [round(x, 4) for x in d.embedding]) for d in docs],
         "doc_metadata": [dict(d.doc_metadata) for d in docs if d.source == KB_SOURCE],
         "ops": [(o.op_id, None if o.embedding is None else round(o.embedding[0], 4)) for o in ops],
+        "doc_times": {
+            (d.source, d.source_id): (d.created_at, d.updated_at)
+            for d in docs
+            if d.source != KB_PASSAGE_SOURCE
+        },
+        "passage_times": sorted(
+            {(d.created_at, d.updated_at) for d in docs if d.source == KB_PASSAGE_SOURCE}
+        ),
+        "op_times": [(o.op_id, o.updated_at) for o in ops],
         "revisions": sorted(revisions),
         "state": state,
     }
@@ -168,12 +190,13 @@ async def test_every_vector_is_embedded_again_and_the_record_shows_the_new_model
     counts, lines = await _run(batch_size=1)
 
     after = await _snapshot()
-    assert (counts.documents, counts.kb_entries, counts.endpoints) == (2, 1, 1)
+    assert (counts.documents, counts.kb_entries, counts.endpoints) == (2, 1, 2)
     assert any(line.startswith("documents: 2/2") for line in lines)
+    assert any(line.startswith("operations: 2/2") for line in lines)
     for source, _source_id, vector in after["docs"]:
         assert vector == NEW_VECTOR, source
-    # The operation with a vector is new; the one without a vector is left alone.
-    assert after["ops"] == [("with-vector", 0.7), ("without-vector", None)]
+    # Every operation gets the new vector, also the one that had none.
+    assert after["ops"] == [("with-vector", 0.7), ("without-vector", 0.7)]
     assert after["state"] == (NEW_MODEL, 384)
 
 
@@ -209,6 +232,83 @@ async def test_a_second_run_gives_the_same_rows_and_vectors(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", [OLD_MODEL, NEW_MODEL])
+async def test_no_row_gets_new_times(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    await _seed()
+    before = await _snapshot()
+    assert len(before["passage_times"]) == 1  # type: ignore[arg-type]
+    _use_model(monkeypatch, model)
+
+    await _run()
+
+    after = await _snapshot()
+    assert after["doc_times"] == before["doc_times"]
+    assert after["op_times"] == before["op_times"]
+    created, updated = before["passage_times"][0]  # type: ignore[index]
+    assert after["passage_times"] == [(created, updated)]
+
+
+async def _entry_body(slug: str) -> str | None:
+    async with get_sessionmaker()() as session:
+        return await session.scalar(
+            select(Document.body).where(Document.source == KB_SOURCE, Document.source_id == slug)
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_entry_edited_during_the_run_keeps_the_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed()
+    _use_model(monkeypatch, NEW_MODEL)
+    edited = BODY + "\n\nA paragraph added by another writer."
+    calls: list[str] = []
+
+    async def write_after_an_edit(**kwargs: Any) -> Any:
+        if not calls:
+            calls.append("edit")
+            await revisions.write_entry(
+                tenant_id=TENANT, slug="guide", body=edited, metadata_for=lambda m: dict(m or {})
+            )
+        calls.append("reembed")
+        return await revisions.write_entry(**kwargs)
+
+    with patch("meho_backplane.retrieval.reembed.write_entry", write_after_an_edit):
+        await _run()
+
+    assert calls == ["edit", "reembed", "reembed"]
+    assert await _entry_body("guide") == edited
+    async with get_sessionmaker()() as session:
+        latest = await session.scalar(
+            select(KbRevision.body).order_by(KbRevision.revision_number.desc()).limit(1)
+        )
+    assert latest == edited
+    after = await _snapshot()
+    assert all(p[2] == NEW_VECTOR for p in _passages(after))
+
+
+@pytest.mark.asyncio
+async def test_an_entry_deleted_during_the_run_stays_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed()
+    _use_model(monkeypatch, NEW_MODEL)
+
+    async def delete_then_write(**kwargs: Any) -> Any:
+        await delete_entry_rows(TENANT, "guide")
+        return await revisions.write_entry(**kwargs)
+
+    with patch("meho_backplane.retrieval.reembed.write_entry", delete_then_write):
+        _counts, lines = await _run()
+
+    assert await _entry_body("guide") is None
+    assert _passages(await _snapshot()) == []
+    assert any("guide: skipped" in line for line in lines)
+    async with get_sessionmaker()() as session:
+        assert await read_embedding_state(session) == (NEW_MODEL, 384)
+
+
+@pytest.mark.asyncio
 async def test_dry_run_writes_nothing_and_prints_the_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -219,8 +319,8 @@ async def test_dry_run_writes_nothing_and_prints_the_counts(
     counts, lines = await _run(dry_run=True)
 
     assert await _snapshot() == before
-    assert (counts.documents, counts.kb_entries, counts.endpoints) == (2, 1, 1)
-    assert "would embed: 2 documents, 1 knowledge entries, 1 operations" in lines[-1]
+    assert (counts.documents, counts.kb_entries, counts.endpoints) == (2, 1, 2)
+    assert "would embed: 2 documents, 1 knowledge entries, 2 operations" in lines[-1]
 
 
 @pytest.mark.asyncio
@@ -266,7 +366,7 @@ async def test_start_with_another_model_warns_once_and_shows_it_in_the_health_de
     _use_model(monkeypatch, NEW_MODEL)
 
     with capture_logs() as logs:
-        await check_embedding_model_at_start()
+        assert await check_embedding_model_at_start() is True
 
     warnings = [e for e in logs if e["event"] == "embedding_model_mismatch"]
     assert len(warnings) == 1
@@ -289,7 +389,8 @@ async def test_start_with_the_same_model_logs_nothing_and_embeds_nothing() -> No
         patch("meho_backplane.retrieval.embedding.get_embedding_service", return_value=service),
         patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=service),
     ):
-        await check_embedding_model_at_start()
+        # False: the start adds no readiness check, so the health answer stays as it was.
+        assert await check_embedding_model_at_start() is False
 
     assert [e for e in logs if e["event"] == "embedding_model_mismatch"] == []
     service.encode.assert_not_called()
@@ -301,7 +402,7 @@ async def test_start_with_the_same_model_logs_nothing_and_embeds_nothing() -> No
 @pytest.mark.asyncio
 async def test_start_without_a_record_still_starts() -> None:
     with capture_logs() as logs:
-        await check_embedding_model_at_start()
+        assert await check_embedding_model_at_start() is False
 
     assert [e for e in logs if e["event"] == "embedding_model_mismatch"] == []
     assert embedding_model_probe().ok is True

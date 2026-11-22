@@ -479,6 +479,101 @@ async def test_database_read_cut_off_at_the_deadline_ends_and_a_write_follows(
         await seed_announcement(_TENANT, activity="written after the cut-off read")
 
 
+async def test_left_read_that_never_ends_is_stopped_at_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A database read that never ends is stopped at the limit after the stream ends.
+
+    Its connection is closed, not given back to the pool, and MEHO logs
+    one line when the read is left and one when it is stopped.
+    """
+    from sqlalchemy import event
+    from structlog.testing import capture_logs
+
+    from meho_backplane.broadcast import read_to_end
+
+    entered = asyncio.Event()
+
+    async def _never_ends(*_args: object, **_kwargs: object) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    await seed_announcement(_TENANT, activity="stored before the stream")
+    monkeypatch.setattr(archive_reader, "_without_ended_claims", _never_ends)
+    monkeypatch.setattr(read_to_end, "LEFT_READ_LIMIT_SECONDS", 0.5)
+    engine = get_sessionmaker().kw["bind"]
+    closed: list[object] = []
+    event.listen(engine.sync_engine, "invalidate", lambda *args: closed.append(args[0]))
+
+    with capture_logs() as logs:
+        started = time.monotonic()
+        frames = await _collect(
+            announcement_feed_frames(
+                _reader(),
+                start=FeedStart(after=0),
+                flt=AnnouncementFilter(),
+                surface="api",
+                liveness=_short_liveness(0.3),
+            )
+        )
+        assert frames == []
+        assert time.monotonic() - started < 2.0
+        assert entered.is_set()
+        assert read_to_end._LEFT_READS
+
+        async with asyncio.timeout(3.0):
+            while read_to_end._LEFT_READS:
+                await asyncio.sleep(0.05)
+
+    assert len(closed) == 1
+    assert engine.pool.checkedout() == 0
+    events = [entry["event"] for entry in logs if entry["event"].startswith("broadcast_archive")]
+    assert events == ["broadcast_archive_read_left", "broadcast_archive_read_stopped"]
+    for entry in logs:
+        assert "stored before the stream" not in repr(entry)
+    await seed_announcement(_TENANT, activity="written after the stopped read")
+
+
+async def test_left_read_that_ends_in_time_logs_its_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A left read that ends before the limit closes its session normally and logs it."""
+    from structlog.testing import capture_logs
+
+    from meho_backplane.broadcast import read_to_end
+
+    release = asyncio.Event()
+    real_filter = archive_reader._without_ended_claims
+
+    async def _held_filter(*args: Any, **kwargs: Any) -> Any:
+        await release.wait()
+        return await real_filter(*args, **kwargs)
+
+    await seed_announcement(_TENANT, activity="stored before the stream")
+    monkeypatch.setattr(archive_reader, "_without_ended_claims", _held_filter)
+    engine = get_sessionmaker().kw["bind"]
+
+    with capture_logs() as logs:
+        frames = await _collect(
+            announcement_feed_frames(
+                _reader(),
+                start=FeedStart(after=0),
+                flt=AnnouncementFilter(),
+                surface="api",
+                liveness=_short_liveness(0.3),
+            )
+        )
+        assert frames == []
+        release.set()
+        async with asyncio.timeout(3.0):
+            while read_to_end._LEFT_READS:
+                await asyncio.sleep(0.05)
+
+    assert engine.pool.checkedout() == 0
+    ended = [entry for entry in logs if entry["event"] == "broadcast_archive_read_left_ended"]
+    assert [entry["outcome"] for entry in ended] == ["done"]
+
+
 async def test_read_error_after_the_deadline_sends_no_error_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

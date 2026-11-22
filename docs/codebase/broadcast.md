@@ -60,17 +60,25 @@ was closed as not planned).
 
    **A stream ends when its login ends.** `/api/v1/feed` ends the
    stream at the token's `exp` plus the JWT leeway, and after
-   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. This end
-   also stops an archive read that is still running (a slow Valkey or
-   database call), and a read error after the end sends no
-   `feed_error` frame. The end stops the stream at once, but it never
-   stops a database statement in the middle: each archive read runs in
-   its own task (`broadcast/read_to_end.py`), ends there and closes its
-   session. A cancel in the middle of a statement is not safe on
-   SQLite: the connection keeps its lock, and the next write fails with
-   "database is locked". The stream never holds a database session
-   while it waits: each archive read opens a short session and closes
-   it before the wait.
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. At this end
+   the stream stops waiting for an archive read that is still running:
+   a slow Valkey call is cancelled, and a read error after the end
+   sends no `feed_error` frame. A database read is not stopped in the
+   middle of a statement at this end: each archive read runs in its own
+   task with its own session (`broadcast/read_to_end.py`), ends there
+   and closes its session. A cancel in the middle of a statement is not
+   safe on SQLite: the connection keeps its lock, and the next write
+   fails with "database is locked". A read whose caller stopped waiting
+   (the stream ended, the client left, or the console history page,
+   the MCP tenant feed or the MCP watch tool was cancelled) runs on for
+   at most 30 seconds (`LEFT_READ_LIMIT_SECONDS`). After that it is
+   stopped, and its database connection is closed, not given back to
+   the pool. MEHO logs `broadcast_archive_read_left` when a read is
+   left, and `broadcast_archive_read_left_ended` or
+   `broadcast_archive_read_stopped` when it ends or is stopped. The
+   lines carry no announcement content. The stream never holds a
+   database session while it waits: each archive read opens a short
+   session and closes it before the wait.
    `/ui/broadcast/stream` checks its session again (the same check as
    `require_ui_operator`) at most every
    `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat

@@ -2575,6 +2575,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#from-an-audit-row-to-its-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From an audit row to its session
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#retention-per-tenant" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3467,6 +3478,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#from-an-audit-row-to-its-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From an audit row to its session
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#retention-per-tenant" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3552,7 +3574,9 @@ a session.</p>
 <li>one index row per session: tenant, session id, who uploaded it,
   project, app, start and end time, state (<code>open</code>, <code>ended</code> or
   <code>unfinished</code>) and the file hashes;</li>
-<li>one audit row for each upload, read and delete.</li>
+<li>one audit row for each upload, read and delete;</li>
+<li>with the switch <code>AUDIT_SESSION_LINKS</code> on: the links from MEHO's audit
+  log to the session (see "From an audit row to its session" below).</li>
 </ul>
 <p>MEHO never keeps:</p>
 <ul>
@@ -3881,6 +3905,35 @@ use the session routes.</p>
 </table>
 <p>Every call sees only the caller's tenant. A session of another tenant
 answers <code>404 session_not_found</code>.</p>
+<h2 id="from-an-audit-row-to-its-session">From an audit row to its session<a class="headerlink" href="#from-an-audit-row-to-its-session" title="Permanent link">&para;</a></h2>
+<p>This part works only with the switch <code>AUDIT_SESSION_LINKS</code> set to <code>true</code>
+(off by default). With it off, MEHO stores no links and its answers do not
+change.</p>
+<p>At upload time MEHO finds the audit rows of the session's MEHO calls:</p>
+<ul>
+<li>an MCP call: the same person, the same tool and the same arguments,
+  inside the session's start and end time. A call that two of your agents
+  made at the same time with the same arguments is skipped, because it
+  does not show which agent made it. A session with no start time gets no
+  link.</li>
+<li>a <code>meho</code> command the agent ran: the same person, the operation or the
+  command (for example <code>meho vmware vm list</code>), written while the command
+  ran. A command that was still running at one upload links at the next. Two agents that share one
+  <code>meho login</code> still get their own rows. A row that both of them could
+  have written gets no link.</li>
+</ul>
+<p>Then an audit row of a call that is part of a stored session names that
+session. A person with the right to read sessions sees it:</p>
+<ul>
+<li><code>meho audit show &lt;audit-id&gt;</code> prints <code>stored_session: &lt;id&gt;</code>;</li>
+<li><code>GET /api/v1/audit/show/{audit_id}</code> returns <code>stored_session_id</code>;</li>
+<li>the console's audit drawer shows a "Stored session" part. For a run that
+  MEHO started itself, it links to the run page.</li>
+</ul>
+<p>Read the session with <code>meho sessions show &lt;id&gt;</code>. It lists the MCP
+sessions of the session; for a run that MEHO started itself, the run and
+its ticket id. A reader without the right, and a row with no stored
+session, get no link.</p>
 <h2 id="retention-per-tenant">Retention per tenant<a class="headerlink" href="#retention-per-tenant" title="Permanent link">&para;</a></h2>
 <p>A session is old when its last upload is older than the tenant's
 retention period. The cleanup job deletes old sessions with their files,

@@ -1583,6 +1583,13 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    kb_wiki_interleave:
+        Off by default. When on, ``search_knowledge`` lists the store hits
+        and the knowledge repo hits in turns (store 1, knowledge repo 1,
+        store 2, ...), so the knowledge repo's hits are not always last
+        and cut first when the answer is too large. When off, the store
+        hits come first. It stays off until a before-and-after
+        measurement shows it helps. Env ``KB_WIKI_INTERLEAVE``.
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
@@ -1858,6 +1865,10 @@ class Settings(BaseModel):
     # written as before, and a dry run lists no entries. It stays off until
     # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
     kb_similar_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on, `search_knowledge` tells the agent to search
+    # with a few key words, and its answer has `word_match` (some / none).
+    # Set via ``KB_SEARCH_WORD_HINT``.
+    kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2597,6 +2608,7 @@ class Settings(BaseModel):
         default=False, json_schema_extra=AGENT_FACING
     )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3345,6 +3357,7 @@ def get_settings() -> Settings:
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
+        kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3806,6 +3819,9 @@ def get_settings() -> Settings:
         ),
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
+        ),
+        kb_wiki_interleave=parse_bool_env(
+            os.environ.get("KB_WIKI_INTERLEAVE"),
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),

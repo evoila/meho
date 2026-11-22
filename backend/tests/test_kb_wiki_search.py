@@ -70,7 +70,7 @@ from meho_backplane.mcp.tools.knowledge import (
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.retrieval.retriever import RetrievalHit
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 from meho_backplane.untrusted_text import BLOCK_START
 from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
@@ -626,6 +626,168 @@ async def test_the_size_limit_counts_the_wiki_status() -> None:
     assert response["omitted_hits"] == 1
     assert response["wiki"]["collection"] == _WIKI
     assert [hit["slug"] for hit in response["hits"]] == ["vcenter-snapshot-notes"]
+
+
+# --- the order of the hits (KB_WIKI_INTERLEAVE) --------------------------------
+
+_RECORD_SEAM = "meho_backplane.mcp.tools.knowledge.record_kb_retrievals"
+
+
+def _three_store_two_wiki() -> tuple[list[RetrievalHit], AsyncMock]:
+    store = [_store_hit(slug=f"store-{n}") for n in (1, 2, 3)]
+    chunks = [_WIKI_CHUNK.model_copy(update={"chunk_id": f"wiki-{n}"}) for n in (1, 2)]
+    return store, _corpus(*chunks)
+
+
+async def _ordered_search(
+    *, interleave: bool, limit: int | None = None
+) -> tuple[dict[str, Any], list[str]]:
+    """Run the search with the switch set; return the answer and the recorded slugs."""
+    store, corpus = _three_store_two_wiki()
+    settings = get_settings()
+    record = AsyncMock()
+    with (
+        patch.object(settings, "kb_wiki_interleave", interleave),
+        patch(_RECORD_SEAM, new=record),
+    ):
+        if limit is None:
+            response, _ = await _search(_operator(), store=store, corpus=corpus)
+        else:
+            with patch.object(settings, "result_complete_response_wire_max_bytes", limit):
+                response, _ = await _search(_operator(), store=store, corpus=corpus)
+    recorded = [slug for slug, _owner in record.await_args.args[1]]
+    return response, recorded
+
+
+def _names(response: dict[str, Any]) -> list[str]:
+    return [hit.get("slug") or hit["chunk_id"] for hit in response["hits"]]
+
+
+async def _seed_wiki_tenant() -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, _WIKI)
+    await seed_doc_collection(collection_key=_WIKI)
+
+
+async def _limit_for(interleave: bool, places: int) -> int:
+    """Find a size limit that keeps exactly *places* hits of the answer."""
+    whole, _ = await _ordered_search(interleave=interleave)
+    limit = measure_delivered_wire_bytes(whole, structured=False)
+    while limit > 0:
+        response, _ = await _ordered_search(interleave=interleave, limit=limit)
+        if len(response["hits"]) <= places:
+            assert len(response["hits"]) == places
+            return limit
+        limit -= 40
+    raise AssertionError("no limit found")
+
+
+def test_the_switch_is_off_by_default() -> None:
+    assert Settings.model_fields["kb_wiki_interleave"].default is False
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_the_wiki_hits_come_last() -> None:
+    await _seed_wiki_tenant()
+    response, recorded = await _ordered_search(interleave=False)
+    assert _names(response) == ["store-1", "store-2", "store-3", "wiki-1", "wiki-2"]
+    assert response["delivery"] == "complete"
+    assert "omitted_hits" not in response
+    assert recorded == ["store-1", "store-2", "store-3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("places", "names", "recorded"),
+    [
+        (4, ["store-1", "store-2", "store-3", "wiki-1"], ["store-1", "store-2", "store-3"]),
+        (2, ["store-1", "store-2"], ["store-1", "store-2"]),
+    ],
+)
+async def test_with_the_switch_off_a_cut_answer_is_as_before(
+    places: int, names: list[str], recorded: list[str]
+) -> None:
+    await _seed_wiki_tenant()
+    limit = await _limit_for(False, places)
+    response, got = await _ordered_search(interleave=False, limit=limit)
+    assert _names(response) == names
+    assert response["delivery"] == "partial"
+    assert response["omitted_hits"] == 5 - places
+    assert got == recorded
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_on_the_two_lists_take_turns() -> None:
+    await _seed_wiki_tenant()
+    response, recorded = await _ordered_search(interleave=True)
+    assert _names(response) == ["store-1", "wiki-1", "store-2", "wiki-2", "store-3"]
+    assert response["delivery"] == "complete"
+    assert recorded == ["store-1", "store-2", "store-3"]
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_on_a_cut_answer_loses_the_last_places() -> None:
+    await _seed_wiki_tenant()
+    limit = await _limit_for(True, 3)
+    response, recorded = await _ordered_search(interleave=True, limit=limit)
+    assert _names(response) == ["store-1", "wiki-1", "store-2"]
+    assert response["delivery"] == "partial"
+    assert response["omitted_hits"] == 2
+    assert recorded == ["store-1", "store-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wiki", [None, _WIKI])
+async def test_with_the_switch_on_and_no_wiki_hits_the_answer_is_as_before(
+    wiki: str | None,
+) -> None:
+    await _seed_tenant(OPERATOR_TENANT_ID, wiki)
+    if wiki:
+        await seed_doc_collection(collection_key=wiki)
+    store = [_store_hit(slug=f"store-{n}") for n in (1, 2, 3)]
+    record = AsyncMock()
+    with (
+        patch.object(get_settings(), "kb_wiki_interleave", True),
+        patch(_RECORD_SEAM, new=record),
+    ):
+        response, _ = await _search(_operator(), store=store, corpus=_corpus())
+    assert _names(response) == ["store-1", "store-2", "store-3"]
+    assert [slug for slug, _owner in record.await_args.args[1]] == _names(response)
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_on_a_hit_too_big_for_the_limit_keeps_none_and_records_none() -> None:
+    await _seed_wiki_tenant()
+    response, recorded = await _ordered_search(interleave=True, limit=1)
+    assert response["hits"] == []
+    assert response["delivery"] == "partial"
+    assert response["omitted_hits"] == 5
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("hint", [False, True])
+async def test_both_switches_the_word_hint_reads_store_hits_only(
+    interleave: bool, hint: bool
+) -> None:
+    """The word hint is the one main gives: wiki hits never count as word matches."""
+    await _seed_wiki_tenant()
+    store = [_store_hit(slug=f"store-{n}").model_copy(update={"bm25_score": None}) for n in (1, 2)]
+    chunks = [_WIKI_CHUNK.model_copy(update={"chunk_id": f"wiki-{n}"}) for n in (1, 2)]
+    settings = get_settings()
+    with (
+        patch.object(settings, "kb_wiki_interleave", interleave),
+        patch.object(settings, "kb_search_word_hint", hint),
+        patch(_RECORD_SEAM, new=AsyncMock()),
+    ):
+        response, _ = await _search(_operator(), store=store, corpus=_corpus(*chunks))
+    assert _names(response) == (
+        ["store-1", "wiki-1", "store-2", "wiki-2"]
+        if interleave
+        else ["store-1", "store-2", "wiki-1", "wiki-2"]
+    )
+    assert response.get("word_match") == ("none" if hint else None)
+    assert response["wiki"]["hit_count"] == 2
 
 
 # --- the wiki is not searched: the answer says why ----------------------------

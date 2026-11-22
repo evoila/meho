@@ -2511,13 +2511,31 @@ def params_with_secret_fields_hidden(
     return cast(dict[str, Any], hidden)
 
 
+def resume_parent_without_inputs(
+    resume_parent: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The parent of a step request that never runs, kept as its ``op_id`` only.
+
+    A request that ends without a run never goes back into its multi-step
+    operation, so the row needs no inputs of that operation (its params,
+    saved state and finished steps). The approval pages and the runbook
+    check read only ``op_id``. ``None`` when *resume_parent* holds nothing
+    else, so such a row is not written.
+    """
+    if resume_parent is None or set(resume_parent) <= {"op_id"}:
+        return None
+    return {"op_id": resume_parent.get("op_id")}
+
+
 async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None:
     """Drop what MEHO kept only to run *request*: the row is ending without a run.
 
     Deletes the encrypted custody row of a credential write
     (:func:`~meho_backplane.operations.approval_handoff.discard`) and
     replaces each secret-named value in the stored ``params`` (a password or
-    a licence key inside a deployment spec) with a marker. The caller holds
+    a licence key inside a deployment spec) with a marker. The parent of a
+    step of a multi-step operation keeps only its ``op_id``
+    (:func:`resume_parent_without_inputs`). The caller holds
     the row lock, flushes and commits. Rejected, withdrawn and expired
     requests end here; a request that runs has its values hidden when the
     run claim is won (:func:`claim_resume`).
@@ -2526,6 +2544,9 @@ async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None
     hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
     if hidden is not None:
         request.params = hidden
+    parent = resume_parent_without_inputs(request.resume_parent)
+    if parent is not None:
+        request.resume_parent = parent
 
 
 async def claim_resume(

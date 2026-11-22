@@ -311,6 +311,53 @@ async def test_an_old_row_of_an_apply_of_a_secret_has_its_manifest_hidden(
     assert count.handoffs_removed == 1
 
 
+async def _store_a_parent_the_old_way(
+    tenant_id: uuid.UUID, request_id: uuid.UUID, params: dict[str, Any]
+) -> None:
+    """Put the params of a multi-step parent on the row, as an older release stored them."""
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=tenant_id, request_id=request_id)
+        row.resume_parent = {
+            "op_id": "example.deploy",
+            "params": params,
+            "state": {"step": 2},
+        }
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_an_old_step_row_keeps_no_copy_in_its_parent(running_release: str) -> None:
+    tenant_id = await _tenant()
+    params = {"manifest": _SECRET_MANIFEST}
+    request_id = await _park(tenant_id, _APPLY_OP, params, release_id="release-a")
+    await _store_the_old_way(tenant_id, request_id, params)
+    await _store_a_parent_the_old_way(tenant_id, request_id, {"admin_password": _PW, **params})
+
+    count = await hide_values_of_requests_that_cannot_run()
+
+    row = await _load(tenant_id, request_id)
+    assert row.params == {"manifest": _MARKER}
+    assert row.resume_parent == {"op_id": "example.deploy"}
+    assert _PW not in json.dumps({"params": row.params, "parent": row.resume_parent})
+    assert await _handoff_rows(request_id) == 0
+    assert count.params_hidden == 1
+    again = await hide_values_of_requests_that_cannot_run()
+    assert again.params_hidden == 0
+
+
+@pytest.mark.asyncio
+async def test_a_step_row_that_expires_keeps_only_the_parent_name() -> None:
+    tenant_id = await _tenant()
+    request_id = await _park(tenant_id, _SPEC_OP, _SPEC_PARAMS, decided_ago=_past_ttl())
+    await _store_a_parent_the_old_way(tenant_id, request_id, {"admin_password": _PW})
+
+    await sweep_expired_approvals()
+
+    row = await _load(tenant_id, request_id)
+    assert row.status == ApprovalRequestStatus.EXPIRED.value
+    assert row.resume_parent == {"op_id": "example.deploy"}
+
+
 @pytest.mark.asyncio
 async def test_the_clean_up_covers_ended_rows_and_leaves_rows_that_can_run(
     running_release: str,

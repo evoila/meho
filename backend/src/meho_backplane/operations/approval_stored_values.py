@@ -39,6 +39,7 @@ from meho_backplane.operations.approval_queue import (
     _expire_request,
     _now,
     params_with_secret_fields_hidden,
+    resume_parent_without_inputs,
 )
 from meho_backplane.version import running_release_id
 
@@ -113,6 +114,7 @@ class CleanUpCount:
     """What one start-up clean-up did."""
 
     requests_read: int = 0
+    #: Rows whose params or parent inputs were rewritten.
     params_hidden: int = 0
     handoffs_removed: int = 0
     batches: int = 0
@@ -144,11 +146,18 @@ def _cannot_run_clause(running_release: str | None) -> Any:
 async def _clean_batch(
     session: AsyncSession, rows: list[ApprovalRequest], count: CleanUpCount
 ) -> None:
-    """Hide the secret-named values of *rows* and drop their handoff rows."""
+    """Hide the secret-named values of *rows*, drop their parent inputs and handoff rows."""
     for request in rows:
         hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
+        parent = resume_parent_without_inputs(request.resume_parent)
+        written = False
         if hidden is not None and hidden != request.params:
             request.params = hidden
+            written = True
+        if parent is not None:
+            request.resume_parent = parent
+            written = True
+        if written:
             count.params_hidden += 1
     removed = await session.execute(
         delete(ApprovalExecutionPayload)
@@ -171,7 +180,8 @@ async def hide_values_of_requests_that_cannot_run(
     :func:`~meho_backplane.operations.approval_queue.end_run_input`: each
     secret-named value of its params, and the param a connector hides (the
     manifest of a ``k8s.apply`` that holds a credential), is replaced with
-    the marker, and its encrypted handoff row is deleted. This also covers
+    the marker, the parent of a step of a multi-step operation keeps only
+    its ``op_id``, and its encrypted handoff row is deleted. This also covers
     rows stored by an older release. A row with nothing to hide is not
     written.
 

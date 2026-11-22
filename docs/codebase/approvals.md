@@ -125,8 +125,9 @@ within `APPROVAL_DEFAULT_TTL` after its decision
 same decision audit row, and its `expires_at` becomes the end of the time
 it had to start (`decided_at + APPROVAL_DEFAULT_TTL`), so every surface
 shows the usual expired reason. `end_run_input` runs on it: the encrypted
-handoff row is deleted and each secret-named value of the stored params
-is replaced by the marker. A claim of its run after that finds no
+handoff row is deleted, each secret-named value of the stored params
+is replaced by the marker, and the parent of a step of a multi-step
+operation keeps only its op id (`resume_parent_without_inputs`). A claim of its run after that finds no
 `approved` row and is refused; an agent that still waits for it reads the
 usual expired answer (`approval_expired`). So a stored request keeps the
 values of its call at most `APPROVAL_DEFAULT_TTL` after the decision.
@@ -138,9 +139,10 @@ run: a rejected, expired or withdrawn request, and an approved
 request of another release (an approval covers one exact release; without
 a release identity no approved request counts). Each one gets the
 `end_run_input` clean-up: its secret-named values and the param a
-connector hides become the marker, and its handoff row is deleted. This
-covers rows stored by an older release, for example a `k8s.apply` of a
-Secret whose manifest is still in `params`. It reads 500 rows per
+connector hides become the marker, the parent of a step keeps only its
+op id, and its handoff row is deleted. This covers rows stored by an
+older release, for example a `k8s.apply` of a Secret whose manifest is
+still in `params`, or in the params of its parent. It reads 500 rows per
 transaction, in the order of their id, writes only rows that change, and
 logs the counts (`approval_stored_values_cleaned`). A failure is logged and
 the start goes on.

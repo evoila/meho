@@ -38,8 +38,10 @@ it. So ``postgres.query`` adds three checks:
 
 * :func:`assert_no_secret_catalogs` refuses, before a connection is opened,
   any statement that names one of the server catalogs, views or functions
-  in :data:`DENIED_RELATIONS`. Each of them can show a stored password, a
-  connection string with a password, the SQL text of other sessions, a
+  in :data:`DENIED_RELATIONS`. Each of them can show a stored password
+  (also a login or key in the options of a foreign server, or the bind
+  password of an ldap line in ``pg_hba.conf``), a connection string with a
+  password, the SQL text of other sessions, a
   server setting or sampled column values. It uses the same word scan and
   the same refusal of Unicode-escaped identifiers. It also refuses
   ``SHOW ALL`` and a ``SHOW`` of a setting in
@@ -73,7 +75,11 @@ pinned to the PostgreSQL 16 pages "System Catalogs"
 (https://www.postgresql.org/docs/16/views.html), "The Cumulative Statistics
 System" (https://www.postgresql.org/docs/16/monitoring-stats.html), the
 information schema view ``user_mapping_options``
-(https://www.postgresql.org/docs/16/infoschema-user-mapping-options.html)
+(https://www.postgresql.org/docs/16/infoschema-user-mapping-options.html),
+the information schema view ``foreign_server_options``
+(https://www.postgresql.org/docs/16/infoschema-foreign-server-options.html),
+the view ``pg_hba_file_rules``
+(https://www.postgresql.org/docs/16/view-pg-hba-file-rules.html),
 the ``pg_stat_statements`` extension
 (https://www.postgresql.org/docs/16/pgstatstatements.html), the ``SHOW``
 command (https://www.postgresql.org/docs/16/sql-show.html) and the setting
@@ -216,6 +222,14 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
         "pg_user_mappings",
         "_pg_user_mappings",
         "user_mapping_options",
+        # The options of a foreign server. Some foreign data wrappers keep a
+        # login or a key there.
+        "pg_foreign_server",
+        "_pg_foreign_servers",
+        "foreign_server_options",
+        # The lines of pg_hba.conf (view and function): the options of an
+        # ldap line hold the bind password.
+        "pg_hba_file_rules",
         # The SQL text of other sessions.
         "pg_stat_activity",
         "pg_stat_get_activity",

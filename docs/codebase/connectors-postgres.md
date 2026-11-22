@@ -171,6 +171,11 @@ role's rights. So the free-form op adds three checks:
    - `pg_user_mapping`, `pg_user_mappings`, and the information schema views
      `user_mapping_options` and `_pg_user_mappings` — the options of a
      foreign server login (`postgres_fdw`), with its password;
+   - `pg_foreign_server`, and the information schema views
+     `foreign_server_options` and `_pg_foreign_servers` — the options of a
+     foreign server, where some foreign data wrappers keep a login or a key;
+   - `pg_hba_file_rules` (view and function) — the lines of `pg_hba.conf`,
+     where the options of an ldap line hold the bind password;
    - `pg_stat_activity`, `pg_stat_get_activity`,
      `pg_stat_get_backend_activity` — the SQL text of other sessions, which
      can hold a password;

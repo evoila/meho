@@ -290,13 +290,58 @@ def test_the_refusal_for_sessions_names_the_curated_operation(name: str, hint: s
         "SHOW work_mem",
         "SELECT * FROM my_pg_stats_copy",
         "SELECT * FROM pg_stat_user_tables",
-        "SELECT srvname FROM pg_foreign_server",
         "SELECT * FROM my_pg_stat_activity_copy",
     ],
 )
 def test_reads_that_show_no_secret_pass(sql: str) -> None:
     assert denied_relation_in(sql) is None
     assert_no_secret_catalogs(sql)
+
+
+def test_the_deny_list_is_pinned() -> None:
+    assert {
+        "pg_authid",
+        "pg_shadow",
+        "pg_subscription",
+        "pg_user_mapping",
+        "pg_user_mappings",
+        "_pg_user_mappings",
+        "user_mapping_options",
+        "pg_foreign_server",
+        "_pg_foreign_servers",
+        "foreign_server_options",
+        "pg_hba_file_rules",
+        "pg_stat_activity",
+        "pg_stat_get_activity",
+        "pg_stat_get_backend_activity",
+        "pg_stat_statements",
+        "pg_stat_statements_info",
+        "pg_settings",
+        "pg_file_settings",
+        "pg_show_all_settings",
+        "pg_show_all_file_settings",
+        "current_setting",
+        "pg_statistic",
+        "pg_stats",
+        "pg_stats_ext",
+        "pg_stats_ext_exprs",
+        "pg_statistic_ext_data",
+    } == DENIED_RELATIONS
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT options FROM pg_hba_file_rules",
+        "SELECT * FROM pg_catalog.pg_hba_file_rules()",
+        "SELECT srvoptions FROM pg_foreign_server",
+        "SELECT * FROM information_schema.foreign_server_options",
+        "SELECT * FROM information_schema._pg_foreign_servers",
+    ],
+)
+def test_server_options_and_hba_lines_are_refused(sql: str) -> None:
+    with pytest.raises(PostgresReadOnlyError):
+        assert_no_secret_catalogs(sql)
 
 
 def test_deny_list_entries_are_lower_case() -> None:

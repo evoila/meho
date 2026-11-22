@@ -166,6 +166,7 @@ async def query_audit(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> AuditQueryResult:
     """Tenant-scoped paginated query over ``audit_log``.
 
@@ -179,6 +180,12 @@ async def query_audit(
     ``target_name=None`` rather than leaking the other tenant's target name.
     The LEFT JOIN to ``tenant`` fills ``tenant_name`` (#5238); every row is
     already in ``tenant_id``, so it only ever names the caller's own tenant.
+
+    ``owner_sub`` set (a service login, see
+    :func:`~meho_backplane.audit_query.owner_scope.own_rows_sub`): only the
+    rows with ``operator_sub == owner_sub`` match, before any other filter.
+    So no filter, also not ``has_trace``, tells anything about the rows of
+    another login.
     """
     stmt = (
         sa.select(
@@ -197,6 +204,7 @@ async def query_audit(
         .where(AuditLog.tenant_id == tenant_id)
     )
 
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, filters, tenant_id=tenant_id)
 
     stmt = stmt.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(
@@ -227,6 +235,7 @@ async def count_event_classes(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     now: datetime | None = None,
+    owner_sub: str | None = None,
 ) -> EventClassCounts:
     """Count the rows that match *filters*, per event class (#3747).
 
@@ -240,6 +249,9 @@ async def count_event_classes(
     When ``filters.since`` is not set, only the last
     :data:`DEFAULT_COUNT_WINDOW` is counted. The returned ``since`` is the
     start of the window that was counted, so callers can show it.
+
+    ``owner_sub`` limits the count to the rows of one login, as in
+    :func:`query_audit`.
     """
     since = filters.since
     if since is None:
@@ -250,10 +262,18 @@ async def count_event_classes(
         .where(AuditLog.tenant_id == tenant_id)
         .group_by(AuditLog.event_class)
     )
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
     found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
     counts = {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
     return EventClassCounts(counts=counts, since=since)
+
+
+def _scope_to_owner(stmt: sa.Select[Any], owner_sub: str | None) -> sa.Select[Any]:
+    """Keep only the rows of *owner_sub*; no change when it is ``None``."""
+    if owner_sub is None:
+        return stmt
+    return stmt.where(AuditLog.operator_sub == owner_sub)
 
 
 # A flat chain of independent `if filters.X is not None` guards — one per

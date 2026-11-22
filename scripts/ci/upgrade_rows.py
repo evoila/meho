@@ -42,6 +42,9 @@ This file does these things:
   pull request runs it (``--write``), so contributors never edit that table.
   ``check_released_rows`` fails when such a row is missing there, and when a
   new row is in the folder of a version that was released before.
+* ``check_new_rows`` (``--check-new-rows <base ref>``) runs in a pull request.
+  It fails on a row file that the pull request adds to the folder of a version
+  that is released on the base branch.
 
 ``python scripts/ci/upgrade_rows.py`` runs the checks and prints the rows as
 table lines, so you can see what the site will show.
@@ -53,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -359,6 +363,46 @@ def check_released_rows(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> No
         )
 
 
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise UpgradeRowError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def check_new_rows(base_ref: str, root: Path = REPO_ROOT) -> list[str]:
+    """Fail on a row file added to the folder of a version released on the base.
+
+    "Released" is read from ``CHANGELOG.md`` on the base ref, so the release
+    pull request, which adds the ``## [X.Y.Z]`` heading itself, still passes.
+    Returns the new row files that are in a folder that is not released.
+    """
+    base_changelog = _git(root, "show", f"{base_ref}:CHANGELOG.md")
+    released = {f"v{v}" for v in _RELEASED_RE.findall(base_changelog)}
+    diff = _git(
+        root,
+        "diff",
+        "--diff-filter=AR",
+        "--name-status",
+        f"{base_ref}...HEAD",
+        "--",
+        "docs/upgrade-rows",
+    )
+    added: list[str] = []
+    for line in diff.splitlines():
+        path = line.split("\t")[-1]
+        parts = path.split("/")
+        if len(parts) != 4 or parts[3] == "README.md":
+            continue
+        if parts[2] in released:
+            raise UpgradeRowError(
+                f"{path}: {parts[2]} is released. Move the row to the folder of "
+                f"the next release: git mv {path} docs/upgrade-rows/<next>/."
+            )
+        added.append(path)
+    return added
+
+
 def check_all(root: Path = REPO_ROOT, rows_dir: Path = ROWS_DIR) -> list[Row]:
     """Run every check; return the rows of the folder."""
     check_table_files(root)
@@ -388,8 +432,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=f"add the missing rows of the newest release to the table in {DEPLOYING}",
     )
+    parser.add_argument(
+        "--check-new-rows",
+        metavar="BASE_REF",
+        help="fail on a row file added to the folder of a version released on BASE_REF",
+    )
     args = parser.parse_args(argv)
     try:
+        if args.check_new_rows:
+            added = check_new_rows(args.check_new_rows)
+            print(f"new upgrade rows: {len(added)} added, none in a released folder")
+            return 0
         if args.write:
             for row in write_deploying():
                 print(f"added to {DEPLOYING}: {row.version}/{row.name}.md")

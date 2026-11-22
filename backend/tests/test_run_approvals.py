@@ -968,40 +968,24 @@ async def _request_rights_change_list(monkeypatch: pytest.MonkeyPatch) -> uuid.U
         _approver(role=TenantRole.READ_ONLY, approver=True),
         _approver(role=TenantRole.OPERATOR),
         _approver(role=TenantRole.OPERATOR, sa=True),
+        _approver(role=TenantRole.TENANT_ADMIN),
+        _operator(sub=_PRINCIPAL, kind=PrincipalKind.USER, role=TenantRole.TENANT_ADMIN),
     ],
-    ids=["approver-flag", "operator", "sa-operator"],
+    ids=["approver-flag", "operator", "sa-operator", "another-admin", "the-requester-admin"],
 )
 @pytest.mark.asyncio
-async def test_a_list_with_a_rights_change_needs_an_admin(
+async def test_nobody_approves_a_list_with_a_rights_change(
     person: Operator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A run approval list never covers a change of rights: a person approves each call."""
     approval_id = await _request_rights_change_list(monkeypatch)
 
-    with pytest.raises(RunApprovalGroupError, match="rights_change_required: entries\\[0\\]"):
+    with pytest.raises(
+        RunApprovalGroupError, match="rights_change_required: entries\\[0\\]"
+    ) as exc:
         await RunApprovalService().approve(person, approval_id)
+    assert "A run approval list never covers it" in str(exc.value)
     assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_the_requester_of_a_rights_change_list_cannot_approve_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    approval_id = await _request_rights_change_list(monkeypatch)
-    person = _operator(sub=_PRINCIPAL, kind=PrincipalKind.USER, role=TenantRole.TENANT_ADMIN)
-
-    with pytest.raises(RunApprovalGroupError, match="Another admin must approve it"):
-        await RunApprovalService().approve(person, approval_id)
-    assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_another_admin_approves_a_list_with_a_rights_change(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    approval_id = await _request_rights_change_list(monkeypatch)
-    admin = _approver(role=TenantRole.TENANT_ADMIN)
-
-    assert (await RunApprovalService().approve(admin, approval_id)).status == "approved"
 
 
 @pytest.mark.asyncio

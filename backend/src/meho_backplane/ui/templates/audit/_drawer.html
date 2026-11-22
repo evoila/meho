@@ -20,6 +20,8 @@
                        method/path, humanized status + timestamp.
     4. Lineage      -- labelled parent / replay-session / run links
                        (replay TENANT_ADMIN-gated, disabled w/ tooltip).
+       Stored session -- the agent session the call is part of (#4904),
+                       only for a viewer who may read sessions.
     5. Flight recorder -- the operator read of the dispatch trace (#3215):
                        ordered redacted+capped spans w/ method/URL/status/
                        duration, expandable redacted bodies + truncation
@@ -120,6 +122,29 @@
 
     {# ---------- Lineage (labelled parent / replay / run links) ---------- #}
     {{ lineage(references, "audit") }}
+
+    {# ---------- Stored session (#4904; only for a viewer who may read sessions) ---------- #}
+    {% if stored_session %}
+      <section aria-label="Stored session" data-stored-session>
+        <h3 class="text-sm font-semibold uppercase opacity-60">Stored session</h3>
+        {% if stored_session.href %}
+          <a
+            class="btn btn-ghost btn-xs gap-1"
+            href="{{ stored_session.href }}"
+            title="{{ stored_session.session_id }}"
+            aria-label="Open the agent run this call came from"
+          >agent run: {{ stored_session.session_id }}</a>
+        {% else %}
+          <p class="text-sm">
+            This call is part of the stored session
+            <span class="font-mono break-all">{{ stored_session.session_id }}</span>.
+          </p>
+          <p class="text-sm opacity-60">
+            Read it with <code class="font-mono break-all">{{ stored_session.command }}</code>.
+          </p>
+        {% endif %}
+      </section>
+    {% endif %}
 
     {# ---------- Flight recorder trace (operator read surface, #3215) ---------- #}
     <section aria-label="Flight recorder trace">

@@ -57,6 +57,7 @@ __all__ = [
     "AuditClassCounts",
     "AuditClassCountsRequest",
     "AuditEntry",
+    "AuditEntryDetail",
     "AuditQueryRequest",
     "AuditQueryResult",
     "AuditReplayResult",
@@ -66,6 +67,28 @@ __all__ = [
     "TraceSpanView",
     "TraceView",
 ]
+
+
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class AuditEntryDetail(AuditEntry):
+    """The 200 body of ``GET /api/v1/audit/show/{audit_id}``: one row, and its stored session.
+
+    Only this route has ``stored_session_id`` (#4904). The list, query and
+    replay answers keep the plain :class:`AuditEntry`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stored_session_id: str | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description="The stored agent session this row belongs to, for "
+        "`meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS "
+        "on, to a person who may read sessions, for a row with a stored session.",
+    )
 
 
 class _AuditFilterFields(BaseModel):

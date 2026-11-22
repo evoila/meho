@@ -290,9 +290,10 @@ async def _park(op_id: str, params: dict[str, Any]) -> uuid.UUID:
 
 
 async def _approve_and_resume(request_id: uuid.UUID, *, platform_admin: bool = True) -> Any:
+    # A change of rights is approved with a click in the web console.
     approver = _operator(
         "kc-identity-approver", TenantRole.TENANT_ADMIN, platform_admin=platform_admin
-    )
+    ).model_copy(update={"web_session": True})
     async with get_sessionmaker()() as session:
         await approve_request(session, request_id, operator=approver, params=None)
         await session.commit()

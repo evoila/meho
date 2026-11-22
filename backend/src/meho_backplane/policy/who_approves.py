@@ -9,8 +9,8 @@ and ``approvers`` of ``preview_operation``).
 
 The groups are the ones that may approve another person's call:
 
-* A change of rights: only another admin (``MEHO-Admins``), as today. It
-  is never routed.
+* A change of rights: only an admin (``MEHO-Admins``), in the web
+  console. It is never routed.
 * With the ``POLICY_APPROVER_ROUTING`` switch on, the first install entry
   that fits the category the install's policy alone gives (the floor),
   narrowed by the first tenant entry that fits
@@ -55,7 +55,7 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The rule of the approver groups of a change of rights: only another admin.
+#: The rule of the approver groups of a change of rights: only an admin.
 RIGHTS_CHANGE_RULE: Final[str] = "rights_change"
 
 

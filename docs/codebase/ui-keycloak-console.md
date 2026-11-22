@@ -146,9 +146,11 @@ Both ops register `requires_approval=True`
 (`connectors/keycloak/ops_write_schemas.py`). The client-scope op is
 `caution`. The protocol-mapper op is `dangerous`: it wires the `tenant_id` /
 `tenant_role` claims the backplane row-scopes on. Both ops are changes of
-rights (`connectors/keycloak/rights_changes.py`), so another admin (a
-tenant admin or a platform admin) must approve them, never the person who
-asked.
+rights (`connectors/keycloak/rights_changes.py`). The pages need a tenant
+admin. Their approval card does not say who the write gives rights to, so
+a confirmed write waits for an admin's approval in the web console and the
+result shows the approval banner (`operations/rights_change_console.py`).
+A write MEHO refuses shows the refusal.
 
 Each write is reached only from an explicit, unmissable confirm modal (the
 `GET` render) that names the op's safety level and the requires-approval

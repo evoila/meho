@@ -7,14 +7,16 @@
   a platform admin; a machine principal cannot import.
 * With the ``POLICY_CLASSIFICATION`` switch off, the import is refused with
   one sentence.
-* The preview shows the diff and writes nothing. The import makes a
-  request that waits; nothing changes yet. The importer can never approve
-  it; a second tenant admin can, and then the policy is stored and listed
-  in the history.
+* The preview shows the diff and writes nothing. The import over REST
+  makes a request that waits; nothing changes yet. No admin approves it
+  with a token; an admin approves it in the web console (also the
+  importer), and then the policy is stored and listed in the history.
+* An admin's import in the web console runs at once; the same admin's
+  import with a token waits.
 * The same file again is "No change.": nothing waits.
 * When the stored policy changed after the plan, the approved import does
   not run.
-* After a failed run, the importer's own re-run writes nothing.
+* After a failed run, the importer's own re-run with a token writes nothing.
 * ``policy.apply`` through ``dispatch`` (``call_operation``, the REST
   dispatch route, the CLI) refuses an agent, a hosted agent run, and an
   install-wide import from someone who is not a platform admin: no request
@@ -27,6 +29,7 @@ per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -41,8 +44,8 @@ from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.policy import apply as policy_apply_module
 from meho_backplane.connectors.policy.apply import (
+    IMPORT_NEEDS_APPROVAL,
     IMPORT_NEEDS_PERSON,
-    IMPORT_NEEDS_SECOND_ADMIN,
     INSTALL_ASK_NEEDS_PLATFORM_ADMIN,
     POLICY_APPLY_OP_ID,
     SWITCH_OFF_IMPORT,
@@ -62,7 +65,7 @@ from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.typed_register import register_typed_operation
-from meho_backplane.policy.service import NO_CHANGE, POLICY_CHANGED
+from meho_backplane.policy.service import NO_CHANGE, POLICY_CHANGED, build_plan
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
@@ -93,6 +96,7 @@ _OTHER_FILE = "policy: v1\nclassifications:\n  - {match: {op: polapi.*}, always_
 @pytest.fixture
 def switch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "observe")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -153,8 +157,13 @@ def _post(client: TestClient, path: str, token: str, content: str, **params: str
 
 
 def _admin(
-    sub: str, *, kind: PrincipalKind = PrincipalKind.USER, platform_admin: bool = False
+    sub: str,
+    *,
+    kind: PrincipalKind = PrincipalKind.USER,
+    platform_admin: bool = False,
+    web: bool = True,
 ) -> Operator:
+    """An admin; ``web`` is a click in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
@@ -162,6 +171,9 @@ def _admin(
         principal_kind=kind,
         platform_admin=platform_admin,
         raw_jwt="header.payload.signature",
+        web_session=web,
+        acr="1",
+        auth_time=int(time.time()),
     )
 
 
@@ -255,7 +267,7 @@ def test_validate_lists_every_mistake(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("switch")
-async def test_import_waits_and_only_a_second_admin_applies_it(
+async def test_import_waits_and_an_admin_in_the_console_applies_it(
     client: TestClient, embedding: AsyncMock
 ) -> None:
     await _setup(embedding)
@@ -274,7 +286,9 @@ async def test_import_waits_and_only_a_second_admin_applies_it(
         assert resp.status_code == 202, resp.text
         body = resp.json()
         assert body["based_on"] == preview["based_on"]
-        assert body["message"].startswith("The import waits until a second admin approves it.")
+        assert body["message"].startswith(
+            "The import waits until an admin approves it in the web console."
+        )
     assert await _stored() is None
 
     request_id = uuid.UUID(body["approval_request_id"])
@@ -284,10 +298,11 @@ async def test_import_waits_and_only_a_second_admin_applies_it(
     assert plan["file_sha256"] == body["file_sha256"]
     assert plan["diff"]["classifications"]["added"][0]["matches"] == 1
 
-    async with get_sessionmaker()() as session:
-        with pytest.raises(RightsChangeApprovalError):
-            await approve_request(session, request_id, operator=_admin("admin-a"))
-        await session.rollback()
+    for approver in ("admin-a", "admin-b"):
+        async with get_sessionmaker()() as session:
+            with pytest.raises(RightsChangeApprovalError):
+                await approve_request(session, request_id, operator=_admin(approver, web=False))
+            await session.rollback()
     result = await _approve(request_id, _admin("admin-b"))
     assert result.status == "ok", result
     assert result.result["applied"] is True
@@ -346,7 +361,7 @@ async def test_an_import_planned_on_an_old_policy_does_not_run(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("switch")
-async def test_the_importer_cannot_rerun_a_failed_approved_import(
+async def test_the_importer_with_a_token_cannot_rerun_a_failed_approved_import(
     client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await _setup(embedding)
@@ -364,9 +379,11 @@ async def test_the_importer_cannot_rerun_a_failed_approved_import(
         first = await _approve(request_id, _admin("admin-b"))
     assert first.status != "ok"
 
-    outcome = await rerun_failed_request(operator=_admin("admin-a"), request_id=request_id)
+    outcome = await rerun_failed_request(
+        operator=_admin("admin-a", web=False), request_id=request_id
+    )
     assert outcome.result.status != "ok"
-    assert IMPORT_NEEDS_SECOND_ADMIN in str(outcome.result.error) + str(outcome.result.extras)
+    assert IMPORT_NEEDS_APPROVAL in str(outcome.result.error) + str(outcome.result.extras)
     assert await _stored() is None
     async with get_sessionmaker()() as session:
         assert (await session.execute(select(PolicyRevision))).scalars().all() == []
@@ -396,11 +413,85 @@ async def test_a_second_admin_replaces_a_stored_policy_that_is_not_valid(
 
     async with get_sessionmaker()() as session:
         with pytest.raises(RightsChangeApprovalError):
-            await approve_request(session, request_id, operator=_admin("admin-a"))
+            await approve_request(session, request_id, operator=_admin("admin-a", web=False))
         await session.rollback()
     result = await _approve(request_id, _admin("admin-b"))
     assert result.status == "ok", result
     assert (await _stored() or {})["description"] == "Network team"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_the_importer_approves_their_own_import_in_the_console(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-pol-own")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = _post(client, "import", _token(key), _FILE).json()
+    request_id = uuid.UUID(body["approval_request_id"])
+
+    result = await _approve(request_id, _admin("admin-a"))
+
+    assert result.status == "ok", result
+    assert (await _stored() or {})["description"] == "Network team"
+    (request,) = await _requests()
+    assert request.reviewed_by == request.principal_sub == "admin-a"
+    async with get_sessionmaker()() as session:
+        (revision,) = (await session.execute(select(PolicyRevision))).scalars().all()
+    assert (revision.imported_by_sub, revision.approved_by_sub) == ("admin-a", "admin-a")
+
+
+async def _import_params() -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        plan = await build_plan(session, scope="tenant", tenant_id=_TENANT, content=_FILE.encode())
+    return {
+        "scope": "tenant",
+        "file": _FILE,
+        "file_sha256": plan.file_sha256,
+        "based_on": plan.based_on,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_an_admin_import_in_the_console_runs_at_once(embedding: AsyncMock) -> None:
+    await _setup(embedding)
+
+    result = await dispatch(
+        operator=_admin("admin-a"),
+        connector_id="policy-registry-1.x",
+        op_id=POLICY_APPLY_OP_ID,
+        target=None,
+        params=await _import_params(),
+    )
+
+    assert result.status == "ok", result
+    assert (await _stored() or {})["description"] == "Network team"
+    assert await _requests() == []
+    async with get_sessionmaker()() as session:
+        (revision,) = (await session.execute(select(PolicyRevision))).scalars().all()
+    assert (revision.imported_by_sub, revision.approved_by_sub) == ("admin-a", "admin-a")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+async def test_the_same_admin_import_with_a_token_waits(embedding: AsyncMock) -> None:
+    await _setup(embedding)
+
+    result = await dispatch(
+        operator=_admin("admin-a", web=False),
+        connector_id="policy-registry-1.x",
+        op_id=POLICY_APPLY_OP_ID,
+        target=None,
+        params=await _import_params(),
+    )
+
+    assert result.status == "awaiting_approval", result
+    assert await _stored() is None
+    (request,) = await _requests()
+    assert request.rights_change is True
 
 
 @pytest.mark.asyncio

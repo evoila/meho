@@ -51,13 +51,7 @@ def upgrade() -> None:
     """Create the table and its lookup index."""
     op.create_table(
         _TABLE,
-        sa.Column(
-            "approval_request_id",
-            sa.Uuid(),
-            sa.ForeignKey("approval_request.id", ondelete="CASCADE"),
-            primary_key=True,
-            nullable=False,
-        ),
+        sa.Column("approval_request_id", sa.Uuid(), primary_key=True, nullable=False),
         sa.Column("idempotency_key", sa.Text(), primary_key=True, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )

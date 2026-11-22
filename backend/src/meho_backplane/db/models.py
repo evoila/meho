@@ -7766,8 +7766,9 @@ class ApprovalRequestKey(Base):
     Columns
     -------
 
-    * ``approval_request_id`` -- the request the key gets back. Deleted
-      with the request.
+    * ``approval_request_id`` -- the request the key gets back (no foreign
+      key, like the other approval side tables; MEHO never deletes an
+      approval request, and the lookup joins on it).
     * ``idempotency_key`` -- the retry key.
     * ``created_at`` -- when the key was linked.
 
@@ -7777,11 +7778,7 @@ class ApprovalRequestKey(Base):
 
     __tablename__ = "approval_request_key"
 
-    approval_request_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(),
-        ForeignKey("approval_request.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    approval_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

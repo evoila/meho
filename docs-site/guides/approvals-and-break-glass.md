@@ -404,25 +404,38 @@ and for the approval of a waiting request:
   a fresh sign-in the change waits. A tenant admin who is not a platform
   admin never makes such a change alone and never approves it: the change
   waits, and only a platform admin approves it.
-- In MEHO's own login realm, a write that can change the sign-in MEHO asks
-  for before an approval never runs alone, also not for a platform admin
-  with a fresh sign-in. It waits, and a second platform admin approves it:
-  the login that asked never does, and for a request of an agent no person
-  behind the agent does. MEHO counts a client as one of these clients unless
-  it read that client from Keycloak. These clients are the clients of the
-  approval sign-in, the client of the console login, and the client MEHO
-  uses for the Keycloak admin API (`KEYCLOAK_ADMIN_CLIENT_ID`). Such a
-  write is:
-  - a client update (`keycloak.client.update`) of one of these clients, or
-    one that sets the `clientId` of one of them on another client;
+- In MEHO's own login realm, MEHO first refuses some writes that would
+  break its own sign-in, before any wait. No approval lets them run, also
+  not the approval of a second platform admin. Make them by hand in the
+  Keycloak admin console (see
+  [Keycloak realm setup](../install/keycloak-realm.md)). MEHO refuses:
+  - a delete (`keycloak.client.delete`) of a client MEHO signs in with;
+  - a change (`keycloak.client.update`) of such a client, other than its
+    name, its description, a new address that keeps the old ones, turning
+    it on, or removing its own login flow (never on the approval clients);
+  - a new protocol mapper (`keycloak.protocol_mapper.create`) on such a
+    client, and a mapper change on a client scope that such a client uses;
+  - a realm change (`keycloak.realm.update`) of other settings than names,
+    mail, events, languages, turning the realm on and setting the browser
+    login flow back to `browser`.
+- In MEHO's own login realm, a write that MEHO lets through and that can
+  change the sign-in MEHO asks for before an approval never runs alone,
+  also not for a platform admin with a fresh sign-in. It waits, and a
+  second platform admin approves it: the login that asked never does, and
+  for a request of an agent no person behind the agent does. MEHO counts a
+  client as one of these clients unless it read that client from Keycloak.
+  These clients are the clients of the approval sign-in, the client of the
+  console login, and the client MEHO uses for the Keycloak admin API
+  (`KEYCLOAK_ADMIN_CLIENT_ID`). Such a write is:
+  - a change (`keycloak.client.update`) of one of these clients that MEHO
+    allows, or an update that sets the `clientId` of one of them on
+    another client;
   - a new client (`keycloak.client.create`) with the `clientId` of one of
-    these clients, and a delete (`keycloak.client.delete`) of one of them.
-    MEHO compares the `clientId` without letter case;
-  - a protocol mapper (`keycloak.protocol_mapper.create`) on one of these
-    clients, or of the `acr`, `amr`, `auth_time` or `azp` claim or of the
-    sign-in level;
-  - a realm change of other settings than names, mail, events and
-    languages.
+    these clients. MEHO compares the `clientId` without letter case;
+  - a protocol mapper of the `acr`, `amr`, `auth_time` or `azp` claim or
+    of the sign-in level, on another client or on a client scope;
+  - turning the realm on, and setting the browser login flow back to
+    `browser`.
 - In MEHO's own login realm, a platform admin who asked for a change in
   the web console may approve it there, after a fresh sign-in, when it
   waits (for example because it reads, writes or makes a credential). A
@@ -471,16 +484,22 @@ same after a fresh sign-in, and prints a line that says it was a
 self-approval. The decision record shows `self_approved: true` and the
 rule `sa_operator_self_approval`.
 
-In MEHO's own login realm you always need a second platform admin for
-two kinds of changes. One is a write that can change the sign-in MEHO
-asks for before an approval (see [Changes of rights](#changes-of-rights)):
-a change of the approval clients, the console login client or the client
-of the Keycloak admin API, a new client or a delete with the name of one
-of them, a sign-in claim mapper, or most realm settings. The other is a
-change of rights that you asked for with a token, the command line, MCP
-or an agent. Your own approve is refused for both. An install with one
-platform admin adds a second one first, or makes the change by hand in
-the Keycloak admin console.
+In MEHO's own login realm, MEHO refuses some writes that would break its
+own sign-in, before any wait (see [Changes of rights](#changes-of-rights)):
+a delete of a client MEHO signs in with, most changes of such a client, a
+new mapper on it, and most realm settings. No approval lets them run, also
+not the approval of a second platform admin: make them by hand in the
+Keycloak admin console. You always need a second platform admin for two
+kinds of changes there. One is a write that MEHO lets through and that
+can change the sign-in MEHO asks for before an approval: an allowed change
+of the approval clients, the console login client or the client of the
+Keycloak admin API, a new client or an update that sets the `clientId` of
+one of them, a sign-in claim mapper on another client or client scope,
+turning the realm on, or setting its browser login flow back to
+`browser`. The other is a change of rights that you asked for with a
+token, the command line, MCP or an agent. Your own approve is refused for
+both. An install with one platform admin adds a second one first, or
+makes the change by hand in the Keycloak admin console.
 
 A person is in exactly one role group per tenant. MEHO reads the old
 group `MEHO-SA-Operators` as Operators, so a person there does not

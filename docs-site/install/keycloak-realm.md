@@ -1263,12 +1263,6 @@ In MEHO's own login realm, MEHO refuses this change through the operation
 `keycloak.realm.update` (the keys `ssoSessionIdleTimeout` and
 `ssoSessionMaxLifespan`). Make it in the Keycloak admin console.
 
-  In MEHO's own login realm this realm change always needs a second
-  platform admin, also from the web console: it sets realm settings
-  outside the short list of names, mail, events and languages. Your own
-  approve is refused. With one platform admin, use the Keycloak admin
-  console above.
-
 ## Approve-only principal
 
 Clearing the approval queue needs the **operator** role. MEHO keeps an

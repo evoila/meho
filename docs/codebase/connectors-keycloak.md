@@ -503,7 +503,10 @@ For such a write:
   login that asked approves the request only when it asked in the web
   console. A write that can change the approval sign-in
   (`approval_sign_in_writes.py`) never runs alone there, and the
-  login that asked never approves it, nor a person behind it. A card names
+  login that asked never approves it, nor a person behind it. In the
+  login realm the guard of `ops_meho_own_login_guard.py` refuses many of
+  these writes first, before any wait, and no approval lets them run; the
+  rule here holds for the writes the guard lets through. A card names
   the client only as Keycloak returned it; a failed read leaves the card
   without a client, and the write counts as one on an approval client.
   The sign-in clients are the CLI and web approval clients, the console

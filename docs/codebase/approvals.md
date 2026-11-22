@@ -1540,7 +1540,11 @@ Then `may_make_alone` runs the check of who may make the change on that
 card, the same rule as `check_grant_approval` on approve. When the admin
 may not make it alone (in the login realm: an admin who is not a platform
 admin), the call waits, and a platform admin approves it. In the login
-realm a change that can change the approval sign-in never runs alone and
+realm the guard of `connectors/keycloak/ops_meho_own_login_guard.py`
+refuses many of these writes first, before any wait (a delete or most
+changes of a client MEHO signs in with, a new mapper on it, most realm
+keys), and no approval lets them run. A change that can change the
+approval sign-in and that the guard lets through never runs alone and
 is never approved by the login that asked or by a person behind it
 (`people_behind`): a connector registers a check
 of such a request with `register_approval_sign_in_check`

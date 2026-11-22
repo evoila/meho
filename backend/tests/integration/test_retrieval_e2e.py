@@ -1245,3 +1245,42 @@ async def test_rest_search_makes_one_decision_for_own_and_shared(
     on = await _post()
     assert {h["source_id"] for h in on if h["bm25_score"] is not None} == scored
     assert on == off
+
+
+# ---------------------------------------------------------------------------
+# KB_SEARCH_PLAIN_SENTENCES (#6784): the any-word search uses at most
+# ANY_WORD_MAX_WORDS different words, so a long question stays fast.
+# ---------------------------------------------------------------------------
+
+#: Made-up words that no passage holds, all different.
+_KBPS_FILLER = [f"zq{a}{b}x" for a in "bcdfg" for b in "bcdfghjk"]
+
+
+def _kbps_word_scores(hits: list[RetrievalHit]) -> dict[str, tuple[float | None, int | None]]:
+    return {h.source_id: (h.bm25_score, h.bm25_rank) for h in hits if h.bm25_score is not None}
+
+
+async def test_any_word_search_uses_only_the_first_words(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _retriever_module.ANY_WORD_MAX_WORDS == 32
+    first = ["backup", *_KBPS_FILLER[: _retriever_module.ANY_WORD_MAX_WORDS - 1]]
+    rest = _KBPS_FILLER[_retriever_module.ANY_WORD_MAX_WORDS - 1 :]
+    _kbps_switch(monkeypatch, on=True)
+    # "certificate" comes after the first 32 different words: it does not count.
+    long_hits = await _kbps_search(" ".join([*first, *rest, "certificate"]))
+    first_hits = await _kbps_search(" ".join(first))
+    assert set(_kbps_word_scores(long_hits)) == {"restore", "mounts"}
+    assert _kbps_word_scores(long_hits) == _kbps_word_scores(first_hits)
+    # Inside the first 32 different words, it counts.
+    inside = await _kbps_search(" ".join(["certificate", *first, *rest]))
+    assert "certs" in _kbps_word_scores(inside)
+
+
+async def test_any_word_search_counts_a_repeated_word_once(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=True)
+    # 60 words, but only "backup" and the 30 made-up words are different.
+    query = " ".join(["backup"] * 30 + _KBPS_FILLER[:30] + ["certificate"])
+    assert set(_kbps_word_scores(await _kbps_search(query))) == {"restore", "mounts", "certs"}

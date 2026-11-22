@@ -208,9 +208,12 @@ off by default, listed by `GET /version`) adds a fallback:
   If none does, all of them use it. The decision is in one place,
   `kb_any_word` in `kb/service.py`; it runs the every-word search with
   the filters of each searched tenant and stops at the first match.
-  `search_entries`, `POST /api/v1/retrieve` with `source="kb"` and the
-  similar-entry check call it and pass the answer as `any_word` to every
-  `retrieve`. `any_word=True` means: use the any-word query at once.
+  `search_entries` and `POST /api/v1/retrieve` with `source="kb"` call it
+  and pass the answer as `any_word` to every `retrieve`. The similar-entry
+  check (`kb/similar.py`) does not: it always passes `any_word=False`, so
+  its answer is the same with the switch off and on. Its question is the
+  whole new entry, and extra word hits could push an entry that is close
+  in meaning out of its candidates. `any_word=True` means: use the any-word query at once.
   `any_word=False`: never. `any_word=None` (a single-tenant call such as
   the UI diagnostics): that call decides alone, any word only when its
   own every-word search finds no row.
@@ -220,8 +223,14 @@ off by default, listed by `GET /version`) adds a fallback:
   that the search drops later (the caller has an entry with the same slug,
   or the limit) still counts: the question keeps the every-word search,
   as it does today.
-- The any-word query is the same words joined by OR, so a passage needs
-  any word. The rank is the same `ts_rank_cd`: more question words, closer
+- The any-word query is the first `ANY_WORD_MAX_WORDS` (32) different
+  words of the question, in question order, joined by OR, so a passage
+  needs any of them. Words are counted after stop words are dropped and
+  words are stemmed; a repeated word counts once. Later words do not
+  count. Each OR word adds matching rows and rank work, so without the
+  limit a 2,000-character question took about 2 seconds per statement on
+  a few thousand passages; with it, about 60 ms, the same as a short
+  question. The rank is the same `ts_rank_cd`: more question words, closer
   together, rank higher. The tenant, source, kind, filter, time window and
   principal rules are the same text of the same statement, and a search
   never reads a tenant it did not read before.

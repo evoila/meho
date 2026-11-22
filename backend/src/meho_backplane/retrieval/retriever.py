@@ -114,6 +114,7 @@ from meho_backplane.retrieval.time_window import TimeWindow
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "ANY_WORD_MAX_WORDS",
     "CANDIDATE_LIMIT",
     "RRF_K",
     "MemoryEligibility",
@@ -161,6 +162,12 @@ RRF_K: int = 60
 #: Initiative body -- wide enough to catch the documents one signal
 #: missed, narrow enough to keep the fusion loop O(N) where N <= 100.
 CANDIDATE_LIMIT: int = 50
+
+#: The any-word search of the knowledge search (``KB_SEARCH_PLAIN_SENTENCES``,
+#: #6784) uses only the first this many different words of the question
+#: (after stop words are dropped and words are stemmed). Each OR word adds
+#: matching rows and rank work, so a long question would get slow.
+ANY_WORD_MAX_WORDS: int = 32
 
 
 class RetrievalHit(BaseModel):
@@ -821,17 +828,27 @@ _TIME_WINDOW_PREDICATE_SQL: str = r"""
 # predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
 # pinned to it at module load by :func:`_assert_predicate_inlined`.
 # ``:any_word`` picks the query form (#6784). False: ``plainto_tsquery`` (every
-# word, as always). True: the same words joined by OR. ``plainto_tsquery``
-# writes `` & `` only between words and a word never holds a space, so the
-# replace changes no word. The user's text stays a bound value; a query of
-# stop words only gives an empty query that matches nothing.
+# word, as always). True: the first :data:`ANY_WORD_MAX_WORDS` different
+# words of that query, in question order, joined by OR. More OR words make
+# the search slow: many rows match and ``ts_rank_cd`` scores each one
+# against every word. ``plainto_tsquery`` writes `` & `` only between words
+# and a word never holds a space, so the split changes no word. The user's
+# text stays a bound value; a query of stop words only gives an empty query
+# that matches nothing.
 _BM25_CANDIDATES_SQL = text(
     r"""
     SELECT id, ts_rank_cd(
         to_tsvector('english', body),
         CASE WHEN CAST(:any_word AS boolean)
-          THEN CAST(replace(CAST(plainto_tsquery('english', :query) AS text), ' & ', ' | ')
-                    AS tsquery)
+          THEN CAST(array_to_string(ARRAY(
+                 SELECT word
+                 FROM unnest(string_to_array(
+                   CAST(plainto_tsquery('english', :query) AS text), ' & '
+                 )) WITH ORDINALITY AS words(word, position)
+                 GROUP BY word
+                 ORDER BY min(position)
+                 LIMIT :any_word_max_words
+               ), ' | ') AS tsquery)
           ELSE plainto_tsquery('english', :query)
         END
     ) AS score
@@ -907,8 +924,15 @@ _BM25_CANDIDATES_SQL = text(
         )
       )
       AND to_tsvector('english', body) @@ CASE WHEN CAST(:any_word AS boolean)
-          THEN CAST(replace(CAST(plainto_tsquery('english', :query) AS text), ' & ', ' | ')
-                    AS tsquery)
+          THEN CAST(array_to_string(ARRAY(
+                 SELECT word
+                 FROM unnest(string_to_array(
+                   CAST(plainto_tsquery('english', :query) AS text), ' & '
+                 )) WITH ORDINALITY AS words(word, position)
+                 GROUP BY word
+                 ORDER BY min(position)
+                 LIMIT :any_word_max_words
+               ), ' | ') AS tsquery)
           ELSE plainto_tsquery('english', :query)
         END
     ORDER BY score DESC
@@ -1091,8 +1115,8 @@ async def _bm25_candidates(
 
     Returns rows whose body contains every query term (the ``@@``
     filter), ranked descending. With ``any_word=True`` (only the
-    ``KB_SEARCH_PLAIN_SENTENCES`` fallback) a row needs any one query
-    term. The ``CAST(:source AS text) IS
+    ``KB_SEARCH_PLAIN_SENTENCES`` fallback) a row needs any one of the
+    first :data:`ANY_WORD_MAX_WORDS` different query terms. The ``CAST(:source AS text) IS
     NULL OR ...`` pattern lets us bind a single SQL string for every
     filter combination; the asyncpg driver short-circuits the OR
     cleanly. The metadata-filter predicate uses the same null-or-match
@@ -1119,6 +1143,7 @@ async def _bm25_candidates(
             "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
             "any_word": any_word,
+            "any_word_max_words": ANY_WORD_MAX_WORDS,
             **_time_window_binds(time_window),
         },
     )

@@ -2163,7 +2163,7 @@ removes one through `DELETE /api/v1/targets/{name}`.
   a 500; per the #477 accepted trade-off the CLI surfaces the
   underlying detail rather than masking it as a graceful failure.
 - `meho targets outside-folder [--tenant <id>]` — calls
-  `GET /api/v1/targets/outside-tenant-folder` and lists the targets whose
+  `GET /api/v1/targets/checks/outside-tenant-folder` and lists the targets whose
   secret path is outside the tenant's folder (tenant admin; a platform admin
   sees every tenant). See `connectors-vault-tenant-scope.md`.
 - `meho targets discover <product> [--seed-target <name>]` — calls

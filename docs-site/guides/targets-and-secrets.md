@@ -460,16 +460,28 @@ meho targets outside-folder
 ```
 
 A tenant admin sees their own tenant. A platform admin sees every tenant,
-or one tenant with `--tenant <tenant-id>`. Each row has the target name,
-the tenant, the `secret_ref` and why it is outside. The same list is at
-`GET /api/v1/targets/outside-tenant-folder`.
+or one tenant with `--tenant <tenant-id>`. For a tenant you are a member
+of, choose it with `meho tenants use <name>` instead, so your own role
+there applies. The list of every tenant leaves out a tenant where you are
+a member without the admin role. Each row has the target name, the
+tenant, the `secret_ref` and why it is outside. The same list is at
+`GET /api/v1/targets/checks/outside-tenant-folder`.
+
+The folder is set by `VAULT_KV_TENANT_SCOPE_PREFIX`, with the tenant id in
+place of `{tenant_id}`. By default it is `secret/tenants/<tenant-id>/`.
+Ask the person who runs your MEHO install if your install uses another
+folder.
 
 To move a target into the folder:
 
-1. Copy the secret to `tenants/<tenant-id>/<target-name>` with your own
-   store tooling.
-2. Run `meho targets update <name> --secret-ref tenants/<tenant-id>/<target-name>`.
-3. Run `meho targets outside-folder` again. The target is gone from the list.
+1. Copy the secret into the tenant's folder with your own store tooling.
+   With the default folder, that is `tenants/<tenant-id>/<target-name>`
+   in the `secret` mount.
+2. Run `meho targets update <name> --secret-ref <new path>`. With the
+   default folder, the new path is `tenants/<tenant-id>/<target-name>`.
+3. The update waits until a person approves it. The command prints the
+   approval request. Wait for the approval.
+4. Run `meho targets outside-folder` again. The target is gone from the list.
 
 When the folder check is off on your install, the command says
 "The folder check is off on this install" and lists nothing.

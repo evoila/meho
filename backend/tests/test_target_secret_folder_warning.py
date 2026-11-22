@@ -6,7 +6,7 @@
 * Every store read of a target's own secret checks the path against the
   tenant's folder. A path outside it writes one warning per target per
   hour to the server log; the read goes on and the answer is the same.
-* ``GET /api/v1/targets/outside-tenant-folder`` lists the targets whose
+* ``GET /api/v1/targets/checks/outside-tenant-folder`` lists the targets whose
   path is outside the folder, for admins.
 """
 
@@ -218,12 +218,18 @@ def test_the_helper_reasons_and_the_off_switch(monkeypatch: pytest.MonkeyPatch) 
 # The admin list
 # ---------------------------------------------------------------------------
 
-_URL = "/api/v1/targets/outside-tenant-folder"
+_URL = "/api/v1/targets/checks/outside-tenant-folder"
 
 
-def _get(client: TestClient, key: Any, url: str = _URL, **claims: Any) -> Any:
+def _get(
+    client: TestClient,
+    key: Any,
+    url: str = _URL,
+    headers: dict[str, str] | None = None,
+    **claims: Any,
+) -> Any:
     token = mint_token(key, **claims)
-    return client.get(url, headers={"Authorization": f"Bearer {token}"})
+    return client.get(url, headers={"Authorization": f"Bearer {token}", **(headers or {})})
 
 
 def _app_with(router: Any) -> Any:
@@ -287,6 +293,83 @@ async def test_the_list_scopes_by_role() -> None:
     assert [i["name"] for i in one.json()["items"]] == ["other"]
     assert foreign.status_code == 403
     assert operator.status_code == 403
+
+
+_THIRD_TENANT = UUID("00000000-0000-0000-0000-00000000c0c0")
+
+
+@pytest.mark.asyncio
+async def test_the_list_keeps_the_role_of_each_member_tenant() -> None:
+    """A platform admin who reads only in a member tenant does not get that tenant's list."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _seed()
+    await _insert_target(name="third", tenant_id=_THIRD_TENANT, secret_ref="targets/third")
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    member_of = {
+        "meho_tenants": [
+            f"{_TENANT}:lab-a:Admins",
+            f"{_OTHER_TENANT}:lab-b:Readers",
+        ]
+    }
+    claims: dict[str, Any] = {
+        "tenant_role": TenantRole.TENANT_ADMIN.value,
+        "platform_admin": True,
+        "extra_claims": member_of,
+        "headers": {"Meho-Tenant": str(_TENANT)},
+    }
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            every = _get(client, key, **claims)
+            read_only = _get(client, key, url=f"{_URL}?tenant_id={_OTHER_TENANT}", **claims)
+            not_member = _get(client, key, url=f"{_URL}?tenant_id={_THIRD_TENANT}", **claims)
+            chosen = _get(
+                client,
+                key,
+                tenant_role=TenantRole.TENANT_ADMIN.value,
+                platform_admin=True,
+                extra_claims=member_of,
+                headers={"Meho-Tenant": str(_OTHER_TENANT)},
+            )
+    assert every.status_code == 200, every.text
+    assert every.json()["all_tenants"] is True
+    assert {(i["tenant_id"], i["name"]) for i in every.json()["items"]} == {
+        (DEFAULT_TENANT_ID, "outside"),
+        (str(_THIRD_TENANT), "third"),
+    }
+    assert read_only.status_code == 403
+    assert read_only.json()["detail"].startswith("tenant_select_with_header:")
+    assert not_member.status_code == 200, not_member.text
+    assert [i["name"] for i in not_member.json()["items"]] == ["third"]
+    assert chosen.status_code == 403
+    assert chosen.json()["detail"] == "insufficient_role"
+
+
+@pytest.mark.asyncio
+async def test_a_target_with_the_check_name_is_still_read_by_name() -> None:
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _insert_target(name="outside-tenant-folder", aliases=["checks"])
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            by_name = _get(
+                client,
+                key,
+                url="/api/v1/targets/outside-tenant-folder",
+                tenant_role=TenantRole.OPERATOR.value,
+            )
+            by_alias = _get(
+                client, key, url="/api/v1/targets/checks", tenant_role=TenantRole.OPERATOR.value
+            )
+    assert by_name.status_code == 200, by_name.text
+    assert by_name.json()["name"] == "outside-tenant-folder"
+    assert by_alias.status_code == 200, by_alias.text
+    assert by_alias.json()["name"] == "outside-tenant-folder"
 
 
 @pytest.mark.asyncio

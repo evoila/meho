@@ -22,7 +22,7 @@ import (
 //
 //	meho targets outside-folder [--tenant <uuid>] [--json] [--backplane <url>]
 //
-// It calls GET /api/v1/targets/outside-tenant-folder and lists the targets
+// It calls GET /api/v1/targets/checks/outside-tenant-folder and lists the targets
 // whose secret path is outside the tenant's folder in the secret store.
 func newOutsideFolderCmd() *cobra.Command {
 	var (
@@ -36,7 +36,8 @@ func newOutsideFolderCmd() *cobra.Command {
 		Long: "outside-folder lists the targets whose secret path is outside the " +
 			"tenant's folder in the secret store (Vault or OpenBao). A tenant admin " +
 			"sees their own tenant. A platform admin sees every tenant, or one tenant " +
-			"with --tenant. Each row shows the target name, the tenant, the secret_ref " +
+			"with --tenant. For a tenant you are a member of, use `meho tenants use` " +
+			"instead, so your own role there applies. Each row shows the target name, the tenant, the secret_ref " +
 			"and why it is outside. Move each secret into the folder, then update the " +
 			"target's secret_ref. When the folder check is off on this install, the " +
 			"command says so and lists nothing.",
@@ -52,7 +53,7 @@ func newOutsideFolderCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&tenant, "tenant", "",
-		"tenant id to list (platform admin only; default: your own tenant, or every tenant for a platform admin)")
+		"tenant id to list (platform admin only, for a tenant you are not a member of; default: your own tenant, or every tenant for a platform admin)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -67,7 +68,7 @@ type outsideFolderOptions struct {
 }
 
 func runOutsideFolder(cmd *cobra.Command, opts outsideFolderOptions) error {
-	params := &api.OutsideTenantFolderApiV1TargetsOutsideTenantFolderGetParams{}
+	params := &api.OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams{}
 	if opts.Tenant != "" {
 		id, err := uuid.Parse(opts.Tenant)
 		if err != nil {
@@ -89,7 +90,7 @@ func runOutsideFolder(cmd *cobra.Command, opts outsideFolderOptions) error {
 	}
 	rsp, err := retryHTTPOn401(cmd.Context(), authed,
 		func(ctx context.Context) (*http.Response, error) {
-			return authed.OutsideTenantFolderApiV1TargetsOutsideTenantFolderGet(ctx, params)
+			return authed.OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx, params)
 		},
 	)
 	if err != nil {

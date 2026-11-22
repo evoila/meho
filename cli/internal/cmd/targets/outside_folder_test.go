@@ -17,7 +17,7 @@ import (
 func outsideFolderServer(t *testing.T, list api.OutsideTenantFolderList, gotTenant *string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/outside-tenant-folder", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/targets/checks/outside-tenant-folder", func(w http.ResponseWriter, r *http.Request) {
 		if gotTenant != nil {
 			*gotTenant = r.URL.Query().Get("tenant_id")
 		}

@@ -151,10 +151,15 @@ checked too, and gets a warning instead of a refusal. The read goes on.
   has no own Vault role, the helper answers "not outside" and nothing is
   logged. Only Vault and OpenBao paths are checked, not `gsm:` or
   `wrapped:` refs.
-- **The list.** `GET /api/v1/targets/outside-tenant-folder` and
+- **The list.** `GET /api/v1/targets/checks/outside-tenant-folder` and
   `meho targets outside-folder` list the targets whose path is outside the
-  folder, read from the targets table when asked. A tenant admin sees their
+  folder, read from the targets table when asked. Two path segments, so the
+  route never meets `GET /api/v1/targets/{name}`. A tenant admin sees their
   own tenant. A platform admin sees every tenant, or one with `tenant_id`.
+  `tenant_id` goes through `authorize_tenant_scope`: a tenant the admin is a
+  member of is chosen with the `Meho-Tenant` header, so their role there
+  applies. The list of every tenant leaves out each tenant where the admin
+  is a member without the `tenant_admin` role.
   The list uses the same `outside_tenant_folder_reason` as the warning, so
   a target is listed exactly when a read of its secret warns. With the
   check off, the answer has `check_off: true` and no rows.

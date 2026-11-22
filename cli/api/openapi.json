@@ -1152,14 +1152,14 @@
         }
       }
     },
-    "/api/v1/targets/outside-tenant-folder": {
+    "/api/v1/targets/checks/outside-tenant-folder": {
       "get": {
         "tags": [
           "targets"
         ],
         "summary": "Outside Tenant Folder",
-        "description": "List the live targets whose own secret path is outside the tenant's folder.\n\nRegistered before ``GET /{name}`` so the literal segment is not read as\na target name.",
-        "operationId": "outside_tenant_folder_api_v1_targets_outside_tenant_folder_get",
+        "description": "List the live targets whose own secret path is outside the tenant's folder.",
+        "operationId": "outside_tenant_folder_api_v1_targets_checks_outside_tenant_folder_get",
         "parameters": [
           {
             "name": "tenant_id",

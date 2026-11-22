@@ -1167,9 +1167,9 @@ app.include_router(api_v1_doc_collections_router)
 # refuses (no managed realm, or a realm that is not a plain name). Two path
 # segments, so it never meets GET /{name}.
 app.include_router(api_v1_targets_keycloak_realm_router)
-# GET /api/v1/targets/outside-tenant-folder: the targets whose secret path is
-# outside the tenant's folder. Included before the targets router so the
-# literal path wins over GET /{name}.
+# GET /api/v1/targets/checks/outside-tenant-folder: the targets whose secret
+# path is outside the tenant's folder. Two path segments, so it never meets
+# GET /{name}.
 app.include_router(api_v1_targets_outside_tenant_folder_router)
 app.include_router(api_v1_targets_router)
 # #3272 -- operator mutation surface for the per-tenant flight-recorder

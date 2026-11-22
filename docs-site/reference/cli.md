@@ -5377,7 +5377,7 @@ meho targets outside-folder [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
-- `--tenant` — tenant id to list (platform admin only; default: your own tenant, or every tenant for a platform admin)
+- `--tenant` — tenant id to list (platform admin only, for a tenant you are not a member of; default: your own tenant, or every tenant for a platform admin)
 
 ### `meho targets probe`
 

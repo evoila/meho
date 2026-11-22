@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /api/v1/targets/outside-tenant-folder``: targets whose secret path is outside the folder.
+"""``GET /api/v1/targets/checks/outside-tenant-folder``: targets with a path outside the folder.
 
 MEHO keeps each tenant's secrets under the tenant's own folder in the
 secret store. This route lists the live targets whose own ``secret_ref``
@@ -9,7 +9,11 @@ points outside that folder, so an admin can move the secrets into it.
 
 * A ``tenant_admin`` sees the targets of their own tenant.
 * A platform admin (a person) sees the targets of every tenant, or of one
-  tenant with ``?tenant_id=<uuid>``.
+  tenant with ``?tenant_id=<uuid>``. A tenant the admin is a member of
+  is chosen with the ``Meho-Tenant`` header, so their role there applies
+  (:func:`~meho_backplane.auth.rbac.authorize_tenant_scope`). The list of
+  every tenant leaves out each tenant where the admin is a member without
+  the ``tenant_admin`` role.
 * When the folder check is off on this install, the list is empty and
   ``check_off`` is true.
 
@@ -24,13 +28,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.operator import Operator, TenantRole, group_grant, is_human_principal
+from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.vault.tenant_scope import (
@@ -97,24 +101,29 @@ def _outside_reason(row: TargetORM) -> str | None:
     )
 
 
-@router.get("/outside-tenant-folder", response_model=OutsideTenantFolderList)
+def _member_tenants_without_admin_role(operator: Operator) -> set[UUID]:
+    """The tenants *operator* is a member of with a role below ``tenant_admin``."""
+    return {
+        entry.tenant_id
+        for entry in operator.tenants
+        if entry.tenant_id != operator.tenant_id
+        and group_grant(entry.group).role is not TenantRole.TENANT_ADMIN
+    }
+
+
+@router.get("/checks/outside-tenant-folder", response_model=OutsideTenantFolderList)
 async def outside_tenant_folder(
     tenant_id: UUID | None = Query(default=None),
     operator: Operator = _require_admin,
     session: AsyncSession = Depends(get_session),
 ) -> OutsideTenantFolderList:
-    """List the live targets whose own secret path is outside the tenant's folder.
-
-    Registered before ``GET /{name}`` so the literal segment is not read as
-    a target name.
-    """
+    """List the live targets whose own secret path is outside the tenant's folder."""
     platform_admin = operator.platform_admin and is_human_principal(operator)
-    if tenant_id is not None and tenant_id != operator.tenant_id and not platform_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="only a platform admin can list another tenant",
-        )
-    scope: UUID | None = tenant_id if platform_admin else operator.tenant_id
+    scope: UUID | None
+    if tenant_id is not None or not platform_admin:
+        scope = authorize_tenant_scope(operator, tenant_id)
+    else:
+        scope = None
     all_tenants = scope is None
     check_off = _folder_check_is_off(scope)
     if check_off:
@@ -124,6 +133,10 @@ async def outside_tenant_folder(
     stmt = select(TargetORM).where(TargetORM.deleted_at.is_(None))
     if scope is not None:
         stmt = stmt.where(TargetORM.tenant_id == scope)
+    else:
+        hidden = _member_tenants_without_admin_role(operator)
+        if hidden:
+            stmt = stmt.where(TargetORM.tenant_id.not_in(hidden))
     rows = (await session.execute(stmt.order_by(TargetORM.tenant_id, TargetORM.name))).scalars()
     items = [
         OutsideTenantFolderItem(

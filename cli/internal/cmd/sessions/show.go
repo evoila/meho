@@ -4,7 +4,9 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -64,7 +66,17 @@ func runShow(cmd *cobra.Command, sessionID string, jsonOut bool, backplaneOverri
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 	}
 	if jsonOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+		// Print the server's JSON, not the decoded struct: a field the
+		// server leaves out (mcp_sessions with AUDIT_SESSION_LINKS off)
+		// stays out instead of turning into null.
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, resp.Body, "", "  "); err != nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("backplane returned a session that is not valid JSON"), jsonOut)
+		}
+		pretty.WriteByte('\n')
+		_, err := cmd.OutOrStdout().Write(pretty.Bytes())
+		return err
 	}
 	printDetail(cmd, resp.JSON200)
 	return nil

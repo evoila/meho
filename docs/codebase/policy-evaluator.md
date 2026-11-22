@@ -42,8 +42,11 @@ All are frozen dataclasses.
 | `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), every step in order (`steps`, each a `Step` with its rule and verdict), and the same steps as text lines (`trace`). |
 
 The op class marks of `Asked` come from the code: `root_shell`,
-`credential_read`, `per_call_approval`, `delete_shaped` and
-`classified_always_wait`.
+`credential_read`, `per_call_approval`, `delete_shaped`,
+`classified_always_wait` and `sandbox_delete_grant`. The last one is set
+in sandbox mode for an op marked with `declare_sandbox_delete_grant`
+(today only `k8s.delete`): a delete grant may still run its call, for a
+service login.
 
 ## Control flow
 

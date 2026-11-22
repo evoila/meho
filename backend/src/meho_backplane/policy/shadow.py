@@ -115,6 +115,7 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.service_grants import (
+        _sandbox_delete_exception,
         delete_grant_reason,
         descriptor_credential_reason,
         descriptor_credential_waits,
@@ -129,6 +130,9 @@ def _op_class(descriptor: EndpointDescriptor) -> frozenset[str]:
         "credential_waits": descriptor_credential_waits(descriptor),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
+        "sandbox_delete_grant": _sandbox_delete_exception(
+            op_id, getattr(descriptor, "op_class", None), descriptor
+        ),
     }
     return frozenset(name for name, on in marks.items() if on)
 

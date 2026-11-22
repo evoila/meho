@@ -24,7 +24,7 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
-Two of these calls always wait for a person, and no standing grant, no
+Six of these calls always wait for a person, and no standing grant, no
 agent grant and no run approval covers them
 ([service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
@@ -39,8 +39,23 @@ agent grant and no run approval covers them
   `k8s.apply`. Grant create, agent grant create and run approval create
   refuse `k8s.apply`. A person's own call waits for approval, as every
   `k8s.apply` call does.
+- every `k8s.delete` call: it deletes a Pod, a Job or a ReplicaSet.
+- every `k8s.label` call: on a Namespace it can set or remove the labels
+  that decide how the cluster checks the pods in it. This holds for
+  every kind of object.
+- every `k8s.annotate` call, for the same reason as `k8s.label`.
+- every `k8s.namespace.create` call: it makes a new namespace, and MEHO
+  sets no labels on it.
 
-Both are declared in `op_classes.py` of the connector. The approval card
+Grant create, agent grant create and run approval create refuse all six.
+In sandbox mode a delete grant still covers `k8s.delete`, and only that
+one of the six (`declare_sandbox_delete_grant`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`k8s.scale`, `k8s.rollout.restart` and `k8s.cordon` (also with
+`uncordon: true`) keep their rules: a standing grant and a run approval
+still cover them.
+
+All six are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits; only a person reads that line. The
 card of a `k8s.apply` also names, for a person only, what each container
 runs: the object, the container, the image, the `command` and `args`, and

@@ -137,8 +137,9 @@ class Asked:
     classification and floors. ``op_class`` holds marks from the code:
     ``root_shell``, ``credential`` (the call reads, writes or makes a
     credential), ``credential_waits`` (such a call waits for a person),
-    ``per_call_approval``, ``delete_shaped`` and ``classified_always_wait``. ``target`` is the
-    target id, or ``None``.
+    ``per_call_approval``, ``delete_shaped``, ``classified_always_wait`` and
+    ``sandbox_delete_grant`` (in sandbox mode a delete grant may still clear
+    the call). ``target`` is the target id, or ``None``.
     """
 
     connector_id: str | None

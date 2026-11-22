@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Literal
 
@@ -16,6 +17,7 @@ __all__ = [
     "SessionDetail",
     "SessionFileState",
     "SessionListResponse",
+    "SessionMcpLink",
     "SessionRetention",
     "SessionRetentionUpdate",
     "SessionState",
@@ -77,11 +79,33 @@ class SessionUploadPart(BaseModel):
     files: dict[str, SessionUploadFile]
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class SessionMcpLink(BaseModel):
+    """One MCP session whose calls are in this session."""
+
+    mcp_session_id: uuid.UUID = Field(
+        description="The agent_session_id of the audit rows of these calls."
+    )
+    work_ref: str | None = Field(
+        description="The newest work reference (ticket id) on those audit rows, or null."
+    )
+
+
 class SessionDetail(SessionSummary):
     """One session with its file hashes and its uploads."""
 
     files: dict[str, SessionFileState]
     uploads: list[SessionUploadPart]
+    mcp_sessions: list[SessionMcpLink] | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description="The MCP sessions of the session's calls: for an upload, the ones MEHO "
+        "found at upload; for a hosted agent run, the run itself. Their audit rows link to "
+        "this session. Sent only with the switch AUDIT_SESSION_LINKS on.",
+    )
 
 
 class SessionListResponse(BaseModel):

@@ -131,6 +131,7 @@ from meho_backplane.ui.routes.audit.op_class_badges import (
     OP_CLASS_BADGE_CLASSES,
     OP_CLASS_FILTER_OPTIONS,
 )
+from meho_backplane.ui.routes.audit.stored_session import drawer_rights, stored_session_context
 from meho_backplane.ui.routes.audit.trace_pane import project_trace
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
@@ -441,7 +442,7 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
 
 
 async def _build_drawer_context(
-    db_session: AsyncSession, row: AuditLog, *, is_admin: bool
+    db_session: AsyncSession, row: AuditLog, *, is_admin: bool, may_read_sessions: bool
 ) -> dict[str, object]:
     """Assemble the row-detail drawer context for one ``audit_log`` row.
 
@@ -461,7 +462,8 @@ async def _build_drawer_context(
     via :func:`~meho_backplane.ui.references.resolve_audit_references`. The
     replay deep-link inside it is enabled only when the session lifted to
     ``tenant_admin`` (``is_admin``) and the row carries an
-    ``agent_session_id``.
+    ``agent_session_id``. The "Stored session" part shows only when
+    *may_read_sessions* is true and the row belongs to a stored session.
     """
     op_id = resolve_op_id(row)
     op_class = classify_op(op_id)
@@ -525,6 +527,7 @@ async def _build_drawer_context(
         "references": references,
         # The login client and channel of the row (AUDIT_CLIENT_IDENTITY).
         "via_label": via_label(row.payload),
+        "stored_session": await stored_session_context(db_session, row, may_read=may_read_sessions),
     }
 
 
@@ -548,8 +551,10 @@ async def _resolve_deep_link_drawer(
     row = await fetch_audit_row(db_session, tenant_id=session.tenant_id, audit_id=audit_id)
     if row is None:
         return None
-    is_admin = await is_ui_tenant_admin(session)
-    return await _build_drawer_context(db_session, row, is_admin=is_admin)
+    is_admin, may_read_sessions = await drawer_rights(session)
+    return await _build_drawer_context(
+        db_session, row, is_admin=is_admin, may_read_sessions=may_read_sessions
+    )
 
 
 async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
@@ -983,8 +988,10 @@ async def _drawer_handler(
             {"audit_id": str(audit_id)},
             status_code=404,
         )
-    is_admin = await is_ui_tenant_admin(session)
-    context = await _build_drawer_context(db_session, row, is_admin=is_admin)
+    is_admin, may_read_sessions = await drawer_rights(session)
+    context = await _build_drawer_context(
+        db_session, row, is_admin=is_admin, may_read_sessions=may_read_sessions
+    )
     return get_templates().TemplateResponse(request, "audit/_drawer.html", context)
 
 

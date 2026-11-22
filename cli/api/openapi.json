@@ -8556,7 +8556,7 @@
           "audit"
         ],
         "summary": "Show",
-        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".",
+        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".\n\n``stored_session_id`` names the stored agent session of the row (#4904).\nIt is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person\nwho may read sessions\n(:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).\nFor anyone else, and for a row with no stored session, the answer has\nno such field: it is the same as before the switch existed.",
         "operationId": "show_api_v1_audit_show__audit_id__get",
         "parameters": [
           {
@@ -8586,7 +8586,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuditEntry"
+                  "$ref": "#/components/schemas/AuditEntryDetail"
                 }
               }
             }
@@ -29230,6 +29230,182 @@
         "title": "AuditEntry",
         "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` takes the whole id (see its field).\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
+      "AuditEntryDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "title": "Result Status"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "policy_decision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Decision"
+          },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
+          },
+          "broadcast_event_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Broadcast Event Id"
+          },
+          "stored_session_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Stored Session Id",
+            "description": "The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "tenant_id",
+          "principal_sub",
+          "principal_name",
+          "target_id",
+          "target_name",
+          "method",
+          "path",
+          "status_code",
+          "request_id",
+          "duration_ms",
+          "payload",
+          "op_id",
+          "op_class",
+          "result_status",
+          "parent_audit_id",
+          "agent_session_id",
+          "work_ref",
+          "policy_decision",
+          "event_class",
+          "sandbox_mode",
+          "broadcast_event_id"
+        ],
+        "title": "AuditEntryDetail",
+        "description": "The 200 body of ``GET /api/v1/audit/show/{audit_id}``: one row, and its stored session.\n\nOnly this route has ``stored_session_id`` (#4904). The list, query and\nreplay answers keep the plain :class:`AuditEntry`."
+      },
       "AuditEventClass": {
         "type": "string",
         "enum": [
@@ -44382,6 +44558,15 @@
             },
             "type": "array",
             "title": "Uploads"
+          },
+          "mcp_sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionMcpLink"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Mcp Sessions",
+            "description": "The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on."
           }
         },
         "type": "object",
@@ -44445,6 +44630,29 @@
         ],
         "title": "SessionListResponse",
         "description": "A page of sessions, newest upload first."
+      },
+      "SessionMcpLink": {
+        "properties": {
+          "mcp_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mcp Session Id",
+            "description": "The agent_session_id of the audit rows of these calls."
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref",
+            "description": "The newest work reference (ticket id) on those audit rows, or null."
+          }
+        },
+        "type": "object",
+        "required": [
+          "mcp_session_id",
+          "work_ref"
+        ],
+        "title": "SessionMcpLink",
+        "description": "One MCP session whose calls are in this session."
       },
       "SessionRetention": {
         "properties": {

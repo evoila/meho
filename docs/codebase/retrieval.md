@@ -428,6 +428,59 @@ kind, result, place and reason, the knowledge search switch values from
 `GET /version` ("not shown" when the server does not list them), the
 version and the date. It holds no question text.
 
+### German and English page set for the agent search runner
+
+`backend/scripts/retrieval_eval/kb_language_set/` holds a small made-up
+knowledge set, so a person can measure `search_knowledge` in German and in
+English with the runner above. It is test tooling: it adds no route,
+setting or operation. All products, error codes and pages are made up.
+
+- **Pages.** 24 Markdown pages in `pages/de/` and `pages/en/`, each with the
+  lesson header that `POST /api/v1/kb/import` needs (`type`, `applies_to`,
+  `status: confirmed`) and 3 to 6 sections. There are 12 topics from IT
+  support and server operations. Four topics have a German and an English
+  page, four have only a German page and four only an English page. Eight more
+  pages are near misses: they share a product name and many words with a topic
+  page but answer something else.
+- **Questions.** `questions.de.yaml` and `questions.en.yaml` (the runner's
+  question file has no language field, so there is one file per language).
+  Each topic has one ticket question (a full sentence, `kind: meaning`) and
+  one key word question (2 to 4 words, `kind: exact`). `expect` is the page in
+  the question's language, or the page in the other language when there is
+  none. No question repeats six words in a row of its page.
+- **Load.** `kb_language_set_load.py` sends the pages in one
+  `POST /api/v1/kb/import`. The path of each page below `pages/` (for example
+  `de/vpn-verbindung-bricht-ab.md`) becomes `provenance.relative_path`, which
+  is what the runner compares with `expect`.
+
+Load the pages, then run the runner once per language, from `backend/`:
+
+```bash
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.kb_language_set_load \
+  --url <meho-address> [--dry-run]
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
+  --url <meho-address> --questions scripts/retrieval_eval/kb_language_set/questions.de.yaml \
+  --report report-de.md
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
+  --url <meho-address> --questions scripts/retrieval_eval/kb_language_set/questions.en.yaml \
+  --report report-en.md
+```
+
+Use a `tenant_admin` token for both steps. The import route
+(`POST /api/v1/kb/import`) takes only a `tenant_admin` login or a login with
+the `kb_import_only` claim. The runner's search (`search_knowledge` over MCP)
+needs the `operator` role or higher, and a `kb_import_only` login has no MCP
+access at all. So one `tenant_admin` token covers both.
+
+The load script reads the token from `--token-env` (default `MEHO_TOKEN`) and
+never prints it. It prints the counts created, updated, unchanged and skipped,
+and a second run reports every page as unchanged. `--dry-run` sends
+`dry_run: true` and writes nothing.
+
+**Use a test tenant.** The import writes into the tenant of the token, and the
+pages stay there. Never load this set into a tenant that holds real knowledge,
+or the made-up pages show up in real answers and the numbers are wrong.
+
 ### Offline KB passage benchmark (#3765)
 
 Before anyone changes a retrieval default (model, prefixes, reranker),

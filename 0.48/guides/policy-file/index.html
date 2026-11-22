@@ -3411,7 +3411,8 @@ MEHO-Admins approve network changes.</p>
 <ul>
 <li><strong>validate</strong> a file and see every mistake,</li>
 <li>see a <strong>diff</strong>: what an import would change (a dry run),</li>
-<li><strong>import</strong> a file. A second admin must approve the import. Only a
+<li><strong>import</strong> a file. An admin approves the import with a click in the web
+  console, and may be the person who asked. Only a
   person can ask for an import, never an agent. Only a platform admin can
   ask to import the install's policy,</li>
 <li><strong>export</strong> the stored policy as a file,</li>
@@ -3446,7 +3447,7 @@ file as a tenant's file and reports <code>taxonomy.default</code> as a mistake.<
 <p>On a fresh install, the diff of an install file with no <code>taxonomy</code> block
 shows the six built-in categories as removed, but they still apply. An
 install file with no entries and no <code>taxonomy</code> block is not the same as the
-"small team" file, so its import waits for a second admin to approve it.</p>
+"small team" file, so its import waits for an admin to approve it.</p>
 <p>On a fresh install, <code>meho policy export --scope install</code> writes the same
 policy, without the comments. To start your own policy:</p>
 <ol>
@@ -3455,13 +3456,13 @@ policy, without the comments. To start your own policy:</p>
    <code>taxonomy.categories</code>.</li>
 <li>Run <code>meho policy validate --scope install</code> to check it, and
    <code>meho policy diff --scope install</code> to see what changes.</li>
-<li>Import it. A second admin approves the import.</li>
+<li>Import it. An admin approves the import in the web console.</li>
 </ol>
 <p>An import replaces the whole stored policy of its scope. When your install
 already has a policy, importing <code>small-team.yaml</code> removes every entry of
 that policy, also an entry that made an operation stricter. So export the
-install's policy first and add your entries to that file. A second admin
-must approve every import that changes something, and the changes made to
+install's policy first and add your entries to that file. An admin must
+approve every import that changes something, and the changes made to
 single operations (<code>meho connector edit-op</code>) stay.</p>
 <p>The "small team" file is for the whole install (<code>--scope install</code>). A
 tenant's own file cannot set <code>taxonomy.default</code>.</p>
@@ -3668,8 +3669,10 @@ and <code>Readers</code>.</p>
   the stored ones, and the shipped bindings count again.</li>
 <li>A binding can name any group of the login setup, also a group of
   another tenant. Who is in that group is then decided by whoever manages
-  it. Bind only groups that your tenant manages. Two admins of the tenant
-  decide the bindings: one imports the file, a second one approves it.</li>
+  it. Bind only groups that your tenant manages. An admin of the tenant
+  decides the bindings: an import with a token waits until an admin
+  approves it in the web console, and an admin's import in the web console
+  runs at once through the Run window, after a fresh sign-in.</li>
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Off by default</p>
@@ -3726,7 +3729,7 @@ refused, and the message names the entry and the operation.</p>
 <h2 id="commands">Commands<a class="headerlink" href="#commands" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>validate<span class="w"> </span>policy.yaml<span class="w">     </span><span class="c1"># list every mistake</span>
 meho<span class="w"> </span>policy<span class="w"> </span>diff<span class="w"> </span>policy.yaml<span class="w">         </span><span class="c1"># what an import would change</span>
-meho<span class="w"> </span>policy<span class="w"> </span>import<span class="w"> </span>policy.yaml<span class="w">       </span><span class="c1"># ask to import; a second admin approves</span>
+meho<span class="w"> </span>policy<span class="w"> </span>import<span class="w"> </span>policy.yaml<span class="w">       </span><span class="c1"># ask to import; an admin approves in the web console</span>
 meho<span class="w"> </span>policy<span class="w"> </span><span class="nb">export</span><span class="w"> </span>-o<span class="w"> </span>policy.yaml<span class="w">    </span><span class="c1"># the stored policy as a file</span>
 meho<span class="w"> </span>policy<span class="w"> </span><span class="nb">history</span><span class="w">                  </span><span class="c1"># the last 20 imported files</span>
 </code></pre></div>
@@ -3832,13 +3835,15 @@ today's answer only.</p>
 <ol>
 <li>MEHO checks the file and works out the diff.</li>
 <li>If the file changes nothing, MEHO answers "No change." Nothing waits.</li>
-<li>Otherwise the import waits for approval. <strong>Nothing changes yet.</strong> You
-   can never approve your own import. Another tenant admin approves it in
-   the web console or on the command line.</li>
+<li>Otherwise the import waits for approval. <strong>Nothing changes yet.</strong> A
+   tenant admin approves it with a click in the web console, and may be
+   the person who asked. The command line and REST do not approve an
+   import.</li>
 <li>When it is approved, MEHO checks again. If the stored policy changed in
    the meantime, the import does not run: run the diff again and import
-   again. An approved import that failed cannot run again. Import the file
-   again, and a second admin approves the new request.</li>
+   again. An approved import that failed runs again only for an admin in
+   the web console. Or import the file again, and an admin approves the new
+   request.</li>
 <li>The import <strong>replaces the whole policy</strong>. An entry that is not in the
    file is removed.</li>
 </ol>

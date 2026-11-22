@@ -3294,9 +3294,10 @@ log records who approved, how, and when.</p>
 <li>As a rule, a second person must approve. For another person's
   <code>dangerous</code> or <code>destructive</code> change, the approver must be an admin. A person may approve their
   own change in three cases only:<ul>
-<li>A member of the <code>MEHO-Admins</code> group may approve their own change at every risk level, but never
-  a change of rights. Another admin approves a change of rights. See
-  <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">Approvals and break-glass</a>.</li>
+<li>A member of the <code>MEHO-Admins</code> group may approve their own change at every risk level. A
+  change of rights is approved only with a click in the web console, by an admin, who may
+  be the person who asked. An admin's own change of rights in the web console runs at once.
+  See <a href="../../guides/approvals-and-break-glass/#changes-of-rights">Approvals and break-glass</a>.</li>
 <li>An operator or an admin may approve their own <code>caution</code> change
   when it waited only because they sent it with a token. This works
   only with a click in the web interface. It never covers a change of

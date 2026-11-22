@@ -3426,15 +3426,17 @@ first people log in.</p>
   may approve their own. Anyone else needs a second person: an
   admin.</li>
 <li><strong>Create a user</strong> (Step 4) and <strong>add a person to a group</strong>
-  (Step 5): these are changes of rights. Another admin (a tenant
-  admin or a platform admin) must approve them, never the person who
+  (Step 5): these are changes of rights. An admin approves them with
+  a click in the web console. In MEHO's own login realm only a
+  platform admin approves them, and the person who asked approves
+  only a request they asked in the web console. Outside it a tenant
+  admin or a platform admin approves them, and may be the person who
   asked. An Operator cannot approve them.
-  See <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</li>
+  See <a href="../approvals-and-break-glass/#changes-of-rights">Changes of rights</a>.</li>
 </ul>
-<p>For Steps 4 and 5, an admin who is not the person who asked approves
-each change. No setup below changes that. An install with only one
-admin adds a second admin first (see
-<a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">An install with only one admin</a>).</p>
+<p>For Steps 4 and 5, an admin approves each change in the web console
+(in MEHO's own login realm, a platform admin).
+No setup below changes that.</p>
 <p>For the group step, pick one of these before you start:</p>
 <ul>
 <li><strong>You are a MEHO-Admin</strong> in your current
@@ -3482,7 +3484,8 @@ each change is approved and stored in the audit log.</p>
 <li>An <code>operator</code> or <code>tenant_admin</code> login in your current tenant.</li>
 <li>For the group step: a second person who can approve, unless you
   approve it yourself as in the box above. For the user and group
-  member steps: an admin who is not the person who asked. Step 8 needs
+  member steps: an admin who is not the person who asked (in MEHO's own
+  login realm, a platform admin). Step 8 needs
   a <code>tenant_admin</code> approver in the new tenant too, because an approval
   belongs to one tenant. Step 8 explains the choices.</li>
 <li>This guide gives each person one tenant. For a person who works in
@@ -3549,15 +3552,17 @@ meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w">
 <span class="w">  </span>--password-secret-ref<span class="w"> </span>&lt;vault-path-of-the-password&gt;<span class="w"> </span>--temporary
 </code></pre></div>
 <p>This step waits for approval too (risk level <code>dangerous</code>). Creating a
-user is a change of rights, so another admin (a tenant admin or a
-platform admin) must approve it, never the person who asked. See
-<a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</p>
+user is a change of rights, so an admin (a tenant admin or a platform
+admin) approves it with a click in the web console. In MEHO's own login
+realm only a platform admin approves it. See
+<a href="../approvals-and-break-glass/#changes-of-rights">Changes of rights</a>.</p>
 <h2 id="step-5-put-each-person-in-exactly-one-group">Step 5: Put each person in exactly one group<a class="headerlink" href="#step-5-put-each-person-in-exactly-one-group" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>add<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--username<span class="w"> </span>alice@acme.example<span class="w"> </span>--group-name<span class="w"> </span>MEHO-acme-Admins
 </code></pre></div>
-<p>Adding a person to a group is a change of rights. Another admin
-approves it, never the person who asked. Check the members:</p>
+<p>Adding a person to a group is a change of rights. An admin approves it
+with a click in the web console (in MEHO's own login realm, a platform
+admin). Check the members:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--id<span class="w"> </span>&lt;group-id&gt;
 </code></pre></div>
 <h2 id="step-6-give-each-person-access-to-the-tenants-secrets-in-vault">Step 6: Give each person access to the tenant's secrets in Vault<a class="headerlink" href="#step-6-give-each-person-access-to-the-tenants-secrets-in-vault" title="Permanent link">&para;</a></h2>
@@ -3784,9 +3789,9 @@ meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class=
 <td>Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface.</td>
 </tr>
 <tr>
-<td><code>approve</code> answers <code>rights_change_required</code> ("This is a change of rights. Another admin must approve it.")</td>
-<td>Steps 4 and 5 are changes of rights. You asked for the change and tried to approve it yourself, or you are not an admin in this tenant. Nobody approves their own change of rights.</td>
-<td>An admin who is not the person who asked approves.</td>
+<td><code>approve</code> answers <code>rights_change_required</code> ("This is a change of rights. Approve this change of rights in the web console." or "Only an admin may approve it.")</td>
+<td>Steps 4 and 5 are changes of rights. You approved on the command line, or you are not an admin in this tenant.</td>
+<td>An admin approves it on the Approvals page of the web console.</td>
 </tr>
 <tr>
 <td><code>meho approvals list</code> in the new tenant shows nothing, but a request is waiting</td>

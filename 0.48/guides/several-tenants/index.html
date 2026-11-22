@@ -3493,11 +3493,12 @@ waits for approval. The self-approval switch does not cover the
 dangerous risk level (decision record:
 <a href="https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md">tenant groups stay at the dangerous risk level</a>).</p>
 <ul>
-<li><strong>Putting a person in a group</strong> is a change of rights. Another
-  admin (a tenant admin or a platform admin) must approve it, never
-  the person who asked. An Operator cannot
-  approve it. See
-  <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>.</li>
+<li><strong>Putting a person in a group</strong> is a change of rights. The role
+  groups are in MEHO's own login realm, so only a platform admin does
+  it in the web console, where it runs at once after a fresh sign-in,
+  or approves a waiting request there. A tenant admin who is not a
+  platform admin and an Operator cannot approve it. See
+  <a href="../approvals-and-break-glass/#changes-of-rights">Changes of rights</a>.</li>
 <li><strong>Taking a person out of a group</strong> only takes rights away. A
   MEHO-Admin may approve their own; anyone else
   needs a second person (an admin).</li>
@@ -3531,10 +3532,8 @@ dangerous risk level (decision record:
   <code>tenant_not_chosen</code> to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.</li>
-<li>An admin who is not the person who asked, to approve each time you
-  put a person in a group. An install with only one admin adds a second
-  admin first (see
-  <a href="../approvals-and-break-glass/#changes-of-rights-need-another-admin">Changes of rights need another admin</a>).</li>
+<li>A platform admin in the web console, each time you put a person in a group (see
+  <a href="../approvals-and-break-glass/#changes-of-rights">Changes of rights</a>).</li>
 </ul>
 <h2 id="step-1-add-the-tenant-in-keycloak">Step 1: Add the tenant in Keycloak<a class="headerlink" href="#step-1-add-the-tenant-in-keycloak" title="Permanent link">&para;</a></h2>
 <p>A new tenant needs a UUID and a short name. The short name uses
@@ -3765,10 +3764,10 @@ in your first tenant and operate in <code>team-b</code>:</p>
 meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>add<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--username<span class="w"> </span>alice@example.com<span class="w"> </span>--group-name<span class="w"> </span>MEHO-team-b-Operators
 </code></pre></div>
-<p>Each command waits for approval. It is a change of rights, so another
-admin approves it, never the person who asked:</p>
+<p>Each command waits for approval. It is a change of rights in MEHO's own
+login realm, so a second person who is a platform admin approves it in
+the web console, never the person who asked with the command line:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>list
-meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
 </code></pre></div>
 <p>The rules:</p>
 <ul>
@@ -3834,8 +3833,8 @@ also in at least one role group.</p>
   tenant, the role of that group applies instead.</li>
 <li>approve their own changes in a tenant where they act as <code>tenant_admin</code>.
   They count as an admin there, so they may approve their own changes
-  like members of <code>MEHO-Admins</code>. This does not
-  cover a change of rights: another admin must approve that.</li>
+  like members of <code>MEHO-Admins</code>. A change of rights they approve only
+  with a click in the web console.</li>
 <li>use the cross-tenant options, for example <code>--tenant</code> on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers <code>403 tenant_select_with_header</code>: pick that tenant with

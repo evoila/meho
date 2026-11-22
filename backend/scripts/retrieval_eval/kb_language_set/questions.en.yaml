@@ -1,0 +1,101 @@
+# English question file for scripts.retrieval_eval.agent_search.
+# Load the pages first (kb_language_set_load.py). All names are made up.
+# Per topic: one ticket question (kind: meaning) and one key word question (kind: exact).
+# Topics without an English page (gatekeeper, quill logs, relay proxy, tarn db) expect the German page.
+questions:
+  - id: en-vpn-ticket
+    question: Whenever I leave my laptop alone for a few minutes, I lose the company network and must sign in again.
+    expect: en/vpn-drops-after-idle.md
+    kind: meaning
+  - id: en-vpn-keywords
+    question: ORB-4012 KeepAliveSeconds
+    expect: en/vpn-drops-after-idle.md
+    kind: exact
+  - id: en-print-ticket
+    question: My document has waited for an hour, the printer does nothing, and nobody else's pages come out either.
+    expect: en/print-job-stuck-in-queue.md
+    kind: meaning
+  - id: en-print-keywords
+    question: nimbus-spool NP-210
+    expect: en/print-job-stuck-in-queue.md
+    kind: exact
+  - id: en-mail-ticket
+    question: People tell me my reply bounced back to them, and nothing new has reached my inbox since this morning.
+    expect: en/mailbox-full-quota-exceeded.md
+    kind: meaning
+  - id: en-mail-keywords
+    question: MBX-552 quota archive
+    expect: en/mailbox-full-quota-exceeded.md
+    kind: exact
+  - id: en-backup-ticket
+    question: The nightly backup shows a red error every morning, and the log says it could not read a few files.
+    expect: en/backup-fails-on-locked-files.md
+    kind: meaning
+  - id: en-backup-keywords
+    question: snapshot mode HB-0073
+    expect: en/backup-fails-on-locked-files.md
+    kind: exact
+  - id: en-time-ticket
+    question: I cannot get in anywhere since this morning although my password is right, and my computer clock is wrong.
+    expect: de/anmeldung-scheitert-zeitabweichung.md
+    kind: meaning
+  - id: en-time-keywords
+    question: GK-401-SKEW gkctl time-sync
+    expect: de/anmeldung-scheitert-zeitabweichung.md
+    kind: exact
+  - id: en-logs-ticket
+    question: The machine that collects our logs is almost out of space, and new lines no longer arrive there.
+    expect: de/logserver-festplatte-voll.md
+    kind: meaning
+  - id: en-logs-keywords
+    question: QL-DISK-90 Quill Rotation
+    expect: de/logserver-festplatte-voll.md
+    kind: exact
+  - id: en-cert-ticket
+    question: When I open our website, my browser shows a red page and says the connection is not private.
+    expect: de/zertifikat-abgelaufen-proxy.md
+    kind: meaning
+  - id: en-cert-keywords
+    question: RP-CERT-EXP relayctl
+    expect: de/zertifikat-abgelaufen-proxy.md
+    kind: exact
+  - id: en-db-ticket
+    question: The reports show numbers from half an hour ago, although everything has long been booked in the main system.
+    expect: de/datenbank-replikation-verzoegert.md
+    kind: meaning
+  - id: en-db-keywords
+    question: TDB-LAG-30 tarnctl
+    expect: de/datenbank-replikation-verzoegert.md
+    kind: exact
+  - id: en-flap-ticket
+    question: All night I get a red message, then a green one, again and again, for the same server.
+    expect: en/monitoring-alert-flapping.md
+    kind: meaning
+  - id: en-flap-keywords
+    question: Beacon Monitor BM-FLAP
+    expect: en/monitoring-alert-flapping.md
+    kind: exact
+  - id: en-share-ticket
+    question: Opening folders on the shared drive takes forever at the start of the week, but it is fine after lunch.
+    expect: en/file-share-slow-monday-morning.md
+    kind: meaning
+  - id: en-share-keywords
+    question: SS-SCAN-08 antivirus scan
+    expect: en/file-share-slow-monday-morning.md
+    kind: exact
+  - id: en-dns-ticket
+    question: Since the website moved servers, some of us land on the old one and others on the new one.
+    expect: en/dns-old-address-after-change.md
+    kind: meaning
+  - id: en-dns-keywords
+    question: Atlas DNS flush TTL
+    expect: en/dns-old-address-after-change.md
+    kind: exact
+  - id: en-wifi-ticket
+    question: My video call freezes for a few seconds when I walk from one conference room to another with my laptop.
+    expect: en/wifi-drops-between-meeting-rooms.md
+    kind: meaning
+  - id: en-wifi-keywords
+    question: Wavepoint fast roaming
+    expect: en/wifi-drops-between-meeting-rooms.md
+    kind: exact

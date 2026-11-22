@@ -1,0 +1,101 @@
+# German question file for scripts.retrieval_eval.agent_search.
+# Load the pages first (kb_language_set_load.py). All names are made up.
+# Per topic: one ticket question (kind: meaning) and one key word question (kind: exact).
+# Topics without a German page (beacon, stack share, atlas dns, wavepoint) expect the English page.
+questions:
+  - id: de-vpn-ticket
+    question: Immer wenn ich ein paar Minuten nichts tippe, ist meine Verbindung ins Firmennetz weg und ich muss mich neu anmelden.
+    expect: de/vpn-verbindung-bricht-ab.md
+    kind: meaning
+  - id: de-vpn-keywords
+    question: VPN Leerlauf KeepAliveSeconds
+    expect: de/vpn-verbindung-bricht-ab.md
+    kind: exact
+  - id: de-print-ticket
+    question: Mein Dokument steht seit einer Stunde auf Warten, der Drucker rührt sich nicht, und bei den anderen kommt auch nichts.
+    expect: de/druckauftrag-haengt-in-warteschlange.md
+    kind: meaning
+  - id: de-print-keywords
+    question: Nimbus Print NP-210
+    expect: de/druckauftrag-haengt-in-warteschlange.md
+    kind: exact
+  - id: de-mail-ticket
+    question: Seit heute Morgen kommt bei mir keine neue Mail an, und Leute schreiben mir, dass ihre Antwort zurückkam.
+    expect: de/postfach-voll-kontingent-ueberschritten.md
+    kind: meaning
+  - id: de-mail-keywords
+    question: Postfach Archiv MBX-552
+    expect: de/postfach-voll-kontingent-ueberschritten.md
+    kind: exact
+  - id: de-backup-ticket
+    question: Die Datensicherung in der Nacht meldet jeden Morgen einen Fehler, und laut Protokoll konnten ein paar Dateien nicht gelesen werden.
+    expect: de/sicherung-scheitert-an-gesperrten-dateien.md
+    kind: meaning
+  - id: de-backup-keywords
+    question: Schnappschuss-Modus HB-0073
+    expect: de/sicherung-scheitert-an-gesperrten-dateien.md
+    kind: exact
+  - id: de-time-ticket
+    question: Ich komme seit heute früh nirgends hinein, obwohl mein Passwort richtig ist, und meine Rechneruhr geht falsch.
+    expect: de/anmeldung-scheitert-zeitabweichung.md
+    kind: meaning
+  - id: de-time-keywords
+    question: Gatekeeper GK-401-SKEW
+    expect: de/anmeldung-scheitert-zeitabweichung.md
+    kind: exact
+  - id: de-logs-ticket
+    question: Auf dem Rechner, der unsere Protokolle sammelt, ist kaum noch Platz frei, und neue Zeilen kommen dort nicht mehr an.
+    expect: de/logserver-festplatte-voll.md
+    kind: meaning
+  - id: de-logs-keywords
+    question: Logserver Aufbewahrung Rotation
+    expect: de/logserver-festplatte-voll.md
+    kind: exact
+  - id: de-cert-ticket
+    question: Wenn ich unsere Internetseite aufrufe, zeigt der Browser eine rote Seite und meldet, dass die Verbindung nicht sicher sei.
+    expect: de/zertifikat-abgelaufen-proxy.md
+    kind: meaning
+  - id: de-cert-keywords
+    question: relayctl cert reload
+    expect: de/zertifikat-abgelaufen-proxy.md
+    kind: exact
+  - id: de-db-ticket
+    question: Die Berichte zeigen Zahlen von vor einer halben Stunde, obwohl im Hauptsystem längst alles gebucht ist.
+    expect: de/datenbank-replikation-verzoegert.md
+    kind: meaning
+  - id: de-db-keywords
+    question: Replikat tarnctl lag
+    expect: de/datenbank-replikation-verzoegert.md
+    kind: exact
+  - id: de-flap-ticket
+    question: Ich bekomme die ganze Nacht abwechselnd eine rote und eine grüne Meldung für denselben Server.
+    expect: en/monitoring-alert-flapping.md
+    kind: meaning
+  - id: de-flap-keywords
+    question: Beacon BM-FLAP recovery_count
+    expect: en/monitoring-alert-flapping.md
+    kind: exact
+  - id: de-share-ticket
+    question: Zu Wochenbeginn dauert das Öffnen von Ordnern auf dem Netzlaufwerk ewig, nach dem Mittagessen geht es wieder.
+    expect: en/file-share-slow-monday-morning.md
+    kind: meaning
+  - id: de-share-keywords
+    question: Stack Share SS-SCAN-08
+    expect: en/file-share-slow-monday-morning.md
+    kind: exact
+  - id: de-dns-ticket
+    question: Nach dem Serverumzug landen manche Kollegen noch auf der alten Webseite, andere schon auf der neuen.
+    expect: en/dns-old-address-after-change.md
+    kind: meaning
+  - id: de-dns-keywords
+    question: Atlas DNS AD-TTL
+    expect: en/dns-old-address-after-change.md
+    kind: exact
+  - id: de-wifi-ticket
+    question: Mein Videoanruf friert ein paar Sekunden ein, wenn ich mit dem Laptop von einem Besprechungsraum in den nächsten gehe.
+    expect: en/wifi-drops-between-meeting-rooms.md
+    kind: meaning
+  - id: de-wifi-keywords
+    question: Wavepoint WP-ROAM-11
+    expect: en/wifi-drops-between-meeting-rooms.md
+    kind: exact

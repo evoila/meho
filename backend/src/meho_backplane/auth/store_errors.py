@@ -31,6 +31,7 @@ __all__ = [
     "STORE_REFUSED_TEXT",
     "has_store_detail",
     "hide_store_address",
+    "log_holds_store_text",
     "log_store_error",
     "log_without_store_text",
     "store_request_id",
@@ -86,9 +87,8 @@ _SECRET_WORD: Final = re.compile(
 #: A quote or an escape. An apostrophe inside a word (``doesn't``) is none.
 _QUOTE_OR_ESCAPE: Final = re.compile(r"[\"`\\]|(?<!\w)'|'(?!\w)")
 _PLAIN_VALUE: Final = re.compile(
-    r"(?P<label>(?:password|passwd|passphrase|pwd|client_secret|secret_id)\w{0,32}"
-    r"(?=\s*[=:])"
-    r"|(?:token|secret|jwt|api_?key)\w{0,32}(?=\s*=|\s*:\s*[^\s\d]{0,64}\d))"
+    r"(?P<label>(?:password|passwd|passphrase|pwd|client_secret|secret_id"
+    r"|token|secret|jwt|api_?key)\w{0,32}(?=\s*[=:]))"
     r"\s*[=:]\s*\S.*",
     re.IGNORECASE | re.DOTALL,
 )
@@ -110,6 +110,11 @@ def log_without_store_text() -> Iterator[None]:
         yield
     finally:
         _log_holds_text.reset(token)
+
+
+def log_holds_store_text() -> bool:
+    """Say whether a store failure logged now may hold the store's text."""
+    return _log_holds_text.get()
 
 
 def hide_store_address(text: str) -> str:
@@ -241,7 +246,7 @@ def log_store_error(exc: BaseException, *, op_id: str) -> None:
                 error_class=type(link).__name__,
                 store_status=store_status(link),
                 store_request_id=store_request_id(link),
-                store_text=store_text_for_log(link) if _log_holds_text.get() else None,
+                store_text=store_text_for_log(link) if log_holds_store_text() else None,
             )
             return
 

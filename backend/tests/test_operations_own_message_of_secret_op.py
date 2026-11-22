@@ -238,14 +238,6 @@ _MARKED_TYPES = {
     "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
-    # Secret store login errors: a fixed MEHO sentence. The store's text and
-    # address stay in fields and in the server log.
-    "VaultClientError",
-    "VaultNotConfiguredError",
-    "VaultRoleDeniedError",
-    "VaultUnreachableError",
-    # The mount name from the call; no store text.
-    "VaultAuthBackendNotMountedError",
 }
 
 

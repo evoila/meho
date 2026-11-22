@@ -216,7 +216,7 @@ async def test_a_failed_login_gives_a_meho_sentence_and_a_log_event(
     # The dispatcher answer holds no address and no store text.
     result = result_connector_error("op", caught.value, 1.0)
     _assert_clean(result)
-    assert result.extras["message_source"] == "meho"
+    assert "message_source" not in result.extras
 
     # The log has the detail, with the address cut.
     events = [e for e in logs if e["event"] == "vault_login_failed"]
@@ -243,6 +243,9 @@ async def test_a_failed_login_gives_a_meho_sentence_and_a_log_event(
         ("bad token: {} for this mount", "ab12"),
         ("token='{}'", _SHORT_PASSWORD),
         ("token={}", "abc"),
+        ("invalid token: {}", "abc"),
+        ("invalid secret: {}", "allletters"),
+        ("error validating token: {}", "abc"),
     ],
 )
 def test_a_secret_in_the_store_text_is_cut_from_the_log(template: str, value: str) -> None:
@@ -253,10 +256,47 @@ def test_a_secret_in_the_store_text_is_cut_from_the_log(template: str, value: st
 
 @pytest.mark.parametrize(
     "text",
-    ["permission denied", "error validating token: invalid audience (aud) claim"],
+    ["permission denied", "error validating token", "invalid audience (aud) claim"],
 )
 def test_the_log_keeps_the_stores_diagnosis(text: str) -> None:
     assert store_text_for_log(hvac.exceptions.Forbidden(text)) == text
+
+
+_WORD_1 = "allletters"
+_WORD_2 = "extra-" + "secret-part"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "invalid token: {} {}",
+        "invalid secret: {} {}",
+        "jwt: {} {}",
+        "api_key = {} {}",
+        "bad token:{}\n{}",
+    ],
+)
+async def test_both_events_withhold_a_short_or_spaced_secret_after_a_label(
+    monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    text = f"{_STORE_TEXT}: " + template.format(_WORD_1, _WORD_2)
+    fake = _FakeClient(hvac.exceptions.InvalidRequest(text))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs:
+        with pytest.raises(VaultClientError) as caught:
+            async with vault_client_for_operator(_operator()):
+                pytest.fail("body must not run when login raises")
+        result_connector_error("op", hvac.exceptions.InvalidRequest(text), 1.0)
+
+    events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+    assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+    for event in events:
+        assert _STORE_TEXT in event["store_text"]
+        assert "REDACTED" in event["store_text"]
+        for word in (_WORD_1, _WORD_2):
+            assert word not in json.dumps(event, default=str)
+            assert word not in str(caught.value.store_text)
 
 
 _PART_1 = "ab" + "41"
@@ -428,6 +468,26 @@ def test_a_caller_can_log_a_store_failure_without_the_store_text() -> None:
     assert _STORE_TEXT not in json.dumps(events, default=str)
 
 
+@pytest.mark.parametrize(
+    "store_exc", [hvac.exceptions.Forbidden, hvac.exceptions.InternalServerError]
+)
+async def test_a_caller_can_log_a_failed_login_without_the_store_text(
+    monkeypatch: pytest.MonkeyPatch, store_exc: type[hvac.exceptions.VaultError]
+) -> None:
+    fake = _FakeClient(_store_error(store_exc))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs, log_without_store_text(), pytest.raises(VaultClientError):
+        async with vault_client_for_operator(_operator()):
+            pytest.fail("body must not run when login raises")
+
+    events = [e for e in logs if e["event"] == "vault_login_failed"]
+    assert len(events) == 1
+    assert events[0]["store_text"] is None
+    assert events[0]["error_class"] == store_exc.__name__
+    assert _STORE_TEXT not in json.dumps(logs, default=str)
+
+
 def test_the_store_error_builders_set_no_message_source() -> None:
     for result in _builder_results():
         assert "message_source" not in result.extras
@@ -469,6 +529,9 @@ class _StoreConnector(Connector):
 
 async def _raise_store_failure(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
     case = params.get("case", "refused")
+    if case == "login":
+        async with vault_client_for_operator(operator):
+            pytest.fail("body must not run when login raises")
     if case == "failed":
         raise _store_error(hvac.exceptions.InternalServerError)
     if case == "own_ref":
@@ -543,3 +606,42 @@ async def test_the_dispatcher_logs_a_failed_store_request_and_answers_clean(
     assert events[0]["store_request_id"] == "req-1"
     assert events[0]["store_status"] == status
     _assert_log_is_clean(events[0])
+
+
+@pytest.mark.usefixtures("_clean_dispatcher")
+@pytest.mark.parametrize(
+    "store_exc", [hvac.exceptions.Forbidden, hvac.exceptions.InternalServerError]
+)
+async def test_a_failed_login_through_the_dispatcher_keeps_the_answer_keys(
+    monkeypatch: pytest.MonkeyPatch, store_exc: type[hvac.exceptions.VaultError]
+) -> None:
+    fake = _FakeClient(_store_error(store_exc))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+    register_connector_v2(product="storefail", version="", impl_id="", cls=_StoreConnector)
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    await register_typed_operation(
+        product="storefail",
+        version="1.x",
+        impl_id="storefail",
+        op_id="storefail.item.read",
+        handler=_raise_store_failure,
+        summary="Fail at the store login.",
+        description="The handler raises a store login error.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=service,
+    )
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id="storefail-1.x",
+        op_id="storefail.item.read",
+        target=None,
+        params={"case": "login"},
+    )
+
+    # The same keys as an answer for any other connector error: no message_source.
+    assert set(result.extras) == {"error_code", "exception_class", "exception_message"}
+    assert result.extras["error_code"] == "connector_error"
+    _assert_clean(result)

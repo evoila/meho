@@ -72,9 +72,13 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.store_errors import store_request_id, store_status, store_text_for_log
+from meho_backplane.auth.store_errors import (
+    log_holds_store_text,
+    store_request_id,
+    store_status,
+    store_text_for_log,
+)
 from meho_backplane.health import ProbeResult
-from meho_backplane.own_message import ConnectorOwnMessage
 from meho_backplane.settings import Settings, get_settings
 
 _log = structlog.get_logger(__name__)
@@ -89,7 +93,7 @@ __all__ = [
 ]
 
 
-class VaultClientError(ConnectorOwnMessage, Exception):
+class VaultClientError(Exception):
     """Base class for backplane-side Vault failures.
 
     Raised by :func:`vault_client_for_operator` when the JWT forward to
@@ -97,10 +101,9 @@ class VaultClientError(ConnectorOwnMessage, Exception):
     callers can catch the base class to surface a single error response
     shape (G2.2-T3 wires this into the ``/api/v1/health`` route).
 
-    The message is always a sentence MEHO wrote (the class has the
-    :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark). The
-    store's own text and request path stay in ``store_text`` and
-    ``request_path``, for the server log only.
+    The message is always a sentence MEHO wrote. The store's own text and
+    request path stay in ``store_text`` and ``request_path``, for the server
+    log only.
     """
 
     def __init__(
@@ -203,8 +206,10 @@ def _login_error(
     """Build a login error with a MEHO sentence, and log the store's detail.
 
     The log event holds the error class, the role, the login mount, the
-    store's request id and the store's text, with the address and secrets cut. The
-    returned error carries the same detail in fields, never in its message.
+    store's request id and the store's text, with the address and secrets cut.
+    Inside :func:`~meho_backplane.auth.store_errors.log_without_store_text`
+    the event has no store text. The returned error carries the detail in
+    fields, never in its message.
     """
     store_text = store_text_for_log(exc)
     request_path = _store_request_path(exc)
@@ -217,7 +222,7 @@ def _login_error(
         login_mount=mount_path,
         store_status=status,
         store_request_id=store_request_id(exc),
-        store_text=store_text,
+        store_text=store_text if log_holds_store_text() else None,
     )
     return error_class(
         message,

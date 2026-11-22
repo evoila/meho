@@ -563,12 +563,13 @@ class Settings(BaseModel):
         384-dim, Apache-2.0, English-optimised, matches v0.1-spec
         L391's chosen model. Operators on non-English tenancies can
         swap via ``RETRIEVAL_EMBEDDING_MODEL`` to another fastembed-
-        supported identifier; **changing the output dimensionality
-        requires a re-embed-everything migration** because the
-        ``documents.embedding`` column is hard-pinned to
-        ``vector(384)`` by migration ``0003``. Swap to a same-
-        dimension model (e.g. a multilingual 384-dim variant) is
-        zero-migration.
+        supported identifier. The ``documents.embedding`` column is
+        hard-pinned to ``vector(384)`` by migration ``0003``, so only a
+        model with 384 dimensions fits. **A model change also needs
+        ``python -m meho_backplane.retrieval.reembed``**: stored vectors
+        stay from the old model until it has run, and until then
+        searches compare new question vectors with old vectors. MEHO
+        logs ``embedding_model_mismatch`` at start while they differ.
     retrieval_model_cache_dir:
         Filesystem path fastembed reads ONNX weights from. Default
         :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`

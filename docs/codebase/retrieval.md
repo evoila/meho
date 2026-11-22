@@ -308,6 +308,43 @@ lowest-ranked hits are left out, `delivery` is `partial` and
 `omitted_hits` says how many. A passage is never cut. Snippets,
 passage texts and heading titles are wrapped as untrusted text.
 
+### How to change the embedding model
+
+A model change needs more than the setting. Stored vectors keep the model
+that made them until you embed them again. A search compares the vector of
+the question with those stored vectors, so after a change without the
+command below, knowledge, memory and operations search all get worse, and
+MEHO says nothing about it except the warning at start.
+
+1. Set `RETRIEVAL_EMBEDDING_MODEL` to the new model. It must make
+   384-wide vectors: the column is `vector(384)`. Make the model files
+   available (`retrieval.modelCache`) and restart MEHO.
+2. At start MEHO compares the setting with the table `embedding_state`
+   (one row: `model`, `dimension`, `updated_at`; migration `0182` writes the
+   model the install runs at upgrade). On a difference it logs
+   `embedding_model_mismatch` with both names, the readiness check
+   `embedding_model` shows the same text, and MEHO still starts.
+3. In the backplane container run
+   `python -m meho_backplane.retrieval.reembed`. Options: `--dry-run`
+   counts the rows and writes nothing; `--batch-size N` sets the batch
+   (default 50). It prints progress and does three things:
+   - every `documents` row that is not a knowledge passage (knowledge
+     heads, memory rows, other sources) is embedded again from its body;
+   - every knowledge entry goes through the normal write path
+     (`kb/revisions.py`), which rebuilds its passages under the new
+     model's window and with new passage ids. The entry keeps its
+     revision and metadata;
+   - every `endpoint_descriptor` row that has a vector is embedded again
+     from its stored text. A row with no vector stays without one.
+
+   At the end it stores the new model in `embedding_state`.
+4. The command is safe to run twice. If it stops half way, run it again;
+   the record stays on the old model until it ends.
+
+Searches mix old and new vectors while the command runs, so plan a
+maintenance window. With the shipped default model the command writes the
+same vectors again; nothing at start embeds anything.
+
 ### Offline KB passage benchmark (#3765)
 
 Before anyone changes a retrieval default (model, prefixes, reranker),

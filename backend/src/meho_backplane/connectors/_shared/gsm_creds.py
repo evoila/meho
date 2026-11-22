@@ -120,6 +120,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from meho_backplane.auth.secret_read_as import (
+    MEHO_OWN_IDENTITY,
+    record_secret_read_as,
+    token_subject,
+)
 from meho_backplane.connectors._shared.credential_backend import (
     CredentialsReadError,
     register_credential_backend,
@@ -574,6 +579,13 @@ class GcpSecretManagerBackend:
             active_wif,
         )
 
+        # The store saw the caller's login on the federated path, and MEHO's own
+        # identity on the direct path.
+        record_secret_read_as(
+            token_subject(operator.raw_jwt, operator.sub)
+            if active_wif is not None
+            else MEHO_OWN_IDENTITY
+        )
         secret_data = _decode_payload(
             payload_bytes,
             field=field,

@@ -443,3 +443,34 @@ func TestFormatPayloadScalarJSONNumberRendersExact(t *testing.T) {
 		t.Errorf("json.Number precision lost; got %q", got)
 	}
 }
+
+// TestPrintEntrySummaryShowsSecretReadAs — the summary names the login a
+// secret store accepted, and prints no line when the field is empty.
+func TestPrintEntrySummaryShowsSecretReadAs(t *testing.T) {
+	login := "approver-sub"
+	for _, tc := range []struct {
+		name  string
+		login *string
+		want  bool
+	}{{"set", &login, true}, {"missing", nil, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printEntrySummary(&buf, &api.AuditEntry{
+				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+				PrincipalSub: "operator-a",
+				SecretReadAs: tc.login,
+				OpId:         "x.y",
+				ResultStatus: "ok",
+				Payload:      map[string]any{},
+			})
+			got := strings.Contains(buf.String(), "secret_read_as:")
+			if got != tc.want {
+				t.Errorf("secret_read_as line present = %v, want %v in %s", got, tc.want, buf.String())
+			}
+			if tc.want && !strings.Contains(buf.String(), "approver-sub") {
+				t.Errorf("login missing in %s", buf.String())
+			}
+		})
+	}
+}

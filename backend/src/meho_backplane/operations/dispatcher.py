@@ -308,6 +308,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -1009,7 +1010,10 @@ async def _execute_and_audit(
     try:
         # A multi-step run keeps a log of its steps, so its error result is
         # stored as uncertain when a step ended uncertain (_composite_steps).
-        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+        with (
+            track_secret_read_as(),
+            track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
+        ):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
                 connector_id=connector_id,

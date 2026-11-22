@@ -529,6 +529,7 @@ def _build_audit_entry(
         sandbox_mode=row.sandbox_mode,
         actor_sub=row.actor_sub,
         actor_name=_actor_name(row.actor_sub),
+        secret_read_as=row.secret_read_as,
         broadcast_event_id=None,
     )
 

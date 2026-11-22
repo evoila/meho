@@ -583,6 +583,10 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # The id (``sub``) of the login that a secret store accepted for the call
+    # (``meho`` when the store saw MEHO's own identity). NULL when the call
+    # read no secret. Never a token, a store path or a store address.
+    secret_read_as: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
     # redaction engine, and stores the raw payload here so an auditor can

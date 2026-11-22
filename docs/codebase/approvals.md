@@ -4002,6 +4002,10 @@ runs under the **reviewing** operator's token
 so the preflight is the right early signal while the reviewer must carry
 the same grant.
 
+The audit row of the approved call names the reviewing operator in
+`secret_read_as` (the login the secret store accepted), and `operator_sub` is
+the reviewer too. The person who asked stays on the approval request row.
+
 `k8s.secret.read_to_ref` (#3844) also registers a preflight. The op reads
 a Kubernetes Secret and writes the value to Vault through the
 `vault.kv.put` handler, so it gets the same `vault.kv.put` check on the
@@ -4053,7 +4057,8 @@ How it works:
    A deny added while the request waited still stops it.
 
 The agent's own resume (`call_operation_with_approval`) runs as the agent,
-so the agent is the caller and the requester check adds nothing. When a
+so the agent is the caller and the requester check adds nothing. Its audit row names the agent's own login id in
+`secret_read_as`. When a
 reviewer runs an opted-in op and the card has no `requester` record, or
 its `sub` does not match the row, the run is refused before any appliance
 call: `policy_denied: the requester's policy … cannot be checked … -- ask

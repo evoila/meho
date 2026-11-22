@@ -186,6 +186,11 @@ func printEntrySummary(w io.Writer, e *api.AuditEntry) {
 	}
 	field("actor_sub:", strOrDash(strDeref(e.ActorSub)))
 	field("actor_name:", strOrDash(strDeref(e.ActorName)))
+	// MEHO sends the field only with AUDIT_SECRET_READ_AS on, and it is empty
+	// when the call read no secret, so the line is left out then.
+	if login := strDeref(e.SecretReadAs); login != "" {
+		field("secret_read_as:", login)
+	}
 	field("target_id:", strOrDash(uuidDeref(e.TargetId)))
 	field("target_name:", strOrDash(strDeref(e.TargetName)))
 	field("method:", e.Method)

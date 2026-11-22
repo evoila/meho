@@ -2443,6 +2443,7 @@ type AuditEntry struct {
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
 	SandboxMode      bool                   `json:"sandbox_mode"`
+	SecretReadAs     *string                `json:"secret_read_as"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
@@ -9648,6 +9649,7 @@ type ReplayNode struct {
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
 	SandboxMode      bool                   `json:"sandbox_mode"`
+	SecretReadAs     *string                `json:"secret_read_as"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`

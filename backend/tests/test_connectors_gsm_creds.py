@@ -1077,3 +1077,69 @@ async def test_gsm_read_error_is_a_backend_neutral_credentials_read_error() -> N
     assert issubclass(GcpSecretManagerReadError, cb.CredentialsReadError)
     assert issubclass(VaultCredentialsReadError, cb.CredentialsReadError)
     assert not issubclass(GcpSecretManagerReadError, VaultCredentialsReadError)
+
+
+def _jwt_with_sub(sub: str) -> str:
+    """A compact token whose payload holds only a ``sub`` claim (made-up, unsigned)."""
+    import base64
+
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": sub}).encode()).decode().rstrip("=")
+    return f"e30.{payload}.sig"
+
+
+async def test_read_notes_caller_login_on_federation_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With federation the store saw the caller's login: the audit note names its id."""
+    from meho_backplane.auth.secret_read_as import current_secret_read_as, track_secret_read_as
+
+    _set_wif_env(monkeypatch)
+    client = _FakeClient(payload=_json_secret(username=_CANARY_USERNAME, password=_CANARY_PASSWORD))
+    backend = GcpSecretManagerBackend(
+        adc_loader=_adc_loader_returning(_SourceCreds()),
+        client_factory=_factory_for(client),
+        wif_credentials_factory=_wif_factory_returning(object()),
+    )
+
+    with track_secret_read_as():
+        await backend.load_secret_data(
+            "my-project/db-creds",
+            _make_operator(_jwt_with_sub("caller-login-1")),
+            target_name="gcp-lab-01",
+        )
+        assert current_secret_read_as() == "caller-login-1"
+
+
+async def test_read_notes_meho_under_own_identity() -> None:
+    """On the direct path the store saw no caller's login: the note is ``meho``."""
+    from meho_backplane.auth.secret_read_as import current_secret_read_as, track_secret_read_as
+
+    client = _FakeClient(payload=_json_secret(username=_CANARY_USERNAME, password=_CANARY_PASSWORD))
+    backend = GcpSecretManagerBackend(
+        adc_loader=_adc_loader_returning(_SourceCreds()),
+        client_factory=_factory_for(client),
+        impersonate_sa="",
+    )
+
+    with track_secret_read_as():
+        await backend.load_secret_data(
+            "my-project/db-creds", _make_operator(), target_name="gcp-lab-01"
+        )
+        assert current_secret_read_as() == "meho"
+
+
+async def test_failed_read_notes_no_login() -> None:
+    """A read the store refused leaves the note empty."""
+    from meho_backplane.auth.secret_read_as import current_secret_read_as, track_secret_read_as
+
+    client = _FakeClient(payload=b"{}", raises=RuntimeError("boom"))
+    backend = GcpSecretManagerBackend(
+        adc_loader=_adc_loader_returning(_SourceCreds()),
+        client_factory=_factory_for(client),
+        impersonate_sa="",
+    )
+
+    with track_secret_read_as():
+        with pytest.raises(Exception):  # noqa: B017 - any read error
+            await backend.load_secret_data(
+                "my-project/db-creds", _make_operator(), target_name="gcp-lab-01"
+            )
+        assert current_secret_read_as() is None

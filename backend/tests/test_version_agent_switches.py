@@ -97,6 +97,7 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "approval_reveal_fetch_window_seconds",
         "approval_sign_in_level",
         "audit_client_identity",
+        "audit_secret_read_as",
         "audit_wrapper_rows_retired",
         "backplane_url",
         "bedrock_default_model",

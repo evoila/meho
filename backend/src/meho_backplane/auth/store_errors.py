@@ -71,22 +71,26 @@ _STATUS_BY_CLASS: Final = {
 # The default policy finds a secret by a label and a value of 8 or more
 # characters. The store also quotes values in sentences, writes short values
 # and names its own tokens without a label. These rules cover those shapes.
+# A quoted value has no sure end (an escape, a quote or a line break can stand
+# in it), and neither has a labelled value with spaces. So the text is withheld
+# from there on, and the words in front stay.
 # A labelled value becomes "<label> <mark>": the log holds no label=value pair.
 _STORE_TOKEN: Final = re.compile(
     r"\bhv[sbr]\.[A-Za-z0-9_-]{8,}|(?<![\w./-])[sbr]\.[A-Za-z0-9_-]{24,}"
 )
-_QUOTED_VALUE: Final = re.compile(
-    r"(?P<label>(?:password|passwd|passphrase|pwd|token|secret|jwt|api_?key)\w{0,32}['\"]?)"
-    r"\s*[=:]?\s*(?:is\s+)?"
-    r"(?:\"[^\"\n]*\"|'[^'\n]*')",
+_SECRET_WORD: Final = re.compile(
+    r"passw|passphrase|passcode|pwd|token|secret(?!/| store>)|jwt|credential|psk|bearer"
+    r"|(?:api|private|access|unseal)[ _-]?key",
     re.IGNORECASE,
 )
+#: A quote or an escape. An apostrophe inside a word (``doesn't``) is none.
+_QUOTE_OR_ESCAPE: Final = re.compile(r"[\"`\\]|(?<!\w)'|'(?!\w)")
 _PLAIN_VALUE: Final = re.compile(
     r"(?P<label>(?:password|passwd|passphrase|pwd|client_secret|secret_id)\w{0,32}"
     r"(?=\s*[=:])"
     r"|(?:token|secret|jwt|api_?key)\w{0,32}(?=\s*=|\s*:\s*[^\s\d]{0,64}\d))"
-    r"\s*[=:]\s*[^\s\"']+",
-    re.IGNORECASE,
+    r"\s*[=:]\s*\S.*",
+    re.IGNORECASE | re.DOTALL,
 )
 _LABELLED_MARK: Final = rf"\g<label> {SECRET_FIELD_MARKER}"
 
@@ -136,12 +140,28 @@ def hide_store_address(text: str) -> str:
     return text
 
 
+def _withhold_from_first_quote(text: str) -> str:
+    """Withhold *text* from its first quote or escape when it names a secret.
+
+    The cut is at the start of the word that holds the quote, so no first part
+    of a value stays.
+    """
+    quote = _QUOTE_OR_ESCAPE.search(text)
+    if quote is None or not _SECRET_WORD.search(text):
+        return text
+    start = quote.start()
+    while start and not text[start - 1].isspace():
+        start -= 1
+    return f"{text[:start]}{SECRET_FIELD_MARKER}"
+
+
 def store_text_for_log(exc: BaseException) -> str:
     """Return the text of *exc* for the server log: no address and no secret.
 
     For an hvac error this is the store's own message, without the method and
     URL that hvac adds. Secrets are replaced first and the text is cut after.
-    The text is withheld when it cannot be cleaned.
+    A part that cannot be cleaned safely is withheld, and so is the whole
+    text when the cleaning fails.
     """
     try:
         if isinstance(exc, hvac.exceptions.VaultError):
@@ -150,9 +170,8 @@ def store_text_for_log(exc: BaseException) -> str:
             text = str(exc)
         if len(text) > _LOG_INPUT_LIMIT:
             return _TEXT_WITHHELD
-        text = hide_secret_text(hide_store_address(text))
+        text = hide_secret_text(_withhold_from_first_quote(hide_store_address(text)))
         text = _STORE_TOKEN.sub(SECRET_FIELD_MARKER, text)
-        text = _QUOTED_VALUE.sub(_LABELLED_MARK, text)
         text = _PLAIN_VALUE.sub(_LABELLED_MARK, text)
         cleaned = str(redact(text, get_default_policy()).redacted).strip()
     except Exception:  # fail closed, and never raise on an error path

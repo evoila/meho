@@ -35,7 +35,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vault.ops_identity_oidc import _key_in_use_error
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import _preview, dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
     _sanitize_free_text,
     result_connector_error,
@@ -43,7 +43,11 @@ from meho_backplane.operations._errors import (
     result_connector_vault_write_forbidden,
     result_vault_credentials_read_error,
 )
-from meho_backplane.operations._preview import preview_failure_reason
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    build_proposed_effect,
+    preview_failure_reason,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
 
@@ -255,6 +259,66 @@ def test_the_log_keeps_the_stores_diagnosis(text: str) -> None:
     assert store_text_for_log(hvac.exceptions.Forbidden(text)) == text
 
 
+_PART_1 = "ab" + "41"
+_PART_2 = "cd-" + "tail-9"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        'bad password "{}\\"{}"',
+        'bad password "{}\\\\\\"{}"',
+        "bad password '{}\\'{}'",
+        'bad password "{}"{}"',
+        'bad password "{} {}',
+        'bad password "{}\n{}"',
+        "bad password `{} {}`",
+        'bad password {}"{}',
+        "bad password {}\\{}",
+        'password={} "{}"',
+        "client_secret={} {}",
+        'token: {}"{}',
+        "invalid password: {} {}",
+        '{{"password": "{}\\"{}"}}',
+        '{{\\"password\\": \\"{}\\\\\\"{}\\"}}',
+        '"{}\\"{}" is not a valid password',
+    ],
+)
+async def test_both_events_withhold_a_secret_with_no_sure_end(
+    monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    text = f"{_STORE_TEXT}: " + template.format(_PART_1, _PART_2)
+    fake = _FakeClient(hvac.exceptions.InternalServerError(text))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs:
+        with pytest.raises(VaultClientError) as caught:
+            async with vault_client_for_operator(_operator()):
+                pytest.fail("body must not run when login raises")
+        result_connector_error("op", hvac.exceptions.InternalServerError(text), 1.0)
+
+    events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+    assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+    for event in events:
+        assert _STORE_TEXT in event["store_text"]
+        assert "REDACTED" in event["store_text"]
+        for part in (_PART_1, _PART_2):
+            assert part not in json.dumps(event, default=str)
+            assert part not in str(caught.value.store_text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'unknown role "reader"',
+        "the token doesn't match the claim",
+        "no handler for route secret/data/app",
+    ],
+)
+def test_the_log_keeps_text_with_no_secret_value(text: str) -> None:
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
 def test_the_log_takes_empty_and_withholds_oversized_store_text() -> None:
     assert store_text_for_log(hvac.exceptions.Forbidden()) == ""
     assert store_text_for_log(hvac.exceptions.Forbidden("x" * 9000)) == "<store text withheld>"
@@ -279,6 +343,68 @@ def test_a_wrapper_that_repeats_a_store_error_shows_the_meho_sentence() -> None:
 def test_an_approval_preview_shows_no_store_text() -> None:
     reason = preview_failure_reason(_store_error(hvac.exceptions.InternalServerError))
     assert reason == "InternalServerError: The secret store returned an error."
+
+
+def _preview_context(op_id: str) -> PreviewContext:
+    return PreviewContext(
+        descriptor=type("D", (), {"op_id": op_id})(),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={},
+    )
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_a_failed_preview_logs_the_store_detail_and_shows_the_sentence(
+    monkeypatch: pytest.MonkeyPatch, wrapped: bool
+) -> None:
+    async def _builder(_ctx: PreviewContext) -> dict[str, Any] | None:
+        store = _store_error(hvac.exceptions.InternalServerError)
+        if wrapped:
+            raise RuntimeError(f"the read failed: {store}") from store
+        raise store
+
+    op_id = "test.preview.store_failure"
+    monkeypatch.setitem(_preview._PREVIEW_BUILDERS, op_id, _builder)
+    with capture_logs() as logs:
+        effect = await build_proposed_effect(_preview_context(op_id))
+
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert "The secret store returned an error." in effect["preview_error"]
+    assert _STORE_TEXT not in json.dumps(effect)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert events[0]["op_id"] == op_id
+    assert events[0]["store_request_id"] == "req-1"
+    assert events[0]["store_status"] == 500
+    _assert_log_is_clean(events[0])
+    others = [e for e in logs if e["event"] != "vault_request_failed"]
+    assert _STORE_TEXT not in json.dumps(others, default=str)
+
+
+async def test_failed_preview_failure_keys_log_the_store_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _builder(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError("no preview")
+
+    def _keys(_ctx: PreviewContext) -> dict[str, Any]:
+        raise _store_error()
+
+    op_id = "test.preview.store_failure_keys"
+    monkeypatch.setitem(_preview._PREVIEW_BUILDERS, op_id, _builder)
+    monkeypatch.setitem(_preview._PREVIEW_FAILURE_KEYS, op_id, _keys)
+    with capture_logs() as logs:
+        effect = await build_proposed_effect(_preview_context(op_id))
+
+    assert effect is not None
+    assert _STORE_TEXT not in json.dumps(effect)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert events[0]["store_request_id"] == "req-1"
+    _assert_log_is_clean(events[0])
 
 
 def test_a_key_in_use_answer_shows_no_store_text() -> None:

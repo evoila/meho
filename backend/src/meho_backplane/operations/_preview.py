@@ -82,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
-from meho_backplane.auth.store_errors import text_without_store_detail
+from meho_backplane.auth.store_errors import log_store_error, text_without_store_detail
 from meho_backplane.broadcast.events import (
     has_snmp_word,
     is_secret_name_value_pair,
@@ -783,7 +783,10 @@ def _preview_unavailable_marker(
 
     The log line carries the same redacted reason as the row, not the
     raw exception: a builder fault can echo an upstream body (#3876).
+    A secret store failure also writes ``vault_request_failed``, with the
+    store's cleaned text and request id.
     """
+    log_store_error(exc, op_id=op_id)
     reason = preview_failure_reason(exc)
     _log.warning(
         "proposed_effect_preview_failed",
@@ -812,6 +815,7 @@ def _preview_failure_keys(
     try:
         keys = build(ctx)
     except Exception as exc:
+        log_store_error(exc, op_id=op_id)
         _log.warning(
             "proposed_effect_failure_keys_failed",
             op_id=op_id,

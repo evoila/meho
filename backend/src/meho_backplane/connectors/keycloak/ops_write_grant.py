@@ -35,9 +35,8 @@ When one of them waits for approval, :func:`with_grant_facts` adds a
   case.
 * ``members``: for a group attribute change in the login realm, the ids
   of the logins in the group (up to :data:`MEMBER_CAP`). ``None`` when
-  they could not be read, or when there are more than the cap. The
-  approval then refuses: it cannot tell whether the approver is in the
-  group.
+  they could not be read, or when there are more than the cap. The card
+  shows it; an admin may approve a change of a group they are in.
 * ``agent_view``: only in ``master`` or the target's ``admin_realm`` when
   that realm is not one of MEHO's own login. It holds the facts a caller
   reads while ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` is off: the facts of a write

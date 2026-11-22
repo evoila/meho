@@ -355,7 +355,12 @@ async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> No
         request_id = uuid.UUID(call["extras"]["approval_request_id"])
 
         async with get_sessionmaker()() as session:
-            approved = await approve_request(session, request_id, operator=approver, params=None)
+            approved = await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         assert approved.status == "approved"
 
@@ -363,7 +368,7 @@ async def test_disable_waits_for_approval_then_runs(kc: KeycloakConnector) -> No
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "ok", resumed
     assert put.call_count == 1

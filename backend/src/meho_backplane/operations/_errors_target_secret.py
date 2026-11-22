@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from meho_backplane.auth.store_errors import log_store_error
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import (
     TargetSecretForbiddenError,
@@ -76,6 +77,7 @@ def result_target_secret_not_found(
 ) -> OperationResult:
     """Build the result for a target whose ``secret_ref`` has no secret in Vault."""
     derived, message, remediation = target_secret_not_found_parts(exc, tenant_id=tenant_id)
+    log_store_error(exc, op_id=op_id)
     return OperationResult(
         status="error",
         op_id=op_id,

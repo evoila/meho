@@ -215,7 +215,8 @@ Detail payloads land in ``extras``. Codes:
     or "write" by the request method hvac keeps on the error;
   * no target (a typed ``vault.*`` op denied by the Vault ACL itself): the
     target-less generic shape. It names only the requested path. The Vault text
-    and address are in no field; the server log has them.
+    and address are in no field; the server log has the text, with the
+    address and secrets cut.
 
   The advice never says to widen the deploy-owned Vault policy.
   ``extras`` carries ``secret_ref`` / ``secret_ref_derived`` /

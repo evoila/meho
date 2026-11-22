@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
+from meho_backplane.auth.store_errors import text_without_store_detail
 from meho_backplane.broadcast.events import (
     has_snmp_word,
     is_secret_name_value_pair,
@@ -212,9 +213,11 @@ def preview_failure_reason(exc: Exception) -> str:
     password or token into its ``Status`` message (#3876), and the
     marker is stored in the durable approval row. Redaction runs first
     so the cap cannot cut a secret into a fragment the patterns no
-    longer match. If the redactor fails, the message is withheld.
+    longer match. If the redactor fails, the message is withheld. A
+    secret store error shows a sentence MEHO wrote, without the store's
+    address.
     """
-    message = str(exc)
+    message = text_without_store_detail(exc)
     if message:
         message = _redact_preview_message(message)
     reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__

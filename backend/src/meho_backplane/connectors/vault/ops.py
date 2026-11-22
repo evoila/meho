@@ -77,6 +77,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.store_errors import store_request_id, store_status, store_text_for_log
 from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
@@ -1314,7 +1315,10 @@ async def vault_capabilities_preflight(
             op_id=op_id,
             path=paths[0],
             operator_sub=operator.sub,
-            exc_info=True,
+            error_class=type(exc).__name__,
+            store_status=store_status(exc),
+            store_request_id=store_request_id(exc),
+            store_text=store_text_for_log(exc),
         )
         if not report_probe_failure:
             return None

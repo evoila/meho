@@ -419,7 +419,7 @@ def test_the_harmless_list_names_three_writes() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("write", _HARMLESS, ids=[write.op_id for write in _HARMLESS])
-async def test_in_the_login_realm_a_tenant_admin_approves_a_write_of_harmless_keys(
+async def test_in_the_login_realm_only_a_platform_admin_approves_a_write_of_harmless_keys(
     write: _Write, fake: _FakeKeycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     effect, params = await _effect(fake, write, _REALM)
@@ -428,7 +428,11 @@ async def test_in_the_login_realm_a_tenant_admin_approves_a_write_of_harmless_ke
     assert grant["platform_admin"] is False
     request_id = await _park(params, effect, op_id=write.op_id)
 
-    await _approve(request_id, _person("person-admin"), params)
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve(request_id, _person("person-admin"), params)
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
     assert await _run_check(monkeypatch, fake, request_id, write, _REALM) is None

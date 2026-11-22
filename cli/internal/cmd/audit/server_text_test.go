@@ -30,7 +30,7 @@ func assertNoControlCodes(t *testing.T, out string) {
 func TestPrintEntrySummaryEscapesControlCodes(t *testing.T) {
 	name := "bob\x1b]0;title\x07"
 	var buf bytes.Buffer
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:            mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:            mustTS(t, "2026-05-13T00:00:00Z"),
 		PrincipalSub:  "reader",

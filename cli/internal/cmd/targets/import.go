@@ -654,6 +654,7 @@ func sendRequest(
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	api.SetSessionIDHeader(req, sessionID)
 	api.SetWorkRefHeader(req)
+	api.SetCommandHeader(req)
 	api.SetTenantHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {

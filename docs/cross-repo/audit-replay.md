@@ -153,12 +153,12 @@ There are two MCP entry points for replay, split by role and scope. The split is
 
 | Tool | Role | Scope | Shape |
 |---|---|---|---|
-| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}` |
+| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Only the rows of the caller's own calls** | `{root, session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}` |
 | `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count, excluded_null_session_count, loose_row_count}` |
 
 ### `query_audit` with `shape:"tree"` (operator, self-session-only)
 
-The narrow-waist [`query_audit`](./audit-query.md#mcp-agent-surface) tool grows a `shape` argument (enum `"flat"` (default) / `"tree"`). With `shape:"tree"` it reconstructs the agent's **own** session as a `ReplayNode` forest instead of a flat page:
+The narrow-waist [`query_audit`](./audit-query.md#mcp-agent-surface) tool grows a `shape` argument (enum `"flat"` (default) / `"tree"`). With `shape:"tree"` it reconstructs the rows of the caller's **own** calls in the session as a `ReplayNode` forest instead of a flat page:
 
 ```json
 {
@@ -170,7 +170,7 @@ The narrow-waist [`query_audit`](./audit-query.md#mcp-agent-surface) tool grows 
 }
 ```
 
-The tree path is strictly self-session: `agent_session_id` must be present **and** equal to the caller's own bound MCP session id. Any other value — or absence — is rejected with JSON-RPC `-32602`. This is intentionally stricter than the flat path (which already returns other in-tenant principals' rows): an operator can replay their own trace, but replaying another session needs the admin tool.
+The tree path is self-session only: `agent_session_id` must be present (absence is rejected with JSON-RPC `-32602`). The tree holds only the rows of the caller's own calls, for every caller, a person too. A session with no rows of the caller's own calls answers like a session that does not exist: an empty tree. This is stricter than the flat path (which returns other in-tenant principals' rows to a person): replaying another session needs the admin tool.
 
 ### `meho_audit_replay` (tenant_admin, cross-session)
 

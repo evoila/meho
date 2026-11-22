@@ -363,7 +363,7 @@ def test_keycloak_ui_scope_create_modal_renders_unmissable_confirm(
     body = response.text
     assert 'data-write-gate="confirm"' in body
     assert "data-write-requires-approval" in body
-    assert "requires approval" in body
+    assert "change of rights" in body
 
 
 def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
@@ -384,7 +384,7 @@ def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
     body = response.text
     assert 'data-write-gate="confirm"' in body
     assert 'data-safety-level="dangerous"' in body
-    assert "requires approval" in body
+    assert "change of rights" in body
 
 
 def test_keycloak_ui_scope_create_without_csrf_is_403(

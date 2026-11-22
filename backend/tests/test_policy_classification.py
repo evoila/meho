@@ -746,13 +746,15 @@ async def test_every_registered_operation_keeps_its_values(
 # ---------------------------------------------------------------------------
 
 
-def _admin(sub: str = "admin-a") -> Operator:
+def _admin(sub: str = "admin-a", *, web: bool = False) -> Operator:
+    """An admin; ``web`` is a click in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
         tenant_role=TenantRole.TENANT_ADMIN,
         principal_kind=PrincipalKind.USER,
         raw_jwt="header.payload.signature",
+        web_session=web,
     )
 
 
@@ -894,14 +896,14 @@ async def test_policy_classify_registers_as_a_waiting_rights_change(
     assert role_floor_for(POLICY_CLASSIFY_OP_ID) == TenantRole.TENANT_ADMIN
     assert is_rights_change_op(POLICY_CLASSIFY_OP_ID)
 
-    # Outside an approved request nothing runs: only a second admin's approval runs it.
-    with pytest.raises(ValueError, match="second admin"):
+    # Outside an approved request a call with a token runs nothing.
+    with pytest.raises(ValueError, match="web console"):
         await policy_classify(
             _admin(), None, {"match": {"connector": "vault-*"}, "category": "secrets"}
         )
 
 
-def test_a_classify_request_needs_another_admin() -> None:
+def test_a_classify_request_needs_an_admin_in_the_console() -> None:
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=_TENANT,
@@ -913,25 +915,29 @@ def test_a_classify_request_needs_another_admin() -> None:
     assert is_rights_change(request)
     with pytest.raises(RightsChangeApprovalError):
         check_rights_change_approval(_admin("admin-a"), request)
-    check_rights_change_approval(_admin("admin-b"), request)
+    with pytest.raises(RightsChangeApprovalError):
+        check_rights_change_approval(_admin("admin-b"), request)
+    check_rights_change_approval(_admin("admin-a", web=True), request)
+    check_rights_change_approval(_admin("admin-b", web=True), request)
     operator_b = Operator(
         sub="operator-b",
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
         raw_jwt="header.payload.signature",
+        web_session=True,
     )
     with pytest.raises(RightsChangeApprovalError):
         check_rights_change_approval(operator_b, request)
 
 
-async def test_a_classify_call_waits_and_only_another_admin_approves_it(
+async def test_a_classify_call_with_a_token_waits_and_an_admin_in_the_console_approves_it(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End to end: the call waits with the mark; the asker is refused; a second admin runs it."""
+    """End to end: the call waits with the mark; no token approves it; the console does."""
     _switch(monkeypatch, True)
     await register_policy_classify_operation(embedding_service=embedding)
-    asker, approver = _admin("admin-a"), _admin("admin-b")
+    asker, approver = _admin("admin-a"), _admin("admin-b", web=True)
     call = await call_operation(
         asker,
         {

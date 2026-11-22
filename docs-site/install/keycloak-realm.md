@@ -70,6 +70,11 @@ the end, then return to the trail.
     `--dry-run` first: it reads the realm and prints each change, with
     the old and the new value, and changes nothing.
 
+    In MEHO's own login realm, a `keycloak.client.update` of a sign-in
+    client always needs a second platform admin, also from the web
+    console, and your own approve is refused. With one platform admin,
+    change the client by hand in the admin console.
+
 ## Step 1 — Trust the deployment's CA on your workstation
 
 Skip this step if your backplane and Keycloak present certificates
@@ -209,7 +214,10 @@ A realm made before this release may have the older flow
 flow; you can delete the older flow after that.
 
 **On an existing realm.** Create `meho-cli-approve` by hand as above,
-or with the operation `keycloak.client.create`. Set the two token
+or with the operation `keycloak.client.create`. In MEHO's own login
+realm, `keycloak.client.create` always needs a second platform admin,
+also from the web console, and your own approve is refused. With one
+platform admin, create the client by hand as above. Set the two token
 settings on an existing `meho-cli-approve` in the Keycloak admin console.
 In MEHO's own login realm, MEHO refuses this change through
 `keycloak.client.update`: both settings are in the client's `attributes`
@@ -415,11 +423,17 @@ managed realm), adds the name `meho-approve` (level 2) to the realm's
 sign-in levels, and makes the flow the browser flow of `meho-cli-approve`. It waits
 for approval
 ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)).
-It is a change of rights: another admin (a tenant admin or a platform
-admin) approves it, never the person who asked. So an install needs two
-admins before it runs this call. Add the second admin in Keycloak itself
-(Step 6, and put them in `MEHO-Admins` or `MEHO-Platform-Admins`).
+It is a change of rights. In MEHO's own login realm a platform admin
+makes it alone in the web console, after a fresh sign-in, or approves it
+there; outside it an admin (a tenant admin or a platform admin) approves
+it with a click in the web console, and may be the person who asked
+(see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
 With the built-in Keycloak, `helm upgrade` adds the flow without this call.
+
+In MEHO's own login realm, a platform admin makes this change alone only
+from the web console. The command below asks from the command line, so
+there the request waits for a second platform admin, and your own
+approve is refused.
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_flow \
@@ -591,11 +605,16 @@ Keycloak reads the chart's realm file only when it makes the realm.
 The chart's setup step does not add this flow to a realm that runs
 already: it is the console's own login flow. Use the operation
 `keycloak.authflow.ensure_approval_touch` instead. It waits for
-approval. It is a change of rights: another admin (a tenant admin or a
-platform admin) approves it, never the person who asked. So an install
-needs two admins before it runs this call. Add the second admin in
-Keycloak itself (Step 6, and put them in `MEHO-Admins` or
-`MEHO-Platform-Admins`).
+approval. It is a change of rights. In MEHO's own login realm a platform admin
+makes it alone in the web console, after a fresh sign-in, or approves it
+there; outside it an admin (a tenant admin or a platform admin) approves
+it with a click in the web console, and may be the person who asked
+(see [Changes of rights](../guides/approvals-and-break-glass.md#changes-of-rights)).
+
+In MEHO's own login realm, a platform admin makes this change alone only
+from the web console. The command below asks from the command line, so
+there the request waits for a second platform admin, and your own
+approve is refused.
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch \
@@ -652,6 +671,11 @@ meho operation call keycloak-admin-26.x keycloak.authflow.ensure_approval_touch 
 The way back: `keycloak.client.update` on `meho-web` with
 `{"authenticationFlowBindingOverrides": {"browser": ""}}`. The console
 then uses the realm's browser flow again.
+In MEHO's own login realm this client update always needs a second
+platform admin, also from the web console, and your own approve is
+refused. With one platform admin, clear the browser flow override of
+`meho-web` by hand in the admin console (**Clients → `meho-web` →
+Advanced → Authentication flow overrides**).
 
 ## Step 3 — Add the protocol mappers
 
@@ -1371,8 +1395,9 @@ console, with the table above.
 In MEHO's own login realm, MEHO refuses this change through the operation
 `keycloak.realm.update` (the keys `rememberMe`,
 `ssoSessionIdleTimeoutRememberMe`, `ssoSessionMaxLifespanRememberMe` and
-the passkey policy keys `webAuthnPolicyPasswordless...`). Make it in the
-Keycloak admin console.
+the passkey policy keys `webAuthnPolicyPasswordless...`). No approval lets
+it run, also not the approval of a second platform admin. Make it by hand
+in the Keycloak admin console, with the table above.
 
 **A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
 browser flow of new realms: **Condition - credential**. It skips the
@@ -1381,9 +1406,14 @@ realm. The built-in Keycloak of the chart started with a newer version, so
 its realm has the step. Without the step, a passkey replaces the password,
 but a person with a one-time code still types the code.
 
-MEHO adds the step with one operation. It waits until another admin
-approves ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
+MEHO adds the step with one operation. It waits until an admin approves
+it in the web console ([who may approve](../guides/approvals-and-break-glass.md#who-may-approve)),
 because it changes how every person of the realm logs in:
+
+In MEHO's own login realm, a platform admin makes this change alone only
+from the web console. The command below asks from the command line, so
+there the request waits for a second platform admin, and your own
+approve is refused.
 
 ```bash
 meho operation call keycloak-admin-26.x keycloak.authflow.ensure_passkey_code_skip \
@@ -1418,6 +1448,12 @@ The Keycloak server must run 26.4 or newer.
 meho operation call keycloak-admin-26.x keycloak.realm.update \
   --target <keycloak-target> --params '{"representation": {"browserFlow": "browser"}}'
 ```
+
+In MEHO's own login realm this realm change always needs a second
+platform admin, also from the web console, and your own approve is
+refused. With one platform admin, bind the flow `browser` as the
+browser flow by hand in the Keycloak admin console, under
+**Authentication**.
 
 The copy then has no effect, and you can delete it.
 

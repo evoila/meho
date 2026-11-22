@@ -456,12 +456,16 @@ async def test_password_and_tokens_leak_nowhere(
             assert preview["password_secret_ref"] == _PASSWORD_REF
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver)
+            await approve_request(
+                session, request_id, operator=approver.model_copy(update={"web_session": True})
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
-            result = await resume_dispatch_after_approval(operator=approver, request=row)
+            result = await resume_dispatch_after_approval(
+                operator=approver.model_copy(update={"web_session": True}), request=row
+            )
 
     assert result.status == "ok", result.error
     assert result.result["result"] == "accepted"

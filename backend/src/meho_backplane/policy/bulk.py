@@ -17,7 +17,7 @@ expects, so every edit surface works in two steps:
    operation, that would give an operation a conflict, or that sets back
    an "always wait" of the install's policy. Otherwise it
    calls the ``policy.classify`` operation through the normal call path.
-   That call is a change of rights: it waits until a second tenant admin
+   That call is a change of rights: it waits until a tenant admin
    approves it (:mod:`meho_backplane.connectors.policy`).
 
 REST, the CLI, the console and the admin MCP tool all use these two
@@ -293,7 +293,10 @@ async def preview_classification_edit(
 async def request_classification_edit(
     operator: Operator, edit: ClassificationEdit
 ) -> dict[str, Any]:
-    """Ask for *edit*; return the call result, which waits for a second admin.
+    """Ask for *edit*; return the call result.
+
+    The call runs at once for an admin in the web console, and waits for
+    an admin's approval in the web console otherwise.
 
     Refuses (:class:`ClassificationEditError`, no request made) an edit
     that is not valid, that matches no operation, that would give an

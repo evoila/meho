@@ -70,7 +70,7 @@ func newListCmd() *cobra.Command {
 			"no:own_change; no:wrong_group (another person's dangerous " +
 			"or destructive change needs a MEHO-Admin" +
 			"); no:role_too_low; no:rights_change (a change " +
-			"of rights: another admin must approve); no:no_approval_access; " +
+			"of rights: approve it in the web console); no:no_approval_access; " +
 			"no:not_a_person; no:not_routed (approver routing sends the " +
 			"change to other login groups). A request that is not pending shows -. " +
 			"In --json the same answer is may_approve and " +

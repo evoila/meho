@@ -6,7 +6,8 @@
 The value of a password ends at the closing quote of the JSON string it
 stands in, so a JSON log line still parses. A quote that is never closed
 on its line does not hide the log lines after it. A long line of quoted
-commands is read in linear time.
+commands, and a long run of backslashes in a double-quoted string, is
+read in linear time.
 """
 
 from __future__ import annotations
@@ -211,3 +212,19 @@ def test_a_4_mib_line_of_quoted_forms_is_read_in_linear_time(unit: str) -> None:
     four_mib = seconds(4 * 1024 * 1024)
     assert four_mib < 8 * one_mib + 0.5
     assert four_mib < 15.0
+
+
+#: A double-quoted string with a tool name and one long run of backslashes:
+#: before a ``t``, and before an escaped double quote at the closing quote.
+_BACKSLASH_RUN_ENDS: Final = ('t"', '\\""')
+
+
+@pytest.mark.parametrize("ending", _BACKSLASH_RUN_ENDS)
+def test_a_long_run_of_backslashes_in_a_double_quoted_string_is_read_in_one_step(
+    ending: str,
+) -> None:
+    text = '"mysql ' + "\\" * (200_000 - 7 - len(ending)) + ending
+    assert len(text) == 200_000
+    started = time.perf_counter()
+    redact(text, get_default_policy())
+    assert time.perf_counter() - started < 1.0

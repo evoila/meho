@@ -74,8 +74,9 @@ policy without the ``api_key`` rule such a value is not hidden.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
-again, each JSON string is decoded once per level, and the matches of
-*leave_to* are found once per text.
+again, a run of backslashes is passed in one step, each JSON string is
+decoded once per level, and the matches of *leave_to* are found once per
+text.
 """
 
 from __future__ import annotations
@@ -530,7 +531,12 @@ def _segment_spans(
         # Written backslashes before ``n`` or ``r`` (a path) belong to the word.
         start = pos
         end = _value_end(text, pos if run is None else run.end(), size, in_string=in_string)
-        if end == start:
+        if end == start and text[start] == "\\":
+            # An escaped tab or quote follows the run: pass the whole run at
+            # once, so a long run is read in linear time.
+            backslashes = _BACKSLASHES.match(text, start, size)
+            end = start + 1 if backslashes is None else backslashes.end()
+        elif end == start:
             # ``< > ( )`` is a word of its own.
             end += 1
         token = text[start:end]

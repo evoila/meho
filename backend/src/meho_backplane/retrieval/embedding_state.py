@@ -78,12 +78,12 @@ async def check_embedding_model_at_start() -> None:
     """
     global _detail
     log = structlog.get_logger()
-    configured = get_settings().retrieval_embedding_model
     try:
+        configured = get_settings().retrieval_embedding_model
         async with get_sessionmaker()() as session:
             stored = await read_embedding_state(session)
     except Exception as exc:
-        _detail = f"model={configured} record unreadable"
+        _detail = "record unreadable"
         log.warning("embedding_state_unreadable", error_class=type(exc).__name__)
         return
     if stored is None:

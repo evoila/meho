@@ -77,10 +77,10 @@ class VersionResponse(BaseModel):
     build_date: str
     chart_version: str | None
     connector_packages: list[ConnectorPackage] = []
-    agent_switches: dict[str, bool] = {}
+    agent_switches: dict[str, bool | int] = {}
 
 
-def agent_switches(settings: Settings) -> dict[str, bool]:
+def agent_switches(settings: Settings) -> dict[str, bool | int]:
     """Return each agent-facing setting of *settings*, keyed by env name, sorted.
 
     A setting is agent-facing when its field carries the

@@ -496,8 +496,15 @@ install with the connectors' raw operations ingested.
   suite. The substrate's behaviour against an actual SQLite engine is
   not contractual.
 - **IVFFlat empty-table caveat.** Building IVFFlat against an empty
-  table produces zero centroids. The expected remediation is `REINDEX
-  INDEX documents_embedding_idx` after the first backfill batch.
+  table produces zero centroids. The index then looks into one group
+  only, and the filters run after it, so the meaning half can return far
+  fewer than its 50 candidates (the test
+  `tests/integration/test_retrieve_vector_index_pg.py` found 5 of 50).
+  Two remedies. The setting `RETRIEVAL_IVFFLAT_PROBES` (0 by default,
+  at most 100) makes the vector query set `ivfflat.probes` to that
+  number for its own transaction; 0 sets nothing. Also, `REINDEX INDEX
+  documents_embedding_idx` after the first large load builds real
+  centroids.
 - **Entries written before passages existed.** Their head stays the
   search candidate (one whole-body hit, no passages) until the entry is
   written again. `meho kb ingest` rewrites every file, also unchanged

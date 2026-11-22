@@ -73,11 +73,24 @@ So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
 object or of a collection of objects, of every kind: `/api/v1/...` and
 `/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
 group: a namespace, a node, a persistent volume or a component status).
-There is no list of kinds that keep their rules. A trailing `/` counts
-the same as none. A path can have any prefix in front, for example the
-base path of a proxy. A read, a `/status` or `/scale` subresource, and
-the `status` and `finalize` subresources of a Namespace keep the rules
-of the operation
+There is no list of kinds that keep their rules. Every write to a
+sub-part of one object waits too: a path that goes on past the name of
+the object, for example a pod's `eviction` or `binding`, a Namespace's
+`finalize`, or the action of an add-on API. This includes the two
+sub-parts that waited first: a pod's `ephemeralcontainers` and the
+`approval` of a certificate signing request. Only `status` and `scale`,
+right after the name of the object, keep the rules of the operation, for
+every kind. A `status` write is where a controller reports what it sees;
+it does not change what the object asks the cluster to run. A `scale`
+write changes only the number of copies of a workload, the same change
+as `k8s.scale`. A longer path, such as `.../status/<more>`, waits.
+`status` and `scale` keep their rules only as a sub-part of one object:
+a path that also reads as a write to a collection, such as
+`/apis/<group>/<version>/namespaces/{namespace}/status`, waits, except
+the `status` of a core Namespace. A
+trailing `/` counts the same as none. A path can have any prefix in
+front, for example the base path of a proxy. A read keeps the rules of
+the operation
 (`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
 The rule reads the path of every operation made from an ingested API
 file, whatever the product. So an API file of another product whose

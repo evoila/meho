@@ -169,8 +169,10 @@ and no run approval covers it.
   token, and every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path
   of an object or of a collection of objects, of every kind, namespaced
   or cluster-wide, of an ephemeral container, or of the approval of a
-  certificate signing request. A path can have any prefix in front. A
-  `/status` or `/scale` subresource keeps the rules of the operation.
+  certificate signing request, and every write to another sub-part of one
+  object (a path that goes on past the name of the object). A path can
+  have any prefix in front. Only a `status` or `scale` sub-part right
+  after the name of the object keeps the rules of the operation.
   The match reads the path of every operation made from an ingested API
   file, whatever the product: an API file of another product whose paths
   have the same form (`/api/v1/namespaces/...`,

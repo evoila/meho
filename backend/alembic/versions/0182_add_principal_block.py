@@ -3,8 +3,8 @@
 
 """Add the ``principal_block`` table.
 
-Revision ID: 0181
-Revises: 0180
+Revision ID: 0182
+Revises: 0181
 Create Date: 2026-11-21
 
 One row for each person an admin blocked in MEHO. ``sub`` is the login id.
@@ -22,8 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0181"
-down_revision: str | None = "0180"
+revision: str = "0182"
+down_revision: str | None = "0181"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

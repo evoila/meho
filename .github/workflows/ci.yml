@@ -1531,9 +1531,18 @@ jobs:
           dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
           git show "${base}:${script}" > "${dir}/redaction_compare.py"
           git show "${base}:${snapshot}" > "${dir}/base.jsonl"
+          # The base's approved entries are already merged: they approve
+          # nothing and are never stale. No base file counts as empty.
+          approved=backend/tests/snapshots/redaction_compare_approved.yaml
+          if git cat-file -e "${base}:${approved}" 2>/dev/null; then
+            git show "${base}:${approved}" > "${dir}/base-approved.yaml"
+          else
+            printf 'approved: []\n' > "${dir}/base-approved.yaml"
+          fi
           python3 -I "${dir}/redaction_compare.py" \
             --judge "${dir}/base.jsonl" "${snapshot}" \
-            --approved backend/tests/snapshots/redaction_compare_approved.yaml
+            --approved "${approved}" \
+            --base-approved "${dir}/base-approved.yaml"
 
   connector-package-template:
     name: Connector package template

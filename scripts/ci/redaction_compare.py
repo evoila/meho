@@ -5,9 +5,10 @@
 
   --write                    write backend/tests/snapshots/redaction_compare.jsonl
                              from the current code (run from backend/ with uv run)
-  --judge BASE HEAD --approved FILE
+  --judge BASE HEAD --approved FILE [--base-approved FILE]
                              compare two snapshots; exit 1 on a difference that
-                             the approved file does not list
+                             the approved file does not list. Only the entries
+                             that are not in the base's approved file count.
 
 The judge uses only the standard library. The CI job reads this script from
 the base branch, so a pull request cannot weaken the rule that judges it.
@@ -82,8 +83,18 @@ def read_approved(path: Path) -> list[dict]:
     return entries
 
 
-def judge(base_path: Path, head_path: Path, approved_path: Path) -> int:
-    approved = read_approved(approved_path)
+def judge(
+    base_path: Path, head_path: Path, approved_path: Path, base_approved_path: Path | None = None
+) -> int:
+    """Only the entries that the pull request adds can approve a difference or be stale.
+
+    An entry that is also in the base's approved file was merged with an
+    earlier pull request: it approves nothing and never fails the job.
+    """
+    old = []
+    if base_approved_path is not None and base_approved_path.is_file():
+        old = read_approved(base_approved_path)
+    approved = [e for e in read_approved(approved_path) if e not in old]
     for entry in approved:
         if not entry.get("reason"):
             sys.exit(f"approved entry {entry} has no reason")
@@ -129,12 +140,14 @@ def main() -> int:
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--judge", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--approved")
+    parser.add_argument("--base-approved")
     args = parser.parse_args()
     if args.write:
         write()
         return 0
     if args.judge and args.approved:
-        return judge(Path(args.judge[0]), Path(args.judge[1]), Path(args.approved))
+        base_approved = Path(args.base_approved) if args.base_approved else None
+        return judge(Path(args.judge[0]), Path(args.judge[1]), Path(args.approved), base_approved)
     parser.error("use --write, or --judge BASE HEAD --approved FILE")
     return 2
 

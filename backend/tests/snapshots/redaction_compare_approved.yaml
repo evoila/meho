@@ -1,6 +1,8 @@
 # Wanted differences from the base branch for the secret-hiding compare job.
-# One entry for each difference, with a one-line reason. Remove the entry after
-# the pull request is merged: an entry that matches no difference fails the job.
+# One entry for each difference, with a one-line reason. Only the entries that
+# a pull request adds count: each must match a difference of that pull request,
+# or the job fails. Entries that are already on the base branch approve nothing
+# and never fail the job, so they can stay after the merge.
 # The file is read by a small script without a YAML library, so keep this shape:
 #
 # approved:

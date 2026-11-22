@@ -1043,8 +1043,13 @@ before a reviewer reads the pull request.
 - **A wanted difference.** List it in
   `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
   the step, the part id (or `text`, or `removed` for a dropped input) and
-  a one-line reason. An entry that
-  matches no difference fails the job, so remove the entry after the merge.
+  a one-line reason. Only the entries that the pull request adds count:
+  the job reads the base branch's approved file with `git show` too (no
+  file counts as empty). A new entry that matches no difference fails the
+  job. An entry that is already in the base's file approves nothing and
+  never fails the job, so it can stay after the merge. To approve the same
+  input, step and part again, add a new entry (for example with a new
+  reason).
 - **The rules come from the base branch.** The job reads the script and
   the snapshot of the base with `git show`, so a pull request cannot weaken
   the check that judges it. The approved file is the one of the pull

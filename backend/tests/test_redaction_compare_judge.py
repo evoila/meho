@@ -190,3 +190,64 @@ def test_a_removed_record_can_be_approved(tmp_path: Path) -> None:
         )
         == 0
     )
+
+
+def _judge_with_base_approved(
+    tmp_path: Path,
+    base: dict[str, object],
+    head: dict[str, object],
+    approved: str,
+    base_approved: str,
+) -> int:
+    (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(json.dumps(head) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
+    (tmp_path / "base-approved.yaml").write_text(base_approved, encoding="utf-8")
+    return int(
+        judge_module.judge(
+            tmp_path / "base.jsonl",
+            tmp_path / "head.jsonl",
+            tmp_path / "approved.yaml",
+            tmp_path / "base-approved.yaml",
+        )
+    )
+
+
+def test_a_merged_entry_that_matches_no_difference_passes(tmp_path: Path) -> None:
+    same = _record(["s2"], ["p0"])
+    code = _judge_with_base_approved(tmp_path, same, same, _APPROVED_SHOWN, _APPROVED_SHOWN)
+    assert code == 0
+
+
+def test_a_new_entry_that_matches_no_difference_fails_as_stale(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    same = _record(["s2"], ["p0"])
+    code = _judge_with_base_approved(tmp_path, same, same, _APPROVED_SHOWN, "approved: []\n")
+    assert code == 1
+    assert "stale" in capfd.readouterr().out
+
+
+def test_an_entry_only_in_the_base_file_does_not_approve_a_new_difference(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base, head = _record(["s2"], ["p0"]), _record([], ["p0", "s2"], "b")
+    code = _judge_with_base_approved(tmp_path, base, head, "approved: []\n", _APPROVED_SHOWN)
+    assert code == 1
+    assert "form.plain.password.bare redact: shown:s2" in capfd.readouterr().out
+
+
+def test_a_missing_base_approved_file_counts_as_empty(tmp_path: Path) -> None:
+    for name, record in (
+        ("base.jsonl", _record(["s2"], ["p0"])),
+        ("head.jsonl", _record([], ["p0", "s2"], "b")),
+    ):
+        (tmp_path / name).write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text(_APPROVED_SHOWN, encoding="utf-8")
+    code = judge_module.judge(
+        tmp_path / "base.jsonl",
+        tmp_path / "head.jsonl",
+        tmp_path / "approved.yaml",
+        tmp_path / "no-such-file.yaml",
+    )
+    assert code == 0

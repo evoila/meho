@@ -178,7 +178,7 @@ retrieve()
         ├── embedding compute (encode_one — one fastembed forward-pass)
         ├── _vector_literal (Python list[float] → pgvector text literal)
         ├── metadata_filters JSON serialisation (sort_keys=True)
-        ├── _bm25_candidates (a second time with any word, only the kb fallback below),
+        ├── _bm25_candidates (with any word instead, only the kb fallback below),
         │   then _cosine_candidates (one after the other, same session)
         │     (raw SQL — pgvector / PG-FTS operators have no SQLAlchemy ORM)
         ├── _rrf_fuse (pure function, in-process)
@@ -201,12 +201,32 @@ off by default, listed by `GET /version`) adds a fallback:
 
 - It applies only when `source="kb"` (this includes the passage rows and
   the shared scope). With the switch off, nothing changes.
-- MEHO runs the word search as always. Only when that finds **no** row,
-  it runs it once more with the `:any_word` bind set. The query is the
-  same words joined by OR, so a passage needs any word. The rank is the
-  same `ts_rank_cd`: more question words, closer together, rank higher.
-  The tenant, source, kind, filter, time window and principal rules are
-  the same text of the same statement.
+- MEHO decides **once for the whole knowledge search**, not once per
+  tenant. A search joins the caller's own passages with the shared
+  passages of the owner tenants, as the scope asks. If a passage in **any**
+  of those tenants holds every word, no tenant uses the any-word search.
+  If none does, all of them use it. The decision is in one place,
+  `kb_any_word` in `kb/service.py`; it runs the every-word search with
+  the filters of each searched tenant and stops at the first match.
+  `search_entries`, `POST /api/v1/retrieve` with `source="kb"` and the
+  similar-entry check call it and pass the answer as `any_word` to every
+  `retrieve`. `any_word=True` means: use the any-word query at once.
+  `any_word=False`: never. `any_word=None` (a single-tenant call such as
+  the UI diagnostics): that call decides alone, any word only when its
+  own every-word search finds no row.
+- The searched tenants are exactly the ones the search queries. A scope
+  that leaves the shared entries out, or a `shared` filter other than
+  `true`, leaves them out of the decision too. An every-word shared hit
+  that the search drops later (the caller has an entry with the same slug,
+  or the limit) still counts: the question keeps the every-word search,
+  as it does today.
+- The any-word query is the same words joined by OR, so a passage needs
+  any word. The rank is the same `ts_rank_cd`: more question words, closer
+  together, rank higher. The tenant, source, kind, filter, time window and
+  principal rules are the same text of the same statement, and a search
+  never reads a tenant it did not read before.
+- With the switch off, `kb_any_word` runs no query and the callers make the
+  same calls as before.
 - The meaning half and the rank fusion do not change.
 - Memory search, a search with no source and the operations search do
   not change, also with the switch on.

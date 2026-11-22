@@ -119,6 +119,7 @@ __all__ = [
     "MemoryEligibility",
     "RetrievalFacets",
     "RetrievalHit",
+    "every_word_match_exists",
     "list_retrieval_facets",
     "retrieve",
 ]
@@ -250,6 +251,7 @@ async def retrieve(
     memory_eligibility: MemoryEligibility | None = None,
     all_principals: bool = False,
     time_window: TimeWindow | None = None,
+    any_word: bool | None = None,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -328,6 +330,14 @@ async def retrieve(
         ``updated_at``, checked in both candidate SQL statements before
         their ``LIMIT`` (:data:`_TIME_WINDOW_PREDICATE_SQL`). ``None`` or
         an empty window checks nothing.
+    any_word
+        Only for ``source="kb"`` and only with the
+        ``KB_SEARCH_PLAIN_SENTENCES`` switch on (#6784). ``None`` (default):
+        this call decides alone: any word is used only when the every-word
+        search of this call finds no row. ``True``: use the any-word search
+        at once. ``False``: never use it. A search that joins several
+        tenants decides once for all of them with
+        :func:`meho_backplane.kb.service.kb_any_word` and passes the answer.
 
     Returns
     -------
@@ -404,6 +414,7 @@ async def retrieve(
             principal_sub,
             memory_kinds,
             time_window,
+            any_word,
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as owned_session:
@@ -418,7 +429,44 @@ async def retrieve(
             principal_sub,
             memory_kinds,
             time_window,
+            any_word,
         )
+
+
+async def every_word_match_exists(
+    tenant_id: uuid.UUID,
+    query: str,
+    *,
+    kind: str | None,
+    metadata_filters: dict[str, Any] | None,
+    time_window: TimeWindow | None = None,
+    principal_sub: str | None = None,
+) -> bool:
+    """Say whether a knowledge passage of *tenant_id* holds every word of *query*.
+
+    Runs the every-word search only, with the same filters as
+    ``retrieve(source="kb", ...)``. Used by
+    :func:`meho_backplane.kb.service.kb_any_word` (#6784) to decide once
+    for a search over several tenants. No embedding is computed.
+    """
+    if metadata_filters is not None and not metadata_filters:
+        metadata_filters = None
+    filters_json = (
+        json.dumps(metadata_filters, sort_keys=True) if metadata_filters is not None else None
+    )
+    async with get_sessionmaker()() as session:
+        rows = await _bm25_candidates(
+            session,
+            tenant_id,
+            query,
+            "kb",
+            kind,
+            filters_json,
+            principal_sub,
+            None,
+            time_window=time_window,
+        )
+    return bool(rows)
 
 
 def _require_memory_principal(
@@ -473,6 +521,7 @@ async def _retrieve_in_session(
     principal_sub: str | None,
     memory_kinds: list[str] | None,
     time_window: TimeWindow | None = None,
+    any_word: bool | None = None,
 ) -> list[RetrievalHit]:
     """Inner implementation -- runs the two candidate queries + RRF fusion.
 
@@ -499,6 +548,12 @@ async def _retrieve_in_session(
         json.dumps(metadata_filters, sort_keys=True) if metadata_filters is not None else None
     )
 
+    # Switch KB_SEARCH_PLAIN_SENTENCES (#6784), knowledge search only.
+    # ``any_word=True``: the caller decided for a search over several
+    # tenants, use any word at once. ``None``: this call decides alone, any
+    # word only when its every-word search finds no row. ``False`` or any
+    # other source: the every-word search only, as always.
+    use_any_word = any_word is True and source == "kb" and get_settings().kb_search_plain_sentences
     bm25_rows = await _bm25_candidates(
         session,
         tenant_id,
@@ -509,11 +564,16 @@ async def _retrieve_in_session(
         principal_sub,
         memory_kinds,
         time_window=time_window,
+        # The first search passes no new argument unless it is the any-word one.
+        **({"any_word": True} if use_any_word else {}),
     )
-    # Switch KB_SEARCH_PLAIN_SENTENCES (#6784): a knowledge search whose
-    # every-word search found nothing runs once more with any word. Memory
-    # search and the search with no source never take this branch.
-    if not bm25_rows and source == "kb" and get_settings().kb_search_plain_sentences:
+    if (
+        not bm25_rows
+        and not use_any_word
+        and any_word is None
+        and source == "kb"
+        and get_settings().kb_search_plain_sentences
+    ):
         bm25_rows = await _bm25_candidates(
             session,
             tenant_id,

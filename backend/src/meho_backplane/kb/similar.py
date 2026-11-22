@@ -55,6 +55,7 @@ from meho_backplane.kb.service import (
     _hit_slug,
     _refuse_if_not_own,
     add_shared_hits,
+    kb_any_word,
 )
 from meho_backplane.kb.shared import visible_to
 from meho_backplane.kb.stale_revision import refuse_stale_revision
@@ -278,12 +279,21 @@ async def _search(
     tenant_id: uuid.UUID, query: str, metadata_filters: dict[str, Any] | None
 ) -> list[RetrievalHit]:
     """Rank the kb passages of the tenant and of the shared scope against *query*."""
+    any_word = await kb_any_word(
+        tenant_id,
+        query,
+        kind=None,
+        own_filters=dict(metadata_filters or {}),
+        shared_filters=metadata_filters,
+        include_shared=True,
+    )
     own = await retrieve(
         tenant_id=tenant_id,
         query=query,
         source=KB_SOURCE,
         limit=CANDIDATE_LIMIT,
         metadata_filters=metadata_filters,
+        any_word=any_word,
     )
     return await add_shared_hits(
         own,
@@ -292,6 +302,7 @@ async def _search(
         kind=None,
         limit=CANDIDATE_LIMIT,
         metadata_filters=metadata_filters,
+        any_word=any_word,
     )
 
 

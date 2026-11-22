@@ -1060,3 +1060,188 @@ async def test_switch_off_rest_search_answer_is_the_same_as_main(
         reference = await _post()
     assert current
     assert current == reference
+
+
+# ---------------------------------------------------------------------------
+# KB_SEARCH_PLAIN_SENTENCES (#6784): one decision for the whole knowledge search
+#
+# The caller's own passages and the shared passages of an owner tenant are
+# searched together. The any-word search runs only when NO searched tenant has
+# a passage with every word. An every-word hit that is dropped later (the
+# caller has an entry with the same slug) still counts.
+# ---------------------------------------------------------------------------
+
+#: Own passages hold only some of these words; the shared "shared-all" holds all.
+_KBPS_Q_SHARED_ALL = "nightly rotate certificate"
+#: Own passages "restore" and "mounts" hold every word; "shared-part" holds two.
+_KBPS_Q_OWN_ALL = "backup job demo share"
+#: No passage anywhere holds "ticket".
+_KBPS_Q_NONE = "ticket backup gateway"
+
+_KBPS_SHARED_DOCS = (
+    ("shared-all", "Rotate the certificate every nightly cycle."),
+    ("shared-part", "The backup job runs weekly."),
+)
+
+
+async def _kbps_index_shared(slug: str, body: str, tenant_id: uuid.UUID) -> None:
+    fake = _make_stub_embedding_service()
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
+        await index_document(
+            tenant_id=tenant_id,
+            source="kb",
+            source_id=slug,
+            kind="kb-entry",
+            body=body,
+            metadata={"shared": True},
+        )
+
+
+@pytest.fixture
+async def kbps_shared(kbps_corpus: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tenant B owns two shared entries; tenant A is the caller."""
+    monkeypatch.setenv("KB_SHARED_TENANT_IDS", str(_KBPS_TENANT_B))
+    get_settings.cache_clear()
+    for slug, body in _KBPS_SHARED_DOCS:
+        await _kbps_index_shared(slug, body, _KBPS_TENANT_B)
+
+
+async def _kbps_entries(query: str, scope: Any, filters: dict[str, Any] | None = None) -> Any:
+    from meho_backplane.kb.service import KbService
+
+    fake = _make_stub_embedding_service()
+    with patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake):
+        return await KbService().search_entries(
+            _KBPS_TENANT_A, query, filters=filters, limit=10, scope=scope
+        )
+
+
+def _kbps_entry_shape(hits: Any) -> list[tuple[str, float, float | None, int | None]]:
+    return [(h.slug, h.fused_score, h.bm25_score, h.bm25_rank) for h in hits]
+
+
+def _kbps_scored(hits: Any) -> set[str]:
+    return {h.slug for h in hits if h.bm25_score is not None}
+
+
+# (scope, query, slugs with a word score with the switch on, same as off?)
+_KBPS_JOINED = [
+    # Own passages hold only some words, a shared passage holds all: no any-word search.
+    pytest.param("all", _KBPS_Q_SHARED_ALL, {"shared-all"}, True, id="own-partial-shared-all"),
+    # Own passages hold every word, a shared passage holds some: no any-word search.
+    pytest.param("all", _KBPS_Q_OWN_ALL, {"restore", "mounts"}, True, id="own-all-shared-partial"),
+    # No passage anywhere holds every word: any word, in both tenants.
+    pytest.param(
+        "all",
+        _KBPS_Q_NONE,
+        {"restore", "mounts", "certs", "shared-part"},
+        False,
+        id="none-anywhere",
+    ),
+    # Scope "tenant" never looks at the shared entries: the own tenant decides alone.
+    pytest.param("tenant", _KBPS_Q_SHARED_ALL, {"restore", "certs"}, False, id="tenant-scope"),
+    # Scope "shared" looks at the owner tenant only.
+    pytest.param("shared", _KBPS_Q_SHARED_ALL, {"shared-all"}, True, id="shared-scope-all"),
+    pytest.param("shared", _KBPS_Q_NONE, {"shared-part"}, False, id="shared-scope-none"),
+]
+
+
+@pytest.mark.parametrize(("scope", "query", "scored", "same_as_off"), _KBPS_JOINED)
+async def test_one_decision_for_the_whole_knowledge_search(
+    scope: str,
+    query: str,
+    scored: set[str],
+    same_as_off: bool,
+    kbps_shared: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    off = await _kbps_entries(query, scope)
+    _kbps_switch(monkeypatch, on=True)
+    on = await _kbps_entries(query, scope)
+    assert _kbps_scored(on) == scored
+    assert (_kbps_entry_shape(on) == _kbps_entry_shape(off)) is same_as_off
+
+
+async def test_dropped_every_word_shared_hit_still_counts(
+    kbps_shared: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The caller has an entry with the slug of the shared every-word entry. The
+    # shared hit is dropped (the own entry wins), but the question keeps the
+    # every-word search, as it has today: the own partial passages get no score.
+    await _kbps_index_shared("shared-all", "The nightly backup job.", _KBPS_TENANT_A)
+    _kbps_switch(monkeypatch, on=False)
+    off = await _kbps_entries(_KBPS_Q_SHARED_ALL, "all")
+    _kbps_switch(monkeypatch, on=True)
+    on = await _kbps_entries(_KBPS_Q_SHARED_ALL, "all")
+    assert _kbps_scored(on) == _kbps_scored(off) == set()
+    assert _kbps_entry_shape(on) == _kbps_entry_shape(off)
+
+
+async def test_shared_scope_left_out_by_a_filter_leaves_the_own_tenant_alone(
+    kbps_shared: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "shared": false leaves every shared entry out, so only the own tenant is
+    # searched and it decides alone: no passage there holds every word.
+    fake = _make_stub_embedding_service()
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
+        await index_document(
+            tenant_id=_KBPS_TENANT_A,
+            source="kb",
+            source_id="private",
+            kind="kb-entry",
+            body="The nightly cycle.",
+            metadata={"shared": False},
+        )
+    _kbps_switch(monkeypatch, on=True)
+    hits = await _kbps_entries(_KBPS_Q_SHARED_ALL, "all", {"shared": False})
+    assert _kbps_scored(hits) == {"private"}
+
+
+async def test_switch_off_makes_no_extra_word_query(
+    kbps_shared: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    _KBPS_MAIN_BM25_CALLS.clear()
+    with patch.object(_retriever_module, "_bm25_candidates", _kbps_main_bm25_candidates):
+        await _kbps_entries(_KBPS_Q_NONE, "all")
+    # One word search for the own tenant and one for the owner tenant, as on main.
+    assert _KBPS_MAIN_BM25_CALLS == [_KBPS_Q_NONE, _KBPS_Q_NONE]
+
+
+@pytest.mark.parametrize(("query", "scored"), [(_KBPS_Q_SHARED_ALL, {"shared-all"})])
+async def test_rest_search_makes_one_decision_for_own_and_shared(
+    query: str,
+    scored: set[str],
+    kbps_shared: None,
+    integration_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = make_rsa_keypair("kid-kbps-rest-joined")
+
+    async def _post() -> list[dict[str, Any]]:
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            token = mint_token(
+                key,
+                sub="op-kbps",
+                tenant_id=TENANT_A_ID,
+                tenant_role=TenantRole.OPERATOR.value,
+            )
+            async with httpx.AsyncClient(
+                transport=ASGITransport(app=integration_app), base_url="https://testserver"
+            ) as client:
+                response = await client.post(
+                    "/api/v1/retrieve",
+                    json={"query": query, "source": "kb", "limit": 10},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        assert response.status_code == 200, response.text
+        return list(response.json()["hits"])
+
+    _kbps_switch(monkeypatch, on=False)
+    off = await _post()
+    _kbps_switch(monkeypatch, on=True)
+    on = await _post()
+    assert {h["source_id"] for h in on if h["bm25_score"] is not None} == scored
+    assert on == off

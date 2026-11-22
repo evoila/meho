@@ -618,6 +618,7 @@ async def _word_search_calls(
     switch_on: bool,
     source: str | None,
     first_rows: list[Any],
+    any_word: bool | None = None,
 ) -> list[bool]:
     """Run one retrieve with fakes; return the ``any_word`` value of each word search."""
     monkeypatch.setenv("KB_SEARCH_PLAIN_SENTENCES", "true" if switch_on else "false")
@@ -648,6 +649,7 @@ async def _word_search_calls(
             source=source,
             session=AsyncMock(),
             all_principals=True,
+            any_word=any_word,
         )
     return calls
 
@@ -672,5 +674,36 @@ async def test_any_word_search_runs_only_for_a_kb_search_without_word_hits(
 ) -> None:
     calls = await _word_search_calls(
         monkeypatch, switch_on=switch_on, source=source, first_rows=first_rows
+    )
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    ("switch_on", "any_word", "source", "first_rows", "expected"),
+    [
+        # The caller decided for the whole search: any word at once, one query.
+        (True, True, "kb", [], [True]),
+        (True, True, "kb", [_row(uuid.uuid4(), 0.2)], [True]),
+        # The caller decided: never any word, also when the call has no word hit.
+        (True, False, "kb", [], [False]),
+        # With the switch off or another source, the caller's answer changes nothing.
+        (False, True, "kb", [], [False]),
+        (True, True, "memory", [], [False]),
+    ],
+)
+async def test_caller_decision_any_word_overrides_the_single_call_rule(
+    monkeypatch: pytest.MonkeyPatch,
+    switch_on: bool,
+    any_word: bool,
+    source: str,
+    first_rows: list[Any],
+    expected: list[bool],
+) -> None:
+    calls = await _word_search_calls(
+        monkeypatch,
+        switch_on=switch_on,
+        source=source,
+        first_rows=first_rows,
+        any_word=any_word,
     )
     assert calls == expected

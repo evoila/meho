@@ -103,6 +103,7 @@ from meho_backplane.mcp.tools._kb_similar_text import (
     SIMILAR_CHECK_TEXT,
     similar_check_for_settings,
 )
+from meho_backplane.mcp.tools._kb_word_hint import with_word_hint, word_hint_extra
 from meho_backplane.mcp.tools._search_filters import (
     FILTER_PROPERTIES,
     FILTER_TOOL_TEXT,
@@ -238,10 +239,11 @@ async def _search_knowledge_handler(
         [_wiki_hit_payload(chunk) for chunk in wiki.hits] if wiki is not None else [],
         interleave=get_settings().kb_wiki_interleave,
     )
+    extra: dict[str, Any] = {"wiki": _wiki_status_payload(wiki)} if wiki is not None else {}
     response = _bounded_search_response(
         [payload for payload, _ in ordered],
         get_settings().result_complete_response_wire_max_bytes,
-        extra={"wiki": _wiki_status_payload(wiki)} if wiki is not None else None,
+        extra={**extra, **word_hint_extra(hits)},
     )
     delivered = [hit for _, hit in ordered[: len(response["hits"])] if hit is not None]
     await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
@@ -492,7 +494,7 @@ register_mcp_tool(
         name="search_knowledge",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(SEARCH_KNOWLEDGE_SHORT),
+        for_settings=with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT)),
         description=(
             "Search the tenant's knowledge base: vendor API patterns, lab "
             "conventions, known-good runbooks, post-incident learnings. "

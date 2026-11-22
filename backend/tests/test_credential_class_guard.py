@@ -192,14 +192,22 @@ def test_the_guard_passes_a_made_up_op_with_a_credential_class_or_no_secret() ->
 
 @pytest.mark.asyncio
 async def test_the_operations_that_can_send_any_credential_get_the_credential_rule() -> None:
-    """A command in a container, a raw Proxmox write and every k8s.apply.
+    """A command in a container, a raw Proxmox write, every k8s.apply and four k8s writes.
 
     They have no credential class, because their approval card must show the
     call. The rule holds for them all the same.
     """
+    always = {
+        "k8s.exec",
+        "proxmox.api.write",
+        "k8s.apply",
+        "k8s.delete",
+        "k8s.label",
+        "k8s.annotate",
+        "k8s.namespace.create",
+    }
     registered = {row.op_id for row in await _register_all()}
-    assert {"k8s.exec", "proxmox.api.write", "k8s.apply"} <= registered
+    assert always <= registered
 
-    assert credential_call_waits("k8s.exec")
-    assert credential_call_waits("proxmox.api.write")
-    assert credential_call_waits("k8s.apply")
+    for op_id in sorted(always):
+        assert credential_call_waits(op_id), op_id

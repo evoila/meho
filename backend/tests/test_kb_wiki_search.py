@@ -754,6 +754,42 @@ async def test_with_the_switch_on_and_no_wiki_hits_the_answer_is_as_before(
     assert [slug for slug, _owner in record.await_args.args[1]] == _names(response)
 
 
+@pytest.mark.asyncio
+async def test_with_the_switch_on_a_hit_too_big_for_the_limit_keeps_none_and_records_none() -> None:
+    await _seed_wiki_tenant()
+    response, recorded = await _ordered_search(interleave=True, limit=1)
+    assert response["hits"] == []
+    assert response["delivery"] == "partial"
+    assert response["omitted_hits"] == 5
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("hint", [False, True])
+async def test_both_switches_the_word_hint_reads_store_hits_only(
+    interleave: bool, hint: bool
+) -> None:
+    """The word hint is the one main gives: wiki hits never count as word matches."""
+    await _seed_wiki_tenant()
+    store = [_store_hit(slug=f"store-{n}").model_copy(update={"bm25_score": None}) for n in (1, 2)]
+    chunks = [_WIKI_CHUNK.model_copy(update={"chunk_id": f"wiki-{n}"}) for n in (1, 2)]
+    settings = get_settings()
+    with (
+        patch.object(settings, "kb_wiki_interleave", interleave),
+        patch.object(settings, "kb_search_word_hint", hint),
+        patch(_RECORD_SEAM, new=AsyncMock()),
+    ):
+        response, _ = await _search(_operator(), store=store, corpus=_corpus(*chunks))
+    assert _names(response) == (
+        ["store-1", "wiki-1", "store-2", "wiki-2"]
+        if interleave
+        else ["store-1", "store-2", "wiki-1", "wiki-2"]
+    )
+    assert response.get("word_match") == ("none" if hint else None)
+    assert response["wiki"]["hit_count"] == 2
+
+
 # --- the wiki is not searched: the answer says why ----------------------------
 
 

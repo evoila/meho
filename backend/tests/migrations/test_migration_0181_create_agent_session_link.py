@@ -3,10 +3,10 @@
 
 """Tests for Alembic migration ``0181_create_agent_session_link``.
 
-The migration adds the table of the MCP sessions of uploaded sessions. The
-tests check that ``upgrade`` creates it with the columns of the model, that
-``downgrade`` removes it, and that the pair round-trips. SQLite is the test
-driver.
+The migration adds the tables of the MCP sessions and the CLI audit rows of
+uploaded sessions. The tests check that ``upgrade`` creates them with the
+columns of the models, that ``downgrade`` removes them, and that the pair
+round-trips. SQLite is the test driver.
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ from sqlalchemy import inspect
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.session_store.models import AgentSessionLink
+from meho_backplane.session_store.models import AgentSessionAuditLink, AgentSessionLink
 from meho_backplane.settings import get_settings
 
 _REVISION = "0181"
 _DOWN_REVISION = "0180"
-_MODELS = (AgentSessionLink,)
+_MODELS = (AgentSessionLink, AgentSessionAuditLink)
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ def _schema(sync_url: str) -> dict[str, tuple[set[str], set[str]]]:
     return found
 
 
-def test_upgrade_creates_the_table_with_the_model_columns(
+def test_upgrade_creates_the_tables_with_the_model_columns(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
@@ -84,9 +84,12 @@ def test_upgrade_creates_the_table_with_the_model_columns(
     columns, indexes = _schema(sync_url)["agent_session_link"]
     assert columns == set(AgentSessionLink.__table__.columns.keys())
     assert "agent_session_link_tenant_mcp_session_idx" in indexes
+    columns, indexes = _schema(sync_url)["agent_session_audit_link"]
+    assert columns == set(AgentSessionAuditLink.__table__.columns.keys())
+    assert "agent_session_audit_link_tenant_audit_idx" in indexes
 
 
-def test_downgrade_drops_the_table(
+def test_downgrade_drops_the_tables(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
@@ -102,4 +105,4 @@ def test_upgrade_round_trips(
     copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
-    assert set(_schema(sync_url)) == {"agent_session_link"}
+    assert set(_schema(sync_url)) == {"agent_session_link", "agent_session_audit_link"}

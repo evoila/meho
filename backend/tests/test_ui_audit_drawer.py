@@ -918,8 +918,14 @@ def _seed_uploaded_session(session_id: str, mcp_session_id: uuid.UUID) -> None:
     asyncio.run(_do())
 
 
-def test_drawer_links_a_hosted_run_row_to_its_run() -> None:
+def _session_links_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_SESSION_LINKS", "true")
+    get_settings.cache_clear()
+
+
+def test_drawer_links_a_hosted_run_row_to_its_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """A tool call of a hosted run links to the run page."""
+    _session_links_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     run_id = uuid.uuid4()
     _seed_hosted_run_session(run_id)
@@ -933,8 +939,9 @@ def test_drawer_links_a_hosted_run_row_to_its_run() -> None:
     assert f'href="/ui/agents/runs/{run_id}"' in response.text
 
 
-def test_drawer_names_the_uploaded_session_of_an_mcp_row() -> None:
+def test_drawer_names_the_uploaded_session_of_an_mcp_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """An MCP call of an uploaded session names the session and the command to read it."""
+    _session_links_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     mcp_session = uuid.uuid4()
     _seed_uploaded_session("claude-session-1", mcp_session)
@@ -952,8 +959,25 @@ def test_drawer_names_the_uploaded_session_of_an_mcp_row() -> None:
     assert "data-stored-session" not in plain.text
 
 
-def test_drawer_hides_the_stored_session_from_an_agent_login() -> None:
+def test_drawer_shows_no_stored_session_with_the_switch_off() -> None:
+    """With ``AUDIT_SESSION_LINKS`` off (the default) the drawer has no such part."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = uuid.uuid4()
+    _seed_hosted_run_session(run_id)
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, agent_session_id=run_id)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        response = _authenticated_client(session_id).get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    assert "data-stored-session" not in response.text
+
+
+def test_drawer_hides_the_stored_session_from_an_agent_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A login that may not read sessions sees no part and no session id."""
+    _session_links_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     mcp_session = uuid.uuid4()
     _seed_uploaded_session("claude-session-2", mcp_session)

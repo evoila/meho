@@ -11,8 +11,9 @@ An audit row that belongs to a stored agent session links to it:
 
 Only a viewer who may read sessions
 (:func:`~meho_backplane.session_store.audit_links.may_read_sessions`) gets
-the part. For anyone else the drawer leaves it out, the same as for a row
-with no stored session, so it gives no hint that a session exists.
+the part, and only with the switch ``AUDIT_SESSION_LINKS`` on. For anyone
+else the drawer leaves it out, the same as for a row with no stored
+session, so it gives no hint that a session exists.
 """
 
 from __future__ import annotations
@@ -21,7 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.models import AuditLog
-from meho_backplane.session_store.audit_links import may_read_sessions, stored_session_for
+from meho_backplane.session_store.audit_links import (
+    may_read_sessions,
+    session_links_on,
+    stored_session_for,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.roles import resolve_ui_operator
 
@@ -43,11 +48,12 @@ async def stored_session_context(
     db_session: AsyncSession, row: AuditLog, *, may_read: bool
 ) -> dict[str, object] | None:
     """Return the drawer's "Stored session" values for *row*, or ``None``."""
-    if not may_read or row.tenant_id is None:
+    if not may_read or row.tenant_id is None or not session_links_on():
         return None
     link = await stored_session_for(
         db_session,
         tenant_id=row.tenant_id,
+        audit_id=row.id,
         agent_session_id=row.agent_session_id,
         payload=row.payload,
     )

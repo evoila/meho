@@ -8556,7 +8556,7 @@
           "audit"
         ],
         "summary": "Show",
-        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".\n\n``stored_session_id`` names the stored agent session of the row (#4904).\nIt is filled only for a person who may read sessions\n(:func:`~meho_backplane.session_store.audit_links.may_read_sessions`);\nfor anyone else it stays ``null``, like for a row with no stored session.",
+        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".\n\n``stored_session_id`` names the stored agent session of the row (#4904).\nIt is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person\nwho may read sessions\n(:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).\nFor anyone else, and for a row with no stored session, the answer has\nno such field: it is the same as before the switch existed.",
         "operationId": "show_api_v1_audit_show__audit_id__get",
         "parameters": [
           {
@@ -29223,7 +29223,7 @@
             "type": "string",
             "nullable": true,
             "title": "Stored Session Id",
-            "description": "The stored agent session this row belongs to, for `meho sessions show <id>`. Filled only for a person who may read sessions; null for anyone else and for a row with no stored session."
+            "description": "The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session."
           }
         },
         "type": "object",
@@ -44337,8 +44337,9 @@
               "$ref": "#/components/schemas/SessionMcpLink"
             },
             "type": "array",
+            "nullable": true,
             "title": "Mcp Sessions",
-            "description": "The MCP sessions MEHO found for the session's MCP calls, at upload. Their audit rows link to this session."
+            "description": "The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on."
           }
         },
         "type": "object",

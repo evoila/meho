@@ -153,7 +153,11 @@ from meho_backplane.flight_recorder import (
     should_expose_to_agent,
 )
 from meho_backplane.flight_recorder.agent_view import agent_view_trace
-from meho_backplane.session_store.audit_links import may_read_sessions, stored_session_for
+from meho_backplane.session_store.audit_links import (
+    may_read_sessions,
+    session_links_on,
+    stored_session_for,
+)
 from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
@@ -394,9 +398,11 @@ async def show(
     to another tenant".
 
     ``stored_session_id`` names the stored agent session of the row (#4904).
-    It is filled only for a person who may read sessions
-    (:func:`~meho_backplane.session_store.audit_links.may_read_sessions`);
-    for anyone else it stays ``null``, like for a row with no stored session.
+    It is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person
+    who may read sessions
+    (:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).
+    For anyone else, and for a row with no stored session, the answer has
+    no such field: it is the same as before the switch existed.
     """
     _bind_audit_overrides()
     filters = AuditQueryFilters(audit_id=audit_id, limit=1)
@@ -405,11 +411,12 @@ async def show(
         raise HTTPException(status_code=404, detail="audit row not found")
     entry = result.rows[0]
     link = None
-    if may_read_sessions(operator):
+    if session_links_on() and may_read_sessions(operator):
         async with get_sessionmaker()() as session:
             link = await stored_session_for(
                 session,
                 tenant_id=operator.tenant_id,
+                audit_id=entry.id,
                 agent_session_id=entry.agent_session_id,
                 payload=entry.payload,
             )

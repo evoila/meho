@@ -9,10 +9,17 @@
   the session in ``stored_session_id``.
 * A hosted agent run: its tool calls carry the run id, which is the id of
   its session.
+* A ``meho`` CLI command: each of its audit rows links on its own (same
+  person, a CLI row, its ``op_id`` is a word of the command, written while
+  the command ran), since many conversations share one login session.
 * No link for a reader who may not read sessions, for a row with no stored
-  session, and for a CLI login session.
+  session, and for a CLI login session id alone.
+* All of it is behind the switch ``AUDIT_SESSION_LINKS``; with it off the
+  answers are the same as before.
 
-The object storage is an in-memory fake. Every value in this file is made up.
+SQLite checks foreign keys here, like PostgreSQL, so a link row written
+before its session row fails the upload. The object storage is an
+in-memory fake. Every value in this file is made up.
 """
 
 from __future__ import annotations
@@ -31,18 +38,20 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane.audit_query import AuditEntry
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
+from meho_backplane.db.models import AgentRunTrigger, AuditLog, Tenant
 from meho_backplane.main import app
+from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.session_store.audit_links import stored_session_for
 from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP, add_run_session
-from meho_backplane.session_store.models import AgentSessionLink
+from meho_backplane.session_store.models import AgentSessionAuditLink, AgentSessionLink
 from meho_backplane.session_store.object_store import set_object_store_for_testing
-from meho_backplane.session_store.tool_calls import tool_calls_in
+from meho_backplane.session_store.tool_calls import cli_calls_in, tool_calls_in
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -82,11 +91,21 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SESSION_STORE_ENDPOINT", "https://objects.example.com")
     monkeypatch.setenv("SESSION_STORE_BUCKET", "sessions")
     monkeypatch.setenv("SESSION_STORE_CREDENTIALS_VAULT_PATH", "secret/data/meho/session-store")
+    monkeypatch.setenv("AUDIT_SESSION_LINKS", "true")
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
+
+
+@pytest.fixture(autouse=True)
+def _enforce_sqlite_foreign_keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Check foreign keys like PostgreSQL does, so a link row can never come before its session."""
+    monkeypatch.setenv("MEHO_SQLITE_FOREIGN_KEYS", "1")
+    reset_engine_for_testing()
+    yield
+    reset_engine_for_testing()
 
 
 @pytest.fixture
@@ -131,21 +150,35 @@ def _archive(files: dict[str, bytes]) -> bytes:
 _NO_START: Any = object()
 
 
+def _bash_lines(command: str, started: datetime, ended: datetime, *, call_id: str = "b1") -> bytes:
+    """A ``Bash`` call line and its answer line, with their times."""
+    block = {"type": "tool_use", "id": call_id, "name": "Bash", "input": {"command": command}}
+    call = {"type": "assistant", "timestamp": started.isoformat(), "message": {"content": [block]}}
+    answer_block = {"type": "tool_result", "tool_use_id": call_id, "content": "ok"}
+    answer = {
+        "type": "user",
+        "timestamp": ended.isoformat(),
+        "message": {"content": [answer_block]},
+    }
+    return json.dumps(call).encode() + b"\n" + json.dumps(answer).encode() + b"\n"
+
+
 def _upload(
     client: TestClient,
     *lines: bytes,
     started_at: datetime | None = None,
     app_name: str = "claude-code",
+    session_id: str = _SID,
 ) -> Any:
     """Upload one session. With no ``started_at`` it started 10 minutes ago."""
-    data = {"session_id": _SID, "project": "infra", "app": app_name, "state": "ended"}
+    data = {"session_id": session_id, "project": "infra", "app": app_name, "state": "ended"}
     if started_at is not _NO_START:
         start = started_at or datetime.now(UTC) - timedelta(minutes=10)
         data["started_at"] = start.isoformat()
     resp = client.post(
         "/api/v1/sessions",
         data=data,
-        files={"archive": ("s.tar.gz", _archive({f"{_SID}.jsonl": b"".join(lines)}))},
+        files={"archive": ("s.tar.gz", _archive({f"{session_id}.jsonl": b"".join(lines)}))},
         headers=_headers(),
     )
     assert resp.status_code == 200, resp.text
@@ -193,7 +226,7 @@ async def _audit_row(
 def _stored_session_id(client: TestClient, row_id: uuid.UUID, **header_args: Any) -> Any:
     resp = client.get(f"/api/v1/audit/show/{row_id}", headers=_headers(**header_args))
     assert resp.status_code == 200, resp.text
-    return resp.json()["stored_session_id"]
+    return resp.json().get("stored_session_id")
 
 
 def test_tool_calls_in_reads_only_mcp_tool_calls() -> None:
@@ -220,7 +253,6 @@ async def test_an_mcp_call_of_an_uploaded_session_links_to_it(client: TestClient
     row_id = await _audit_row(agent_session_id=mcp_session, work_ref="CHG-7")
     body = _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS))
     assert body["outcome"] == "created"
-
     assert _stored_session_id(client, row_id) == _SID
     detail = client.get(f"/api/v1/sessions/{_SID}", headers=_headers()).json()
     assert detail["mcp_sessions"] == [{"mcp_session_id": str(mcp_session), "work_ref": "CHG-7"}]
@@ -267,6 +299,7 @@ async def test_rows_that_do_not_match_get_no_link(client: TestClient) -> None:
     assert _stored_session_id(client, other_tenant, tenant=_TENANT_B) is None
     async with get_sessionmaker()() as session:
         assert list(await session.scalars(select(AgentSessionLink))) == []
+        assert list(await session.scalars(select(AgentSessionAuditLink))) == []
 
 
 @pytest.mark.asyncio
@@ -332,7 +365,11 @@ async def test_an_upload_with_the_hosted_run_app_name_is_not_a_hosted_run(
     _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS), app_name=HOSTED_RUN_APP)
     async with get_sessionmaker()() as session:
         link = await stored_session_for(
-            session, tenant_id=_TENANT_A, agent_session_id=mcp_session, payload={}
+            session,
+            tenant_id=_TENANT_A,
+            audit_id=uuid.uuid4(),
+            agent_session_id=mcp_session,
+            payload={},
         )
     assert link is not None
     assert link.session_id == _SID
@@ -347,7 +384,7 @@ async def test_a_reader_without_the_session_read_right_sees_no_link(client: Test
     agent = {"principal_kind": "agent", "role": TenantRole.TENANT_ADMIN}
     resp = client.get(f"/api/v1/audit/show/{row_id}", headers=_headers(**agent))
     assert resp.status_code == 200, resp.text
-    assert resp.json()["stored_session_id"] is None
+    assert "stored_session_id" not in resp.json()
     assert _SID not in resp.text
 
 
@@ -363,6 +400,169 @@ async def test_a_hosted_run_tool_call_links_to_the_run_session(client: TestClien
     # The same id in another tenant is another tenant's row: no link.
     foreign = await _audit_row(agent_session_id=run_id, tenant_id=_TENANT_B)
     assert _stored_session_id(client, foreign, tenant=_TENANT_B) is None
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_run_session_names_the_run_and_its_work_ref(client: TestClient) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT_A, slug="tenant-a", name="Tenant A"))
+        await session.flush()
+        run = await run_lifecycle.create_run(
+            session,
+            tenant_id=_TENANT_A,
+            identity_sub="op-alice",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="CHG-9",
+        )
+        add_run_session(
+            session, run_id=run.id, tenant_id=_TENANT_A, started_by="op-alice", agent_name="ops"
+        )
+        run_id = run.id
+        await session.commit()
+    detail = client.get(f"/api/v1/sessions/{run_id}", headers=_headers())
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["mcp_sessions"] == [{"mcp_session_id": str(run_id), "work_ref": "CHG-9"}]
+
+
+@pytest.mark.asyncio
+async def test_an_upload_named_like_a_hosted_run_lists_no_run(client: TestClient) -> None:
+    _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS), app_name=HOSTED_RUN_APP)
+    detail = client.get(f"/api/v1/sessions/{_SID}", headers=_headers()).json()
+    assert detail["mcp_sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_each_cli_call_links_to_its_own_conversation_of_one_login(
+    client: TestClient,
+) -> None:
+    login = uuid.uuid4()
+    other_sid = "0b5e2a8c-7777-4222-8333-444455556666"
+    base = datetime.now(UTC) - timedelta(minutes=5)
+    cli = {"method": "DISPATCH", "extra": {SESSION_FROM_CLIENT_KEY: True}}
+    # Conversation A lists pods at minute 0; conversation B lists nodes at
+    # minute 2. Both run with the same login session id.
+    pods = await _audit_row(
+        agent_session_id=login, op_id="pods.list", occurred_at=base + timedelta(seconds=1), **cli
+    )
+    nodes = await _audit_row(
+        agent_session_id=login,
+        op_id="nodes.list",
+        occurred_at=base + timedelta(minutes=2, seconds=1),
+        **cli,
+    )
+    # A row of the same login outside both commands, and another person's row.
+    idle = await _audit_row(
+        agent_session_id=login, op_id="pods.list", occurred_at=base + timedelta(minutes=4), **cli
+    )
+    bob = await _audit_row(
+        agent_session_id=uuid.uuid4(),
+        op_id="pods.list",
+        operator_sub="op-bob",
+        occurred_at=base + timedelta(seconds=1),
+        **cli,
+    )
+    a_lines = _bash_lines("meho call k8s pods.list --json", base, base + timedelta(seconds=2))
+    b_lines = _bash_lines(
+        "cd /tmp && meho call k8s nodes.list",
+        base + timedelta(minutes=2),
+        base + timedelta(minutes=2, seconds=2),
+    )
+    first = _upload(client, a_lines, started_at=base - timedelta(minutes=1))
+    _upload(client, b_lines, started_at=base - timedelta(minutes=1), session_id=other_sid)
+
+    assert _stored_session_id(client, pods) == _SID
+    assert _stored_session_id(client, nodes) == other_sid
+    assert _stored_session_id(client, idle) is None
+    assert _stored_session_id(client, bob) is None
+    assert first["outcome"] == "created"
+    async with get_sessionmaker()() as session:
+        linked = {row.audit_id for row in await session.scalars(select(AgentSessionAuditLink))}
+    assert linked == {pods, nodes}
+
+
+@pytest.mark.asyncio
+async def test_a_cli_row_that_two_conversations_claim_links_to_neither(
+    client: TestClient,
+) -> None:
+    login = uuid.uuid4()
+    base = datetime.now(UTC) - timedelta(minutes=5)
+    row = await _audit_row(
+        agent_session_id=login,
+        op_id="pods.list",
+        method="DISPATCH",
+        extra={SESSION_FROM_CLIENT_KEY: True},
+        occurred_at=base + timedelta(seconds=1),
+    )
+    lines = _bash_lines("meho call k8s pods.list", base, base + timedelta(seconds=2))
+    _upload(client, lines, started_at=base - timedelta(minutes=1))
+    assert _stored_session_id(client, row) == _SID
+    _upload(
+        client,
+        lines,
+        started_at=base - timedelta(minutes=1),
+        session_id="0b5e2a8c-8888-4222-8333-444455556666",
+    )
+    assert _stored_session_id(client, row) is None
+
+
+def test_cli_calls_in_reads_only_finished_meho_commands() -> None:
+    start = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
+    end = start + timedelta(seconds=3)
+    no_answer = {
+        "type": "assistant",
+        "timestamp": start.isoformat(),
+        "message": {
+            "content": [
+                {"type": "tool_use", "id": "x", "name": "Bash", "input": {"command": "meho a"}}
+            ]
+        },
+    }
+    content = b"".join(
+        [
+            _bash_lines("meho call k8s pods.list", start, end, call_id="a"),
+            _bash_lines("ls -la", start, end, call_id="b"),
+            _bash_lines("echo mehoo x", start, end, call_id="c"),
+            json.dumps(no_answer).encode() + b"\n",
+            b"not json but tool_use\n",
+        ]
+    )
+    (call,) = cli_calls_in(content)
+    assert "pods.list" in call.words
+    assert (call.started_at, call.ended_at) == (start, end)
+    # A line with no time zone gives no time: the command is left out.
+    naive = _bash_lines("meho x", start.replace(tzinfo=None), end.replace(tzinfo=None))
+    assert cli_calls_in(naive) == []
+    assert cli_calls_in(content, limit=0) == []
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_nothing_links_and_answers_are_unchanged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUDIT_SESSION_LINKS", "false")
+    get_settings.cache_clear()
+    mcp_session = uuid.uuid4()
+    row_id = await _audit_row(agent_session_id=mcp_session, work_ref="CHG-7")
+    body = _upload(client, _tool_use_line("mcp__meho__call_operation", _ARGS))
+    assert body["outcome"] == "created"
+
+    show = client.get(f"/api/v1/audit/show/{row_id}", headers=_headers())
+    assert show.status_code == 200, show.text
+    assert set(show.json()) == set(AuditEntry.model_fields)
+    detail = client.get(f"/api/v1/sessions/{_SID}", headers=_headers()).json()
+    assert "mcp_sessions" not in detail
+    async with get_sessionmaker()() as session:
+        assert list(await session.scalars(select(AgentSessionLink))) == []
+        assert list(await session.scalars(select(AgentSessionAuditLink))) == []
+        upload_rows = [
+            row
+            for row in await session.scalars(select(AuditLog))
+            if (row.payload or {}).get("op_id") == "sessions.upload"
+        ]
+    assert [
+        set(row.payload) & {"linked_mcp_sessions", "linked_cli_rows"} for row in upload_rows
+    ] == [set()]
 
 
 @pytest.mark.asyncio
@@ -390,3 +590,4 @@ async def test_deleting_the_session_removes_its_links(client: TestClient) -> Non
     assert _stored_session_id(client, row_id) is None
     async with get_sessionmaker()() as session:
         assert list(await session.scalars(select(AgentSessionLink))) == []
+        assert list(await session.scalars(select(AgentSessionAuditLink))) == []

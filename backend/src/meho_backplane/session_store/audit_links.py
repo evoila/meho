@@ -20,9 +20,20 @@ Two kinds of session get a link:
   of its rows. A session with no start time gets no link: without it the
   time window has no start.
 
-A row whose session id is the CLI login session
-(:data:`~meho_backplane.operations._audit.SESSION_FROM_CLIENT_KEY`) gets
-no link: one login session spans many agent sessions.
+* **A ``meho`` CLI command of an uploaded session.** Its audit rows carry
+  the ``meho login`` session id
+  (:data:`~meho_backplane.operations._audit.SESSION_FROM_CLIENT_KEY`).
+  Many agent sessions share one login, so that id names none of them.
+  :func:`link_cli_calls` links each row on its own instead: same tenant,
+  same person, a CLI row, its ``op_id`` is a word of the command, and it
+  was written while the command ran (30 seconds of slack). The row id is
+  stored as one :class:`AgentSessionAuditLink` row. A row that two stored
+  sessions claim (two conversations of one login ran the same operation at
+  the same time) links to neither.
+
+All of it is behind the switch ``AUDIT_SESSION_LINKS`` (off by default,
+:func:`session_links_on`). Off, an upload stores no link and the read
+routes do not look one up.
 
 :func:`stored_session_for` answers the read side. Only a caller that
 :func:`may_read_sessions` may see the link; for any other caller the read
@@ -35,7 +46,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from sqlalchemy import and_, or_, select
@@ -43,17 +54,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS, Operator
 from meho_backplane.db.models import AuditLog
-from meho_backplane.operations._audit import agent_session_rows, payload_session_from_client
+from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
+    agent_session_rows,
+    payload_session_from_client,
+)
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
-from meho_backplane.session_store.models import AgentSessionLink, AgentSessionRecord
+from meho_backplane.session_store.models import (
+    AgentSessionAuditLink,
+    AgentSessionLink,
+    AgentSessionRecord,
+)
 from meho_backplane.session_store.rights import SessionRight, has_right
-from meho_backplane.session_store.tool_calls import ToolCall
+from meho_backplane.session_store.tool_calls import CliCall, ToolCall
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "StoredSessionLink",
+    "link_cli_calls",
     "link_mcp_sessions",
     "may_read_sessions",
+    "session_links_on",
     "stored_session_for",
 ]
 
@@ -64,6 +86,14 @@ _TIME_SLACK: Final[timedelta] = timedelta(minutes=5)
 #: The ``method`` of the audit row of an MCP tool call.
 _MCP_METHOD: Final[str] = "MCP"
 
+#: Clock difference allowed between the time of a ``meho`` command in the
+#: transcript and the time of its audit rows. Small, because only the time
+#: tells which command wrote a row.
+_CLI_SLACK: Final[timedelta] = timedelta(seconds=30)
+
+#: How many command words go into one ``IN`` list of the CLI row query.
+_WORDS_PER_QUERY: Final[int] = 500
+
 
 @dataclass(frozen=True)
 class StoredSessionLink:
@@ -73,6 +103,11 @@ class StoredSessionLink:
     """The id to read the session with (``meho sessions show <id>``)."""
     hosted_run: bool
     """True when the session is a hosted agent run; its id is the run id."""
+
+
+def session_links_on() -> bool:
+    """Whether the switch ``AUDIT_SESSION_LINKS`` is on (off by default)."""
+    return get_settings().audit_session_links
 
 
 def may_read_sessions(operator: Operator) -> bool:
@@ -131,8 +166,8 @@ async def link_mcp_sessions(
     """
     if not tool_calls or record.started_at is None:
         return 0
-    # No flush here: a new record is inserted at the caller's commit, which
-    # turns a lost race for the first upload into a clean 409.
+    # No flush here: the caller's commit writes the changes and turns a
+    # conflict into a clean 409. The caller inserted a new record already.
     with session.no_autoflush:
         rows = await _matching_rows(session, record, _wanted(tool_calls), record.started_at, now)
         sessions_of_call: dict[tuple[str, str], set[uuid.UUID]] = defaultdict(set)
@@ -177,6 +212,7 @@ async def stored_session_for(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    audit_id: uuid.UUID,
     agent_session_id: uuid.UUID | None,
     payload: object,
 ) -> StoredSessionLink | None:
@@ -184,8 +220,10 @@ async def stored_session_for(
 
     Call it only for a reader that :func:`may_read_sessions`.
     """
-    if agent_session_id is None or payload_session_from_client(payload):
+    if agent_session_id is None:
         return None
+    if payload_session_from_client(payload):
+        return await _stored_session_of_cli_row(session, tenant_id=tenant_id, audit_id=audit_id)
     linked = select(AgentSessionLink.record_id).where(
         AgentSessionLink.tenant_id == tenant_id,
         AgentSessionLink.mcp_session_id == agent_session_id,
@@ -212,3 +250,98 @@ async def stored_session_for(
     # An upload may name any app, so a hosted run also needs the run id.
     hosted_run = row.id == agent_session_id and row.app == HOSTED_RUN_APP
     return StoredSessionLink(session_id=row.session_id, hosted_run=hosted_run)
+
+
+async def _stored_session_of_cli_row(
+    session: AsyncSession, *, tenant_id: uuid.UUID, audit_id: uuid.UUID
+) -> StoredSessionLink | None:
+    """Return the one stored session that claims the CLI row *audit_id*, or ``None``."""
+    rows = (
+        await session.execute(
+            select(AgentSessionRecord.session_id)
+            .join(AgentSessionAuditLink, AgentSessionAuditLink.record_id == AgentSessionRecord.id)
+            .where(
+                AgentSessionAuditLink.tenant_id == tenant_id,
+                AgentSessionAuditLink.audit_id == audit_id,
+                AgentSessionRecord.tenant_id == tenant_id,
+            )
+            .limit(2)
+        )
+    ).all()
+    # Two sessions claim the row: it says nothing about which one ran it.
+    if len(rows) != 1:
+        return None
+    return StoredSessionLink(session_id=rows[0].session_id, hosted_run=False)
+
+
+def _cli_row_matches(op_id: object, occurred_at: datetime, calls: Sequence[CliCall]) -> bool:
+    if not isinstance(op_id, str):
+        return False
+    if occurred_at.tzinfo is None:
+        # SQLite gives the stored UTC time without its time zone.
+        occurred_at = occurred_at.replace(tzinfo=UTC)
+    return any(
+        op_id in call.words
+        and call.started_at - _CLI_SLACK <= occurred_at <= call.ended_at + _CLI_SLACK
+        for call in calls
+    )
+
+
+async def _matching_cli_rows(
+    session: AsyncSession, record: AgentSessionRecord, calls: Sequence[CliCall]
+) -> set[uuid.UUID]:
+    op_id = AuditLog.payload["op_id"].as_string()
+    words = sorted(set().union(*(call.words for call in calls)))
+    begin = min(call.started_at for call in calls) - _CLI_SLACK
+    end = max(call.ended_at for call in calls) + _CLI_SLACK
+    matched: set[uuid.UUID] = set()
+    for start in range(0, len(words), _WORDS_PER_QUERY):
+        result = await session.execute(
+            select(AuditLog.id, op_id, AuditLog.occurred_at).where(
+                AuditLog.tenant_id == record.tenant_id,
+                AuditLog.operator_sub == record.uploaded_by_sub,
+                AuditLog.agent_session_id.is_not(None),
+                AuditLog.payload[SESSION_FROM_CLIENT_KEY].as_boolean().is_(True),
+                op_id.in_(words[start : start + _WORDS_PER_QUERY]),
+                AuditLog.occurred_at >= begin,
+                AuditLog.occurred_at <= end,
+            )
+        )
+        matched.update(
+            row_id for row_id, row_op, when in result.all() if _cli_row_matches(row_op, when, calls)
+        )
+    return matched
+
+
+async def link_cli_calls(
+    session: AsyncSession,
+    record: AgentSessionRecord,
+    cli_calls: Sequence[CliCall],
+    *,
+    now: datetime,
+) -> int:
+    """Store the audit rows of the ``meho`` commands *cli_calls* for *record*; the caller commits.
+
+    Returns how many new audit rows were linked.
+    """
+    if not cli_calls:
+        return 0
+    with session.no_autoflush:
+        matched = await _matching_cli_rows(session, record, cli_calls)
+        if not matched:
+            return 0
+        existing = set(
+            await session.scalars(
+                select(AgentSessionAuditLink.audit_id).where(
+                    AgentSessionAuditLink.record_id == record.id
+                )
+            )
+        )
+    new = sorted(matched - existing)
+    session.add_all(
+        AgentSessionAuditLink(
+            record_id=record.id, audit_id=audit_id, tenant_id=record.tenant_id, linked_at=now
+        )
+        for audit_id in new
+    )
+    return len(new)

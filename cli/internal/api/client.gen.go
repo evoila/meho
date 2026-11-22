@@ -2480,7 +2480,7 @@ type AuditEntryDetail struct {
 	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 
-	// StoredSessionId The stored agent session this row belongs to, for `meho sessions show <id>`. Filled only for a person who may read sessions; null for anyone else and for a row with no stored session.
+	// StoredSessionId The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session.
 	StoredSessionId *string             `json:"stored_session_id"`
 	TargetId        *openapi_types.UUID `json:"target_id"`
 	TargetName      *string             `json:"target_name"`
@@ -11407,8 +11407,8 @@ type SessionDetail struct {
 	// LastSeenAt When MEHO last got an upload for this session.
 	LastSeenAt time.Time `json:"last_seen_at"`
 
-	// McpSessions The MCP sessions MEHO found for the session's MCP calls, at upload. Their audit rows link to this session.
-	McpSessions   *[]SessionMcpLink   `json:"mcp_sessions,omitempty"`
+	// McpSessions The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on.
+	McpSessions   *[]SessionMcpLink   `json:"mcp_sessions"`
 	Outcome       *string             `json:"outcome"`
 	Project       string              `json:"project"`
 	SessionId     string              `json:"session_id"`

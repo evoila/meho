@@ -79,6 +79,10 @@ class SessionUploadPart(BaseModel):
     files: dict[str, SessionUploadFile]
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class SessionMcpLink(BaseModel):
     """One MCP session whose calls are in this session."""
 
@@ -95,10 +99,12 @@ class SessionDetail(SessionSummary):
 
     files: dict[str, SessionFileState]
     uploads: list[SessionUploadPart]
-    mcp_sessions: list[SessionMcpLink] = Field(
-        default_factory=list,
-        description="The MCP sessions MEHO found for the session's MCP calls, at upload. "
-        "Their audit rows link to this session.",
+    mcp_sessions: list[SessionMcpLink] | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description="The MCP sessions of the session's calls: for an upload, the ones MEHO "
+        "found at upload; for a hosted agent run, the run itself. Their audit rows link to "
+        "this session. Sent only with the switch AUDIT_SESSION_LINKS on.",
     )
 
 

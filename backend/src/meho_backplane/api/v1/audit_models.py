@@ -69,6 +69,10 @@ __all__ = [
 ]
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class AuditEntryDetail(AuditEntry):
     """The 200 body of ``GET /api/v1/audit/show/{audit_id}``: one row, and its stored session.
 
@@ -80,9 +84,10 @@ class AuditEntryDetail(AuditEntry):
 
     stored_session_id: str | None = Field(
         default=None,
+        exclude_if=_is_none,
         description="The stored agent session this row belongs to, for "
-        "`meho sessions show <id>`. Filled only for a person who may read "
-        "sessions; null for anyone else and for a row with no stored session.",
+        "`meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS "
+        "on, to a person who may read sessions, for a row with a stored session.",
     )
 
 

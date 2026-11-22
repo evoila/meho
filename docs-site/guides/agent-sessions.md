@@ -30,13 +30,8 @@ MEHO keeps:
   project, app, start and end time, state (`open`, `ended` or
   `unfinished`) and the file hashes;
 - one audit row for each upload, read and delete;
-- the MCP sessions of the session's MEHO calls. MEHO finds them in its
-  audit log at upload time: the same person, the same tool and the same
-  arguments, inside the session's start and end time. So the audit row of
-  each such call links to the session (see "From an audit row to its
-  session" below). A call that two of your agents made at the same time
-  with the same arguments is skipped, because it does not show which
-  agent made it. A session with no start time gets no link.
+- with the switch `AUDIT_SESSION_LINKS` on: the links from MEHO's audit
+  log to the session (see "From an audit row to its session" below).
 
 MEHO never keeps:
 
@@ -311,7 +306,23 @@ answers `404 session_not_found`.
 
 ## From an audit row to its session
 
-An audit row of a call that is part of a stored session names that
+This part works only with the switch `AUDIT_SESSION_LINKS` set to `true`
+(off by default). With it off, MEHO stores no links and its answers do not
+change.
+
+At upload time MEHO finds the audit rows of the session's MEHO calls:
+
+- an MCP call: the same person, the same tool and the same arguments,
+  inside the session's start and end time. A call that two of your agents
+  made at the same time with the same arguments is skipped, because it
+  does not show which agent made it. A session with no start time gets no
+  link.
+- a `meho` command the agent ran: the same person, the operation the
+  command names, written while the command ran. Two agents that share one
+  `meho login` still get their own rows. A row that both of them could
+  have written gets no link.
+
+Then an audit row of a call that is part of a stored session names that
 session. A person with the right to read sessions sees it:
 
 - `meho audit show <audit-id>` prints `stored_session: <id>`;
@@ -319,9 +330,10 @@ session. A person with the right to read sessions sees it:
 - the console's audit drawer shows a "Stored session" part. For a run that
   MEHO started itself, it links to the run page.
 
-Read the session with `meho sessions show <id>`. A reader without the
-right, and a row with no stored session, get no link. A call made with the
-`meho` CLI gets no link either.
+Read the session with `meho sessions show <id>`. It lists the MCP
+sessions of the session; for a run that MEHO started itself, the run and
+its ticket id. A reader without the right, and a row with no stored
+session, get no link.
 
 ## Retention per tenant
 

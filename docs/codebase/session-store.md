@@ -32,7 +32,8 @@ for example MinIO. The customer brings its own.
   See "Laptop uploader" below.
 
 - An audit row of a call that is part of a stored session links to that
-  session. See "Links from audit rows" below.
+  session, with the switch `AUDIT_SESSION_LINKS` on (off by default). See
+  "Links from audit rows" below.
 
 Not in this part: a review page.
 
@@ -110,6 +111,8 @@ is two separate sessions.
 | `AgentSessionEvent` | `models.py` | One saved event of a hosted agent run: kind, checked data, quarantine flag, `seq` |
 | `RunEventLog` | `hosted_runs.py` | Saves the events of one hosted run, in order, when they happen |
 | `AgentSessionLink` | `models.py` | One MCP session whose calls are in an uploaded session, with the newest work reference (ticket id) of those calls |
+| `AgentSessionAuditLink` | `models.py` | One audit row of a `meho` CLI command in an uploaded session |
+| `CliCall` | `tool_calls.py` | One `meho` command of a transcript: its words, and when it started and ended |
 | `StoredSessionLink` | `audit_links.py` | The stored session of one audit row: its id, and whether it is a hosted run |
 
 The tables come from migrations `0152`, `0162` (`agent_session_event`) and
@@ -415,6 +418,21 @@ console follows them live through `GET /ui/agents/runs/{handle}/events`
 An operator who looks at an audit row can open the session the call came
 from. The code is in `session_store/audit_links.py`.
 
+**The switch.** All of it is behind `AUDIT_SESSION_LINKS` (a `Settings`
+field marked agent-facing, off by default). It stays off until model tests
+show that it helps. With it off:
+
+- an upload stores no new link, and its audit row has no
+  `linked_mcp_sessions` or `linked_cli_rows` key;
+- `GET /api/v1/audit/show/{audit_id}` has no `stored_session_id` field, so
+  `meho audit show` prints no `stored_session:` line;
+- `GET /api/v1/sessions/{session_id}` has no `mcp_sessions` field;
+- the console's audit drawer has no "Stored session" part.
+
+So every answer is the same as before the switch existed. With it on, the
+two new answer fields are left out when they are empty (`exclude_if`), so
+an agent login and a row with no stored session still get the old answer.
+
 **Which rows link.** A row links when its `agent_session_id` belongs to a
 stored session:
 
@@ -422,7 +440,10 @@ stored session:
   `agent_session_id` (`operations/_audit.py`). The session record of the
   run has the same id, so no extra row is needed. A child run (one agent
   starts another) has its own run id and no session, so its rows do not
-  link.
+  link. `GET /api/v1/sessions/{run id}` lists the run itself in
+  `mcp_sessions`, with the `work_ref` (ticket id) the run was started with
+  (`agent_run.work_ref`). An upload that only names the hosted run app has
+  no run row, so it lists no run.
 - **An uploaded session.** At each upload with new bytes, the worker
   process also finds the MCP tool calls in the checked tails of the
   `.jsonl` files (`tool_calls.py`): content blocks
@@ -444,7 +465,11 @@ stored session:
   rows. Every audit row of that MCP session then links to the uploaded
   session, also the rows of calls whose transcript line did not match.
   The upload's audit row says how many MCP sessions were new
-  (`linked_mcp_sessions`). `GET /api/v1/sessions/{session_id}` lists them
+  (`linked_mcp_sessions`).
+
+  The new session row is written (flushed) before its link rows, because
+  the link rows refer to it. The unit of work does not order the rows of
+  two models with no `relationship()` between them by their foreign key. `GET /api/v1/sessions/{session_id}` lists them
   in `mcp_sessions`, and `meho sessions show` prints them.
 
   The hash is made from the checked arguments. A secret-named value
@@ -459,9 +484,22 @@ stored session:
   that writes its own `op_id` (for example `search_docs` writes
   `meho.docs.search`) never matches its transcript name. Other calls of
   the same MCP session can still link it.
-- **A CLI call** (its session id is the `meho login` session, payload key
-  `session_from_client`) never links. One login session spans many agent
-  sessions, so it does not name one of them.
+- **A `meho` CLI command of an uploaded session.** Its audit rows carry the
+  `meho login` session id (payload key `session_from_client`). Many agent
+  sessions share one login, so that id does not name one of them, and
+  MEHO never links the whole login session. It links each row on its own
+  instead. The worker finds the `meho` commands in the checked tails
+  (`cli_calls_in` in `tool_calls.py`): a `Bash` tool call whose `command`
+  runs `meho`, and the `tool_result` line of its answer. The `timestamp`
+  of the two lines is when the command ran. A command whose answer line
+  is not in the same upload is left out. A CLI row then links when it has
+  the same tenant and person, its `op_id` is a word of the command, and it
+  was written while the command ran (30 seconds of clock slack). Each such
+  row id is stored as one `agent_session_audit_link` row. The upload's
+  audit row counts the new ones (`linked_cli_rows`). A row that two stored
+  sessions claim (two conversations of one login ran the same operation
+  at the same time) links to neither. A command that names no `op_id`
+  (for example `meho vmware vm list`) links no row.
 
 **Who sees the link.** Only a person with the `read` right of the store
 (`may_read_sessions`: `operator` and up, not an agent, service or runner
@@ -478,7 +516,8 @@ the same as for a row with no stored session.
   uploaded session it shows the session id and `meho sessions show <id>`.
 - `meho audit show` prints `stored_session: <id> (meho sessions show <id>)`.
 
-Deleting a session (by hand or by the cleanup job) deletes its link rows.
+Deleting a session (by hand or by the cleanup job) deletes both kinds of
+link rows.
 
 ## Dependencies
 

@@ -142,7 +142,12 @@ a release identity no approved request counts). Each one gets the
 connector hides become the marker, the parent of a step keeps only its
 op id, and its handoff row is deleted. This covers rows stored by an
 older release, for example a `k8s.apply` of a Secret whose manifest is
-still in `params`, or in the params of its parent. It reads 500 rows per
+still in `params`, or in the params of its parent. An approved request of
+another release also ends as `expired` in the same transaction, with one
+decision audit row (reason `release_changed`) and an `approval.expired`
+step event after the commit. So during a rolling update a MEHO that still
+runs the older release cannot start a request whose inputs are gone: its
+claim finds no `approved` row. It reads 500 rows per
 transaction, in the order of their id, writes only rows that change, and
 logs the counts (`approval_stored_values_cleaned`). A failure is logged and
 the start goes on.
@@ -179,7 +184,9 @@ the payload. A request already past its deadline expires as the TTL sweep
 would expire it, with no extra reason. This runs whether or not
 `APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
 TTL clean-up. A failure is logged and the start goes on; the check below
-still stops any old approval from running.
+still stops any old approval from running. Right after it, the start-up
+clean-up above ends every approved request of another release that was
+never started, with the same reason.
 
 **Before an approved run.** Both resume paths call
 `approval_queue.refuse_resume_if_release_changed()` before they run

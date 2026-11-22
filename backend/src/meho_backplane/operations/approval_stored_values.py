@@ -15,7 +15,9 @@ Two parts:
   runs it next to the expiry of waiting requests.
 * :func:`hide_values_of_requests_that_cannot_run` -- run at start-up. Every
   request that is not waiting, was never started and cannot run gets
-  the same clean-up, in small batches.
+  the same clean-up, in small batches. An approved request of another
+  release also ends as ``expired`` in the same transaction, so no MEHO of
+  any release can start it after its inputs are gone.
 """
 
 from __future__ import annotations
@@ -34,11 +36,15 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
+    ApprovalExpiredReason,
     _as_utc,
     _check_reviewer_role,
     _expire_request,
     _now,
+    _resolve_default_ttl,
+    expiry_operator,
     params_with_secret_fields_hidden,
+    record_approval_step_event,
     resume_parent_without_inputs,
 )
 from meho_backplane.version import running_release_id
@@ -117,6 +123,8 @@ class CleanUpCount:
     #: Rows whose params or parent inputs were rewritten.
     params_hidden: int = 0
     handoffs_removed: int = 0
+    #: Approved requests of another release that ended as ``expired``.
+    approvals_ended: int = 0
     batches: int = 0
 
 
@@ -143,30 +151,70 @@ def _cannot_run_clause(running_release: str | None) -> Any:
     return and_(ended, ApprovalRequest.resumed_at.is_(None))
 
 
-async def _clean_batch(
-    session: AsyncSession, rows: list[ApprovalRequest], count: CleanUpCount
+async def _end_approval(
+    session: AsyncSession, request: ApprovalRequest, *, running_release: str | None
 ) -> None:
-    """Hide the secret-named values of *rows*, drop their parent inputs and handoff rows."""
-    for request in rows:
-        hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
-        parent = resume_parent_without_inputs(request.resume_parent)
-        written = False
-        if hidden is not None and hidden != request.params:
-            request.params = hidden
-            written = True
-        if parent is not None:
-            request.resume_parent = parent
-            written = True
-        if written:
-            count.params_hidden += 1
+    """End an approved request of another release as ``expired``, with its audit row.
+
+    Its time to start becomes the end of the TTL after its decision, as in
+    :func:`expire_unclaimed_approved_requests`, so a request that ends here
+    before that time reads with the reason ``release_changed``.
+    """
+    default_ttl = _resolve_default_ttl()
+    if request.decided_at is not None:
+        request.expires_at = _as_utc(request.decided_at) + default_ttl
+    await _expire_request(
+        session,
+        request,
+        operator=expiry_operator(request.tenant_id),
+        cutoff=_now(),
+        default_ttl=default_ttl,
+        extra_payload={
+            "reason": ApprovalExpiredReason.RELEASE_CHANGED.value,
+            "request_release": request.release_id,
+            "running_release": running_release,
+        },
+    )
+
+
+async def _clean_batch(
+    session: AsyncSession,
+    rows: list[ApprovalRequest],
+    count: CleanUpCount,
+    *,
+    running_release: str | None = None,
+) -> list[ApprovalRequest]:
+    """Clean *rows*; return the approved requests that ended in this batch.
+
+    Deletes their handoff rows, hides the secret-named values of their
+    params and drops their parent inputs. An approved request ends as
+    ``expired`` in the same transaction.
+    """
     removed = await session.execute(
         delete(ApprovalExecutionPayload)
         .where(ApprovalExecutionPayload.request_id.in_([request.id for request in rows]))
         .returning(ApprovalExecutionPayload.handle)
     )
     count.handoffs_removed += len(removed.all())
+    ended: list[ApprovalRequest] = []
+    for request in rows:
+        before = (request.params, request.resume_parent)
+        if request.status == ApprovalRequestStatus.APPROVED.value:
+            await _end_approval(session, request, running_release=running_release)
+            ended.append(request)
+        else:
+            hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
+            if hidden is not None and hidden != request.params:
+                request.params = hidden
+            parent = resume_parent_without_inputs(request.resume_parent)
+            if parent is not None:
+                request.resume_parent = parent
+        if (request.params, request.resume_parent) != before:
+            count.params_hidden += 1
+    count.approvals_ended += len(ended)
     count.requests_read += len(rows)
     count.batches += 1
+    return ended
 
 
 async def hide_values_of_requests_that_cannot_run(
@@ -188,8 +236,15 @@ async def hide_values_of_requests_that_cannot_run(
     Reads *batch_size* rows per transaction, in the order of their id, so a
     large table never holds one long transaction. Rows another transaction
     holds are skipped; the next start reads them again.
+
+    An approved request of another release also ends as ``expired`` in the
+    transaction that removes its inputs, with one decision audit row
+    (reason ``release_changed``) and an ``approval.expired`` step event
+    after the commit. So a MEHO that still runs the older release during a
+    rolling update cannot start it any more.
     """
-    clause = _cannot_run_clause(running_release_id())
+    running_release = running_release_id()
+    clause = _cannot_run_clause(running_release)
     count = CleanUpCount()
     last_id: uuid.UUID | None = None
     sessionmaker = get_sessionmaker()
@@ -206,9 +261,16 @@ async def hide_values_of_requests_that_cannot_run(
             rows = list((await session.execute(stmt)).scalars().all())
             if not rows:
                 break
-            await _clean_batch(session, rows, count)
+            ended = await _clean_batch(session, rows, count, running_release=running_release)
             await session.commit()
             last_id = rows[-1].id
+        for request in ended:
+            await record_approval_step_event(
+                tenant_id=request.tenant_id,
+                request=request,
+                decision="expired",
+                audit_id=request._audit_id,  # type: ignore[attr-defined]
+            )
         if len(rows) < batch_size:
             break
     _log.info(
@@ -216,6 +278,7 @@ async def hide_values_of_requests_that_cannot_run(
         requests_read=count.requests_read,
         params_hidden=count.params_hidden,
         handoffs_removed=count.handoffs_removed,
+        approvals_ended=count.approvals_ended,
         batches=count.batches,
     )
     return count

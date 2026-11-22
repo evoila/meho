@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.agent.approval_wait import _lost_claim_envelope
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -305,10 +306,46 @@ async def test_an_old_row_of_an_apply_of_a_secret_has_its_manifest_hidden(
 
     row = await _load(tenant_id, request_id)
     assert row.params == {"manifest": _MARKER}
-    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.status == ApprovalRequestStatus.EXPIRED.value
     assert await _handoff_rows(request_id) == 0
     assert count.params_hidden == 1
     assert count.handoffs_removed == 1
+    assert count.approvals_ended == 1
+
+
+@pytest.mark.asyncio
+async def test_an_approved_row_of_another_release_ends_with_its_clean_up(
+    running_release: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id = await _tenant()
+    params = {"manifest": _SECRET_MANIFEST}
+    request_id = await _park(tenant_id, _APPLY_OP, params, release_id="release-a")
+    await _store_the_old_way(tenant_id, request_id, params)
+    await _store_a_parent_the_old_way(tenant_id, request_id, {"admin_password": _PW, **params})
+
+    await hide_values_of_requests_that_cannot_run()
+
+    row = await _load(tenant_id, request_id)
+    assert row.status == ApprovalRequestStatus.EXPIRED.value
+    assert approval_expired_reason(row) is ApprovalExpiredReason.RELEASE_CHANGED
+    async with get_sessionmaker()() as s:
+        decisions = (
+            await s.scalars(
+                select(AuditLog).where(
+                    AuditLog.path == "approval.decision", AuditLog.tenant_id == tenant_id
+                )
+            )
+        ).all()
+    assert [d.status_code for d in decisions] == [410]
+
+    # A MEHO that still runs the release of the request cannot start it.
+    monkeypatch.setattr(approval_queue_module, "running_release_id", lambda: "release-a")
+    assert await claim_resume(request_id) is False
+    async with get_sessionmaker()() as s:
+        assert await consume_remote_write_approval(s, row) is False
+    after = await _load(tenant_id, request_id)
+    assert after.resumed_at is None
+    assert after.resume_parent == {"op_id": "example.deploy"}
 
 
 async def _store_a_parent_the_old_way(
@@ -434,9 +471,11 @@ async def test_the_clean_up_of_many_rows_runs_in_batches(
     sizes: list[int] = []
     real_batch = approval_stored_values._clean_batch
 
-    async def _recording_batch(session: Any, rows: list[ApprovalRequest], count: Any) -> None:
+    async def _recording_batch(
+        session: Any, rows: list[ApprovalRequest], count: Any, **kwargs: Any
+    ) -> list[ApprovalRequest]:
         sizes.append(len(rows))
-        await real_batch(session, rows, count)
+        return await real_batch(session, rows, count, **kwargs)
 
     monkeypatch.setattr(approval_stored_values, "_clean_batch", _recording_batch)
 

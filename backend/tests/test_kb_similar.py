@@ -197,6 +197,29 @@ async def test_same_product_and_version_comes_before_close_meaning() -> None:
     assert filters() == [{"product": "vcenter", "version": "8.0"}, None]
 
 
+@pytest.mark.parametrize("switch", ["false", "true"])
+async def test_search_needs_every_word_with_the_plain_sentences_switch(
+    switch: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check passes ``any_word=False`` and never asks ``kb_any_word``."""
+    monkeypatch.setenv("KB_SEARCH_PLAIN_SENTENCES", switch)
+    get_settings.cache_clear()
+    tenant = uuid.uuid4()
+    await _seed(tenant, "snapshot-revert")
+    mock, _ = _fake_retrieve(tenant, close={"snapshot-revert": 0.93})
+    probe = AsyncMock(return_value=True)
+    with (
+        patch("meho_backplane.kb.similar.retrieve", mock),
+        patch("meho_backplane.kb.service.every_word_match_exists", probe),
+    ):
+        similar = await find_similar_entries(
+            tenant, "How to revert a snapshot.", {}, actor_sub="a", may_change_any=False
+        )
+    assert [(e.slug, e.score) for e in similar] == [("snapshot-revert", 0.93)]
+    assert [call.kwargs["any_word"] for call in mock.await_args_list] == [False]
+    probe.assert_not_awaited()
+
+
 async def test_entries_below_the_threshold_are_not_listed() -> None:
     tenant = uuid.uuid4()
     await _seed(tenant, "near-copy")

@@ -1284,3 +1284,38 @@ async def test_any_word_search_counts_a_repeated_word_once(
     # 60 words, but only "backup" and the 30 made-up words are different.
     query = " ".join(["backup"] * 30 + _KBPS_FILLER[:30] + ["certificate"])
     assert set(_kbps_word_scores(await _kbps_search(query))) == {"restore", "mounts", "certs"}
+
+
+# ---------------------------------------------------------------------------
+# KB_SEARCH_PLAIN_SENTENCES (#6784): the similar-entry check keeps the
+# every-word search, so its answer does not change with the switch.
+# ---------------------------------------------------------------------------
+
+
+async def test_similar_entry_search_ignores_the_switch(
+    kbps_shared: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meho_backplane.kb import similar
+
+    real = _retriever_module._bm25_candidates
+    calls: list[tuple[str, bool]] = []
+
+    async def _spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append((str(args[1]), bool(kwargs.get("any_word", False))))
+        return await real(*args, **kwargs)
+
+    async def _run() -> tuple[list[Any], list[tuple[str, bool]]]:
+        calls.clear()
+        with patch.object(_retriever_module, "_bm25_candidates", _spy):
+            hits = await similar._search(_KBPS_TENANT_A, _KBPS_Q_NONE, None)
+        return _kbps_shape(hits), list(calls)
+
+    _kbps_switch(monkeypatch, on=False)
+    off, off_calls = await _run()
+    _kbps_switch(monkeypatch, on=True)
+    on, on_calls = await _run()
+    assert on == off
+    assert off  # the meaning half always finds rows
+    assert all(h[2] is None for h in on)  # no passage holds every word
+    # One every-word search for the own tenant and one for the owner, both times.
+    assert on_calls == off_calls == [(str(_KBPS_TENANT_A), False), (str(_KBPS_TENANT_B), False)]

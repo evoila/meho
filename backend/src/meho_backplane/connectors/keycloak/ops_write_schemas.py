@@ -28,16 +28,16 @@ a tenant-rights change, like ``keycloak.group.member.add`` and
   ``tenant_id`` / ``tenant_role``.
 * ``keycloak.client_scope.protocol_mapper.update`` -- the same, for a
   mapper on a client scope. It is also registered as a change of rights:
-  the requester never approves it and the approver is another admin.
+  only an admin approves it, in the web console.
 * ``keycloak.user.reset_password`` -- sets a new password for a user of
   the realm.
 
-All of them are also changes of rights (:mod:`.rights_changes`): another
-admin than the one who asked must approve (a tenant admin, or a platform
-admin for the platform admin group), the requester never approves their
-own request, and no standing grant or run approval covers a call. The
-single-operator self-approval switch (``APPROVAL_ALLOW_SELF_APPROVAL``)
-does not cover them (``operations/approval_queue.py``).
+All of them are also changes of rights (:mod:`.rights_changes`): an admin
+approves them in the web console (a tenant admin, or a platform admin for
+the platform admin group), and may be the admin who asked. No standing
+grant or run approval covers a call. The single-operator self-approval
+switch (``APPROVAL_ALLOW_SELF_APPROVAL``) does not cover them
+(``operations/approval_queue.py``).
 """
 
 from __future__ import annotations
@@ -77,16 +77,16 @@ _WHEN_TO_USE_REALM_WRITE = (
     "To set the realm's mail server, send ``smtpServer`` (host, port, from, "
     "user, ...) in ``representation`` and give the SMTP password as "
     "``smtp_password_secret_ref``; a password inside ``smtpServer`` is refused. "
-    "Realm create and update are changes of rights: another admin must approve "
-    "each call, never the requester."
+    "Realm create and update are changes of rights: a call with a token waits "
+    "until an admin approves it in the web console."
 )
 
 _WHEN_TO_USE_CLIENT_WRITE = (
     "Use to create a Keycloak client (``keycloak.client.create``) or "
     "update one (``keycloak.client.update``) — flows, redirect URIs, web "
-    "origins, mappers. Both are changes of rights: another admin must "
-    "approve each call, never the requester, because a client decides what "
-    "goes into the login token. Pass the "
+    "origins, mappers. Both are changes of rights, because a client decides "
+    "what goes into the login token: a call with a token waits until an admin "
+    "approves it in the web console. Pass the "
     "ClientRepresentation under ``representation``. Updates key on the "
     "internal UUID — pass ``id`` directly, or pass ``client_id`` (the "
     "human clientId) for name→UUID resolution. Create is idempotent on a "
@@ -98,8 +98,8 @@ _WHEN_TO_USE_CLIENT_SCOPE_WRITE = (
     "Use to create a reusable client scope "
     "(``keycloak.client_scope.create``) — the bundle of protocol mappers "
     "and role scope-mappings clients attach as default/optional scopes. "
-    "A change of rights: another admin must approve each call, never the "
-    "requester. Pass the ClientScopeRepresentation under "
+    "A change of rights: a call with a token waits until an admin approves it "
+    "in the web console. Pass the ClientScopeRepresentation under "
     "``representation``. Idempotent on a 409 already-exists."
 )
 
@@ -107,8 +107,8 @@ _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE = (
     "Use to add a protocol mapper to a client "
     "(``keycloak.protocol_mapper.create``) — e.g. the ``tenant_id`` / "
     "``tenant_role`` claim mappers the backplane row-scopes on. A change of "
-    "rights: another admin must approve each call, never the requester. "
-    "Key on the client "
+    "rights: a call with a token waits until an admin approves it in the web "
+    "console. Key on the client "
     "UUID (``id``) or pass ``client_id`` for "
     "resolution; pass the ProtocolMapperRepresentation under "
     "``representation``. Idempotent on a 409 already-exists."
@@ -117,8 +117,8 @@ _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE = (
 _WHEN_TO_USE_USER_WRITE = (
     "Use to create a user (``keycloak.user.create``) or reset a user's "
     "password (``keycloak.user.reset_password``). Both are dangerous and "
-    "both are changes of rights: another admin must approve each call, "
-    "never the requester. "
+    "both are changes of rights: a call with a token waits until an admin "
+    "approves it in the web console. "
     "The password is NEVER passed inline — supply ``password_secret_ref`` "
     "(a Vault KV-v2 path; optional ``password_secret_mount`` / "
     "``password_secret_key``) and the connector reads it from Vault under "

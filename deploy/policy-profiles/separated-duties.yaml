@@ -9,7 +9,7 @@
 #   meho policy diff separated-duties.yaml
 #   meho policy import separated-duties.yaml
 #
-# The import waits until a second admin approves it. Routing works only
+# The import waits until an admin approves it in the web console. Routing works only
 # while the switches POLICY_CLASSIFICATION (categories) and
 # POLICY_APPROVER_ROUTING (routing) are on.
 #

@@ -95,11 +95,11 @@ func newImportCmd() *cobra.Command {
 	var opts fileOptions
 	cmd := &cobra.Command{
 		Use:   "import FILE",
-		Short: "Ask to import a policy file; a second admin must approve it",
+		Short: "Ask to import a policy file; an admin approves it in the web console",
 		Long: "import sends FILE to POST /api/v1/policy/import. The import " +
 			"replaces the whole policy: an entry that is not in the file is " +
-			"removed. It is a change of rights, so it waits until a second " +
-			"admin approves it; you can never approve your own import. Nothing " +
+			"removed. It is a change of rights, so it waits until an admin " +
+			"approves it in the web console; that admin may be you. Nothing " +
 			"changes before that. The same file again says \"No change.\".",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,

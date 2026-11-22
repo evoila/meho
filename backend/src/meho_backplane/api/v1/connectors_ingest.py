@@ -1476,7 +1476,7 @@ async def edit_group_endpoint(
 
     ``category`` / ``labels`` (#6038) are a change of rights: sent alone,
     they ask for the change and answer ``202`` with the approval request
-    id; another tenant admin must approve it. Sent with other fields: 400.
+    id; a tenant admin must approve it in the web console. Sent with other fields: 400.
     """
     classification = classification_patch(
         {"connector": connector_id, "group": group_key},
@@ -1562,7 +1562,7 @@ async def edit_op_endpoint(
 
     ``category`` / ``labels`` (#6038) are a change of rights: sent alone,
     they ask for the change and answer ``202`` with the approval request
-    id; another tenant admin must approve it. Sent with other fields: 400.
+    id; a tenant admin must approve it in the web console. Sent with other fields: 400.
     """
     classification = classification_patch(
         {"connector": connector_id, "op": op_id},

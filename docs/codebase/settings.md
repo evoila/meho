@@ -14,7 +14,7 @@ MEHO 0.45.0 ships the REST endpoints below. The command line and the
 console do not have the settings file yet.
 
 The policy file (categories and classifications) is a separate file with
-its own import that waits for a second admin: see [policy.md](policy.md).
+its own import that waits for an admin's approval: see [policy.md](policy.md).
 
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.

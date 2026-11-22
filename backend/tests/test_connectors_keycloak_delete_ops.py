@@ -876,7 +876,12 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
                 await approve_request(session, request_id, operator=requester, params=None)
 
         async with get_sessionmaker()() as session:
-            approved = await approve_request(session, request_id, operator=approver, params=None)
+            approved = await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         assert approved.status == "approved"
 
@@ -884,7 +889,7 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "ok", resumed
     assert resumed.result == {
@@ -939,13 +944,18 @@ async def test_user_delete_is_refused_when_a_new_user_has_the_approved_name(
         search.respond(200, json=[_user(uuid_=_OTHER_USER_UUID)])
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"
@@ -998,13 +1008,18 @@ async def test_user_delete_is_refused_when_the_card_cannot_be_read_before_the_ru
         groups.respond(500)
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"
@@ -1051,13 +1066,18 @@ async def test_user_delete_is_refused_when_a_user_appears_under_an_absent_name(
         search.respond(200, json=[_user(uuid_=_OTHER_USER_UUID)])
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"

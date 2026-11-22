@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BLAST_RADIUS_KEY",
+    "INTERNAL_EFFECT_KEYS",
     "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
@@ -122,6 +123,7 @@ __all__ = [
     "register_preview_builder_switch",
     "register_preview_failure_keys",
     "register_preview_last_step",
+    "without_internal_effect_keys",
     "without_person_only_effect_keys",
 ]
 
@@ -558,12 +560,28 @@ def register_agent_preview_filter(
 #: (:func:`register_preview_failure_keys`).
 PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
 
+#: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
+#: checks and never returns to a caller: where a change of rights was asked
+#: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`).
+INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"asked_in_web_console"})
+
+
+def without_internal_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
+    """*effect* without :data:`INTERNAL_EFFECT_KEYS`; *effect* itself when it has none."""
+    if INTERNAL_EFFECT_KEYS.isdisjoint(effect):
+        return effect
+    return {key: value for key, value in effect.items() if key not in INTERNAL_EFFECT_KEYS}
+
 
 def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
-    """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS`; *effect* itself when it has none."""
-    if PERSON_ONLY_EFFECT_KEYS.isdisjoint(effect):
+    """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS` and :data:`INTERNAL_EFFECT_KEYS`.
+
+    *effect* itself when it has none of them.
+    """
+    hidden = PERSON_ONLY_EFFECT_KEYS | INTERNAL_EFFECT_KEYS
+    if hidden.isdisjoint(effect):
         return effect
-    return {key: value for key, value in effect.items() if key not in PERSON_ONLY_EFFECT_KEYS}
+    return {key: value for key, value in effect.items() if key not in hidden}
 
 
 def proposed_effect_for_agent(
@@ -588,8 +606,9 @@ def proposed_effect_for_agent(
       (:func:`register_agent_preview_filter`), after the person-only keys
       are gone.
 
-    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) are
-    never in it. Every other ``proposed_effect`` comes back unchanged.
+    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
+    the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. Every
+    other ``proposed_effect`` comes back unchanged.
     """
     if not isinstance(effect, dict):
         return effect

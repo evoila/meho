@@ -136,7 +136,8 @@ role's rights. So the free-form op adds three checks:
    `pg_switch_wal`, recovery control such as `pg_promote`, replication slot
    and origin functions, statistics resets, `pg_notify`, and the built-ins
    that run a SQL string given as an argument: `ts_stat`, `ts_rewrite`,
-   `connectby`, and the extension functions that read stored rows:
+   `connectby`, the `xml2` extension function `xpath_table`, and the
+   extension functions that read stored rows:
    `get_raw_page`, `pg_get_wal_block_info`) or starts with a prefix in `DENIED_FUNCTION_PREFIXES`
    (`pg_ls_`, `pg_logical_slot_`, `pg_stat_reset`, `pg_sleep`, `dblink`,
    `postgres_fdw_`, `query_to_xml`, `cursor_to_xml`, `crosstab`, and the
@@ -144,7 +145,7 @@ role's rights. So the free-form op adds three checks:
    `database_to_xml`). The names
    are pinned to the PostgreSQL 16 pages "System Administration Functions",
    "XML Functions" (mapping tables to XML), "Text Search Functions" and the
-   `tablefunc` extension. The SQL-running functions are on the list because
+   `tablefunc` and `xml2` extensions. The SQL-running functions are on the list because
    a statement could build a denied name from string pieces (`'pg_' ||
    'terminate_backend(...)'`), which the word scan cannot see, and hand it
    to such a function; the server would join and run it. The scan does not
@@ -160,7 +161,10 @@ role's rights. So the free-form op adds three checks:
    named by a text value) and `pg_get_wal_block_info` (the `pg_walinspect`
    extension: the stored row data of the WAL records). The other functions
    of these extensions read a page that `get_raw_page` returns, or show WAL
-   records without their row data.
+   records without their row data. `xpath_table` (the `xml2` extension) is
+   on the list because it builds a SQL text from its text arguments (table
+   name, key, column and condition) and runs it. The other `xml2` functions
+   read a document text, not SQL.
 2. **Catalog deny list** — `assert_no_secret_catalogs` runs right after the
    function check, also before a connection is opened, with the same word
    scan and the same refusal of Unicode-escaped identifiers. It refuses a

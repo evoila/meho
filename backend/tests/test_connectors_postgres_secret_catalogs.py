@@ -39,6 +39,7 @@ from meho_backplane.connectors.postgres.query_guard import (
     ALLOW_SUPERUSER_QUERY_EXTRA,
     CONNECTION_TEXT_SECRET_KEYWORDS,
     CONNECTION_TEXT_SETTINGS,
+    DENIED_FUNCTION_PREFIXES,
     DENIED_FUNCTIONS,
     DENIED_RELATIONS,
     assert_no_admin_functions,
@@ -424,15 +425,84 @@ def _function_spellings(name: str) -> list[str]:
 
 _STORED_ROW_FUNCTIONS = ["get_raw_page", "pg_get_wal_block_info"]
 
+#: Extension functions that build a SQL text from their text arguments and run it.
+_SQL_TEXT_EXTENSION_FUNCTIONS = ["xpath_table"]
+
 _FUNCTION_CASES = [
     pytest.param(sql, name, id=f"{name}-{i}")
-    for name in _STORED_ROW_FUNCTIONS
+    for name in [*_STORED_ROW_FUNCTIONS, *_SQL_TEXT_EXTENSION_FUNCTIONS]
     for i, sql in enumerate(_function_spellings(name))
 ]
 
 
 def test_stored_row_readers_are_on_the_function_list() -> None:
     assert set(_STORED_ROW_FUNCTIONS) <= DENIED_FUNCTIONS
+    assert set(_SQL_TEXT_EXTENSION_FUNCTIONS) <= DENIED_FUNCTIONS
+
+
+def test_the_function_lists_are_pinned() -> None:
+    assert {
+        "pg_cancel_backend",
+        "pg_terminate_backend",
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_log_backend_memory_contexts",
+        "set_config",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_stat_file",
+        "pg_file_write",
+        "pg_file_rename",
+        "pg_file_unlink",
+        "pg_file_sync",
+        "lo_import",
+        "lo_export",
+        "pg_backup_start",
+        "pg_backup_stop",
+        "pg_start_backup",
+        "pg_stop_backup",
+        "pg_switch_wal",
+        "pg_create_restore_point",
+        "pg_logical_emit_message",
+        "pg_promote",
+        "pg_wal_replay_pause",
+        "pg_wal_replay_resume",
+        "pg_create_physical_replication_slot",
+        "pg_create_logical_replication_slot",
+        "pg_copy_physical_replication_slot",
+        "pg_copy_logical_replication_slot",
+        "pg_drop_replication_slot",
+        "pg_replication_slot_advance",
+        "pg_replication_origin_create",
+        "pg_replication_origin_drop",
+        "pg_replication_origin_advance",
+        "pg_replication_origin_session_setup",
+        "pg_replication_origin_session_reset",
+        "pg_replication_origin_xact_setup",
+        "pg_replication_origin_xact_reset",
+        "pg_stat_statements_reset",
+        "pg_notify",
+        "ts_stat",
+        "ts_rewrite",
+        "connectby",
+        "get_raw_page",
+        "pg_get_wal_block_info",
+        "xpath_table",
+    } == DENIED_FUNCTIONS
+    assert {
+        "pg_ls_",
+        "pg_logical_slot_",
+        "pg_stat_reset",
+        "pg_sleep",
+        "dblink",
+        "postgres_fdw_",
+        "query_to_xml",
+        "cursor_to_xml",
+        "crosstab",
+        "table_to_xml",
+        "schema_to_xml",
+        "database_to_xml",
+    } == set(DENIED_FUNCTION_PREFIXES)
 
 
 @pytest.mark.parametrize(("sql", "name"), _FUNCTION_CASES)
@@ -460,6 +530,7 @@ _OTHER_REFUSED_NAMES = {
     "database_to_xml",
     "get_raw_page",
     "pg_get_wal_block_info",
+    "xpath_table",
 }
 
 

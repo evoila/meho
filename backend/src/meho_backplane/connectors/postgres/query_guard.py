@@ -34,7 +34,10 @@ it. So ``postgres.query`` adds three checks:
   returns its stored page, and ``pg_get_wal_block_info`` (``pg_walinspect``)
   returns the stored row data of the WAL records. The other functions of
   these extensions read a page that ``get_raw_page`` returns, or show WAL
-  records without their row data.
+  records without their row data. The ``xml2`` extension function
+  ``xpath_table`` is on the list too: it builds a SQL text from its text
+  arguments (table name, key, column and condition) and runs it. The other
+  ``xml2`` functions read a document text, not SQL.
 
 * :func:`assert_no_secret_catalogs` refuses, before a connection is opened,
   any statement that names one of the server catalogs, views or functions
@@ -69,7 +72,8 @@ connections and the ``tablefunc`` extension functions that run SQL text
 (https://www.postgresql.org/docs/16/tablefunc.html), the ``pageinspect``
 extension (https://www.postgresql.org/docs/16/pageinspect.html) and the
 ``pg_walinspect`` extension
-(https://www.postgresql.org/docs/16/pgwalinspect.html). Catalog names are
+(https://www.postgresql.org/docs/16/pgwalinspect.html), and the ``xml2``
+extension (https://www.postgresql.org/docs/16/xml2.html). Catalog names are
 pinned to the PostgreSQL 16 pages "System Catalogs"
 (https://www.postgresql.org/docs/16/catalogs.html), "System Views"
 (https://www.postgresql.org/docs/16/views.html), "The Cumulative Statistics
@@ -181,6 +185,9 @@ DENIED_FUNCTIONS: frozenset[str] = frozenset(
         # pg_walinspect: the stored row data of the WAL records
         # (block_data, block_fpi_data), for any table.
         "pg_get_wal_block_info",
+        # xml2: builds a SQL text from its text arguments (table name, key,
+        # column and condition) and runs it.
+        "xpath_table",
     }
 )
 

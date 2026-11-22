@@ -308,6 +308,18 @@ lowest-ranked hits are left out, `delivery` is `partial` and
 `omitted_hits` says how many. A passage is never cut. Snippets,
 passage texts and heading titles are wrapped as untrusted text.
 
+**Key-word hint (`KB_SEARCH_WORD_HINT`, off by default).** The word half
+of the search needs every word of the question in one passage, so a pasted
+ticket sentence often gets no word score. With the switch on, the `query`
+text of the tool tells the agent to search with a few key words and to
+search again with other words when `word_match` is `none`. The answer has
+one more field, `word_match`: `some` when at least one store hit has a word
+score (`bm25_score`), `none` when no hit has one (also for an empty answer).
+Knowledge repo hits (`source: wiki`) do not count. With the switch off,
+the tool text and the answer are as before. `GET /version` lists the
+switch. Code: `mcp/tools/_kb_word_hint.py`; tests:
+`tests/test_kb_word_hint.py`. The gain is measured on #6758.
+
 ### Offline KB passage benchmark (#3765)
 
 Before anyone changes a retrieval default (model, prefixes, reranker),

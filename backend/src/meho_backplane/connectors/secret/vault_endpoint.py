@@ -65,6 +65,7 @@ import hvac
 import structlog
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.secret_read_as import record_caller_secret_read
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     strip_credential_value,
@@ -267,6 +268,7 @@ class VaultKvSecretEndpoint:
                 mount_point=self._mount,
                 raise_on_deleted_version=False,
             )
+        record_caller_secret_read(operator)
         secret_data = _structural_unwrap(payload, path=self._path)
         if self._field not in secret_data:
             raise VaultSecretRefError(

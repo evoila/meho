@@ -5,8 +5,9 @@
 
 * The scope helpers keep one id per call, and a step inside a multi-step call
   does not leave its value on the parent.
-* The Vault login notes the ``sub`` of the token MEHO sent (the caller's, the
-  approver's, an agent's, the check runner's own).
+* A passed secret read notes the ``sub`` of the token MEHO sent (the caller's,
+  the approver's, an agent's, the check runner's own). A passed login alone
+  notes nothing: a refused read and a call that reads no secret stay empty.
 * A real dispatch writes the id on the audit row, and nothing else (no store
   path, no address, no token). A call that reads no secret leaves it empty.
 * An audit answer carries ``secret_read_as`` only while ``AUDIT_SECRET_READ_AS``
@@ -22,6 +23,7 @@ from collections.abc import Iterator
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import hvac
 import pytest
 from sqlalchemy import select
 
@@ -253,6 +255,44 @@ async def test_call_without_a_secret_read_leaves_it_empty(
     )
     assert result.status == "ok", result.error
     assert (await _row("vault.sys.health")).secret_read_as is None
+
+
+@pytest.mark.asyncio
+async def test_refused_read_after_a_passed_login_leaves_it_empty(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.read_exc = hvac.exceptions.Forbidden("permission denied")
+    await register_vault_typed_operations(embedding_service=embedding)
+    result = await dispatch(
+        operator=_operator("person-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=_Target(),
+        params={"mount": _MARKER_MOUNT, "path": _MARKER_PATH},
+    )
+    assert result.status != "ok"
+    assert len(fake.auth.jwt.login_calls) == 1
+    assert (await _row("vault.kv.read")).secret_read_as is None
+
+
+@pytest.mark.asyncio
+async def test_logged_in_call_that_reads_no_secret_leaves_it_empty(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    await register_vault_typed_operations(embedding_service=embedding)
+    result = await dispatch(
+        operator=_operator("person-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.list",
+        target=_Target(),
+        params={"mount": _MARKER_MOUNT, "path": "markerenv0zzz"},
+    )
+    assert result.status == "ok", result.error
+    assert len(fake.auth.jwt.login_calls) == 1
+    assert fake.secrets.kv.v2.read_calls == []
+    assert (await _row("vault.kv.list")).secret_read_as is None
 
 
 # ---------------------------------------------------------------------------

@@ -126,6 +126,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import hvac.exceptions
 
+from meho_backplane.auth.secret_read_as import record_caller_secret_read
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors.pfsense.openvpn_config import (
@@ -609,6 +610,7 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
                 )
             except hvac.exceptions.InvalidPath:
                 return 0, {}
+            record_caller_secret_read(operator)
     except PfSenseRefusedError:
         raise
     except Exception as exc:

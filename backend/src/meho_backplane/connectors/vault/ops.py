@@ -77,6 +77,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import record_caller_secret_read
 from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
@@ -404,6 +405,7 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
             mount_point=mount,
             raise_on_deleted_version=False,
         )
+        record_caller_secret_read(operator)
         # Structural unwrap -- raises KeyError on a malformed hvac
         # payload (e.g. ``{"data": {}}`` missing the nested ``data`` or
         # ``metadata`` keys). The dispatcher's ``connector_error``

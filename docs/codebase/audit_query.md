@@ -419,9 +419,12 @@ shows the field, and every answer is the same as without it. With it on,
 each row in an answer carries the field.
 
 How the value gets to the row: the dispatcher opens one scope for each call
-(`auth/secret_read_as.py`). The Vault login (`auth/vault.py`) and the Google
-Secret Manager read (`connectors/_shared/gsm_creds.py`) note the login id after
-the store accepted it. For Vault the id is the `sub` of the token MEHO sent. The
+(`auth/secret_read_as.py`). Each Vault secret read (the target login read in
+`connectors/_shared/vault_creds.py`, `vault.kv.read`, the secret copy and
+compare reads, the pfSense VPN user read) and the Google Secret Manager read
+(`connectors/_shared/gsm_creds.py`) note the login id after the store returned
+the secret. A login that passed, followed by a refused read or by no read at
+all, notes nothing. For Vault the id is the `sub` of the token MEHO sent. The
 audit writer reads it when it writes the row. The row is written once, at the
 end of the call, and is never updated. The same people see the field who see
 the row today: a service login reads only the rows of its own calls.

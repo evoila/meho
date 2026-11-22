@@ -66,7 +66,6 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.secret_read_as import record_secret_read_as, token_subject
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -426,8 +425,6 @@ async def vault_client_for_operator(
     except hvac.exceptions.VaultError as exc:
         raise VaultClientError(f"vault error: {type(exc).__name__}: {exc}") from exc
 
-    # The store accepted this login: note whose it was for the audit row.
-    record_secret_read_as(token_subject(operator.raw_jwt, operator.sub))
     try:
         yield client
     finally:

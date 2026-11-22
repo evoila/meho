@@ -595,6 +595,36 @@ _QUOTED_BEFORE_OPERATORS: Final[list[tuple[str, tuple[str, ...]]]] = [
     for quote in "'\""
     for operator in (";", "&&", "|", ")")
 ]
+#: (line, its secret parts): a value of several quoted parts joined, right
+#: before a shell operator. Each part is hidden inside its quotes.
+_JOINED_BEFORE_OPERATORS: Final[list[tuple[str, tuple[str, ...]]]] = [
+    (f"{form}{first}made up{first}{second} {PW}{second}{operator} echo ok", ("made up", f" {PW}"))
+    for form in ("run --password=", "DB_PASSWORD=")
+    for first, second in (("'", '"'), ('"', "'"))
+    for operator in (";", "&&", "|", ")")
+] + [
+    (f"run --password=made{quote} up {PW}{quote}; echo ok", ("made", f" up {PW}"))
+    for quote in "'\""
+]
+#: (line, its secret values): a tool that is the program that runs, after a
+#: command that runs it, after a variable or ``--``, or from any folder.
+_TOOLS_THAT_RUN: Final[list[tuple[str, tuple[str, ...]]]] = [
+    (f"{before}mysql -p{PW} appdb{after}", (PW,))
+    for before, after in (
+        ("sudo -n ", ""),
+        ("/opt/tools/", ""),
+        ("sudo -u root -H ", ""),
+        ("nice -n 5 ", ""),
+        ("env LANG=C ", ""),
+        ("LANG=C ", ""),
+        ("kubectl exec db-0 -- ", ""),
+        ("if true; then ", "; fi"),
+        ("docker exec db ", ""),
+        ("root 1234 0.0 0.1 12345 678 ? S 10:00 0:00 /opt/tools/", ""),
+        ("sh -c 'sudo -n ", "'"),
+        (f"sshpass -p {PW} /opt/tools/", ""),
+    )
+]
 #: Lines of :data:`_SECRETS_OF` that are read in plain text only. In a JSON
 #: string a quoted value starts with an escaped quote, and that ends the value.
 _PLAIN_TEXT_ONLY: Final = {
@@ -602,6 +632,9 @@ _PLAIN_TEXT_ONLY: Final = {
     _QUOTED_TOOL_IN_SINGLE,
     *(line for line, _secret in _QUOTED_LOGINS),
     *(line for line, _secret in _ESCAPED_QUOTES),
+    # In a JSON string the mark would stand right before an escaped quote,
+    # and the api_key rule reads that as a value: the value is left to it.
+    f'run --password=made" up {PW}"; echo ok',
 }
 #: (line, its secret values). Each value is hidden whole, and nothing else
 #: changes against main: a mark that was in the text before is read as on
@@ -630,6 +663,8 @@ _SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
     ("run --password=ab12cd; echo ok", ()),
     ("DB_PASSWORD=ab12cd; echo ok", ()),
     *_QUOTED_BEFORE_OPERATORS,
+    *_JOINED_BEFORE_OPERATORS,
+    *_TOOLS_THAT_RUN,
     (f"docker exec -i mysql mysql -p{PW} appdb", (PW,)),
     (f"./mysql -p{PW} appdb", (PW,)),
 ]
@@ -1059,6 +1094,33 @@ def test_a_quoted_password_before_an_operator_is_hidden_inside_its_quotes(
     assert scrub_content(line)[0] == expected
 
 
+@pytest.mark.parametrize(("line", "secrets"), _JOINED_BEFORE_OPERATORS)
+def test_a_password_of_joined_quoted_parts_before_an_operator_is_hidden(
+    line: str, secrets: tuple[str, ...]
+) -> None:
+    """In the answer and the trace, each part is hidden; the label, the quotes and the rest stay."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    expected = line
+    for secret in secrets:
+        expected = expected.replace(secret, _MARK, 1)
+    for policy in (get_default_policy(), _CONTENT_POLICY):
+        assert redact(line, policy).redacted == expected
+    assert scrub_content(line)[0] == expected
+
+
+@pytest.mark.parametrize(("line", "secrets"), _TOOLS_THAT_RUN)
+def test_a_tool_that_runs_after_a_command_or_from_any_folder_is_read(
+    line: str, secrets: tuple[str, ...]
+) -> None:
+    """``sudo -n mysql``, ``/opt/tools/mysql`` and the like: only the password is replaced."""
+    from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
+
+    expected = line.replace(secrets[0], _MARK)
+    for policy in (get_default_policy(), _CONTENT_POLICY):
+        assert redact(line, policy).redacted == expected
+
+
 #: Ordinary command lines with no secret in them.
 _ORDINARY: Final[list[str]] = [
     *_KEPT,
@@ -1082,6 +1144,16 @@ _ORDINARY: Final[list[str]] = [
     "docker run --name mysql -p3306:3306 mysql",
     "docker run --hostname curl -u1000:1000 -p8080:80 nginx",
     "kubectl -n mysql get pods -owide -p1",
+    # A tool name that is a quoted option value, follows ``=`` of an option,
+    # names a container, or is an argument of a command that takes files.
+    'docker run --name "mysql" -p3306:3306 mysql',
+    "docker run --name=mysql -p3306:3306 mysql",
+    "docker exec -it mysql psql -p5432",
+    "sudo -u mysql -p3306",
+    "find mysql -print",
+    "sh -c 'find mysql -print'",
+    '{"cmd": "find mysql -print"}',
+    '{"cmd": "docker run --name \\"mysql\\" -p3306:3306 mysql"}',
 ]
 
 

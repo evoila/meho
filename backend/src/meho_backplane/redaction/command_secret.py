@@ -18,9 +18,11 @@ option name and the words around it stay readable:
   the part after the first ``:`` of ``curl -u`` or ``--user``, and the
   part after the first ``%`` of ``smbclient -U``. A tool name in quotes is
   read too: its options follow the closing quote. A tool name is read only
-  when it names the program that runs: not at the end of a path outside a
-  ``bin`` or ``sbin`` folder (``find /tmp/mysql``), and not right after an
-  option, whose value it is (``docker run --name mysql``);
+  when it names the program that runs: at the start of a command, also
+  with a path (``/opt/tools/mysql``), or after a command that runs it
+  (``sudo -n``). It is not read right after an option, whose value it is
+  (``docker run --name "mysql"``), or as an argument of a command that
+  takes files or names (``find mysql``);
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY``.
 
@@ -81,9 +83,9 @@ It drops a value when a match of the pattern overlaps it or ends where it
 starts, and when a label of the pattern ends where the value starts and a
 character other than white space or a quote follows the value. The
 policies run this rule first, and the pattern would read a mark with such
-a character after it as a value and hide the label too. When the value is
-one quoted string, the finder hides only the part inside the quotes
-instead, so the label, the quotes and the next command stay. In a policy
+a character after it as a value and hide the label too. When the value
+has quotes, the finder hides only the text of each quoted or bare part
+instead (``'a b'" c"``), so the label, the quotes and the next command stay. In a policy
 without the ``api_key`` rule such a value is not hidden.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
@@ -445,10 +447,14 @@ def _is_option(word: str) -> bool:
     return word.startswith("-") and word != "--" and "=" not in word
 
 
-def _tool_name(word: str) -> str | None:
-    """The tool a command word names, with its family folded in, or ``None``."""
+def _tool_name(word: str, *, any_folder: bool = False) -> str | None:
+    """The tool a command word names, with its family folded in, or ``None``.
+
+    With *any_folder* the word is known to be the program that runs, so a
+    path outside a folder of programs counts too (``/opt/tools/mysql``).
+    """
     folder, slash, base = word.rpartition("/")
-    if slash and not _is_program_folder(folder + slash):
+    if slash and not any_folder and not _is_program_folder(folder + slash):
         return None
     match = _TOOL.fullmatch(base)
     if match is None:
@@ -551,6 +557,8 @@ def _segment_spans(
     pos = first
     skip_next = False
     previous = ""
+    # The word after the password of ``sshpass`` is the program it runs.
+    runs_next = False
     while pos < size:
         gap = _BLANKS.match(text, pos, size)
         pos = pos if gap is None else gap.end()
@@ -576,18 +584,21 @@ def _segment_spans(
         token = text[start:end]
         pos = end
         option_before, previous = _is_option(previous), token
+        program, runs_next = runs_next, False
         if skip_next:
             skip_next = False
             continue
+        sshpass = "sshpass" in tools
         span = _option_span(text, tools, token, (start, end), size, in_string)
         if span is not None:
             spans.append(span)
             pos = max(pos, span[1])
             # The option took its value, so the next word is no option value.
             previous = ""
+            runs_next = sshpass and "sshpass" not in tools
         elif "sshpass" in tools and token in _SSHPASS_VALUE_OPTIONS:
             skip_next = True
-        elif not option_before and (name := _tool_name(token)) is not None:
+        elif not option_before and (name := _tool_name(token, any_folder=program)) is not None:
             tools.add(name)
         elif "sshpass" in tools and not token.startswith("-"):
             tools.discard("sshpass")
@@ -656,8 +667,56 @@ class _OpenStrings:
 
 #: The characters that end a word when it is read back from a tool name.
 _WORD_EDGE: Final = frozenset(" \t\n\r'\"`;|&<>(){}[],=")
-#: How far back a path or the word before a tool name is read.
+#: How far back a path or the words before a tool name are read.
 _LOOK_BACK: Final = 256
+#: The characters that end a command: a word after one starts a new command.
+_COMMAND_EDGE: Final = frozenset("\n\r;|&(){}`")
+#: Commands that run the command that follows them, each with its options
+#: that take the next word as their value (``sudo -u root mysql``). Shell
+#: words that start a command (``then``, ``do``) are here too.
+_WRAPPERS: Final[dict[str, frozenset[str]]] = {
+    "sudo": frozenset(
+        {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"}
+        | {"--user", "--group", "--host", "--prompt", "--chdir", "--role", "--type"}
+        | {"--other-user", "--close-from", "--command-timeout"}
+    ),
+    "doas": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p", "--class", "--classdata"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "xargs": frozenset(
+        {"-a", "-d", "-E", "-e", "-I", "-L", "-l", "-n", "-P", "-s"}
+        | {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars"}
+    ),
+    "strace": frozenset({"-o", "-p", "-e", "-s", "-u", "-a", "-E", "-P"}),
+    "watch": frozenset({"-n", "--interval"}),
+    "runuser": frozenset({"-u", "-g", "-G", "--user", "--group"}),
+    "nohup": frozenset(),
+    "exec": frozenset({"-a"}),
+    "command": frozenset(),
+    "builtin": frozenset(),
+    "setsid": frozenset(),
+    "then": frozenset(),
+    "do": frozenset(),
+    "else": frozenset(),
+}
+#: Container tools whose ``exec`` or ``run`` takes a container or image name next.
+_CONTAINER_TOOLS: Final = frozenset({"docker", "podman", "nerdctl", "kubectl", "oc", "crictl"})
+#: Commands whose plain words are files, folders or names, not a program to
+#: run (``find mysql -print``). After any other command a tool name is read
+#: as the program, because a hidden value is safer than a shown one.
+_ARGUMENT_COMMANDS: Final = frozenset(
+    {"find", "ls", "cat", "cd", "rm", "cp", "mv", "ln", "du", "df", "stat", "file"}
+    | {"tail", "head", "less", "more", "grep", "egrep", "fgrep", "echo", "printf"}
+    | {"chown", "chmod", "chgrp", "mkdir", "rmdir", "touch", "tar", "zip", "unzip"}
+    | {"rsync", "scp", "ping", "which", "whereis", "type", "man", "kill", "pkill"}
+    | {"pgrep", "killall", "pidof", "locate", "wc", "sort", "diff", "readlink"}
+    | {"realpath", "basename", "dirname", "tree", "systemctl", "service"}
+)
+#: A variable set for one command (``LANG=C mysql``).
+_ASSIGNMENT: Final = re.compile(r"[A-Za-z_]\w*=\S*")
 
 
 def _word_back(text: str, end: int) -> str:
@@ -668,20 +727,96 @@ def _word_back(text: str, end: int) -> str:
     return text[begin:end]
 
 
+def _words_before(text: str, end: int) -> tuple[list[str], bool]:
+    """The words of the command before *end*, first word first.
+
+    The reading stops at a character that ends a command, at the start of
+    a line and at the opening quote of a quoted command (``sh -c 'sudo``).
+    The second value is true when the first word starts the command.
+    """
+    limit = max(0, end - _LOOK_BACK)
+    chunk = text[limit:end]
+    edge = max(chunk.rfind(char) for char in _COMMAND_EDGE)
+    words = chunk[edge + 1 :].split()
+    at_start = edge != -1 or limit == 0
+    for at in range(len(words) - 1, -1, -1):
+        word = words[at]
+        if word.count("'") % 2 or word.count('"') % 2:
+            # The opening quote of a quoted command (``'sudo``, ``"cmd":"find``):
+            # the command starts after it.
+            first = word[max(word.rfind("'"), word.rfind('"')) + 1 :]
+            return ([first] if first else []) + words[at + 1 :], True
+    return words, at_start
+
+
+def _base(word: str) -> str:
+    return word.rsplit("/", 1)[-1]
+
+
+def _hands_on(words: list[str]) -> bool:
+    """True when a command in *words* runs the word after them (``sudo -n``, ``nice -n 5``)."""
+    for at, word in enumerate(words):
+        options = _WRAPPERS.get(_base(word))
+        if options is None or (at and word == "exec" and _base(words[at - 1]) in _CONTAINER_TOOLS):
+            continue
+        rest = at + 1
+        while rest < len(words) and (
+            words[rest].startswith("-") or _ASSIGNMENT.fullmatch(words[rest])
+        ):
+            rest += 2 if words[rest] in options else 1
+        if rest == len(words):
+            return True
+    return False
+
+
+def _is_command_position(words: list[str], at_start: bool) -> bool:
+    """True when a word after *words* is the program that runs, not an argument.
+
+    It is after a command that runs the next word (``sudo -n``), after
+    ``--`` and after a variable set for the command (``LANG=C``). It is not
+    the value or argument after an option (``docker run --name``), the
+    container after ``docker exec``, or an argument of a command that
+    takes files or names (``find``). After other words (another command,
+    the columns of a process list, a log prefix) it is the program.
+    """
+    if not words or _hands_on(words):
+        return True
+    last = words[-1]
+    if last == "--":
+        return True
+    if last.startswith("-"):
+        return False
+    if last in ("exec", "run") and len(words) > 1 and _base(words[-2]) in _CONTAINER_TOOLS:
+        return False
+    if _ASSIGNMENT.fullmatch(last):
+        return len(words) == 1 or not words[-2].startswith("-")
+    return not (at_start and _base(words[0]) in _ARGUMENT_COMMANDS)
+
+
 def _runs_tool(text: str, match: re.Match[str]) -> bool:
     """True when the tool name at *match* is the program that runs, not an argument.
 
-    It is not when it ends a path outside a folder of programs
-    (``find /tmp/mysql``), or when an option stands right before it
-    (``docker run --name mysql``): then it is a file or the option's value.
+    A path before the name (``/opt/tools/mysql``) and quotes around it
+    (``"mysql"``) belong to the word. A quote that opens before the name and
+    does not close right after it starts a quoted command (``sh -c "mysql``).
+    After ``=`` the word is the value of an option (``--name=mysql``), or
+    of a name that holds a command (``COMMAND=/usr/bin/mysql``).
     """
-    path = _word_back(text, match.start())
-    if path and not _is_program_folder(path):
-        return False
-    blank = match.start() - len(path)
-    while blank > 0 and text[blank - 1] in " \t":
-        blank -= 1
-    return blank == match.start() - len(path) or not _is_option(_word_back(text, blank))
+    begin = match.start() - len(_word_back(text, match.start()))
+    before = text[begin - 1] if begin else ""
+    if before in ("'", '"'):
+        lead = begin - 1
+        while lead > 0 and text[lead - 1] == "\\":
+            lead -= 1
+        if not text.startswith(text[lead:begin], match.end()):
+            return True
+        begin = lead
+        before = text[begin - 1] if begin else ""
+    if before == "=":
+        return not _word_back(text, begin - 1).startswith("-")
+    if before not in (" ", "\t"):
+        return True
+    return _is_command_position(*_words_before(text, begin))
 
 
 def _tool_spans(text: str) -> list[tuple[int, int]]:
@@ -789,33 +924,82 @@ def _after_label(text: str, start: int, leave_to: re.Pattern[str]) -> bool:
     return any(m.end() == len(probe) and m.start() < cut for m in leave_to.finditer(probe))
 
 
-#: A value that is one quoted string: its quote (also written as a JSON
-#: escape, ``\\"``) and the part inside it.
-_QUOTED_VALUE: Final = re.compile(r"""(\\*['"])(.+)\1""", re.DOTALL)
+#: A quote that opens a part of a value (also written as a JSON escape, ``\\"``).
+_OPENING_QUOTE: Final = re.compile(r"""\\*['"]""")
 #: The mark the policies write in place of a value of this rule.
 _OWN_MARK: Final = "[REDACTED:command_line_secret]"
 
 
+def _closing_quote(text: str, opening: re.Match[str], end: int) -> tuple[int, int]:
+    """Where the part that *opening* starts ends: its text end and the index after its quote.
+
+    A single quote closes at the next one. A double quote closes at the
+    next one that is not escaped; when the opening quote is a JSON escape
+    (``\\"``), at the next one that is escaped the same way, whose
+    backslashes stay outside the part.
+    """
+    quote = text[opening.end() - 1]
+    if quote == "'":
+        close = text.find("'", opening.end(), end)
+        return (end, end) if close == -1 else (close, close + 1)
+    escaped = opening.end() - opening.start() > 1
+    pos = opening.end()
+    while (close := text.find('"', pos, end)) != -1:
+        run = close
+        while run > opening.end() and text[run - 1] == "\\":
+            run -= 1
+        if (close - run) % 2 == escaped:
+            return (run if escaped else close, close + 1)
+        pos = close + 1
+    return (end, end)
+
+
+def _value_parts(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """The parts of a value with a quote in it, each without its quotes (``'a b'"c"``).
+
+    A bare part between quoted parts is a part too. A value without a
+    quote gives no parts.
+    """
+    parts: list[tuple[int, int]] = []
+    pos = start
+    while pos < end:
+        opening = _OPENING_QUOTE.search(text, pos, end)
+        if opening is None:
+            parts.append((pos, end))
+            break
+        if opening.start() > pos:
+            parts.append((pos, opening.start()))
+        part_end, pos = _closing_quote(text, opening, end)
+        parts.append((opening.end(), part_end))
+    if len(parts) == 1 and parts[0] == (start, end):
+        return []
+    return [(begin, stop) for begin, stop in parts if begin < stop]
+
+
 def _inside_quotes(
     text: str, start: int, end: int, leave_to: re.Pattern[str]
-) -> tuple[int, int] | None:
-    """The part inside the quotes of a quoted value, when *leave_to* then keeps the label.
+) -> list[tuple[int, int]]:
+    """The parts of a quoted value, when *leave_to* then keeps the label.
 
     The policies run this rule before *leave_to*. A mark that a character
     such as ``;`` follows is read by *leave_to* as a value, and it would
-    hide the label too. A mark inside the quotes is not, so the quotes
-    stay and only the part inside them is hidden.
+    hide the label too. A mark inside quotes is not, so the quotes stay and
+    only the text of each part is hidden. Several parts joined into one
+    value (``'a b'" c"``) are each hidden. An empty list means the value
+    is left to *leave_to*.
     """
-    quoted = _QUOTED_VALUE.fullmatch(text, start, end)
-    if quoted is None:
-        return None
-    inner = quoted.span(2)
+    parts = _value_parts(text, start, end)
+    if not parts:
+        return []
     begin = max(0, start - _LABEL_WINDOW)
-    probe = text[begin : inner[0]] + _OWN_MARK + text[inner[1] : end + _LABEL_WINDOW]
-    cut = inner[0] - begin
-    if any(m.start() < cut < m.end() for m in leave_to.finditer(probe)):
-        return None
-    return inner
+    pieces = [text[begin : parts[0][0]]]
+    followers = [part[0] for part in parts[1:]] + [end + _LABEL_WINDOW]
+    for (_, part_end), following in zip(parts, followers, strict=True):
+        pieces += [_OWN_MARK, text[part_end:following]]
+    cut = parts[0][0] - begin
+    if any(m.start() < cut < m.end() for m in leave_to.finditer("".join(pieces))):
+        return []
+    return parts
 
 
 def _left_to(
@@ -838,10 +1022,8 @@ def _left_to(
         follows = text[end : end + 1]
         glued = bool(follows) and not follows.isspace() and follows not in "'\""
         if glued and _after_label(text, start, leave_to):
-            inner = _inside_quotes(text, start, end, leave_to)
-            if inner is None:
-                continue
-            start, end = inner
+            kept.extend(_inside_quotes(text, start, end, leave_to))
+            continue
         kept.append((start, end))
     return kept
 

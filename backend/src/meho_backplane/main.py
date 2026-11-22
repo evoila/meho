@@ -564,6 +564,14 @@ async def _run_lifespan_startup() -> None:
     # after a restart. Runs after the catalog stamp so a shipped profile keeps
     # its key; like the catalog stamp it never enables an op.
     await restore_ingested_profiled_connectors()
+    # Stored operations whose paths look like Kubernetes paths without the
+    # usual start: one warning line per connector, nothing changes. Imported
+    # here, after the connectors are loaded.
+    from meho_backplane.connectors.kubernetes.short_path_warning import (
+        warn_stored_short_kubernetes_paths,
+    )
+
+    await warn_stored_short_kubernetes_paths()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)

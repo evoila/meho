@@ -87,6 +87,36 @@ gets the same rule: its writes wait for a person on every call, and
 grant create refuses them. The method is read without case: `post:`
 counts the same as `POST:`.
 
+MEHO refuses a whole API file when one of its paths looks like a
+Kubernetes path without the usual start (`/api/v1` or
+`/apis/<group>/<version>`), for example `/namespaces/{namespace}/secrets`
+or `/apps/v1/namespaces/{namespace}/deployments`. Nothing from the file is
+stored. The dry run, the ingest and the start check of the shipped files
+all refuse it, because they use the same parser
+([spec-ingestion.md](spec-ingestion.md)). The shapes live in one place,
+`full_kubernetes_path` (`short_paths.py`). There is no setting that turns
+the check off. The ways past: use the standard API file that the cluster
+serves, which has full paths. Or, when the start is in the file's server
+address, write it there as a relative path (for example `/api/v1`, or
+`/k8s/clusters/<id>/api/v1` for a cluster behind a management product)
+and put the host in the target address. MEHO then adds the start to each
+path. A tool with its own API that only uses Kubernetes names can write
+its real start as a relative server address (for example `/api`). A path
+with `namespaces/{x}/secrets`, or a pod's `exec`, `attach`,
+`portforward` or `proxy`, is refused from any `/` of the path, also with
+a relative server address.
+
+An operation that an older ingest stored from such a file stays as it
+is. Each of its calls gets the answer of the same call on the full path:
+`ingested_op_is_credential_call` reads the call with the full path that
+`full_kubernetes_path` gives. So it waits for a person exactly where the
+full path waits (a write of an object, a Secret, a pod's `exec`,
+`attach`, `portforward` or `proxy`, a ServiceAccount token), and a plain
+read keeps its rules. At start MEHO writes one warning log line,
+`short_kubernetes_paths_stored`, for each connector with such operations
+(`short_path_warning.py`). It names the connector id, the tenant and the
+count.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types

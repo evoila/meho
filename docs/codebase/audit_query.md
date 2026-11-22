@@ -420,9 +420,15 @@ shows the field, and every answer is the same as without it. With it on,
 each row in an answer carries the field.
 
 How the value gets to the row: the dispatcher opens one scope for each call
-(`auth/secret_read_as.py`). Each Vault secret read (the target login read in
+(`auth/secret_read_as.py`), at the start of `dispatch()`, before the first
+check. So every row a call writes, a refusal row included, holds only what
+that call read. The step gate of a multi-step call (`operations/composite.py`)
+opens its own scope too, so the refusal or approval row of a step never holds
+the value of the parent call. Each Vault secret read (the target login read in
 `connectors/_shared/vault_creds.py`, `vault.kv.read`, the secret copy and
-compare reads, the pfSense VPN user read, the KV password read of
+compare reads, the read of the existing sink secret before a `secret.move` with
+`merge: true` writes it (noted also when the write then fails), the pfSense VPN
+user read, the KV password read of
 `vault.auth.userpass.write` and `vault.kv.generate`) and the Google Secret Manager read
 (`connectors/_shared/gsm_creds.py`) note the login id after the store returned
 the secret. A login that passed, followed by a refused read or by no read at

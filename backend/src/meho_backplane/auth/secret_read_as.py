@@ -6,7 +6,8 @@
 When MEHO reads a system's login from a secret store, the store checks one
 login. This module keeps that login's id for the audit row of the call:
 
-* The dispatcher opens a :func:`track_secret_read_as` scope for each call.
+* The dispatcher opens a :func:`track_secret_read_as` scope for each call,
+  before its first check. The step gate of a multi-step call opens one too.
 * The secret-store code calls :func:`record_secret_read_as` (or
   :func:`record_caller_secret_read`) after a secret read passed. A login that
   passed, followed by a refused read or by no read at all, records nothing.

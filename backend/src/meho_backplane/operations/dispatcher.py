@@ -1016,10 +1016,7 @@ async def _execute_and_audit(
     try:
         # A multi-step run keeps a log of its steps, so its error result is
         # stored as uncertain when a step ended uncertain (_composite_steps).
-        with (
-            track_secret_read_as(),
-            track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
-        ):
+        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
                 connector_id=connector_id,
@@ -4115,39 +4112,42 @@ async def dispatch(
     # its audit row. The reset puts the parent's rule back.
     rule_token = policy_rule_var.set(None)
     try:
-        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-            with agent_no_grant_log_scope():
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
+        # Each call notes only the secret reads it made itself, from its first
+        # check on, so a refusal row of a step never takes the parent's value.
+        with track_secret_read_as():
+            if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+                with agent_no_grant_log_scope():
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
+            if is_draining() and not _approved:
+                _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+                return shutting_down_result(op_id)
+            with agent_no_grant_log_scope(new=True):
+                async with track_operation(
                     op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
-        if is_draining() and not _approved:
-            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-            return shutting_down_result(op_id)
-        with agent_no_grant_log_scope(new=True):
-            async with track_operation(
-                op_id=op_id,
-                connector_id=connector_id,
-                operator_sub=operator.sub,
-                tenant_id=operator.tenant_id,
-                approved_run=_approved,
-            ):
-                return await _dispatch_now(
-                    operator=operator,
                     connector_id=connector_id,
-                    op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
+                    operator_sub=operator.sub,
+                    tenant_id=operator.tenant_id,
+                    approved_run=_approved,
+                ):
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
     finally:
         policy_rule_var.reset(rule_token)
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import uuid
 from collections.abc import Coroutine
 from contextvars import ContextVar
@@ -62,6 +63,7 @@ from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
 __all__ = [
+    "CLI_COMMAND_KEY",
     "SESSION_FROM_CLIENT_KEY",
     "AgentRunAuditMeta",
     "agent_run_audit_meta_var",
@@ -69,10 +71,12 @@ __all__ = [
     "agent_session_rows",
     "audit_rejection_safe",
     "audit_safe",
+    "client_command_var",
     "client_session_id_var",
     "decode_work_ref_header",
     "descriptor_op_class",
     "parent_audit_id_var",
+    "parse_command_header",
     "payload_session_from_client",
     "policy_decision_var",
     "policy_rule_columns",
@@ -145,6 +149,42 @@ client_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "client_session_id",
     default=None,
 )
+
+
+#: ContextVar carrying the command path the ``meho`` CLI sends in the
+#: ``Meho-Command`` header (for example ``"vmware vm list"``). The audit
+#: middleware binds it for the whole request. With ``AUDIT_SESSION_LINKS``
+#: on, the rows of a CLI login session store it as :data:`CLI_COMMAND_KEY`,
+#: so an uploaded agent session can find the rows of a command that resolves
+#: its operation itself (:mod:`meho_backplane.session_store.audit_links`). It
+#: is a label the client sends. Nothing that decides or advises reads it.
+client_command_var: ContextVar[str | None] = ContextVar(
+    "client_command",
+    default=None,
+)
+
+#: A command path: lower-case command names split by single spaces.
+_COMMAND_PATH: Final[re.Pattern[str]] = re.compile(
+    r"[a-z0-9][a-z0-9_.-]*(?: [a-z0-9][a-z0-9_.-]*){0,7}"
+)
+
+#: The longest command path MEHO keeps.
+_COMMAND_MAX_CHARS: Final[int] = 200
+
+
+def parse_command_header(raw: bytes) -> str | None:
+    """Return the command path of a ``Meho-Command`` header value, or ``None``.
+
+    A value that is not a command path (other signs, too long) gives
+    ``None``: the request then runs and is audited without it.
+    """
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if len(value) > _COMMAND_MAX_CHARS or not _COMMAND_PATH.fullmatch(value):
+        return None
+    return value
 
 
 #: ContextVar carrying the active runbook run's id while a step's
@@ -304,6 +344,10 @@ def resolve_audit_session_id() -> uuid.UUID | None:
 #: value is ``True``; the key is absent on every other row. Readers that
 #: count agent sessions skip such rows (:func:`agent_session_rows`).
 SESSION_FROM_CLIENT_KEY: Final[str] = "session_from_client"
+
+#: Payload key of the CLI command path (:data:`client_command_var`) on a row
+#: of a CLI login session. Written only with ``AUDIT_SESSION_LINKS`` on.
+CLI_COMMAND_KEY: Final[str] = "cli_command"
 
 
 def session_is_from_client() -> bool:

@@ -58,6 +58,8 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
+from meho_backplane.session_store.hosted_runs import add_run_session
+from meho_backplane.session_store.models import AgentSessionLink, AgentSessionRecord
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -868,3 +870,129 @@ def test_drawer_shows_via_from_the_client_block() -> None:
     assert "<dd data-via>meho-mcp (token)</dd>" in shown.text
     assert older.status_code == 200, older.text
     assert "data-via" not in older.text
+
+
+# ===========================================================================
+# Stored session (#4904)
+# ===========================================================================
+
+
+def _seed_hosted_run_session(run_id: uuid.UUID) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            add_run_session(
+                session, run_id=run_id, tenant_id=_TENANT_A, started_by="op-x", agent_name="ops"
+            )
+
+    asyncio.run(_do())
+
+
+def _seed_uploaded_session(session_id: str, mcp_session_id: uuid.UUID) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            record = AgentSessionRecord(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_A,
+                session_id=session_id,
+                uploaded_by_sub="op-actor",
+                project="infra",
+                app="claude-code",
+                state="ended",
+                files={},
+                upload_count=1,
+                created_at=_BASE,
+                last_seen_at=_BASE,
+            )
+            session.add(record)
+            await session.flush()
+            session.add(
+                AgentSessionLink(
+                    record_id=record.id,
+                    mcp_session_id=mcp_session_id,
+                    tenant_id=_TENANT_A,
+                    work_ref=None,
+                    linked_at=_BASE,
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def _session_links_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_SESSION_LINKS", "true")
+    get_settings.cache_clear()
+
+
+def test_drawer_links_a_hosted_run_row_to_its_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool call of a hosted run links to the run page."""
+    _session_links_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = uuid.uuid4()
+    _seed_hosted_run_session(run_id)
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, agent_session_id=run_id)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        response = _authenticated_client(session_id).get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    assert "data-stored-session" in response.text
+    assert f'href="/ui/agents/runs/{run_id}"' in response.text
+
+
+def test_drawer_names_the_uploaded_session_of_an_mcp_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An MCP call of an uploaded session names the session and the command to read it."""
+    _session_links_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    mcp_session = uuid.uuid4()
+    _seed_uploaded_session("claude-session-1", mcp_session)
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, agent_session_id=mcp_session)
+    plain_row = _seed_audit_row(tenant_id=_TENANT_A, second=1, agent_session_id=uuid.uuid4())
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        linked = client.get(f"/ui/audit/show/{row_id}")
+        plain = client.get(f"/ui/audit/show/{plain_row}")
+
+    assert linked.status_code == 200, linked.text
+    assert "meho sessions show claude-session-1" in linked.text
+    assert plain.status_code == 200, plain.text
+    assert "data-stored-session" not in plain.text
+
+
+def test_drawer_shows_no_stored_session_with_the_switch_off() -> None:
+    """With ``AUDIT_SESSION_LINKS`` off (the default) the drawer has no such part."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = uuid.uuid4()
+    _seed_hosted_run_session(run_id)
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, agent_session_id=run_id)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        response = _authenticated_client(session_id).get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    assert "data-stored-session" not in response.text
+
+
+def test_drawer_hides_the_stored_session_from_an_agent_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login that may not read sessions sees no part and no session id."""
+    _session_links_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    mcp_session = uuid.uuid4()
+    _seed_uploaded_session("claude-session-2", mcp_session)
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, agent_session_id=mcp_session)
+    token = _mint_token(
+        _KEYPAIR,
+        sub=_OPERATOR_SUB,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        principal_kind="agent",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+    with respx.mock(assert_all_called=False):
+        response = _authenticated_client(session_id).get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    assert "data-stored-session" not in response.text
+    assert "claude-session-2" not in response.text

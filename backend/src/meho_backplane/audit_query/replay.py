@@ -62,6 +62,7 @@ async def replay_session(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     max_depth: int = 20,
+    owner_sub: str | None = None,
 ) -> list[ReplayNode]:
     """Reconstruct one agent session as a chronological parent/child tree.
 
@@ -73,6 +74,9 @@ async def replay_session(
     :param max_depth: defensive cap on tree depth (cycle / runaway defence). A
         node reached at this depth keeps its own row but its ``children`` is
         left empty.
+    :param owner_sub: when set (a service login), the closure holds only the
+        rows with ``operator_sub == owner_sub``, on the anchor and on every
+        lineage step. A row of another login is left out with its subtree.
     :returns: the session's root nodes, ascending by ``(occurred_at, id)``.
         Empty list when the session id matches no tenant-scoped rows.
 
@@ -84,6 +88,7 @@ async def replay_session(
         tenant_id=tenant_id,
         session=session,
         max_depth=max_depth,
+        owner_sub=owner_sub,
     )
     return _assemble_tree(rows, max_depth=max_depth)
 
@@ -94,6 +99,7 @@ async def _fetch_session_closure(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     max_depth: int,
+    owner_sub: str | None = None,
 ) -> list[tuple[AuditLog, str | None, str | None]]:
     """Fetch every audit row reachable for the session, tenant-scoped.
 
@@ -117,22 +123,28 @@ async def _fetch_session_closure(
     the denormalized ``target_name``) are fetched in a single follow-up select
     keyed on the deduplicated id set.
     """
+    anchor_where = [
+        AuditLog.agent_session_id == session_id,
+        AuditLog.tenant_id == tenant_id,
+    ]
+    if owner_sub is not None:
+        anchor_where.append(AuditLog.operator_sub == owner_sub)
     closure_anchor = (
         sa.select(AuditLog.id, sa.literal(0).label("depth"))
-        .where(
-            AuditLog.agent_session_id == session_id,
-            AuditLog.tenant_id == tenant_id,
-        )
+        .where(*anchor_where)
         .cte(recursive=True, name="session_closure")
     )
 
     child = aliased(AuditLog, name="child")
+    child_where = [
+        child.parent_audit_id == closure_anchor.c.id,
+        child.tenant_id == tenant_id,
+        closure_anchor.c.depth < max_depth,
+    ]
+    if owner_sub is not None:
+        child_where.append(child.operator_sub == owner_sub)
     closure = closure_anchor.union_all(
-        sa.select(child.id, (closure_anchor.c.depth + 1).label("depth")).where(
-            child.parent_audit_id == closure_anchor.c.id,
-            child.tenant_id == tenant_id,
-            closure_anchor.c.depth < max_depth,
-        ),
+        sa.select(child.id, (closure_anchor.c.depth + 1).label("depth")).where(*child_where),
     )
 
     # The CTE re-emits ids reached by more than one path (an anchor row that is

@@ -372,6 +372,75 @@ async def test_audit_loose_rows_op_rejects_unknown_params() -> None:
     assert result.status != "ok"
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered_op")
+async def test_audit_loose_rows_op_shows_a_service_login_only_its_own_rows(
+    session: AsyncSession,
+) -> None:
+    """A service login sees only its own loose rows, in the rows and the counts.
+
+    A person still sees every loose row of the tenant.
+    """
+    person_step_id, person_request_id = await _seed_mixed_rows(session)
+    service_sub = "service:addon"
+    own_step = _row(offset=timedelta(seconds=4), parent_audit_id=uuid.uuid4())
+    own_step.operator_sub = service_sub
+    # A row of the service login whose parent is a row of another login:
+    # only its own rows count as a present parent, so it is listed as loose.
+    parent_of_other = _row(offset=timedelta(seconds=6))
+    child_of_other = _row(offset=timedelta(seconds=7), parent_audit_id=parent_of_other.id)
+    child_of_other.operator_sub = service_sub
+    session.add_all([own_step, parent_of_other, child_of_other])
+    await session.commit()
+
+    service = Operator(
+        sub=service_sub,
+        name=None,
+        email=None,
+        raw_jwt="fake.jwt.value",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.SERVICE,
+    )
+    result = await dispatch(
+        operator=service,
+        connector_id=AUDIT_INTEGRITY_CONNECTOR_ID,
+        op_id=AUDIT_LOOSE_ROWS_OP_ID,
+        target=None,
+        params={"limit": 10},
+    )
+    assert result.status == "ok", result.error
+    payload = result.result
+    assert isinstance(payload, dict)
+    assert [uuid.UUID(r["id"]) for r in payload["rows"]] == [child_of_other.id, own_step.id]
+    assert {r["principal_sub"] for r in payload["rows"]} == {service_sub}
+    assert payload["count"] == 2
+    assert payload["truncated"] is False
+    # The recent count reads only the login's own rows too.
+    own = await find_loose_rows(
+        tenant_id=_TENANT_A, session=session, now=_NOW, owner_sub=service_sub
+    )
+    assert own.recent_count == 2
+    assert own.count == 2
+
+    person = await dispatch(
+        operator=_operator(),
+        connector_id=AUDIT_INTEGRITY_CONNECTOR_ID,
+        op_id=AUDIT_LOOSE_ROWS_OP_ID,
+        target=None,
+        params={"limit": 10},
+    )
+    assert person.status == "ok", person.error
+    person_payload = person.result
+    assert isinstance(person_payload, dict)
+    assert [uuid.UUID(r["id"]) for r in person_payload["rows"]] == [
+        own_step.id,
+        person_step_id,
+        person_request_id,
+    ]
+    assert person_payload["count"] == 3
+
+
 # ---------------------------------------------------------------------------
 # The sensor template
 # ---------------------------------------------------------------------------

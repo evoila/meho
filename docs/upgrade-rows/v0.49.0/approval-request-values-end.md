@@ -1,0 +1,5 @@
+## Note
+An approved request that nobody starts within `APPROVAL_DEFAULT_TTL` (default 14 days) after the approval now ends as `expired`. MEHO then deletes its encrypted run input and replaces each secret-named value of its stored params with a marker; a later run of it is refused with the usual expired answer. At every start MEHO does the same clean-up, in batches, for each request that is rejected, expired, withdrawn, or approved under another release and never started; this covers rows stored by older releases. A `k8s.apply` whose manifest holds a secret-looking value (a key of `data` or `stringData` or an `env` entry with a secret name, or a text with a secret shape, in any kind of object) keeps its manifest only in the encrypted run input, like an apply of a Secret, and waits for a person. See https://github.com/evoila/meho/blob/main/docs/codebase/approvals.md.
+
+## Action
+Start approved requests within `APPROVAL_DEFAULT_TTL`, or ask again after they expire. Set `APPROVAL_HANDOFF_ENCRYPTION_KEY` (in the Helm chart, `approvalHandoff`) if you apply such manifests with `k8s.apply`: without it MEHO refuses these calls. No schema action.

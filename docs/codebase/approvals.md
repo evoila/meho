@@ -117,6 +117,34 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+**An approved request that nobody starts ends too.** The same sweep ends
+an `approved` request whose run nobody claimed (`resumed_at` is empty)
+within `APPROVAL_DEFAULT_TTL` after its decision
+(`expire_unclaimed_approved_requests` in
+`operations/approval_stored_values.py`). It moves to `expired` with the
+same decision audit row, and its `expires_at` becomes the end of the time
+it had to start (`decided_at + APPROVAL_DEFAULT_TTL`), so every surface
+shows the usual expired reason. `end_run_input` runs on it: the encrypted
+handoff row is deleted and each secret-named value of the stored params
+is replaced by the marker. A claim of its run after that finds no
+`approved` row and is refused; an agent that still waits for it reads the
+usual expired answer (`approval_expired`). So a stored request keeps the
+values of its call at most `APPROVAL_DEFAULT_TTL` after the decision.
+
+**The start-up clean-up.** At every start, right after the release check
+below, `hide_values_of_requests_that_cannot_run` reads every request that
+is not `pending`, was never started (`resumed_at` is empty) and cannot
+run: a rejected, expired or withdrawn request, and an approved
+request of another release (an approval covers one exact release; without
+a release identity no approved request counts). Each one gets the
+`end_run_input` clean-up: its secret-named values and the param a
+connector hides become the marker, and its handoff row is deleted. This
+covers rows stored by an older release, for example a `k8s.apply` of a
+Secret whose manifest is still in `params`. It reads 500 rows per
+transaction, in the order of their id, writes only rows that change, and
+logs the counts (`approval_stored_values_cleaned`). A failure is logged and
+the start goes on.
+
 ## An approval covers one exact release (#5030)
 
 A person approves one exact release of MEHO. When MEHO is updated, every
@@ -370,7 +398,8 @@ Two kinds of rows carry a keyed hash of a call's params:
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
   - A credential write, and a `k8s.apply` whose manifest holds a Secret
-    (the param a connector declares with `declare_hidden_stored_param`),
+    or a secret-looking value (the param a connector declares with
+    `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
@@ -379,7 +408,8 @@ Two kinds of rows carry a keyed hash of a call's params:
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
-    expires (`end_run_input`), each secret-named value in that column (a
+    expires (`end_run_input`, also an approved request that nobody
+    started in time), each secret-named value in that column (a
     password or a licence key inside a deployment spec; the name rule of
     the broadcast scrub) is replaced by the marker `[REDACTED:param_name]`.
     The other fields keep their value. A row without such a field is not

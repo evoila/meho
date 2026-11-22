@@ -390,7 +390,9 @@ async def _lost_claim_envelope(
     written by the claim winner) is returned as the outcome, in the same
     reduced envelope shape this waiter returns when it runs the op itself.
     No stored result yet gives the :func:`_build_already_resumed_envelope`
-    answer, which says the outcome is not known here.
+    answer, which says the outcome is not known here. A request that expired
+    before anyone started it (an approved request ends after
+    ``APPROVAL_DEFAULT_TTL``) gives the usual expired answer.
     """
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_queue import get_request
@@ -411,6 +413,11 @@ async def _lost_claim_envelope(
     )
     if stored is not None:
         return dict(stored)
+    if request.status == "expired":
+        return _build_expired_envelope(
+            original_envelope=original_envelope,
+            approval_request_id=approval_request_id,
+        )
     return _build_already_resumed_envelope(
         original_envelope=original_envelope,
         approval_request_id=approval_request_id,

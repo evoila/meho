@@ -227,6 +227,9 @@ from meho_backplane.operations.approval_presence import (
     stop_presence_challenge_cleanup,
 )
 from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
+from meho_backplane.operations.approval_stored_values import (
+    hide_values_of_requests_that_cannot_run,
+)
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -429,6 +432,18 @@ async def _expire_approvals_from_older_release() -> None:
         structlog.get_logger().exception("approval_release_expiry_failed")
 
 
+async def _hide_values_of_requests_that_cannot_run() -> None:
+    """Drop the stored values of approval requests that cannot run.
+
+    Fail-open: a failure here is logged and the start goes on. The next
+    start runs the clean-up again.
+    """
+    try:
+        await hide_values_of_requests_that_cannot_run()
+    except Exception:
+        structlog.get_logger().exception("approval_stored_values_clean_up_failed")
+
+
 async def _recover_interrupted_approvals() -> None:
     """Mark approved runs that a restart cut short as uncertain (#5025).
 
@@ -618,6 +633,9 @@ async def _run_lifespan_startup() -> None:
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
+    # A request that ended without a run, or an approved request of another
+    # release, keeps no secret value and no encrypted handoff row.
+    await _hide_values_of_requests_that_cannot_run()
     # #5025: an approved run that a restart cut short has no result. MEHO
     # does not know if the change happened, so mark it uncertain.
     await _recover_interrupted_approvals()

@@ -1078,7 +1078,8 @@ class ApprovalExpiredReason(StrEnum):
     Read off the row, never stored, like :class:`ApprovalResultState`.
 
     * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
-      without a decision.
+      without a decision, or it was approved and nobody started it before
+      ``expires_at`` (``APPROVAL_DEFAULT_TTL`` after the decision).
     * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
       while the request waited (:func:`expire_older_release_requests`).
       Only this path expires a request before its deadline, so an
@@ -2683,7 +2684,8 @@ async def consume_remote_write_approval(
     competing direct re-dispatch for a runner-targeted op.
 
     Returns ``True`` when this caller set ``resumed_at`` (owns the single mint),
-    ``False`` when a racing mint already claimed it.
+    ``False`` when a racing mint already claimed it or the request is not
+    ``approved`` any more (it expired after the read).
     """
     stamp = now or _now()
     claimed = await session.execute(
@@ -2691,6 +2693,7 @@ async def consume_remote_write_approval(
         .where(
             ApprovalRequest.id == request.id,
             ApprovalRequest.resumed_at.is_(None),
+            ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
         )
         .values(resumed_at=stamp)
         .execution_options(synchronize_session=False)

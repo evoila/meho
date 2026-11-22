@@ -8,7 +8,9 @@ before its pattern rules.
 
 Every ``k8s.apply`` waits for a person, for every kind of object: there is
 no list of kinds that keep the rules of the operation. No standing grant, no
-agent grant and no run approval covers it.
+agent grant and no run approval covers it. A stored request keeps the
+manifest of a Secret, or of an object with a secret-looking value, only in
+the encrypted handoff of the run.
 """
 
 from collections.abc import Callable, Mapping
@@ -16,12 +18,14 @@ from typing import Any, Final
 
 import yaml
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.op_classes import (
     declare_credential_capable,
     declare_hidden_stored_param,
     declare_no_secret_value,
     declare_op_classes,
 )
+from meho_backplane.redaction.command_line import hide_in_text
 
 declare_op_classes(
     credential_read=(
@@ -144,18 +148,85 @@ def _is_credential_kind(doc: Mapping[str, Any]) -> bool:
     return str(doc["kind"]).lower() in CREDENTIAL_KINDS
 
 
-def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
-    """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
+#: The fields of an object whose keys name the values they hold.
+_NAMED_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData")
 
-    Any document of a multi-document manifest counts, and any item of a
-    list object. A manifest MEHO cannot read counts too: it is not text, it is not
-    YAML or JSON, a document has no kind, or it has more than
+
+def _is_secret_shaped(value: Any) -> bool:
+    """True for a text with a secret shape of its own (a password in a URL, a known token)."""
+    return isinstance(value, str) and hide_in_text(value) != value
+
+
+def _is_secret_env_entry(entry: Any) -> bool:
+    """True for an ``env`` entry with a secret name and a value of its own."""
+    return (
+        isinstance(entry, Mapping)
+        and is_secret_param_name(str(entry.get("name", "")))
+        and entry.get("value") not in (None, "")
+    )
+
+
+def _children(node: Any, *, skip_items: bool) -> list[Any]:
+    if isinstance(node, Mapping):
+        return [value for key, value in node.items() if not (skip_items and key == "items")]
+    return list(node) if isinstance(node, list) else []
+
+
+def _secret_value_check() -> _Counts:
+    """A check for one manifest: True when an object holds a secret-looking value.
+
+    An object holds one when a key of its ``data`` or ``stringData`` has a
+    secret name (the name rule of
+    :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
+    an ``env`` entry at any depth has a secret name and a value, or when a
+    text at any depth has a secret shape
+    (:func:`~meho_backplane.redaction.command_line.hide_in_text`). Each value
+    of the manifest is read once, also when YAML aliases name it many times;
+    the ``items`` of a list object are read as objects of their own.
+    """
+    seen: set[int] = set()
+
+    def holds(doc: Mapping[str, Any]) -> bool:
+        for field in _NAMED_VALUE_FIELDS:
+            values = doc.get(field)
+            if isinstance(values, Mapping) and any(is_secret_param_name(str(k)) for k in values):
+                return True
+        if id(doc) in seen:
+            return False
+        seen.add(id(doc))
+        stack = _children(doc, skip_items=_is_list_kind(str(doc["kind"])))
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if _is_secret_shaped(node):
+                return True
+            env = node.get("env") if isinstance(node, Mapping) else None
+            if isinstance(env, list) and any(_is_secret_env_entry(entry) for entry in env):
+                return True
+            stack.extend(_children(node, skip_items=False))
+        return False
+
+    return holds
+
+
+def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
+    """True when the ``k8s.apply`` manifest in *params* holds a credential.
+
+    A manifest holds one when an object is of a credential kind or holds a
+    secret-looking value (:func:`_secret_value_check`). Any document of a
+    multi-document manifest counts, and any item of a list object. A
+    manifest MEHO cannot read counts too: it is not text, it is not YAML or
+    JSON, a document has no kind, or it has more than
     :data:`MAX_CHECKED_OBJECTS` objects.
     """
-    return _manifest_has(params, _is_credential_kind)
+    holds_secret_value = _secret_value_check()
+    return _manifest_has(params, lambda doc: _is_credential_kind(doc) or holds_secret_value(doc))
 
 
-# The manifest of an apply of a Secret holds the Secret's values. A stored
-# request keeps it only in the encrypted handoff of the run
+# The manifest of an apply of a Secret, or of an object with a secret-looking
+# value, holds that value. A stored request keeps it only in the encrypted
+# handoff of the run
 # (meho_backplane.operations.approval_queue.create_pending_request).
 declare_hidden_stored_param("k8s.apply", "manifest", manifest_holds_credential)

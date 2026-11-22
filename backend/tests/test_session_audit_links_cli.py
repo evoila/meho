@@ -176,7 +176,6 @@ async def test_a_command_that_picks_its_operation_links_by_its_path(client: Test
 
     assert row.payload[SESSION_FROM_CLIENT_KEY] is True
     assert row.payload[CLI_COMMAND_KEY] == "vmware vm list"
-    assert "GET:/vcenter/vm" not in "meho vmware vm list --target vc-1".split()
     content = _bash_call("meho vmware vm list --target vc-1", started, "b1") + _bash_answer(
         ended, "b1"
     )

@@ -21,7 +21,7 @@ Eine lange Abfrage auf dem Replikat hält Änderungen zurück, bis sie fertig is
 
 1. Mit `tarnctl lag` die aktuelle Verzögerung ansehen.
 2. Die laufenden Abfragen auf dem Replikat auflisten.
-3. Die längste Abfrage beenden, wenn der Besitzer zustimmt.
+3. Die längste Abfrage beenden, wenn der Verursacher zustimmt.
 4. Danach den Wert nach fünf Minuten erneut lesen.
 
 ## Vorbeugen

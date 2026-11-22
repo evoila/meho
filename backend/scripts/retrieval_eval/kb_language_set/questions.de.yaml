@@ -16,7 +16,7 @@ questions:
     expect: de/druckauftrag-haengt-in-warteschlange.md
     kind: meaning
   - id: de-print-keywords
-    question: Nimbus Print NP-210
+    question: NP-210 Warteschlange
     expect: de/druckauftrag-haengt-in-warteschlange.md
     kind: exact
   - id: de-mail-ticket

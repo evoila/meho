@@ -21,7 +21,7 @@ Man braucht den Treiber für das Druckermodell und die Adresse des Nimbus-Print-
 
 ## Warteschlange anlegen
 
-Für jeden Drucker legt man eine eigene Warteschlange an. Der Name soll den Standort enthalten, zum Beispiel „Etage 2 Farbe“. Danach wird der Spooler-Dienst nicht neu gestartet, die Warteschlange ist sofort bereit.
+Für jeden Drucker legt man eine eigene Warteschlange an. Der Name soll den Standort enthalten, zum Beispiel „Etage 2 Farbe“. Der Spooler-Dienst muss danach nicht neu gestartet werden, die Warteschlange ist sofort bereit.
 
 ## Testseite
 

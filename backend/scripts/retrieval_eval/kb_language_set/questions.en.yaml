@@ -8,7 +8,7 @@ questions:
     expect: en/vpn-drops-after-idle.md
     kind: meaning
   - id: en-vpn-keywords
-    question: ORB-4012 KeepAliveSeconds
+    question: ORB-4012 idle timeout
     expect: en/vpn-drops-after-idle.md
     kind: exact
   - id: en-print-ticket
@@ -16,7 +16,7 @@ questions:
     expect: en/print-job-stuck-in-queue.md
     kind: meaning
   - id: en-print-keywords
-    question: nimbus-spool NP-210
+    question: NP-210 queue
     expect: en/print-job-stuck-in-queue.md
     kind: exact
   - id: en-mail-ticket
@@ -24,7 +24,7 @@ questions:
     expect: en/mailbox-full-quota-exceeded.md
     kind: meaning
   - id: en-mail-keywords
-    question: MBX-552 quota archive
+    question: MBX-552 quota bounce
     expect: en/mailbox-full-quota-exceeded.md
     kind: exact
   - id: en-backup-ticket

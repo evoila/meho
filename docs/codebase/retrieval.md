@@ -400,6 +400,12 @@ MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
   --report report-en.md
 ```
 
+Use a `tenant_admin` token for both steps. The import route
+(`POST /api/v1/kb/import`) takes only a `tenant_admin` login or a login with
+the `kb_import_only` claim. The runner's search (`search_knowledge` over MCP)
+needs the `operator` role or higher, and a `kb_import_only` login has no MCP
+access at all. So one `tenant_admin` token covers both.
+
 The load script reads the token from `--token-env` (default `MEHO_TOKEN`) and
 never prints it. It prints the counts created, updated, unchanged and skipped,
 and a second run reports every page as unchanged. `--dry-run` sends

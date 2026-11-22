@@ -126,6 +126,37 @@ def test_key_words_occur_in_the_expected_page() -> None:
                 assert word in body, (question.id, word)
 
 
+TWIN_PAGES = {
+    "vpn": ("de/vpn-verbindung-bricht-ab.md", "en/vpn-drops-after-idle.md"),
+    "print": ("de/druckauftrag-haengt-in-warteschlange.md", "en/print-job-stuck-in-queue.md"),
+    "mail": ("de/postfach-voll-kontingent-ueberschritten.md", "en/mailbox-full-quota-exceeded.md"),
+    "backup": (
+        "de/sicherung-scheitert-an-gesperrten-dateien.md",
+        "en/backup-fails-on-locked-files.md",
+    ),
+}
+
+
+def test_key_words_of_a_two_language_topic_name_only_their_own_page() -> None:
+    """A key word question needs one word that the other language's page lacks.
+
+    Otherwise both pages match equally and the order of the two is chance.
+    """
+    checked = 0
+    for _, question in _all_questions():
+        if question.kind != "exact":
+            continue
+        topic = question.id.rsplit("-", 1)[0].split("-", 1)[1]
+        if topic not in TWIN_PAGES:
+            continue
+        own = question.expect
+        (twin,) = [p for p in TWIN_PAGES[topic] if p != own]
+        twin_words = set(_words(_body(twin)))
+        assert any(w not in twin_words for w in _words(question.question)), question.id
+        checked += 1
+    assert checked == 8
+
+
 def test_error_codes_belong_to_one_topic() -> None:
     pages_by_code: dict[str, list[str]] = {}
     for path in PAGE_TEXT:

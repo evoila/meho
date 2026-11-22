@@ -100,6 +100,7 @@ from meho_backplane.settings import get_settings
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.docs_collections import DocCollection
+    from meho_backplane.docs_search import DocsScope
     from meho_backplane.kb.schemas import KbEntry
 
 __all__ = [
@@ -173,7 +174,10 @@ def wiki_exact_filters(
     every filter skips the wiki as before. With it on, the answer is a value
     only when the search has no time window, is not in the shared scope, has
     no ``kind``, and its filters are only ``product`` and/or ``version``,
-    each a non-blank string. Anything else gives ``None``.
+    each a non-blank string with no space at its start or end. Anything else
+    gives ``None``. A padded value is refused because the knowledge store
+    matches the exact string while the docs scope strips it; the two halves
+    must never filter by different strings.
     """
     if not get_settings().kb_wiki_filtered_search:
         return None
@@ -181,7 +185,9 @@ def wiki_exact_filters(
         return None
     if not set(filters) <= {"product", "version"}:
         return None
-    if not all(isinstance(value, str) and value.strip() for value in filters.values()):
+    if not all(isinstance(value, str) and value.strip() == value for value in filters.values()):
+        return None
+    if not all(filters.values()):
         return None
     product, version = filters.get("product"), filters.get("version")
     return WikiExactFilters(
@@ -235,6 +241,7 @@ async def search_wiki(
             build_docs_scope(key, exact.product, exact.version) if exact else build_docs_scope(key)
         )
         if exact and forwarded_scope(scope, resolve_backend(collection).ref).mode != "filters":
+            structlog.contextvars.unbind_contextvars("audit_collection")
             return _not_searched(key, "filtered", _INDEX_CANNOT_FILTER)
         result = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
     except CollectionForbiddenError:
@@ -247,7 +254,7 @@ async def search_wiki(
         _log.warning("kb_wiki_search_unavailable", collection_key=key, error=str(exc))
         return _not_searched(key, "index_unavailable")
     hits = [chunk.model_copy(update={"collection": key}) for chunk in result.chunks]
-    copies = await _imported_copies(operator, key, collection, stored, hits)
+    copies = await _imported_copies(operator, scope, collection, stored, hits)
     kept = [chunk for chunk in hits if chunk.chunk_id not in copies]
     structlog.contextvars.bind_contextvars(
         audit_wiki_status=_SEARCHED, audit_wiki_hit_count=len(kept)
@@ -328,7 +335,7 @@ def _wiki_not_searched(key: str, why: str) -> str:
 
 async def _imported_copies(
     operator: Operator,
-    key: str,
+    scope: DocsScope,
     collection: DocCollection,
     stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     hits: list[DocsChunk],
@@ -364,7 +371,7 @@ async def _imported_copies(
             continue
         page_key = _page_identity(chunk)
         if page_key not in pages:
-            pages[page_key] = await _whole_page(operator, key, collection, chunk.read_handle)
+            pages[page_key] = await _whole_page(operator, scope, collection, chunk.read_handle)
         page = pages[page_key]
         if page and any(page == bodies[slug] for slug in slugs):
             copies.add(chunk.chunk_id)
@@ -372,19 +379,25 @@ async def _imported_copies(
 
 
 async def _whole_page(
-    operator: Operator, key: str, collection: DocCollection, read_handle: str
+    operator: Operator, scope: DocsScope, collection: DocCollection, read_handle: str
 ) -> str | None:
     """Return the whole wiki page of a hit without its lesson header, or ``None``.
 
     ``None`` when the page cannot be read in full: the read is refused or
     fails, it has no text, or the backend cut it or has more of it to read.
+    A read handle is bound to the filters of the search that made it, so the
+    read uses the *scope* of that search, with its product and version.
     """
     try:
         read = await read_docs(
-            operator, read_handle, scope=build_docs_scope(key), collection=collection, mode="page"
+            operator, read_handle, scope=scope, collection=collection, mode="page"
         )
     except (DocsReadError, CorpusUnavailable) as exc:
-        _log.info("kb_wiki_page_read_failed", collection_key=key, reason=type(exc).__name__)
+        _log.info(
+            "kb_wiki_page_read_failed",
+            collection_key=scope.collection_key,
+            reason=type(exc).__name__,
+        )
         return None
     if read.text is None or read.truncated or read.next is not None:
         return None

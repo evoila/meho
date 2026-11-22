@@ -1095,7 +1095,7 @@ async def test_switch_on_an_index_without_exact_filters_is_not_searched(
     wiki = response["wiki"]
     assert (wiki["searched"], wiki["reason"], wiki["hit_count"]) == (False, "filtered", 0)
     assert "index does not apply product and version as exact filters" in wiki["message"]
-    assert _audit_fields()["audit_wiki_status"] == "filtered"
+    assert _audit_fields() == _SKIPPED_AUDIT
 
 
 @pytest.mark.asyncio
@@ -1217,3 +1217,71 @@ async def test_switch_on_rest_without_exact_filters_is_not_searched(
     wiki = response.json()["wiki"]
     assert (wiki["searched"], wiki["reason"]) == (False, "filtered")
     assert "index does not apply product and version" in wiki["message"]
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_copy_is_found_by_a_read_with_the_search_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The index refuses a read with other filters than the search had; the copy is still found."""
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    slug = await _seed_import(body=_WIKI_CHUNK.content)
+
+    async def read_page(_operator: Operator, _handle: str, **kwargs: Any) -> UpstreamRead:
+        if kwargs.get("filters") != {"product": "vcenter", "version": "9.0"}:
+            raise CorpusReadError("refused", kind=CorpusReadError.KIND_REJECTED, status=404)
+        return UpstreamRead.model_validate(
+            {"mode": "page", "text": _WIKI_CHUNK.content, "disclosure": "full"}
+        )
+
+    read = AsyncMock(side_effect=read_page)
+    response, _ = await _search(
+        _operator(),
+        store=[_store_hit(slug=slug, metadata=_imported(_PAGE_PATH))],
+        read=read,
+        product="vcenter",
+        version="9.0",
+    )
+    read.assert_awaited_once()
+    assert read.await_args.kwargs["filters"] == {"product": "vcenter", "version": "9.0"}
+    assert (response["wiki"]["duplicate_count"], response["wiki"]["hit_count"]) == (1, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("padded", ["9.0 ", " 9.0", "\t9.0\n"])
+async def test_switch_on_a_padded_value_is_not_searched_over_mcp(
+    monkeypatch: pytest.MonkeyPatch, padded: str
+) -> None:
+    """The store matches the exact string, the index scope strips it: so a padded value skips."""
+    import structlog
+
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    structlog.contextvars.clear_contextvars()
+    response, corpus = await _search(_operator(), product="vcenter", version=padded)
+    corpus.assert_not_called()
+    assert (response["wiki"]["searched"], response["wiki"]["reason"]) == (False, "filtered")
+    assert "cannot apply filters" in response["wiki"]["message"]
+    assert _audit_fields() == _SKIPPED_AUDIT
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_padded_value_is_not_searched_over_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    corpus = _corpus(_WIKI_CHUNK)
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[])),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        response = _retrieve_client(_operator()).post(
+            "/api/v1/retrieve",
+            json={"query": "snapshot", "source": "kb", "metadata_filters": {"version": "9.0 "}},
+        )
+    corpus.assert_not_called()
+    wiki = response.json()["wiki"]
+    assert (wiki["searched"], wiki["reason"]) == (False, "filtered")
+    assert "cannot apply filters" in wiki["message"]

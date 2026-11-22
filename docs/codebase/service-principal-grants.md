@@ -167,7 +167,8 @@ and no run approval covers it.
   agent grant, no run approval and no approval override does. The mark
   refuses an op with a credential class. `_sandbox_delete_exception` in
   `service_grants.py` holds the rule, for the grant lookup, for grant
-  create and for a step of a multi-step operation.
+  create, for a step of a multi-step operation and for the step list
+  (`classify_subop_grantability`).
 - For a family of op ids a connector gives a match function instead:
   `declare_credential_capable_match` (`op_classes.py`). Today the
   Kubernetes connector matches the operations an ingest makes from a
@@ -713,6 +714,8 @@ What the code does:
   multi-step operation through `parent_audit_id`.
 - **The step list.** `GET /api/v1/operations/governed-subops` (CLI:
   `meho operation subops`) marks delete steps grantable with the mode on.
+  This holds for `k8s.delete` too: it is a credential step, but it has
+  the mark `declare_sandbox_delete_grant`.
 - **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
   for every caller and `features.approval_queue.sandbox_mode`;
   `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line

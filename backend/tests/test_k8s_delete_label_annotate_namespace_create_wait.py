@@ -53,6 +53,7 @@ from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.operations.governed_subops import classify_subop_grantability
 from meho_backplane.operations.op_policy import _with_floors, effective_policy
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
 from meho_backplane.operations.run_approvals import (
@@ -513,6 +514,37 @@ async def test_a_delete_grant_covers_no_other_call_that_always_waits(
             creator_role=TenantRole.TENANT_ADMIN,
         )
     assert str(refused.value) == f"{credential_grant_reason(op_id)} Leave it out."
+
+
+@pytest.mark.asyncio
+async def test_step_discovery_says_k8s_delete_is_not_grantable_outside_sandbox_mode() -> None:
+    await _register_all()
+    step = classify_subop_grantability(_DELETE)
+    assert step.grantable is False
+    assert step.ungrantable_reason == credential_grant_reason(_DELETE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sandbox")
+async def test_step_discovery_says_k8s_delete_is_grantable_in_sandbox_mode() -> None:
+    await _register_all()
+    step = classify_subop_grantability(_DELETE)
+    assert step.grantable is True
+    assert step.ungrantable_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sandbox")
+@pytest.mark.parametrize(
+    ("op_id", "params"), _NOT_FOR_A_DELETE_GRANT, ids=_NOT_FOR_A_DELETE_GRANT_IDS
+)
+async def test_step_discovery_keeps_other_calls_that_always_wait_not_grantable(
+    op_id: str, params: dict[str, Any]
+) -> None:
+    await _register_all()
+    step = classify_subop_grantability(op_id)
+    assert step.grantable is False
+    assert step.ungrantable_reason == credential_grant_reason(op_id)
 
 
 @pytest.mark.asyncio

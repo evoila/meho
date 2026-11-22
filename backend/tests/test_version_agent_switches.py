@@ -51,6 +51,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "knowledge_upkeep_enabled",
         "mcp_approval_exit_code",
         "mcp_call_flow_guide",
+        "mcp_own_request_status",
         "mcp_profile_connector_lists",
         "mcp_reveal_fetch",
         "mcp_short_tool_texts",

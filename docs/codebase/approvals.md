@@ -2667,6 +2667,13 @@ for the paired add-on that requested the approval
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
 
+On MCP, with `MCP_OWN_REQUEST_STATUS` on (off by default), the owner makes
+the same read with `call_operation(connector_id, op_id, approval_request_id)`.
+It uses `read_approval_result` too, so the owner check and the
+`approval.result` audit row are the same. Another person's request and an
+unknown id both answer `approval_request_not_found`
+([mcp.md](mcp.md#reading-the-state-of-your-own-approval-request-mcp_own_request_status-off-by-default)).
+
 ## The audit row of an approved run (#3864)
 
 When a person approves a request, MEHO runs the operation. The run writes its

@@ -543,37 +543,55 @@ def _is_quoted_executable(text: str, match: re.Match[str], close: int) -> bool:
     return not path or path.endswith("/")
 
 
-class _LastQuote:
-    """The escape level of the last double quote before a position, read left to right.
+_QUOTE_OR_LINE_END: Final = re.compile(r'["\n]')
 
-    The quote that opens the string a tool stands in has one backslash
-    less than a line end in that string: none in a JSON string, one in a
-    JSON string inside a JSON string. Each part of the text is read once.
+
+class _OpenStrings:
+    """The escape level of the innermost open JSON string at a position, read left to right.
+
+    A double quote with *b* backslashes before it belongs to escape level
+    one more than the count of the low one bits of *b*: no backslash (or
+    an even run) in a JSON string, one in a JSON string inside a JSON
+    string, three one level deeper. A quote opens a string of its level
+    or closes the open one, and closing a string also closes every string
+    inside it. So a quoted word that is opened and closed before the tool,
+    as ``\\"ok\\"``, does not change the level. A real line end closes all
+    strings. Each part of the text is read once.
     """
 
     def __init__(self, text: str) -> None:
         self._text = text
         self._seen = 0
-        self._unit = 1
+        self._open: list[int] = []
 
     def unit(self, index: int) -> int:
-        """Backslashes of an escaped line end in the string of the last quote before *index*."""
-        text = self._text
+        """Backslashes of an escaped line end in the innermost string open at *index*."""
+        text, levels = self._text, self._open
         if index > self._seen:
-            quote = text.rfind('"', self._seen, index)
-            if quote != -1:
+            for mark in _QUOTE_OR_LINE_END.finditer(text, self._seen, index):
+                quote = mark.start()
+                if text[quote] == "\n":
+                    levels.clear()
+                    continue
                 run_start = quote
-                while run_start > self._seen and text[run_start - 1] == "\\":
+                while run_start > 0 and text[run_start - 1] == "\\":
                     run_start -= 1
-                self._unit = quote - run_start + 1
+                after = quote - run_start + 1
+                level = (after & -after).bit_length()
+                while levels and levels[-1] > level:
+                    levels.pop()
+                if levels and levels[-1] == level:
+                    levels.pop()
+                else:
+                    levels.append(level)
             self._seen = index
-        return self._unit
+        return 1 << (levels[-1] - 1) if levels else 1
 
 
 def _tool_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     quotes = _OuterQuotes(text)
-    last_quote = _LastQuote(text)
+    open_strings = _OpenStrings(text)
     pos = 0
     while (match := _TOOL.search(text, pos)) is not None:
         tool = _tool_name(match.group(0)) or ""
@@ -586,7 +604,7 @@ def _tool_spans(text: str) -> list[tuple[int, int]]:
             outer = quotes.end(close + 1)
             first, size = close + 1, len(text) if outer is None else outer
             in_string = _in_double_quotes(text, outer)
-        unit = last_quote.unit(match.start())
+        unit = open_strings.unit(match.start())
         found, pos = _segment_spans(text, first, tool, size, in_string, unit)
         spans.extend(found)
         pos = max(pos, match.end())

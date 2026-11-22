@@ -818,6 +818,33 @@ def test_a_backslash_before_n_or_r_in_a_json_string_does_not_end_the_command(
         assert _parses(redact(text, policy).redacted, levels)
 
 
+#: Quoted words before the tool, in the same JSON string: they are opened
+#: and closed before the tool, so they do not change its escape level.
+_QUOTED_BEFORE_TOOL: Final = (
+    'echo "ok"; ',
+    'printf "%s" "a b" && ',
+    'cd "C:\\work" ; ',
+)
+#: (line, its secret values, JSON levels): quoted text, then a path, then
+#: the password of each tool.
+_PASSWORD_AFTER_QUOTED_TEXT_AND_PATH: Final[list[tuple[str, tuple[str, ...], int]]] = [
+    (prefix + line, secrets, levels)
+    for prefix in _QUOTED_BEFORE_TOOL
+    for line, secrets, levels in _PASSWORD_AFTER_PATH
+]
+
+
+@pytest.mark.parametrize(("line", "secrets", "levels"), _PASSWORD_AFTER_QUOTED_TEXT_AND_PATH)
+def test_quoted_text_before_the_tool_does_not_change_its_escape_level(
+    line: str, secrets: tuple[str, ...], levels: int
+) -> None:
+    text = _in_json(line, levels)
+    values = tuple(_as_json(secret, levels) for secret in secrets)
+    for policy in (get_default_policy(), _content_policy()):
+        assert _changes_besides(text, values, policy) == []
+        assert _parses(redact(text, policy).redacted, levels)
+
+
 #: A Windows path in quotes: ``\\u`` there is no Unicode escape.
 _WINDOWS_PATH: Final = 'copy "C:\\users\\public\\file.txt" backup'
 

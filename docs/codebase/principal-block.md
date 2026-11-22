@@ -50,9 +50,22 @@ Where the list is checked:
 |---|---|
 | `verify_jwt_for_audience` (`auth/jwt.py`) | Every REST and MCP request. 403 `principal_blocked`. It runs after the current tenant is chosen. |
 | `UISessionMiddleware` (`ui/auth/middleware.py`) | Every console request, not only the 300-second token check. 403 with the plain text above. |
-| `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. A `denied` result, and the vendor gets no call. |
+| `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. Each step of a multi-step operation that runs through `dispatch()` checks again before it is sent. A `denied` result, and the vendor gets no call. |
+| `enforce_subop_policy`, `run_governed_subop` (`operations/composite.py`) | Each governed direct step of a multi-step operation, also a step that is sent again on a resume. The step is refused before it is sent, and the operation returns the refusal. |
 | `PrincipalBlockGate` (`agent/principal_block_gate.py`) | Every tool call and every model request of a hosted agent run and of its child runs (`invoke_agent`). The tool does not run, the model gets no further request, and the run ends failed with the refusal text. The audit row of the refused tool call has status 403 (503 when the list cannot be read). |
+| `invoke_agent` (`agent/invoke.py`) | A child run that is refused because its person is blocked ends failed with the refusal text, and its heartbeat stops. The refusal goes on to the parent run: the parent stops with no retry and ends failed with the same text. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
+
+A block made while a multi-step operation runs stops its next step.
+
+A new request of a blocked person is refused within 5 seconds. An open
+live stream is not cut at once:
+
+- The console's live stream (`/ui/broadcast/stream`) ends at its next
+  session check, at most `ui_session_read_revalidation_seconds` later
+  (300 seconds by default).
+- `GET /api/v1/feed` ends when the person's token ends (or after
+  `feed_stream_max_seconds`, when that comes first).
 
 A hosted agent run acts as the person who started it, so it stops when
 that person is blocked. A scheduled run acts as the agent's own login, so

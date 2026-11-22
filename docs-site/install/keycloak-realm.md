@@ -1172,7 +1172,11 @@ that client.
 enough on its own. MEHO checks sign-in tokens itself, so a token that
 was already issued keeps working until it ends. Block the person in MEHO
 too: `meho principal block <sub> --reason "<why>"`. MEHO then refuses
-every request of that person within 5 seconds, on every MEHO process.
+every new request of that person within 5 seconds, on every MEHO
+process. An open live stream is not cut at once: the console's live
+stream ends at its next session check (at most
+`ui_session_read_revalidation_seconds`, 300 seconds by default), and
+`GET /api/v1/feed` ends when the person's token ends.
 `<sub>` is the person's login id (the user id in Keycloak). To undo it,
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.

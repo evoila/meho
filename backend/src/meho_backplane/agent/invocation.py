@@ -117,6 +117,7 @@ from meho_backplane.auth.delegation import (
     resolve_actor_sub,
 )
 from meho_backplane.auth.jwt import verify_jwt_for_audience
+from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
@@ -1297,6 +1298,11 @@ class AgentInvoker:
         path -- the value is unwrapped via ``.get_secret_value()`` only at
         the single :func:`get_client_credentials_token` call below.
 
+        The login id of the verified agent is noted as a machine login
+        (:func:`~meho_backplane.auth.machine_logins.note_machine_login`), the
+        same as for a REST or MCP call, so it never counts as a person behind
+        another login.
+
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
             AgentInvocationError: the authenticated client does not own the
@@ -1331,6 +1337,9 @@ class AgentInvoker:
                 f"scheduled run rejected: agent credentials for {agent_client_id!r} "
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
+        # A machine login never counts as a person behind another login.
+        async with get_sessionmaker()() as session, session.begin():
+            await note_machine_login(session, operator)
         return operator, entry
 
     async def run_scheduled(

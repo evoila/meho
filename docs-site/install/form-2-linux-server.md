@@ -112,8 +112,7 @@ Use your own DNS name and your own admin range.
 | `--admin-network <range>` | The IPv4 addresses that may use SSH: a range such as `192.0.2.0/24`, one address, or `none`. | Only the address of your SSH session. |
 | `--public-address <ipv4>` | Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet. | None. |
 | `--first-tenant-id <uuid>` | The id of the first tenant. Give the old id when you move MEHO to another machine. | A new random id. |
-| `--admin-user <name>` | The user name of the first admin. | `admin` |
-| `--approver-user <name>` | The user name of the approver (in `MEHO-SA-Operators`), whom MEHO reads as an Operator: they approve the admin's `safe` and `caution` changes, but not a change of rights. | `approver` |
+| `--admin-user <name>` | The user name of the one Admin login. | `admin` |
 | `--cluster-cidr <cidr>` | The address range of the pods. | `10.42.0.0/16` |
 | `--service-cidr <cidr>` | The address range of the services. | `10.43.0.0/16` |
 
@@ -169,16 +168,17 @@ your site uses, and give them with `--cluster-cidr` and
    `/etc/meho/install.json`. The record holds no secret. From v0.47.0, it
    also writes the CA of the console certificate to
    `/var/lib/meho/console-ca.crt` (see
-   [The console certificate](#the-console-certificate)), and it reads the
-   [first-start list](first-start-checks.md). A red line in the list does
-   not stop the install.
+   [The console certificate](#the-console-certificate)). From v0.49.0,
+   the last line of the result names where to read the
+   [first-start list](first-start-checks.md) after the first login. MEHO
+   shows the list only to a signed-in person.
 
 When a later step fails, its `[FAIL]` line says what to do. After RKE2
 has started, a second run finds a machine that is only partly installed,
 and it stops. Then run `sudo meho-host support-bundle` and send the file
 to evoila support (see [Get help from support](#get-help-from-support)).
 
-At the end, the script prints the result. From v0.47.0 it looks like
+At the end, the script prints the result. From v0.49.0 it looks like
 this:
 
 ```text
@@ -187,30 +187,19 @@ install.sh: MEHO <version> is installed on meho.example.com.
   Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
-  First-start list:      a red line; each red line says what to fix
-    GREEN   dns           The host name meho.example.com resolves. Where it points is checked once the certificate check is green.
-    RED     certificate   The certificate of meho.example.com is not trusted. Install the full chain, and add your own CA to the trust bundle of MEHO.
-    ...
+  First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 ```
 
-With the install's own certificate, the `certificate` line is red. That
-is expected (see [The console certificate](#the-console-certificate)).
-Each other red line says what to fix. When the script cannot read the
-list, for example behind address translation (`--public-address`), the
-line says `not read`. Then open the first-start page in the console after
-the first login ([Step 4](#step-4-first-login)).
+Read the list after the first login ([Step 4](#step-4-first-login)).
 
-Before v0.47.0, the result has no `Console CA` line, and the last line
-says `First-start list: not in this version yet`.
+In v0.47.0 and v0.48.0, the script reads the list itself and shows its
+lines under the last line. Before v0.47.0, the result has no `Console CA`
+line, and the last line says `First-start list: not in this version yet`.
 
 ## Step 4: First login
 
-The install made two users with temporary passwords: the first admin
-(in `MEHO-Admins`) and an approver (in `MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
-Operators, so the approver can approve the admin's `safe` and `caution`
-changes. The admin approves their own `dangerous` and `destructive`
-changes. A change of rights needs a second admin. See
-[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+The install made one Admin login with a temporary password. It is in
+`MEHO-Admins` and `MEHO-Platform-Admins`.
 
 1. On the server, read the file with the passwords:
 
@@ -218,8 +207,8 @@ changes. A change of rights needs a second admin. See
     sudo cat /var/lib/meho/first-login-passwords
     ```
 
-    It has four lines, each as `name=value`: `admin_username`,
-    `admin_password`, `approver_username` and `approver_password`.
+    It has two lines, each as `name=value`: `admin_username` and
+    `admin_password`.
 
 2. From a computer on the management network, open the console address,
    for example `https://meho.example.com/ui/`. Port 80 sends you on to
@@ -232,9 +221,7 @@ changes. A change of rights needs a second admin. See
    asks you to set a new password and to set up an authenticator app for
    one-time codes. Then it shows recovery codes. Keep them in your key
    store.
-5. Give the approver's user name and temporary password to the second
-   person in a safe way. That person logs in the same way.
-6. Copy the unseal key to your key store, for example your password
+5. Copy the unseal key to your key store, for example your password
    manager or a safe:
 
     ```bash
@@ -321,10 +308,16 @@ in place.
    `/var/lib/meho/console-ca.crt`. Its last line is the `console-certificate`
    line of `meho-host check`. With 30 days or less left, the line is a
    `[WARN]`.
-4. MEHO keeps the key. Delete your copy of `key.pem` from the server.
+4. From v0.49.0, the command also gives your CA to MEHO, and MEHO
+   restarts. The console is away for about a minute. After that, the
+   `certificate` line of the first-start list is green.
+5. MEHO keeps the key. Delete your copy of `key.pem` from the server.
 
-An update keeps your certificate. To replace it, for example before it
-expires, run the command again with the new files.
+An update keeps your certificate, and MEHO keeps trusting your CA. To
+replace the certificate, for example before it expires, run the command
+again with the new files. If you installed your certificate with an
+older version, run the command again after the update to v0.49.0, so the
+`certificate` line turns green.
 
 ### The unseal key
 
@@ -413,7 +406,8 @@ the same machine. There is no other update command.
 The update keeps the answers of the install, the firewall with your SSH
 range, your certificate, the data, the passwords and the keys. It does not
 write the two first-login files again. From v0.47.0, it writes the CA file
-again and shows the first-start list at the end, as the install does.
+again and, as the install does, names where to read the first-start list
+at the end.
 
 **One minor version at a time.** RKE2 moves only one minor version at a
 time, for example from v1.37 to v1.38, but not from v1.37 to v1.39. When
@@ -475,7 +469,7 @@ the new range does not hold your own address.
 ### A person lost the one-time code app
 
 Use this only in an emergency: when a person of a local account (the
-first admin or the second person) lost the phone with the one-time code
+first admin) lost the phone with the one-time code
 app and also the recovery codes, so they cannot log in any more.
 
 ```bash

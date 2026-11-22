@@ -51,8 +51,8 @@ The rules:
   (:func:`narrow`): ``SA-Operators`` may approve only what an Operator may
   approve, and ``Approvers`` (read as Readers) never approves. A request
   keeps the kinds it was stored with, read by the same rule.
-* A change of rights is not routed. Only another admin approves it, as
-  today.
+* A change of rights is not routed. Only an admin approves it, in the
+  web console.
 * The stored value holds group kinds, never people. The requester is not
   asked; whether they may approve their own change is today's rule.
 
@@ -360,7 +360,7 @@ async def stamp_approver_set(
     """Store on *request* the group kinds that may approve it, and the rule.
 
     Does nothing while the switch is off and for a change of rights (only
-    another admin approves it, as today). The risk level is the one the
+    an admin approves it, in the web console). The risk level is the one the
     dispatcher stamped on ``proposed_effect``. *category* is the one the
     classification gave the looked-up row (``policy_category``, set while
     the ``POLICY_CLASSIFICATION`` switch is on); a request without a

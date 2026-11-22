@@ -459,16 +459,30 @@ async def test_unknown_connector_names_only_close_ids_in_the_list(
     await _register("hostos", "hostos-ssh", "hostos.about")
     await _register("clusteros", "clusteros-ssh", "clusteros.about")
 
-    async def ask(connectors: list[str] | None, connector_id: str) -> str:
-        with pytest.raises(ToolFailed) as failed:
+    async def failed(connectors: list[str] | None, connector_id: str) -> str:
+        with pytest.raises(ToolFailed) as failure:
             await _tools([tool], connectors)[tool].function(
                 _ctx(_agent()), connector_id=connector_id, **arguments
             )
-        return str(failed.value)
+        return str(failure.value)
 
-    assert _OTHER in await ask(None, "clusteros-ssh")
-    limited = await ask(["hostos-ssh-1.0"], "clusteros-ssh")
-    assert "Did you mean" not in limited
+    async def refused(connectors: list[str], connector_id: str) -> str:
+        with pytest.raises(ToolRefusedRetry) as refusal:
+            await _tools([tool], connectors)[tool].function(
+                _ctx(_agent()), connector_id=connector_id, **arguments
+            )
+        assert refusal.value.reason_code == CONNECTOR_NOT_ALLOWED
+        return str(refusal.value)
+
+    assert _OTHER in await failed(None, "clusteros-ssh")
+    # An id outside the list is refused before the search; the refusal
+    # names only the list.
+    limited = await refused(["hostos-ssh-1.0"], "clusteros-ssh")
     assert _OTHER not in limited
-    assert "hostos-ssh-1.0" in await ask(["hostos-ssh-1.0"], "hostos-ssh")
-    assert _OTHER not in await ask([], "clusteros-ssh-1")
+    assert "hostos-ssh-1.0" in limited
+    assert _OTHER not in await refused([], "clusteros-ssh-1")
+    # An unknown id on the list reaches the search: its close ids outside
+    # the list are not named.
+    on_list = await failed(["clusteros-ssh"], "clusteros-ssh")
+    assert "Did you mean" not in on_list
+    assert _OTHER not in on_list

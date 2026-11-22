@@ -24,6 +24,69 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
+Two of these calls always wait for a person, and no standing grant, no
+agent grant and no run approval covers them
+([service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- every `k8s.exec` call: a command in a container can read or write any
+  credential the container holds. Grant create, agent grant create and
+  run approval create refuse `k8s.exec`.
+- every `k8s.apply` call, for every kind of object, in every document of
+  a manifest and every item of a list object, and also a manifest MEHO
+  cannot read. What an apply does to an object depends on the object as
+  it is on the cluster and on the fields other writers own, not only on
+  the manifest. So there is no list of kinds that keep the rules of
+  `k8s.apply`. Grant create, agent grant create and run approval create
+  refuse `k8s.apply`. A person's own call waits for approval, as every
+  `k8s.apply` call does.
+
+Both are declared in `op_classes.py` of the connector. The approval card
+says in one line why the call waits; only a person reads that line. The
+card of a `k8s.apply` also names, for a person only, what each container
+runs: the object, the container, the image, the `command` and `args`, and
+the `exec` commands of its lifecycle hooks and probes, with secret values
+hidden (`run_commands`, see `approvals.md`). A container here is also any
+other object with a `command` or `args` list, under any field of a
+custom kind, so every command line the manifest echo shows only by size
+is named. It does so also when the dry
+run fails. The list keeps at most 16 KB. It always keeps room for the
+name of every later container: an entry that is too large keeps
+the start of what it runs, and its `cut` field says so.
+The stored request of a `k8s.apply` of a Secret keeps its manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The row of the request keeps no copy, also not when the request is
+approved and never runs, and a step of a multi-step run keeps no copy of
+the parent's params either. A row stored before this rule keeps its
+manifest until the run starts or the request ends; then MEHO replaces it
+with the same marker it writes for a secret-named value. A new run of a
+failed apply needs the params sent again.
+
+`k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
+defines, unchanged, so the caller does not choose what runs. Writing the
+CronJob with `k8s.apply` waits for a person. The card shows the job
+template of the CronJob.
+
+An operator can also ingest a Kubernetes API file as a generic connector.
+The operations it makes that read or write a Secret, run a command in a
+pod, open a proxy or a port forward, or make a token get the same rule.
+So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
+object or of a collection of objects, of every kind: `/api/v1/...` and
+`/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
+group: a namespace, a node, a persistent volume or a component status).
+There is no list of kinds that keep their rules. A trailing `/` counts
+the same as none. A path can have any prefix in front, for example the
+base path of a proxy. A read, a `/status` or `/scale` subresource, and
+the `status` and `finalize` subresources of a Namespace keep the rules
+of the operation
+(`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The rule reads the path of every operation made from an ingested API
+file, whatever the product. So an API file of another product whose
+paths have the same form (`/api/v1/namespaces/...`,
+`/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+gets the same rule: its writes wait for a person on every call, and
+grant create refuses them. The method is read without case: `post:`
+counts the same as `POST:`.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types
@@ -1336,8 +1399,11 @@ value of `spec.set` becomes one (keys kept). Chart values often hold
 passwords. A chart made with `kubectl apply` also carries its whole
 manifest, values included, in the last-applied annotation, so every
 annotation value of a `HelmChart` becomes a placeholder too (keys kept),
-as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
-recorder (next paragraph) records the answer only in this masked form.
+as on a Secret. A `kind: HelmChartConfig` object (it overrides the values
+of a packaged chart) and the kind-less items of a `HelmChartConfigList`
+are masked the same way. `k8s.meho.release.info` reads such objects, and
+the flight recorder (next paragraph) records the answer only in this
+masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
@@ -1350,7 +1416,21 @@ and annotations carry placeholders, never the values text. For a list
 read, each item first gets its `kind` from the list envelope
 (`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
 "Built-in kinds" above), because the API server leaves `kind` off list
-items. The dedicated way
+items. For every kind, `custom_resource_row` also hides the values under
+secret-shaped key names in `spec` and `status` (numbers included) and the
+secret-named fields inside their text values, before it builds
+`spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
+field inside an annotation value before it cuts the value. On a
+`reveal_secret: true` call by a person, an excerpt or an annotation value
+that is not cut keeps the raw values: the dispatcher hides them in the
+default view and the audit copy and gives them back on the reveal. In
+`fields` a raw value stays only where the dispatcher hides it under its
+path (`_revealed_fields`). A value cut out of its object loses the names
+around it (the `name` of an env entry, the SNMP setting next to a
+`community`), so the dispatcher cannot hide it there; such a value comes
+from the hidden object. A cut excerpt stays hidden, also on a reveal. Both operations
+build their rows in a worker thread, so a large text value does not hold
+up other calls. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 
@@ -1528,6 +1608,17 @@ a "200 but nothing happened" apply can be explained from the trace.
   error.
 - When capture is off the wrapper costs one contextvar read.
 - Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
+
+What the span holds depends on who reads it. A person reads the stored
+span: the whole object of the answer, with Secret data masked as above. An
+agent reads a copy (`trace_agent_view.py`): an `env` value is hidden by
+the same secret rules as in the direct answer of an operation (a
+secret-named entry is hidden; plain values, the names and `valueFrom`
+references stay), the secret values on each `command` / `args` line and in
+`sh -c` scripts are hidden, and annotation values are cleaned (the
+last-applied object is cleaned like the object). `managedFields` stays. A
+service login reads the stored span of its own calls as it is. The rules and who reads which copy are in
+[redaction.md](redaction.md#what-an-agent-reads-in-the-trace-of-a-kubernetes-call).
 
 The shared recorder is
 `flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the

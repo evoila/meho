@@ -35,6 +35,7 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.references import (
     SubjectRef,
@@ -248,6 +249,8 @@ def _seed_audit(
     actor_sub: str | None = None,
     work_ref: str | None = None,
     second: int = 0,
+    method: str = "POST",
+    path: str = "/mcp",
 ) -> AuditLog:
     row_id = uuid.uuid4()
     payload: dict[str, Any] = {"op_id": op_id}
@@ -267,8 +270,8 @@ def _seed_audit(
                 agent_session_id=agent_session_id,
                 actor_sub=actor_sub,
                 work_ref=work_ref,
-                method="POST",
-                path="/mcp",
+                method=method,
+                path=path,
                 status_code=status_code,
                 request_id=uuid.uuid4(),
                 duration_ms=Decimal("1.0"),
@@ -469,6 +472,60 @@ def test_resolve_references_service_marker_from_actor_sub() -> None:
     refs = _resolve(row)
     assert refs.principal.is_service is True
     assert refs.principal.actor_sub == "agent-sub-77"
+
+
+def test_resolve_references_agent_run_without_actor_is_a_service() -> None:
+    """A row of an agent run with no delegated actor keeps the service marker."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(tenant_id=_TENANT_A, actor_sub=None, agent_session_id=uuid.uuid4())
+
+    refs = _resolve(row)
+    assert refs.principal.is_service is True
+
+
+def test_resolve_references_cli_session_is_not_a_service_marker() -> None:
+    """A row whose session id came from the CLI, with no delegated actor, is a person's row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(
+        tenant_id=_TENANT_A,
+        actor_sub=None,
+        agent_session_id=uuid.uuid4(),
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
+
+    refs = _resolve(row)
+    assert refs.principal.is_service is False
+
+
+def test_resolve_references_cli_parked_decision_row_is_not_a_service_marker() -> None:
+    """An approve, reject or expiry row of a CLI-parked request is a person's row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(
+        tenant_id=_TENANT_A,
+        actor_sub=None,
+        agent_session_id=uuid.uuid4(),
+        method="APPROVAL",
+        path="approval.decision",
+        payload_extra={"decision": "approved", SESSION_FROM_CLIENT_KEY: True},
+    )
+
+    refs = _resolve(row)
+    assert refs.principal.is_service is False
+
+
+def test_resolve_references_cli_session_has_no_replay_link() -> None:
+    """A CLI login session is not an agent session: no replay link, even for an admin."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row = _seed_audit(
+        tenant_id=_TENANT_A,
+        agent_session_id=uuid.uuid4(),
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
+
+    refs = _resolve(row, is_admin=True)
+    assert refs.session.present is False
+    assert refs.session.replay_href is None
+    assert refs.session.replay_enabled is False
 
 
 def test_resolve_references_replay_disabled_for_non_admin() -> None:

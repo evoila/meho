@@ -217,6 +217,72 @@ func TestShowPrintsFilesAndQuarantine(t *testing.T) {
 			t.Errorf("missing %q in %q", want, stdout.String())
 		}
 	}
+	if strings.Contains(stdout.String(), "mcp sessions") {
+		t.Errorf("shows mcp sessions with none linked: %q", stdout.String())
+	}
+}
+
+func TestShowPrintsTheLinkedMcpSessions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {
+		body := summary("abc")
+		body["files"] = map[string]any{}
+		body["uploads"] = []any{}
+		body["mcp_sessions"] = []any{
+			map[string]any{"mcp_session_id": "66666666-6666-6666-6666-666666666666", "work_ref": "CHG-7"},
+			map[string]any{"mcp_session_id": "77777777-7777-7777-7777-777777777777", "work_ref": nil},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	if err := runShow(cmd, "abc", false, srv.URL); err != nil {
+		t.Fatalf("runShow: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{
+		"mcp sessions (2):",
+		"66666666-6666-6666-6666-666666666666  work ref CHG-7",
+		"77777777-7777-7777-7777-777777777777  work ref -",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+// With AUDIT_SESSION_LINKS off the server leaves mcp_sessions out. The
+// --json output must leave it out too, not print "mcp_sessions": null.
+func TestShowJSONKeepsAFieldTheServerLeavesOut(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {
+		body := summary("abc")
+		body["files"] = map[string]any{}
+		body["uploads"] = []any{}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	if err := runShow(cmd, "abc", true, srv.URL); err != nil {
+		t.Fatalf("runShow: %v; stderr=%s", err, stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v; %q", err, stdout.String())
+	}
+	if _, ok := got["mcp_sessions"]; ok {
+		t.Errorf("--json added mcp_sessions the server left out: %q", stdout.String())
+	}
+	if got["session_id"] != "abc" {
+		t.Errorf("session_id = %v; want abc", got["session_id"])
+	}
 }
 
 func TestDeleteAsksFirstAndSendsDelete(t *testing.T) {

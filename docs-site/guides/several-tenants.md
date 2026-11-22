@@ -24,11 +24,12 @@ one login. At the end:
     dangerous risk level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
 
-    - **Putting a person in a group** is a change of rights. Another
-      admin (a tenant admin or a platform admin) must approve it, never
-      the person who asked. An Operator cannot
-      approve it. See
-      [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+    - **Putting a person in a group** is a change of rights. The role
+      groups are in MEHO's own login realm, so only a platform admin does
+      it in the web console, where it runs at once after a fresh sign-in,
+      or approves a waiting request there. A tenant admin who is not a
+      platform admin and an Operator cannot approve it. See
+      [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
     - **Taking a person out of a group** only takes rights away. A
       MEHO-Admin may approve their own; anyone else
       needs a second person (an admin).
@@ -55,17 +56,15 @@ The design is in the
 ## Before you start
 
 - Your realm has the `meho-tenants` mapper and the `meho_tenant`
-  attribute on the five groups of your first tenant. The standard setup
+  attribute on the role groups of your first tenant. The standard setup
   adds them from v0.39.0 on. To add them to an older realm, run the
   setup again (see [Upgrades](../install/upgrades.md#version-specific-notes)).
 - MEHO v0.40.0 or later. In v0.40.0 to v0.43.0 the web interface answers
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- An admin who is not the person who asked, to approve each time you
-  put a person in a group. An install with only one admin adds a second
-  admin first (see
-  [Changes of rights need another admin](approvals-and-break-glass.md#changes-of-rights-need-another-admin)).
+- A platform admin in the web console, each time you put a person in a group (see
+  [Changes of rights](approvals-and-break-glass.md#changes-of-rights)).
 
 ## Step 1: Add the tenant in Keycloak
 
@@ -77,16 +76,14 @@ UUID once and keep it:
 uuidgen | tr 'A-Z' 'a-z'
 ```
 
-The tenant gets five role groups. They carry **only** `meho_tenant`, no
+The tenant gets three role groups. They carry **only** `meho_tenant`, no
 `tenant_id` and no `tenant_role`:
 
 | Group | `meho_tenant` | Role in MEHO |
 |---|---|---|
 | `MEHO-team-b-Readers` | `<tenant-uuid>:team-b:Readers` | `read_only` |
 | `MEHO-team-b-Operators` | `<tenant-uuid>:team-b:Operators` | `operator` |
-| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator` (the old group: read as Operators) |
 | `MEHO-team-b-Admins` | `<tenant-uuid>:team-b:Admins` | `tenant_admin` |
-| `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only` (the old group: read as Readers) |
 
 Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
@@ -94,7 +91,7 @@ Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
 Run the setup command with `--add-tenant`. Pass the **same**
 `--tenant-id` as on the first run: without it, the command writes
-the all-zero UUID to the five groups of your first tenant. If your
+the all-zero UUID to the role groups of your first tenant. If your
 first tenant is not called `main`, pass its name with
 `--tenant-name` too.
 
@@ -125,7 +122,7 @@ client `meho-web`. If you use the web interface, add the mapper to
 ### The built-in Keycloak
 
 Add the tenant to the Helm values, then run `helm upgrade`. The
-bootstrap Job makes the five groups.
+bootstrap Job makes the three groups.
 
 ```yaml
 coreKeycloak:
@@ -140,7 +137,7 @@ The built-in realm already has the `meho-tenants` mapper on
 
 ### By hand
 
-Create the five groups at the top level, each with the one
+Create the three groups at the top level, each with the one
 attribute `meho_tenant` from the table above. Check that the
 `meho-tenants` mapper is on every client people log in with, with
 **Multivalued** and **Aggregate attribute values** on. The settings
@@ -151,7 +148,7 @@ are in [Keycloak realm setup, Step 3](../install/keycloak-realm.md#step-3-add-th
 Never set `meho_tenant` on a person. With **Aggregate attribute values**
 on, Keycloak adds a value on the person to their list. Keep people from
 editing their own attributes, as
-[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-five-groups)
+[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-three-groups)
 says.
 
 ## Step 2: Give the tenant its own Vault login role
@@ -316,12 +313,12 @@ meho keycloak group member add --target keycloak-main \
   --username alice@example.com --group-name MEHO-team-b-Operators
 ```
 
-Each command waits for approval. It is a change of rights, so another
-admin approves it, never the person who asked:
+Each command waits for approval. It is a change of rights in MEHO's own
+login realm, so a second person who is a platform admin approves it in
+the web console, never the person who asked with the command line:
 
 ```bash
 meho approvals list
-meho approvals approve <approval-id>
 ```
 
 The rules:
@@ -404,8 +401,8 @@ A platform admin **may**:
   tenant, the role of that group applies instead.
 - approve their own changes in a tenant where they act as `tenant_admin`.
   They count as an admin there, so they may approve their own changes
-  like members of `MEHO-Admins`. This does not
-  cover a change of rights: another admin must approve that.
+  like members of `MEHO-Admins`. A change of rights they approve only
+  with a click in the web console.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers `403 tenant_select_with_header`: pick that tenant with

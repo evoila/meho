@@ -1914,9 +1914,10 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId string  `json:"connector_id"`
-	CreatedAt   string  `json:"created_at"`
-	DecidedAt   *string `json:"decided_at"`
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	ConnectorId    string              `json:"connector_id"`
+	CreatedAt      string              `json:"created_at"`
+	DecidedAt      *string             `json:"decided_at"`
 
 	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
 	//
@@ -1948,15 +1949,17 @@ type ApprovalRequestView struct {
 	OutcomeCheck *OutcomeCheckView `json:"outcome_check,omitempty"`
 
 	// OutcomeUnknown Why an approved request is on the "outcome unknown" list (#5026).
-	OutcomeUnknown *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
-	ParamsHash     string                 `json:"params_hash"`
-	PreviewHash    *string                `json:"preview_hash"`
-	PrincipalAct   *string                `json:"principal_act"`
-	PrincipalKind  *string                `json:"principal_kind"`
-	PrincipalName  *string                `json:"principal_name"`
-	PrincipalSub   string                 `json:"principal_sub"`
-	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReleaseId      *string                `json:"release_id"`
+	OutcomeUnknown    *OutcomeUnknownView    `json:"outcome_unknown,omitempty"`
+	ParamsHash        string                 `json:"params_hash"`
+	PeopleBehind      *[]PersonBehindView    `json:"people_behind"`
+	PeopleBehindKnown *bool                  `json:"people_behind_known"`
+	PreviewHash       *string                `json:"preview_hash"`
+	PrincipalAct      *string                `json:"principal_act"`
+	PrincipalKind     *string                `json:"principal_kind"`
+	PrincipalName     *string                `json:"principal_name"`
+	PrincipalSub      string                 `json:"principal_sub"`
+	ProposedEffect    map[string]interface{} `json:"proposed_effect"`
+	ReleaseId         *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -2442,6 +2445,44 @@ type AuditEntry struct {
 	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
+}
+
+// AuditEntryDetail The 200 body of “GET /api/v1/audit/show/{audit_id}“: one row, and its stored session.
+//
+// Only this route has “stored_session_id“ (#4904). The list, query and
+// replay answers keep the plain :class:`AuditEntry`.
+type AuditEntryDetail struct {
+	ActorName        *string                `json:"actor_name"`
+	ActorSub         *string                `json:"actor_sub"`
+	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
+	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
+	Id               openapi_types.UUID     `json:"id"`
+	Method           string                 `json:"method"`
+	OpClass          string                 `json:"op_class"`
+	OpId             string                 `json:"op_id"`
+	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
+	Path             string                 `json:"path"`
+	Payload          map[string]interface{} `json:"payload"`
+	PolicyDecision   *string                `json:"policy_decision"`
+	PolicyRule       *string                `json:"policy_rule"`
+	PolicyVersion    *int                   `json:"policy_version"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	RequestId        *openapi_types.UUID    `json:"request_id"`
+	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
+	StatusCode       int                    `json:"status_code"`
+
+	// StoredSessionId The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session.
+	StoredSessionId *string             `json:"stored_session_id"`
+	TargetId        *openapi_types.UUID `json:"target_id"`
+	TargetName      *string             `json:"target_name"`
+	TenantId        *openapi_types.UUID `json:"tenant_id"`
+	TenantName      *string             `json:"tenant_name"`
+	Ts              time.Time           `json:"ts"`
+	WorkRef         *string             `json:"work_ref"`
 }
 
 // AuditEventClass What kind of accountable event one “audit_log“ row records (#3733).
@@ -4579,7 +4620,7 @@ type ClassificationPreviewRow struct {
 	OpId        string               `json:"op_id"`
 }
 
-// ClassificationRequestResponse The answer to an edit request: it waits until a second tenant admin approves it.
+// ClassificationRequestResponse The answer to an edit request: it waits until a tenant admin approves it in the console.
 type ClassificationRequestResponse struct {
 	ApprovalRequestId *string `json:"approval_request_id"`
 	ChangedOperations int     `json:"changed_operations"`
@@ -6256,10 +6297,10 @@ type DroppedOpModel struct {
 // surface as a confusing 400 "at least one field must be set"
 // from the route layer).
 type EditGroupBody struct {
-	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console.
 	Category *string `json:"category"`
 
-	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console.
 	Labels    *map[string]string `json:"labels"`
 	Name      *string            `json:"name"`
 	WhenToUse *string            `json:"when_to_use"`
@@ -6301,12 +6342,12 @@ type EditGroupBody struct {
 // 422 “extra_forbidden“ — same fail-loud posture as every other
 // public v1 request schema.
 type EditOpBody struct {
-	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it.
+	// Category A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console.
 	Category          *string `json:"category"`
 	CustomDescription *string `json:"custom_description"`
 	IsEnabled         *bool   `json:"is_enabled"`
 
-	// Labels Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin.
+	// Labels Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console.
 	Labels           *map[string]string     `json:"labels"`
 	Reason           *string                `json:"reason"`
 	RequiresApproval *bool                  `json:"requires_approval"`
@@ -8985,6 +9026,14 @@ type PairingHealth struct {
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
 
+// PersonBehindView One person behind the agent, service or runner login that asked.
+type PersonBehindView struct {
+	Name    *string `json:"name"`
+	Sub     string  `json:"sub"`
+	Why     string  `json:"why"`
+	WhyText string  `json:"why_text"`
+}
+
 // PolicyExplainBody The question of “POST /api/v1/policy/explain“.
 //
 // Ask about one call (“connector_id“ and “op_id“) for yourself
@@ -11347,7 +11396,10 @@ type SessionDetail struct {
 	Files      map[string]SessionFileState `json:"files"`
 
 	// LastSeenAt When MEHO last got an upload for this session.
-	LastSeenAt    time.Time           `json:"last_seen_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+
+	// McpSessions The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on.
+	McpSessions   *[]SessionMcpLink   `json:"mcp_sessions"`
 	Outcome       *string             `json:"outcome"`
 	Project       string              `json:"project"`
 	SessionId     string              `json:"session_id"`
@@ -11371,6 +11423,15 @@ type SessionFileState struct {
 type SessionListResponse struct {
 	Items      []SessionSummary `json:"items"`
 	NextCursor *string          `json:"next_cursor"`
+}
+
+// SessionMcpLink One MCP session whose calls are in this session.
+type SessionMcpLink struct {
+	// McpSessionId The agent_session_id of the audit rows of these calls.
+	McpSessionId openapi_types.UUID `json:"mcp_session_id"`
+
+	// WorkRef The newest work reference (ticket id) on those audit rows, or null.
+	WorkRef *string `json:"work_ref"`
 }
 
 // SessionRetention The retention period of the caller's tenant.
@@ -13719,6 +13780,11 @@ type FeedEndpointApiV1FeedGetParams struct {
 
 	// Since Explicit replay cursor; superseded by Last-Event-Id when present.
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// FirstStartSignedInApiV1FirstStartGetParams defines parameters for FirstStartSignedInApiV1FirstStartGet.
+type FirstStartSignedInApiV1FirstStartGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -17874,6 +17940,9 @@ type ClientInterface interface {
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// FirstStartSignedInApiV1FirstStartGet request
+	FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PollNextCommandApiV1GatewayRunnerNextGet request
 	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21059,6 +21128,18 @@ func (c *Client) IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context,
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FirstStartSignedInApiV1FirstStartGet(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFirstStartSignedInApiV1FirstStartGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -34500,6 +34581,48 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewFirstStartSignedInApiV1FirstStartGetRequest generates requests for FirstStartSignedInApiV1FirstStartGet
+func NewFirstStartSignedInApiV1FirstStartGetRequest(server string, params *FirstStartSignedInApiV1FirstStartGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/first-start")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -55289,6 +55412,9 @@ type ClientWithResponsesInterface interface {
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
+	// FirstStartSignedInApiV1FirstStartGetWithResponse request
+	FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error)
+
 	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
 	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
 
@@ -57880,7 +58006,7 @@ func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) StatusCode() int {
 type ShowApiV1AuditShowAuditIdGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AuditEntry
+	JSON200      *AuditEntryDetail
 	JSON422      *HTTPValidationError
 }
 
@@ -59196,6 +59322,29 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FirstStartSignedInApiV1FirstStartGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FirstStartResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FirstStartSignedInApiV1FirstStartGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FirstStartSignedInApiV1FirstStartGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -68643,6 +68792,15 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
 }
 
+// FirstStartSignedInApiV1FirstStartGetWithResponse request returning *FirstStartSignedInApiV1FirstStartGetResponse
+func (c *ClientWithResponses) FirstStartSignedInApiV1FirstStartGetWithResponse(ctx context.Context, params *FirstStartSignedInApiV1FirstStartGetParams, reqEditors ...RequestEditorFn) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	rsp, err := c.FirstStartSignedInApiV1FirstStartGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp)
+}
+
 // PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
 func (c *ClientWithResponses) PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
 	rsp, err := c.PollNextCommandApiV1GatewayRunnerNextGet(ctx, runner, params, reqEditors...)
@@ -74955,7 +75113,7 @@ func ParseShowApiV1AuditShowAuditIdGetResponse(rsp *http.Response) (*ShowApiV1Au
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AuditEntry
+		var dest AuditEntryDetail
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -76762,6 +76920,39 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFirstStartSignedInApiV1FirstStartGetResponse parses an HTTP response from a FirstStartSignedInApiV1FirstStartGetWithResponse call
+func ParseFirstStartSignedInApiV1FirstStartGetResponse(rsp *http.Response) (*FirstStartSignedInApiV1FirstStartGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FirstStartSignedInApiV1FirstStartGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FirstStartResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

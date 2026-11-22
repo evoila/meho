@@ -19,6 +19,14 @@ rows.
 * ``audit_log_operator_sub_occurred_at_idx`` -- non-unique b-tree on
   ``(operator_sub, occurred_at)``.
 
+Upgrade
+-------
+
+``CREATE INDEX`` reads the whole ``audit_log`` table. While the index is
+built, calls that write an audit row wait. Measured on PostgreSQL 16:
+about 3 seconds for 3.3 million rows. The time grows with the size of
+the table. Reads do not wait.
+
 Reversibility
 -------------
 

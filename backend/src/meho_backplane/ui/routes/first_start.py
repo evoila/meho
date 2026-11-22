@@ -3,27 +3,33 @@
 
 """First-start checks page: ``GET /ui/first-start``.
 
-Shows the same list as the public ``GET /first-start`` endpoint
-(:mod:`meho_backplane.first_start`). Read-only. It needs the ``operator`` role,
-like the other console pages that run checks against systems. It names the
-systems of the signed-in tenant that did not answer, and it passes the
-signed-in person to the checks, so a system whose login is in Vault is read
-with that person's token.
+Shows the same list as ``GET /api/v1/first-start``
+(:mod:`meho_backplane.first_start`). Read-only. It needs the admin role of
+the tenant, or a platform admin; others get 403. The page asks only for a
+console session; the same admin check as the API decides who sees the list. It names the systems of
+the signed-in tenant that did not answer (of all tenants for a platform
+admin), and it passes the signed-in person to the checks, so a system whose
+login is in Vault is read with that person's token. It shares the runs and
+the kept list of the API route.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.first_start import run_first_start_checks
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.first_start import (
+    ADMIN_PERSON_REQUIRED,
+    first_start_list,
+    may_see_first_start,
+)
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.roles import resolve_ui_operator
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_first_start_router"]
 
-_require_ui_operator_dep = Depends(require_ui_operator)
+_require_ui_session_dep = Depends(require_ui_session)
 
 
 def build_first_start_router() -> APIRouter:
@@ -32,13 +38,13 @@ def build_first_start_router() -> APIRouter:
 
     async def _page(
         request: Request,
-        session_ctx: UISessionContext = _require_ui_operator_dep,
+        session_ctx: UISessionContext = _require_ui_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/first-start``."""
         operator = await resolve_ui_operator(session_ctx)
-        result = await run_first_start_checks(
-            tenant_id=session_ctx.tenant_id, show_names=True, operator=operator
-        )
+        if operator is None or not may_see_first_start(operator):
+            raise HTTPException(status_code=403, detail=ADMIN_PERSON_REQUIRED)
+        result = await first_start_list(operator)
         context: dict[str, object] = {
             "page_title": "First-start checks",
             "active_surface": "",

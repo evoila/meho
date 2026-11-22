@@ -10,7 +10,9 @@
                        conflict it carries a button that asks for the change
                        with the same fields (``form``).
     * ``requested`` -- dict: {status, approval_request_id, error,
-                       matched_operations}: the answer to the request.
+                       matched_operations}: the answer to the request:
+                       ``ok`` when it ran at once (a tenant admin in the
+                       console), ``awaiting_approval`` when it waits.
 
   The ask button's form has no ``hx-headers``, and it does not inherit the
   page form's: ``#classify-result`` sits next to that form, not inside it.
@@ -32,10 +34,14 @@
 {% if error %}
   <p class="alert alert-error text-sm" data-classify-error>{{ error }}</p>
 {% elif requested %}
-  {% if requested.status == "awaiting_approval" %}
+  {% if requested.status == "ok" %}
+    <p class="alert alert-success text-sm" data-classify-done>
+      Done. The change for {{ requested.matched_operations }} operation(s) is stored.
+    </p>
+  {% elif requested.status == "awaiting_approval" %}
     <p class="alert alert-info text-sm" data-classify-requested data-approval-request-id="{{ requested.approval_request_id }}">
       The change for {{ requested.matched_operations }} operation(s) waits until
-      another tenant admin approves it.
+      a tenant admin approves it.
       <a class="link" href="/ui/approvals">Open the approvals page</a>
     </p>
   {% else %}
@@ -58,11 +64,11 @@
       </p>
     {% else %}
       <form hx-post="/ui/policy/classify/request" hx-target="#classify-result" hx-swap="innerHTML"
-            hx-confirm="Ask for this change of {{ preview.matched_operations }} operation(s)? Another tenant admin must approve it.">
+            hx-confirm="Make this change of {{ preview.matched_operations }} operation(s)? It is a change of rights.">
         {% for name, value in form.items() %}
           <input type="hidden" name="{{ name }}" value="{{ value }}" />
         {% endfor %}
-        <button type="submit" class="btn btn-sm btn-warning" data-classify-request>Ask for this change</button>
+        <button type="submit" class="btn btn-sm btn-warning" data-classify-request>Make this change</button>
       </form>
     {% endif %}
     <div class="overflow-x-auto">

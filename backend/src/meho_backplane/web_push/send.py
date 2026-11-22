@@ -203,6 +203,8 @@ def _snapshot(tenant_id: uuid.UUID, request: ApprovalRequest) -> ApprovalRequest
         id=request.id,
         tenant_id=tenant_id,
         principal_sub=request.principal_sub,
+        principal_kind=request.principal_kind,
+        people_behind=request.people_behind,
         op_id=request.op_id,
         params=request.params,
         proposed_effect=request.proposed_effect,

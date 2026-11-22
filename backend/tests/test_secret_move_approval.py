@@ -87,6 +87,7 @@ from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -592,6 +593,7 @@ async def _park_run_bound_move(*, requester_sub: str) -> uuid.UUID:
     from meho_backplane.operations.approval_queue import create_pending_request
 
     requester = _make_operator(sub=requester_sub, principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(_TENANT_ID, requester_sub)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         request = await create_pending_request(

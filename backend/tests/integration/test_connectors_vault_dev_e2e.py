@@ -2261,7 +2261,7 @@ async def test_kv_generate_stores_a_value_that_meets_the_rules_and_shows_it_nowh
     assert all(not (a == b == c) for a, b, c in zip(value, value[1:], value[2:], strict=False))
     assert value not in json.dumps(first.result)
     row = await _assert_audited(
-        "vault.kv.generate", operator_sub="op-kvgen-1", expected_op_class="write"
+        "vault.kv.generate", operator_sub="op-kvgen-1", expected_op_class="credential_mint"
     )
     assert value not in json.dumps(row.payload, default=str)
     assert first_logs, "the run logged nothing, so the log check would prove nothing"

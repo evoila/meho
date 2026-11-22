@@ -38,10 +38,18 @@ protocol or config is no longer the one the card was made from. A card
 without both ids, both names and that content is refused too.
 
 The op is a change of rights: a mapper decides what goes into a login
-token. So the requester never approves it, and the approver is another
-admin (:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
+token. So each call waits, also an admin's call in the web console, and
+only an admin approves it, in the web console
+(:func:`~meho_backplane.operations.grant_approval.register_rights_change_op`).
+In MEHO's own login realm the approver is a platform admin when the mapper
+puts the platform admin claim or role into tokens now or after the change,
+or when MEHO cannot read the mapper (:mod:`.ops_write_platform_reach`).
 A person approves each call: no standing grant and no run approval covers
 it (:func:`~meho_backplane.op_classes.declare_per_call_approval`).
+
+MEHO refuses the change, before approval and at the run, when a client MEHO
+itself signs in with has the scope as a default or optional scope
+(:func:`~.ops_meho_own_login_guard.refuse_scope_mapper_write`).
 
 Safe to run twice: the same fields written again is a success.
 
@@ -65,9 +73,19 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_SCOPES_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+    refuse_scope_mapper_write,
+    scope_mapper_park_reason,
+)
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import get_or_none
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    REASON_MAPPER,
+    hide_grant_from_agent,
+    mapper_sets_platform_admin,
+    with_platform_facts,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.op_classes import declare_per_call_approval
@@ -303,6 +321,9 @@ async def keycloak_client_scope_protocol_mapper_update(
             "config is not the one on the approval card. Nothing was changed. A new "
             "request is needed."
         )
+    await refuse_scope_mapper_write(
+        self, operator, target, resolve_realm_config(target).managed_realm, found.scope_name
+    )
     try:
         check = await read_merge_write(
             self,
@@ -428,7 +449,55 @@ async def _refuse_names_of_other_objects(ctx: PreviewContext) -> str | None:
     return None
 
 
+async def _park_check(ctx: PreviewContext) -> str | None:
+    """The check before approval: the names first, then MEHO's own sign-in clients.
+
+    A scope or mapper MEHO cannot find is left to the run, which checks again.
+    """
+    reason = await _refuse_names_of_other_objects(ctx)
+    if reason is not None:
+        return reason
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    try:
+        found = await _resolve(connector, ctx.operator, ctx.target, ctx.params)
+    except Exception:
+        return None
+    return await scope_mapper_park_reason(ctx, found.scope_name)
+
+
+async def _sets_platform_admin(ctx: PreviewContext, realm: str) -> bool | None:
+    """Whether the mapper puts the platform admin claim or role into tokens, now or after it.
+
+    Both count: a change of a mapper that sets the claim now changes who gets
+    the claim. ``None`` when MEHO cannot read the mapper.
+    """
+    connector = _live_connector(ctx)
+    if connector is None:
+        return None
+    found = await _resolve(connector, ctx.operator, ctx.target, ctx.params)
+    representation = ctx.params.get("representation")
+    sent = representation.get("config") if isinstance(representation, dict) else None
+    config = found.mapper.get("config")
+    merged = {
+        **found.mapper,
+        "config": {
+            **(config if isinstance(config, dict) else {}),
+            **(sent if isinstance(sent, dict) else {}),
+        },
+    }
+    facts = [mapper_sets_platform_admin(found.mapper), mapper_sets_platform_admin(merged)]
+    if True in facts:
+        return True
+    return None if None in facts else False
+
+
 register_rights_change_op(_OP_ID)
 declare_per_call_approval([_OP_ID])
-register_park_check(_OP_ID, _refuse_names_of_other_objects)
-register_preview_builder(_OP_ID, _scope_mapper_preview)
+register_park_check(_OP_ID, _park_check)
+register_preview_builder(
+    _OP_ID,
+    with_platform_facts(_OP_ID, _scope_mapper_preview, (_sets_platform_admin, REASON_MAPPER)),
+)
+hide_grant_from_agent(_OP_ID)

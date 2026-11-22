@@ -6,8 +6,9 @@
 * :func:`build_plan` checks a file and works out what it would change. It
   reads the database and writes nothing. The preview, the validation and
   the import request are this plan.
-* :func:`apply_policy` stores the file. It runs only after a second admin
-  approved the import (the ``policy.apply`` operation,
+* :func:`apply_policy` stores the file. It runs after an admin approved
+  the import, or at once for an admin in the web console (the
+  ``policy.apply`` operation,
   :mod:`meho_backplane.connectors.policy.apply`). It plans again first:
   when the stored policy changed after the plan, nothing is written.
 * :func:`export_policy` writes the stored policy as a file. A tenant

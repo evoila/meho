@@ -1625,6 +1625,15 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    audit_session_links:
+        Off by default. When on, an upload of an agent session links its
+        MCP calls and ``meho`` commands to their audit rows. Then
+        ``GET /api/v1/audit/show/{id}``, ``meho audit show`` and the
+        console's audit drawer name the stored session of a row, the session
+        read lists its MCP sessions, and the upload audit row counts the new
+        links. When off, MEHO stores no new link and these answers are the
+        same as before. It stays off until model tests show it helps. Env
+        ``AUDIT_SESSION_LINKS``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -1722,6 +1731,13 @@ class Settings(BaseModel):
     #: the pod never starts.
     test_fail_start_after_registration: bool = False
     backplane_url: str = ""
+    #: A PEM file with the CA of the console certificate, which the
+    #: first-start list trusts in addition to the system trust bundle when
+    #: it connects to ``backplane_url`` (#6698). Form 2 sets
+    #: ``CONSOLE_CA_FILE`` to the ConfigMap that ``meho-host certificate``
+    #: writes (``values-single-node.yaml``). Empty (the default): only the
+    #: system trust bundle.
+    console_ca_file: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
@@ -2588,6 +2604,7 @@ class Settings(BaseModel):
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
     policy_approver_routing: bool = False
     #: Absolute URL of the external vendor-document corpus search
@@ -3273,6 +3290,7 @@ def get_settings() -> Settings:
             os.environ.get("MEHO_TEST_FAIL_START_AFTER_REGISTRATION"),
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
+        console_ca_file=os.environ.get("CONSOLE_CA_FILE", "").strip(),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
         # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
         # and the configmap renders it blank for a `gsm` deploy — both
@@ -3809,6 +3827,9 @@ def get_settings() -> Settings:
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
+        ),
+        audit_session_links=parse_bool_env(
+            os.environ.get("AUDIT_SESSION_LINKS"),
         ),
         policy_engine_shadow=parse_bool_env(
             os.environ.get("POLICY_ENGINE_SHADOW"),

@@ -437,9 +437,9 @@ func renderNextResponse(
 	}
 	if completed != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Run complete. (run_id=%s, state=%s)\n",
-			completed.RunID, completed.State)
+			completed.RunID, output.SafeText(completed.State))
 		if completed.CompletedAt != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "Completed at: %s\n", completed.CompletedAt)
+			fmt.Fprintf(cmd.OutOrStdout(), "Completed at: %s\n", output.SafeText(completed.CompletedAt))
 		}
 		return nil
 	}

@@ -602,7 +602,7 @@ func doAuthedRequest(
 		return nil, errMissingAccessToken
 	}
 
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
+	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, authed.SessionID(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +615,7 @@ func doAuthedRequest(
 		}
 		resp.Body.Close() //nolint:errcheck
 		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
+		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, authed.SessionID(), body)
 		if err != nil {
 			return nil, err
 		}
@@ -639,7 +639,7 @@ func doAuthedRequest(
 func sendRequest(
 	ctx context.Context,
 	client *http.Client,
-	backplaneURL, method, path, bearer string,
+	backplaneURL, method, path, bearer, sessionID string,
 	body []byte,
 ) (*http.Response, error) {
 	fullURL := backplaneURL + path
@@ -652,7 +652,9 @@ func sendRequest(
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
+	api.SetSessionIDHeader(req, sessionID)
 	api.SetWorkRefHeader(req)
+	api.SetCommandHeader(req)
 	api.SetTenantHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {

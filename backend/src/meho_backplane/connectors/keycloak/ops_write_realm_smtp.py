@@ -129,10 +129,19 @@ def with_smtp_password(smtp: Any, password: str) -> dict[str, Any]:
 
 
 async def _refuse_inline_smtp_password(ctx: PreviewContext) -> str | None:
-    """Park check: refuse an inline SMTP password before the wait for approval."""
+    """Park check: refuse an inline SMTP password before the wait for approval.
+
+    Then the check of MEHO's own login realm runs
+    (:func:`~.ops_meho_own_login_guard.login_realm_park_reason`).
+    """
     if has_inline_smtp_password(ctx.params):
         return inline_smtp_password_reason()
-    return None
+    # Imported late: the guard imports the user guard, which imports the write modules.
+    from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+        login_realm_park_reason,
+    )
+
+    return await login_realm_park_reason(ctx)
 
 
 def _realm_label(ctx: PreviewContext) -> str | None:

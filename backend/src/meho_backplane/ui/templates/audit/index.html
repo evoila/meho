@@ -206,7 +206,8 @@
               is_execution=drawer.is_execution,
               event_class_label=drawer.event_class_label,
               tenant_label=drawer.tenant_label,
-              via_label=drawer.via_label %}
+              via_label=drawer.via_label,
+              stored_session=drawer.stored_session %}
         {% include "audit/_drawer.html" %}
       {% endwith %}
     {% else %}

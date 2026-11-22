@@ -7,7 +7,14 @@ See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
 """
 
-from meho_backplane.op_classes import declare_op_classes
+from collections.abc import Mapping
+from typing import Any
+
+from meho_backplane.op_classes import (
+    declare_credential_capable,
+    declare_credential_check,
+    declare_op_classes,
+)
 
 declare_op_classes(
     # The four ArgoCD write verbs (#2681) are exact pins, not new write
@@ -27,3 +34,34 @@ declare_op_classes(
         "argocd.app.refresh",
     ),
 )
+
+# ``argocd.app.set`` writes the whole Application spec: the repo, the path,
+# the Helm values and the cluster it deploys to. ArgoCD then creates what
+# that source holds, also pods, roles and Secrets. An AppProject write sets
+# which repos, clusters, namespaces and kinds the apps of the project may
+# deploy: it gives rights. So every call of these waits for a person, and no
+# standing grant, agent grant or run approval covers it.
+declare_credential_capable(
+    (
+        "argocd.app.set",
+        "argocd.appproject.create",
+        "argocd.appproject.update",
+    )
+)
+
+
+def sync_sets_a_revision(params: Mapping[str, Any]) -> bool:
+    """True when the ``argocd.app.sync`` call in *params* names its own revision.
+
+    A sync with a revision deploys the branch or commit the caller picks,
+    not the target revision the Application already defines. The handler
+    sends ``revision`` when the value is truthy, so the same test is used
+    here.
+    """
+    return bool(params.get("revision"))
+
+
+# A sync to a revision the caller picks waits for a person on every call. A
+# sync without one starts what the Application already defines and keeps
+# the rules of argocd.app.sync.
+declare_credential_check("argocd.app.sync", sync_sets_a_revision)

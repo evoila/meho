@@ -44,7 +44,7 @@ import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
@@ -746,6 +746,14 @@ async def test_agent_resume_moves_list_and_show_off_started(
 @pytest.mark.asyncio
 async def test_view_preview_hash_is_none_for_non_destructive_row() -> None:
     row = await _park_direct(key=None)
-    view = _view(row)
+    person = Operator(
+        sub="view-reader",
+        name=None,
+        email=None,
+        raw_jwt="<test>",
+        tenant_id=row.tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+    view = _view(row, operator=person)
     assert view.preview_hash is None
     assert view.result_state is None

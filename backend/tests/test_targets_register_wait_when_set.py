@@ -3,10 +3,10 @@
 
 """``targets.register`` with a secret field map or a capture setting waits for a person.
 
-A service login whose standing grant covers ``targets.register`` runs a
-plain call at once. A call that sets ``secret_field_map`` or
-``flight_recorder_capture`` waits for a person's approval on every call:
-the standing grant does not cover it. Nothing is written until then.
+Every ``targets.register`` call waits for a person, also under a standing
+grant. A call that sets ``secret_field_map`` or ``flight_recorder_capture``
+is also named by its own wait rule. Nothing is written until a person
+approves.
 """
 
 from __future__ import annotations
@@ -112,16 +112,15 @@ async def _waiting_ops() -> list[str]:
 _NEW = {"name": "new-vc", "product": "vault", "host": "vault-c.example"}
 
 
-async def test_a_granted_call_without_the_fields_runs_at_once(
+async def test_a_granted_call_without_the_fields_waits_too(
     _service_client: TestClient, _granted: None
 ) -> None:
     body = _register(_service_client, _NEW)
 
     result = body["result"]
-    assert result["isError"] is False, body
-    assert result["structuredContent"].get("status") != "awaiting_approval"
-    assert await _target_names() == ["new-vc"]
-    assert await _waiting_ops() == []
+    assert result["structuredContent"]["status"] == "awaiting_approval", body
+    assert await _target_names() == []
+    assert await _waiting_ops() == [TARGETS_REGISTER_OP_ID]
 
 
 @pytest.mark.parametrize(

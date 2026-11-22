@@ -25,15 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import uuid
 from collections.abc import Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import structlog
+from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.client_identity import apply_client_block
@@ -61,21 +63,30 @@ from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
 __all__ = [
+    "CLI_COMMAND_KEY",
+    "SESSION_FROM_CLIENT_KEY",
     "AgentRunAuditMeta",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
+    "agent_session_rows",
     "audit_rejection_safe",
     "audit_safe",
+    "client_command_var",
+    "client_session_id_var",
     "decode_work_ref_header",
     "descriptor_op_class",
     "parent_audit_id_var",
+    "parse_command_header",
+    "payload_session_from_client",
     "policy_decision_var",
     "policy_rule_columns",
     "policy_rule_var",
     "resolve_agent_session_id",
+    "resolve_audit_session_id",
     "restore_audit_extras",
     "reveal_secret_var",
     "run_id_var",
+    "session_is_from_client",
     "snapshot_audit_extras",
     "step_id_var",
     "with_audit_receipt",
@@ -126,6 +137,54 @@ agent_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "agent_session_id",
     default=None,
 )
+
+
+#: ContextVar carrying the session id the ``meho`` CLI sends in the
+#: ``Meho-Session-Id`` header. The audit middleware binds it for the whole
+#: request. :func:`resolve_audit_session_id` uses it last, after an agent run
+#: and an MCP session, so the audit rows and parked approval requests of a CLI
+#: dispatch carry the id of its ``meho login`` session. It is a label the
+#: client sends. Nothing that decides or advises reads it.
+client_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
+    "client_session_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the command path the ``meho`` CLI sends in the
+#: ``Meho-Command`` header (for example ``"vmware vm list"``). The audit
+#: middleware binds it for the whole request. With ``AUDIT_SESSION_LINKS``
+#: on, the rows of a CLI login session store it as :data:`CLI_COMMAND_KEY`,
+#: so an uploaded agent session can find the rows of a command that resolves
+#: its operation itself (:mod:`meho_backplane.session_store.audit_links`). It
+#: is a label the client sends. Nothing that decides or advises reads it.
+client_command_var: ContextVar[str | None] = ContextVar(
+    "client_command",
+    default=None,
+)
+
+#: A command path: lower-case command names split by single spaces.
+_COMMAND_PATH: Final[re.Pattern[str]] = re.compile(
+    r"[a-z0-9][a-z0-9_.-]*(?: [a-z0-9][a-z0-9_.-]*){0,7}"
+)
+
+#: The longest command path MEHO keeps.
+_COMMAND_MAX_CHARS: Final[int] = 200
+
+
+def parse_command_header(raw: bytes) -> str | None:
+    """Return the command path of a ``Meho-Command`` header value, or ``None``.
+
+    A value that is not a command path (other signs, too long) gives
+    ``None``: the request then runs and is audited without it.
+    """
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if len(value) > _COMMAND_MAX_CHARS or not _COMMAND_PATH.fullmatch(value):
+        return None
+    return value
 
 
 #: ContextVar carrying the active runbook run's id while a step's
@@ -263,6 +322,58 @@ def policy_rule_columns() -> dict[str, Any]:
     if stamp is None:
         return {"policy_rule": None, "policy_version": None}
     return {"policy_rule": stamp.label(), "policy_version": stamp.policy_version}
+
+
+def resolve_audit_session_id() -> uuid.UUID | None:
+    """Session id to store on an audit row or a parked approval request.
+
+    It is :func:`resolve_agent_session_id`, and when that is ``None`` the id
+    the CLI sent in ``Meho-Session-Id`` (:data:`client_session_id_var`).
+    Only writers of audit rows and approval requests use it. Code that
+    treats a session as an agent session (the reflex advisory, lessons
+    retrievals) keeps using :func:`resolve_agent_session_id`.
+    """
+    session_id = resolve_agent_session_id()
+    if session_id is not None:
+        return session_id
+    return client_session_id_var.get()
+
+
+#: Payload key of an audit row whose ``agent_session_id`` is the CLI login
+#: session (``Meho-Session-Id``), not an agent run or an MCP session. The
+#: value is ``True``; the key is absent on every other row. Readers that
+#: count agent sessions skip such rows (:func:`agent_session_rows`).
+SESSION_FROM_CLIENT_KEY: Final[str] = "session_from_client"
+
+#: Payload key of the CLI command path (:data:`client_command_var`) on a row
+#: of a CLI login session. Written only with ``AUDIT_SESSION_LINKS`` on.
+CLI_COMMAND_KEY: Final[str] = "cli_command"
+
+
+def session_is_from_client() -> bool:
+    """Return True when the current session id is the CLI login session.
+
+    That is the case when no agent run or MCP session is bound and the
+    ``meho`` CLI sent ``Meho-Session-Id``.
+    """
+    return resolve_agent_session_id() is None and client_session_id_var.get() is not None
+
+
+def payload_session_from_client(payload: object) -> bool:
+    """Return True when an audit row *payload* says its session id came from the CLI."""
+    return isinstance(payload, dict) and payload.get(SESSION_FROM_CLIENT_KEY) is True
+
+
+def agent_session_rows() -> ColumnElement[bool]:
+    """SQL condition: the row's session id is not a CLI login session.
+
+    True for a row without :data:`SESSION_FROM_CLIENT_KEY`, so rows of
+    agent runs, MCP sessions and rows with no session id all pass.
+    """
+    condition: ColumnElement[bool] = (
+        AuditLog.payload[SESSION_FROM_CLIENT_KEY].as_boolean().is_not(True)
+    )
+    return condition
 
 
 def resolve_agent_session_id() -> uuid.UUID | None:
@@ -601,7 +712,7 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     the columns. Each key is present only when its contextvar is bound:
 
     * session attribution -- ``agent_session_id``, the same value the
-      row's column gets from :func:`resolve_agent_session_id` (the agent
+      row's column gets from :func:`resolve_audit_session_id` (the agent
       run id inside MEHO's own agent loop, G11.4-T5 #1074, else the MCP
       session id of a direct MCP call, #4672), plus the ``model`` /
       ``provider`` / ``cost`` from the active :class:`AgentRunAuditMeta`
@@ -618,7 +729,7 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
       written (:mod:`meho_backplane.operations.caller_gone`). The operation
       still ran to the end.
     """
-    agent_session_id = resolve_agent_session_id()
+    agent_session_id = resolve_audit_session_id()
     if agent_session_id is not None:
         payload["agent_session_id"] = str(agent_session_id)
     meta = agent_run_audit_meta_var.get()
@@ -764,7 +875,7 @@ async def write_audit_row(
     # of a direct MCP call, so the operation row carries the same session
     # as its MCP tool row and the session replay finds it. ``None`` only
     # for a call with neither (REST / CLI, system sweeps).
-    agent_session_id = resolve_agent_session_id()
+    agent_session_id = resolve_audit_session_id()
     # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
     # columns (``run_id`` / ``step_id``) are added by migration ``0034``
     # (G12.1-T1 #1292). We pass them only when the model carries the

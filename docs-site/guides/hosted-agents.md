@@ -155,15 +155,28 @@ More rules:
 - Any other key in the object is ignored.
 - `meta_tools` and `connectors` must be lists of strings. Anything else
   (for example a single string) makes the run fail.
-- The `connectors` list limits `call_operation` and
-  `preview_operation`, and `meho_connector_list` shows only the
-  connectors in the list. When the agent asks for a connector that is not in
-  the list, MEHO refuses the call and tells the agent which connectors it
-  may use.
-  `result_query` reads only results that were stored under the list.
-  With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
-  with a `connectors` list does not get `query_topology`; the setting is
-  off by default.
+- The `connectors` list limits these tools:
+  - `call_operation`, `preview_operation`, `list_operation_groups` and
+    `search_operations` answer only for connectors in the list. When the
+    agent asks for a connector that is not in the list, MEHO refuses the
+    call and tells the agent which connectors it may use.
+  - `meho_connector_list` shows only the connectors in the list.
+  - `list_targets` shows only the targets of connectors in the list.
+    Its page cursor also names only such a target.
+  - When the agent names a target that MEHO does not find, or a name
+    that fits more than one target, the answer lists close target names.
+    It lists only targets of connectors in the list.
+  - `result_query` reads only results that were stored under the list.
+  - With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
+    with a `connectors` list does not get `query_topology`. The setting is
+    off by default.
+- The `connectors` list does **not** limit Memory, the knowledge base or
+  the activity feed. `search_memory`, `search_knowledge`,
+  `read_context_resource`, `broadcast_recent` and `broadcast_watch` show
+  the same entries as for an agent without a list. These entries can be
+  about any connector. They are shared on purpose, so that agents learn
+  from each other and see what other agents do. If an agent must not see
+  them, leave these tools out of `meta_tools`.
 
 ### The tool names
 

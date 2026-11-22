@@ -10,9 +10,9 @@ page works in two steps, like every other surface
 
 * ``POST /ui/policy/classify/preview`` -- the dry run: every operation the
   match finds, with its values before and after. Nothing is written.
-* ``POST /ui/policy/classify/request`` -- ask for the change. It is a
-  change of rights, so it waits until another tenant admin approves it on
-  the approvals page.
+* ``POST /ui/policy/classify/request`` -- make the change. It is a
+  change of rights that a tenant admin makes in the console, so it runs at
+  once (:mod:`~meho_backplane.operations.rights_change_console`).
 
 The review drawer links here with the match filled in (``?connector=``,
 ``&group=`` or ``&op=``). Gated to ``tenant_admin``; the POSTs pass the
@@ -176,7 +176,7 @@ async def _request(
     always_wait: str | None = Form(default=None, max_length=5),
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
-    """Ask for the change. It waits until another tenant admin approves it."""
+    """Make the change. A tenant admin's change of rights in the console runs at once."""
     try:
         result = await request_classification_edit(
             operator, _edit(connector, group, op, category, labels, always_wait)

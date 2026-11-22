@@ -60,6 +60,7 @@ __all__ = [
     "RuleRef",
     "Step",
     "Verdict",
+    "admin_console_rights_change",
     "approver_groups",
     "evaluate",
 ]
@@ -135,9 +136,11 @@ class Asked:
 
     ``risk`` and ``always_wait`` are the effective values after overrides,
     classification and floors. ``op_class`` holds marks from the code:
-    ``root_shell``, ``credential_read``, ``per_call_approval``,
-    ``delete_shaped`` and ``classified_always_wait``. ``target`` is the
-    target id, or ``None``.
+    ``root_shell``, ``credential`` (the call reads, writes or makes a
+    credential), ``credential_waits`` (such a call waits for a person),
+    ``per_call_approval``, ``delete_shaped``, ``classified_always_wait`` and
+    ``rights_change`` (the operation is a change of rights). ``target`` is
+    the target id, or ``None``.
     """
 
     connector_id: str | None
@@ -164,6 +167,10 @@ class Lookups:
     run approval that covers a service login's call. ``read_scope_denial``
     is the refusal text of a service login's read scope. ``sandbox`` and
     ``agent_grant_required`` are the settings at the time of the call.
+    ``rights_change_refusal`` is the refusal text of the checks of who may
+    make a change of rights, for an admin's call in the web console, and
+    ``rights_change_waits`` is ``True`` when that call waits all the same
+    (:func:`~meho_backplane.operations.rights_change_console.console_check`).
     """
 
     agent_grant: tuple[Verdict, str] | None = None
@@ -173,6 +180,8 @@ class Lookups:
     read_scope_denial: str | None = None
     sandbox: bool = False
     agent_grant_required: str = "off"
+    rights_change_refusal: str | None = None
+    rights_change_waits: bool = False
 
 
 @dataclass(frozen=True)
@@ -378,12 +387,45 @@ def _service_clear(steps: _Steps, hits: list[FloorHit], asked: Asked, found: Loo
         )
 
 
+def admin_console_rights_change(asker: Asker, asked: Asked) -> bool:
+    """An admin's call of a change of rights in the web interface: it may run at once."""
+    is_admin = asker.tenant_role is TenantRole.TENANT_ADMIN or "platform_admin" in asker.roles
+    return (
+        asker.kind == "person"
+        and asker.via == "web"
+        and is_admin
+        and asker.tenant_chosen
+        and "rights_change" in asked.op_class
+        and "credential_waits" not in asked.op_class
+        and "classified_always_wait" not in asked.op_class
+        and asked.risk != "destructive"
+    )
+
+
+def _rights_change_step(steps: _Steps, found: Lookups) -> None:
+    if found.rights_change_refusal is not None:
+        steps.set(
+            Verdict.DENY,
+            _default("rights_change.console_refused", found.rights_change_refusal),
+        )
+        return
+    if found.rights_change_waits:
+        return
+    steps.set(
+        Verdict.RUN,
+        _default("rights_change.console", "an admin's change of rights in the web runs at once"),
+    )
+
+
 def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     hits = call_floors(asker, asked)
     if hits and hits[0].verdict == "deny":
         return _Steps(Verdict.DENY, _floor_rule(hits[0]))
     steps = _non_agent_default(asker, asked)
     _apply_floors(steps, hits)
+    if steps.verdict is Verdict.WAIT and admin_console_rights_change(asker, asked):
+        _rights_change_step(steps, found)
+        return steps
     if asker.kind != "service":
         return steps
     if steps.verdict is Verdict.RUN and found.read_scope_denial is not None:

@@ -3,14 +3,14 @@
 
 """Entries of a run approval that each wait for a person.
 
-A run approval never covers an operation that reads a credential (the
-``credential_read`` class). A request that lists one is not refused: the
-answer of request, show and approve names the entry in
-``entries_that_wait`` when its calls wait for a person, so the add-on that
-asks and the person who approves both see it. A read that returns no
-secret value runs at once and gets no note. A read that shows a secret
-only with ``reveal_secret`` (``vault.kv.read``) gets a note that says only
-those calls wait.
+A run approval never covers an operation that reads, writes or makes a
+credential. A new request that lists one is refused. A request made before
+this rule can still list one: the answer of show and approve names the
+entry in ``entries_that_wait`` when its calls wait for a person, so the
+add-on that asks and the person who approves both see it. A read that
+returns no secret value runs at once and gets no note. A read that shows a
+secret only with ``reveal_secret`` (``vault.kv.read``) gets a note that
+says only those calls wait.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from meho_backplane.operations.run_approval_schemas import (
     RunApprovalRead,
     RunApprovalWaitNote,
 )
+from meho_backplane.operations.service_grants import credential_call_waits
 
 __all__ = ["wait_notes", "with_wait_notes"]
 
@@ -34,10 +35,10 @@ async def wait_notes(
     """The entries of *entries* whose calls wait for a person under a run approval.
 
     The call gate (``run_approval_gate.consult_and_record_run_approval``)
-    never lets a run approval cover a credential read. Such a call waits
-    when the credential-read floor applies to it
-    (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`),
-    with the class stored on the operation's row when MEHO finds it.
+    never lets a run approval cover a call that reads, writes or makes a
+    credential. Such a call waits when
+    :func:`~meho_backplane.operations.service_grants.credential_call_waits`
+    says so, with the class stored on the operation's row when MEHO finds it.
     """
     from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 
@@ -68,17 +69,17 @@ async def wait_notes(
 
 def _wait_reason(op_id: str, stored_class: str | None) -> str | None:
     """The note for *op_id*, or ``None`` when none of its calls wait."""
-    if not has_credential_read_floor(op_id, reveal_secret=True, stored_op_class=stored_class):
-        return None
-    if has_credential_read_floor(op_id, reveal_secret=False, stored_op_class=stored_class):
+    if credential_call_waits(op_id, stored_class):
+        return (
+            f"op {op_id!r} reads, writes or makes a credential. A run approval never "
+            "covers it: each call waits for a person"
+        )
+    if has_credential_read_floor(op_id, reveal_secret=True, stored_op_class=stored_class):
         return (
             f"op {op_id!r} reads a credential. A run approval never covers it: "
-            "each call waits for a person"
+            "each call with reveal_secret waits for a person"
         )
-    return (
-        f"op {op_id!r} reads a credential. A run approval never covers it: "
-        "each call with reveal_secret waits for a person"
-    )
+    return None
 
 
 async def with_wait_notes(read: RunApprovalRead) -> RunApprovalRead:

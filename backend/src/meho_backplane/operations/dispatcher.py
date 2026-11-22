@@ -293,6 +293,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ssl
 import time
@@ -488,6 +489,7 @@ from meho_backplane.operations.composite import (
     DispatchChild,
     approved_run_var,
     composite_depth_var,
+    credential_step_waits_after_approval,
     get_dispatch_child,
 )
 from meho_backplane.operations.composite_steps import (
@@ -517,8 +519,18 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.rights_change_console import (
+    CONSOLE_RUN_AUDIT_VALUE,
+    CONSOLE_RUN_POLICY_RULE,
+    CONSOLE_RUN_REASON,
+    take_console_run_sign_in,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.service_grants import (
+    CREDENTIAL_CARD_LINE,
+    descriptor_credential_waits,
+)
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -1126,7 +1138,7 @@ async def _execute_and_audit_inner(
             secret_view=secret_view,
         )
 
-    redaction = _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
+    redaction = await _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
     return await _reduce_and_audit_success(
         op_id=op_id,
         descriptor=descriptor,
@@ -1148,7 +1160,7 @@ async def _execute_and_audit_inner(
 SecretView = Literal["hidden", "revealed"]
 
 
-def _protect_secret_values(
+async def _protect_secret_values(
     redaction: RedactionMiddlewareResult,
     *,
     op_id: str,
@@ -1168,6 +1180,10 @@ def _protect_secret_values(
     marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
     the HTTP answer that carries it says ``Cache-Control: no-store``.
 
+    The default view runs in a worker thread, like the redaction pass of a
+    script: a large text value in the answer takes time to read, and the
+    event loop keeps serving other requests meanwhile.
+
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
     the caller saw the value or not. So no secret value is stored in the
@@ -1181,7 +1197,7 @@ def _protect_secret_values(
     fails; the caller then withholds the envelope.
     """
     redacted = redaction.redacted
-    shown = hide_secret_values(op_id, redacted, raw=redaction.raw)
+    shown = await asyncio.to_thread(hide_secret_values, op_id, redacted, raw=redaction.raw)
     if error_cleanup:
         redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
     if secret_view == "hidden":
@@ -1537,7 +1553,7 @@ async def _reduce_and_audit_composite_error(
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        redaction = _protect_secret_values(
+        redaction = await _protect_secret_values(
             redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
         )
     except Exception as exc:
@@ -3474,6 +3490,9 @@ async def _build_proposed_effect(
         # approve it with a click in the web interface.
         if waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
+        # The approval card says in one line why a credential call waits.
+        if descriptor_credential_waits(descriptor):
+            base["credential_wait"] = CREDENTIAL_CARD_LINE
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -4436,14 +4455,16 @@ async def _dispatch_now(
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
             policy_rule_var.set(take_rule())
+            console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval. A credential
-            # read that a resume sends again is refused whenever it would wait,
-            # also when it is destructive or needs its own approval: an
-            # approval request for it alone cannot finish the waiting run.
+            # ``requires_approval`` step, or one that reads, writes or makes
+            # a credential, keeps its own approval. A credential read that a
+            # resume sends again is refused whenever it would wait, also when
+            # it is destructive or needs its own approval: an approval request
+            # for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
@@ -4456,10 +4477,26 @@ async def _dispatch_now(
                         "credential; the run after an approval sends it again only when "
                         "its policy lets it go ahead with no person"
                     )
-                elif descriptor.safety_level != "destructive" and not descriptor.requires_approval:
+                elif (
+                    descriptor.safety_level != "destructive"
+                    and not descriptor.requires_approval
+                    and not descriptor_credential_waits(descriptor)
+                ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)
                     verdict = PermissionVerdict.AUTO_EXECUTE
+            # A child call that reads, writes or makes a credential waits for
+            # its own approval in a run that goes on after an approval, also
+            # when the approving person's own rights would let it run.
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and credential_step_waits_after_approval(
+                    descriptor.op_id, getattr(descriptor, "op_class", None)
+                )
+            ):
+                _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):
@@ -4475,6 +4512,16 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
+                policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
+                structlog.contextvars.bind_contextvars(
+                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE,
+                    audit_approval_auth=(
+                        console_run_sign_in.audit_payload(operator.sub)
+                        if console_run_sign_in is not None
+                        else None
+                    ),
+                )
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
                 # The row keeps the reason and its code (#5773), so the audit

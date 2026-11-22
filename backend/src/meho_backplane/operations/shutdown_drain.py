@@ -52,9 +52,11 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
     parent_audit_id_var,
-    resolve_agent_session_id,
+    resolve_audit_session_id,
     run_id_var,
+    session_is_from_client,
     step_id_var,
     work_ref_var,
 )
@@ -102,6 +104,9 @@ class RunningOperation:
     (agent session, parent row, runbook run and step, change ticket), so
     the row of an unfinished call is found by the same queries: the
     session replay and the audit filters by session, run or ticket.
+    ``session_from_client`` says that ``agent_session_id`` is the CLI login
+    session. The row is written after the request ended, so it is saved
+    here and not read from the request context.
     """
 
     op_id: str
@@ -112,6 +117,7 @@ class RunningOperation:
     started_at: datetime
     approved_run: bool
     agent_session_id: uuid.UUID | None = None
+    session_from_client: bool = False
     parent_audit_id: uuid.UUID | None = None
     run_id: uuid.UUID | None = None
     step_id: str | None = None
@@ -214,7 +220,8 @@ async def track_operation(
         request_id=current_request_id(),
         started_at=datetime.now(UTC),
         approved_run=approved_run,
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
+        session_from_client=session_is_from_client(),
         parent_audit_id=parent_audit_id_var.get(),
         run_id=run_id_var.get(),
         step_id=step_id_var.get(),
@@ -302,6 +309,8 @@ def _audit_row(entry: RunningOperation, stopped_at: datetime) -> AuditLog:
         payload["parent_audit_id"] = str(entry.parent_audit_id)
     if entry.agent_session_id is not None:
         payload["agent_session_id"] = str(entry.agent_session_id)
+        if entry.session_from_client:
+            payload[SESSION_FROM_CLIENT_KEY] = True
     duration_ms = (stopped_at - entry.started_at).total_seconds() * 1000
     return AuditLog(
         id=uuid.uuid4(),

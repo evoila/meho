@@ -288,7 +288,7 @@ async def test_command_and_args_keep_only_their_size_at_every_depth(
         "hidden": True,
         "bytes": len(_ARG_VALUE),
     }
-    assert _ARG_VALUE not in json.dumps(preview)
+    assert _ARG_VALUE not in json.dumps(preview["manifest"])
 
 
 _MULTI = f"""
@@ -457,8 +457,11 @@ async def test_env_and_header_entries_are_walked_past_their_hidden_value(
     assert header["exec"]["command"] == {"hidden": True, "bytes": 4 + len(_ARG_VALUE)}
 
     text = json.dumps(preview)
-    for value in (_ENV_VALUE, _SECRET_VALUE, _HEADER_VALUE, _ARG_VALUE):
+    for value in (_ENV_VALUE, _SECRET_VALUE, _HEADER_VALUE):
         assert value not in text
+    assert _ARG_VALUE not in json.dumps(preview["manifest"])
+    # The person-only list names the command line the echo shows only by size.
+    assert [entry.get("command") for entry in preview["run_commands"]] == [["sh", "-c", _ARG_VALUE]]
 
 
 @pytest.mark.asyncio

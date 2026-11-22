@@ -132,6 +132,7 @@ __all__ = [
     "composite_resume_state",
     "composite_resume_state_var",
     "composite_resume_var",
+    "credential_step_waits_after_approval",
     "enforce_subop_policy",
     "get_dispatch_child",
     "run_governed_subop",
@@ -649,7 +650,12 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
 
 
 def _covered_by_approved_run(
-    *, safety_level: str, requires_approval: bool, always_wait: bool = False
+    *,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    always_wait: bool = False,
+    stored_op_class: str | None = None,
 ) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
@@ -657,12 +663,38 @@ def _covered_by_approved_run(
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
     internal step, except a ``destructive`` step, a step marked
-    ``requires_approval`` and a step a classification entry makes always
-    wait: those keep their own approval.
+    ``requires_approval``, a step a classification entry makes always
+    wait and a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
+    those keep their own approval.
     """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
     if safety_level == "destructive" or requires_approval or always_wait:
         return False
+    if credential_call_waits(op_id, stored_op_class):
+        return False
+    return _runs_after_approval()
+
+
+def _runs_after_approval() -> bool:
+    """True while a run goes on after a person's approval (:data:`approved_run_var`, a resume)."""
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
+
+
+def credential_step_waits_after_approval(op_id: str, stored_op_class: str | None = None) -> bool:
+    """True when a step or child call of a run after an approval needs its own approval.
+
+    Such a run is checked with the rights of the person who approved it. A
+    step or child call that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    still waits for its own approval, whatever rights that person has and
+    whatever level the step declares. The approved step itself is cleared
+    before this check (:func:`_subop_resume_cleared`).
+    """
+    from meho_backplane.operations.service_grants import credential_call_waits
+
+    return _runs_after_approval() and credential_call_waits(op_id, stored_op_class)
 
 
 def _resume_parent_for_current_composite(
@@ -1143,6 +1175,7 @@ async def _gate_subop(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_policy
+    from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
     from meho_backplane.policy.stamp import take_rule
 
     started = time.monotonic()
@@ -1210,6 +1243,8 @@ async def _gate_subop(
     # operation. Only the step's group key is read from a stored row; the
     # step runs without one.
     await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
+    # Some params make a step wait for a person, as for a called operation.
+    raise_descriptor_for_params(descriptor, params)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No
@@ -1223,10 +1258,14 @@ async def _gate_subop(
     )
     step_rule = take_rule()
     if verdict is PermissionVerdict.AUTO_EXECUTE:
-        return _GoAhead.NO_PERSON
+        if not credential_step_waits_after_approval(op_id) and not descriptor.credential_call:
+            return _GoAhead.NO_PERSON
+        _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
+        verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+        op_id=op_id,
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
         always_wait=descriptor.policy_always_wait,

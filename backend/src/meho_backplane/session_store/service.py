@@ -21,11 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass
+from meho_backplane.db.models import AgentRun, AuditEventClass
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
+from meho_backplane.session_store.audit_links import session_links_on
 from meho_backplane.session_store.config import SessionStoreConfig
+from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
 from meho_backplane.session_store.models import (
+    AgentSessionAuditLink,
     AgentSessionEvent,
+    AgentSessionLink,
     AgentSessionRecord,
     AgentSessionRetention,
     AgentSessionUpload,
@@ -36,6 +40,7 @@ from meho_backplane.session_store.schemas import (
     SessionDetail,
     SessionFileState,
     SessionListResponse,
+    SessionMcpLink,
     SessionRetention,
     summary_of,
     upload_part_of,
@@ -151,6 +156,7 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
                 .order_by(AgentSessionUpload.seq)
             )
         )
+        mcp_sessions = await _mcp_sessions(session, record) if session_links_on() else None
         add_audit_row(
             session,
             operator,
@@ -164,7 +170,35 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
         **summary_of(record).model_dump(),
         files={p: SessionFileState(**state) for p, state in record.files.items()},
         uploads=[upload_part_of(upload) for upload in uploads],
+        mcp_sessions=mcp_sessions,
     )
+
+
+async def _mcp_sessions(session: AsyncSession, record: AgentSessionRecord) -> list[SessionMcpLink]:
+    """The MCP sessions of *record*: its stored links, or the hosted run itself.
+
+    A hosted run's tool calls carry the run id as their session id, and the
+    run has the work reference (ticket id) it was started with.
+    """
+    links = [
+        SessionMcpLink(mcp_session_id=link.mcp_session_id, work_ref=link.work_ref)
+        for link in await session.scalars(
+            select(AgentSessionLink)
+            .where(AgentSessionLink.record_id == record.id)
+            .order_by(AgentSessionLink.linked_at, AgentSessionLink.mcp_session_id)
+        )
+    ]
+    if record.app == HOSTED_RUN_APP:
+        run = (
+            await session.execute(
+                select(AgentRun.id, AgentRun.work_ref).where(
+                    AgentRun.id == record.id, AgentRun.tenant_id == record.tenant_id
+                )
+            )
+        ).first()
+        if run is not None:
+            links.insert(0, SessionMcpLink(mcp_session_id=run.id, work_ref=run.work_ref))
+    return links
 
 
 async def read_upload(
@@ -244,9 +278,16 @@ async def delete_session(
 
 
 async def delete_record_rows(session: AsyncSession, record_id: uuid.UUID) -> None:
-    """Delete one record, its upload rows and its saved events in *session* (the caller commits)."""
+    """Delete one record with its upload rows, saved events and both kinds of links.
+
+    The caller commits.
+    """
     await session.execute(
         delete(AgentSessionUpload).where(AgentSessionUpload.record_id == record_id)
+    )
+    await session.execute(delete(AgentSessionLink).where(AgentSessionLink.record_id == record_id))
+    await session.execute(
+        delete(AgentSessionAuditLink).where(AgentSessionAuditLink.record_id == record_id)
     )
     await session.execute(delete(AgentSessionEvent).where(AgentSessionEvent.record_id == record_id))
     await session.execute(delete(AgentSessionRecord).where(AgentSessionRecord.id == record_id))

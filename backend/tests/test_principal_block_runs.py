@@ -276,6 +276,71 @@ async def test_hosted_run_of_a_blocked_person_makes_no_model_request() -> None:
     assert requests == []
 
 
+async def test_child_run_of_a_person_blocked_during_it_ends_failed_and_stops_the_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The block comes inside the child run, right before its tool call."""
+    await _seed_definition(name="runner", toolset={"meta_tools": ["add_to_memory", "invoke_agent"]})
+    await _seed_definition(
+        name="child",
+        system_prompt="CHILD: you write a note.",
+        toolset={"meta_tools": ["add_to_memory"]},
+    )
+    written = _spy_handler(monkeypatch, "add_to_memory")
+    person = _make_operator()
+    state = {"parent": 0, "child": 0}
+
+    async def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        parts = [p for m in messages if isinstance(m, ModelRequest) for p in m.parts]
+        if any("CHILD" in str(getattr(p, "content", "")) for p in parts):
+            state["child"] += 1
+            if state["child"] > 1:
+                return ModelResponse(parts=[TextPart("child done")])
+            await block_principal(_admin(), person.sub, "left the team")
+            return ModelResponse(parts=[ToolCallPart("add_to_memory", {"content": "note"})])
+        state["parent"] += 1
+        if state["parent"] > 1:
+            return ModelResponse(parts=[TextPart("done")])
+        call = ToolCallPart("invoke_agent", {"agent_name": "child", "inputs": "sub"})
+        return ModelResponse(parts=[call])
+
+    outcome = await _invoker(FunctionModel(fn)).run(person, "runner", "go")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert _REFUSAL in outcome.error
+    assert written == []
+    assert state == {"parent": 1, "child": 1}
+    children = await _child_runs(outcome.run_id)
+    assert [c.status for c in children] == [AgentRunStatus.FAILED.value]
+    assert children[0].error is not None
+    assert _REFUSAL in children[0].error
+
+
+async def test_hosted_run_stops_when_the_block_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The list becomes unreadable after the first model request, before the tool call."""
+    await _seed_definition(name="runner", toolset={"meta_tools": ["add_to_memory"]})
+    written = _spy_handler(monkeypatch, "add_to_memory")
+
+    async def _list_breaks() -> None:
+        _unreadable_block_list(monkeypatch)
+        reset_block_cache()
+
+    tool_call = ToolCallPart("add_to_memory", {"content": "note"})
+    outcome = await _invoker(_model(tool_call, _list_breaks)).run(_make_operator(), "runner", "go")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert "principal_block_check_unavailable" in outcome.error
+    assert written == []
+    async with get_sessionmaker()() as session:
+        query = select(AuditLog).where(AuditLog.agent_session_id == outcome.run_id)
+        rows = list((await session.execute(query)).scalars())
+    assert [(r.payload["op_id"], r.status_code) for r in rows] == [("add_to_memory", 503)]
+
+
 # ---------------------------------------------------------------------------
 # The in-process agent waiter
 # ---------------------------------------------------------------------------

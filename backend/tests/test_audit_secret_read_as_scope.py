@@ -34,6 +34,7 @@ from meho_backplane.connectors.secret.endpoints import SecretMaterial
 from meho_backplane.connectors.secret.vault_endpoint import (
     SecretMergeChangedError,
     SecretMergeRefusedError,
+    SecretSinkChangedError,
     VaultKvSecretEndpoint,
 )
 from meho_backplane.connectors.vault import VaultConnector
@@ -43,6 +44,7 @@ from meho_backplane.operations import dispatch, register_typed_operation, reset_
 from meho_backplane.operations._preview import (
     _PERMISSION_PREFLIGHTS,
     PreviewContext,
+    approved_preview_var,
     register_permission_preflight,
 )
 from meho_backplane.operations.composite import composite_depth_var, enforce_subop_policy
@@ -157,6 +159,36 @@ async def test_merge_read_names_the_caller_when_the_write_is_refused(
                 _operator("person-sub"), _material("made-up-value-0zzz")
             )
         assert current_secret_read_as() == "person-sub"
+
+
+@pytest.mark.parametrize(
+    ("sink", "secret"),
+    [
+        ({"secret_exists": "no", "field_exists": "no"}, {"username": "svc"}),
+        ({"secret_exists": "yes", "field_exists": "no"}, {"username": "svc", "password": "old"}),
+    ],
+    ids=["approved-secret-missing", "approved-field-missing"],
+)
+@pytest.mark.asyncio
+async def test_merge_read_names_the_caller_when_the_approved_sink_changed(
+    monkeypatch: pytest.MonkeyPatch, sink: dict[str, str], secret: dict[str, str]
+) -> None:
+    """The merge read finds what the approval card said does not exist: no write is sent."""
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.secret = secret
+    endpoint = VaultKvSecretEndpoint(f"{_LOGIN_PATH}#password")
+    token = approved_preview_var.set(("secret.move", {"sink": sink}))
+    try:
+        with track_secret_read_as():
+            with pytest.raises(SecretSinkChangedError):
+                await endpoint.write_secret_merged(
+                    _operator("person-sub"), _material("made-up-value-0zzz")
+                )
+            assert len(fake.secrets.kv.v2.read_calls) == 1
+            assert current_secret_read_as() == "person-sub"
+    finally:
+        approved_preview_var.reset(token)
+    assert fake.secrets.kv.v2.put_calls == []
 
 
 @pytest.mark.asyncio

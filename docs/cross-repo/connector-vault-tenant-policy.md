@@ -237,6 +237,12 @@ vault write identity/entity \
   metadata=tenant_id="<tenant-uuid>"
 ```
 
+The JWT login finds its entity by the alias (the `sub` claim on the
+accessor of the `jwt` mount), not by the entity `name`. So link the login
+to this entity with an alias, or, when the operator has already logged in,
+set the metadata on the entity of that login. The commands for both cases
+are in [`vault-provisioning.md`](./vault-provisioning.md) §3.
+
 > **The metadata value is the canonical dashed-lowercase UUID string**
 > (`str(UUID)`), matching the tenant UUID's spelling in audit rows, JWT
 > claims, and the [`tenant_scope`](../../backend/src/meho_backplane/connectors/vault/tenant_scope.py)
@@ -310,10 +316,9 @@ missing grant — same procedure as
 [`connector-vault-policy.md`](./connector-vault-policy.md) §4). Then:
 
 ```bash
-# 1. The entity carries the tenant_id metadata the template needs.
-vault read -format=json identity/entity/name/<operator-sub> \
-  | jq '.data.metadata'
-# Expect: {"tenant_id": "<tenant-uuid>"}
+# 1. This login uses the entity that carries the tenant_id metadata.
+vault token lookup -format=json | jq -r '.data.entity_id'
+# Expect: the entity id you set the tenant_id metadata on (§3)
 
 # 2. The operator can read a secret under their OWN tenant.
 vault kv get -mount=secret -format=json "tenants/<tenant-uuid>/<target>" \

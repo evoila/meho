@@ -137,6 +137,46 @@ identity wiring that makes them resolve are in
 §2 to §4. Bind them to the role's logins through identity groups, and
 give each tenant's callers the group that matches their `tenant_role`.
 
+Set the tenant metadata and the group on the entity that the JWT login
+really uses. Vault finds that entity by its alias: the alias name is the
+caller's `sub` claim (`user_claim=sub`), on the accessor of the `jwt`
+mount. An entity whose `name` is the same `sub` is not linked by the name
+alone. So for each caller:
+
+```bash
+# The accessor of the jwt mount (use your mount path if it is not jwt/).
+ACCESSOR=$(vault auth list -format=json | jq -r '."jwt/".accessor')
+
+# a) The caller has not logged in yet: create the entity and link the
+#    login to it with an alias.
+ENTITY_ID=$(vault write -format=json identity/entity \
+  name="<operator-sub>" metadata=tenant_id="<tenant-uuid>" | jq -r .data.id)
+vault write identity/entity-alias \
+  name="<operator-sub>" canonical_id="$ENTITY_ID" mount_accessor="$ACCESSOR"
+
+# b) The caller has logged in once: Vault already made an entity and an
+#    alias for the login. Find that entity and set the metadata on it.
+ENTITY_ID=$(vault write -format=json identity/lookup/entity \
+  alias_name="<operator-sub>" alias_mount_accessor="$ACCESSOR" | jq -r .data.id)
+vault write identity/entity/id/"$ENTITY_ID" metadata=tenant_id="<tenant-uuid>"
+
+# Then put this entity id into the tenant's role group
+# (connector-vault-tenant-policy.md §4, member_entity_ids).
+```
+
+Check the result with the caller's own login, not with a root token:
+
+```bash
+# Log in with the caller's Keycloak JWT on the meho-mcp role.
+VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=meho-mcp jwt="<caller-jwt>")
+export VAULT_TOKEN
+vault token lookup -format=json | jq -r .data.entity_id   # Expect: $ENTITY_ID
+vault kv get -mount=secret "tenants/<tenant-uuid>/<target>"        # Expect: the secret
+vault kv get -mount=secret "tenants/<other-tenant-uuid>/<target>"  # Expect: permission denied
+```
+
+Run the check from one of the addresses in `token_bound_cidrs`.
+
 The policy `meho-mcp` on the role itself grants only the health test
 secret (surface 5):
 

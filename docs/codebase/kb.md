@@ -1115,6 +1115,11 @@ the lesson header (`mcp/tools/_search_filters.py`):
 `search_knowledge` also takes `scope`: `all` (default), `tenant` or
 `shared`. A named filter wins over the same key in `filters`.
 
+With `KB_SEARCH_WORD_HINT` on (off by default), `search_knowledge` tells
+the agent to search with a few key words, and its answer has `word_match`
+(`some` or `none`). See "MCP `search_knowledge` tool surface" in
+`retrieval.md`.
+
 Example: the confirmed lessons for one product version from the last
 90 days are `status="confirmed"`, `product`, `version` and
 `confirmed_after=<the date 90 days ago>`.

@@ -261,12 +261,14 @@ backplane is now a credential-bearing **intermediary** that touches both
 sides of a move.
 
 That is the new blast radius to reason about. The mitigations below each
-map to a primitive that **actually ships** — there is no god-mode token
-and no value ever rests in a durable artifact.
+map to a primitive that **actually ships** — MEHO holds no broad backplane
+token (its own Vault logins, the scheduler token and the check runner's
+login, are listed in [`connector-vault-policy.md`](./connector-vault-policy.md)
+§5), and no value ever rests in a durable artifact.
 
 ### 3.2 Mitigations (each maps to a shipped primitive)
 
-1. **Operator-context credential reads — no god-mode.** The vault
+1. **Operator-context credential reads — no broad backplane token.** The vault
    adapter reads and writes under the **operator's own** Vault token via
    [`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py),
    bounded by that operator's Vault policy (per-operator RBAC + audit

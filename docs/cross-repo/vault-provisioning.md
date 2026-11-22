@@ -164,18 +164,17 @@ vault write identity/entity/id/"$ENTITY_ID" metadata=tenant_id="<tenant-uuid>"
 # (connector-vault-tenant-policy.md §4, member_entity_ids).
 ```
 
-Check the result with the caller's own login, not with a root token:
+Check the result with the caller's own login, not with a root token. Log
+in as [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§5 says, from one of the addresses in `token_bound_cidrs`. Then check that
+the login uses this entity:
 
 ```bash
-# Log in with the caller's Keycloak JWT on the meho-mcp role.
-VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=meho-mcp jwt="<caller-jwt>")
-export VAULT_TOKEN
 vault token lookup -format=json | jq -r .data.entity_id   # Expect: $ENTITY_ID
-vault kv get -mount=secret "tenants/<tenant-uuid>/<target>"        # Expect: the secret
-vault kv get -mount=secret "tenants/<other-tenant-uuid>/<target>"  # Expect: permission denied
 ```
 
-Run the check from one of the addresses in `token_bound_cidrs`.
+Steps 2 and 3 of that §5 check the read of the tenant's own secret and the
+refused read of another tenant's secret.
 
 The policy `meho-mcp` on the role itself grants only the health test
 secret (surface 5):
@@ -626,15 +625,18 @@ vault write auth/jwt/role/meho-mcp - <<'JSON'
   "user_claim": "sub",
   "bound_audiences": "<keycloak-audience>",
   "bound_claims": {"/realm_access/roles": "meho-operator"},
+  "token_bound_cidrs": ["<meho-address-1>", "<meho-address-2>"],
   "policies": "meho-mcp",
-  "token_ttl": "1h"
+  "token_ttl": "5m"
 }
 JSON
 ```
 
 The request goes in as JSON on stdin (the `-` argument). `bound_claims` is
 a map, and the `key=value` form of `vault write` can only send a string
-for it, which Vault rejects.
+for it, which Vault rejects. The JSON sets `token_bound_cidrs` and
+`token_ttl` to the values of surface 2, so the role keeps MEHO's addresses
+and its 5-minute token.
 
 Note what is deliberately **absent**: no `bound_claims_type`. Its default is
 `string`, under which bound values "will be treated as literals and must

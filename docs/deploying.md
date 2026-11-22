@@ -293,21 +293,24 @@ targets whose credentials MEHO does not have to fetch per read.
 is **not** inert-until-you-provision-more. The `meho-mcp` JWT role this
 project documents
 ([`cross-repo/vault-provisioning.md`](cross-repo/vault-provisioning.md#2-role-meho-mcp))
-is `role_type=jwt user_claim=sub bound_audiences=<keycloak-audience>` with
-**no** `bound_subject` and **no** `bound_claims`, and the `meho-mcp` policy
-grants read on all of `secret/data/meho/*`. The runner mints its token with
-`audience=KEYCLOAK_AUDIENCE`, and the realm recipe just above tells you to
-add the matching audience mapper. Those two facts compose: Vault accepts
-the runner principal against the **existing** role with no further
-provisioning, and background dispatch inherits the role's entire policy.
+is bound to the backplane audience (`bound_audiences=<keycloak-audience>`)
+and to MEHO's addresses (`token_bound_cidrs`), with **no** `bound_subject`
+and **no** `bound_claims`. Its policy is the per-tenant policy of surface 3
+in the same guide: each login reads the secrets of the tenant its Vault entity belongs to.
+The runner mints its token with `audience=KEYCLOAK_AUDIENCE` from the same
+MEHO pods, and the realm recipe just above tells you to add the matching
+audience mapper. Those facts compose: Vault accepts the runner principal
+against the **existing** role with no further provisioning, and background
+dispatch reads what the role and its per-tenant policy grant the runner's
+login.
 
 Concretely, enabling `checkRunner.*` on a Vault install removes the
 "system-initiated calls cannot perform an operator-context Vault read"
 carve-out that the rest of this credential layer is built on — every
-scheduled evaluation can then read any target credential under
-`secret/meho/*`. That may be exactly what you want (it is what makes
-credentialed Sensors work on Vault), but it is a deliberate privilege
-decision, not a no-op.
+scheduled evaluation can then read the target credentials that the
+per-tenant policy grants the runner's login. That may be exactly what you
+want (it is what makes credentialed Sensors work on Vault), but it is a
+deliberate choice about what MEHO may read, not a no-op.
 
 Bound the role first if it isn't:
 

@@ -178,7 +178,8 @@ retrieve()
         ├── embedding compute (encode_one — one fastembed forward-pass)
         ├── _vector_literal (Python list[float] → pgvector text literal)
         ├── metadata_filters JSON serialisation (sort_keys=True)
-        ├── _bm25_candidates, then _cosine_candidates (one after the other, same session)
+        ├── _bm25_candidates (a second time with any word, only the kb fallback below),
+        │   then _cosine_candidates (one after the other, same session)
         │     (raw SQL — pgvector / PG-FTS operators have no SQLAlchemy ORM)
         ├── _rrf_fuse (pure function, in-process)
         └── _hydrate_hits (single IN-fetch for the top-limit ids)
@@ -190,6 +191,26 @@ passage mapping, plus the mandatory per-principal predicate (`principal_sub`, se
 notes above) is applied symmetrically so the fused list is the
 intersection of two equally-scoped sets and neither signal can surface
 a user-scoped memory row the caller does not own.
+
+### Any-word fallback for the knowledge search (#6784)
+
+The word half uses `plainto_tsquery`, so a passage needs **every** word
+of the question. A long question almost never gets a word score. The
+switch `KB_SEARCH_PLAIN_SENTENCES` (setting `kb_search_plain_sentences`,
+off by default, listed by `GET /version`) adds a fallback:
+
+- It applies only when `source="kb"` (this includes the passage rows and
+  the shared scope). With the switch off, nothing changes.
+- MEHO runs the word search as always. Only when that finds **no** row,
+  it runs it once more with the `:any_word` bind set. The query is the
+  same words joined by OR, so a passage needs any word. The rank is the
+  same `ts_rank_cd`: more question words, closer together, rank higher.
+  The tenant, source, kind, filter, time window and principal rules are
+  the same text of the same statement.
+- The meaning half and the rank fusion do not change.
+- Memory search, a search with no source and the operations search do
+  not change, also with the switch on.
+- A question of stop words only gives an empty word query and no word hit.
 
 ### API surface (`POST /api/v1/retrieve`)
 

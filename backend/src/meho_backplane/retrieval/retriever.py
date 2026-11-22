@@ -111,6 +111,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.time_window import TimeWindow
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CANDIDATE_LIMIT",
@@ -341,8 +342,12 @@ async def retrieve(
       v0.2). The cost is one fastembed forward-pass plus two SQL
       round-trips against the indexed table.
     * BM25 filter uses ``@@`` against ``to_tsvector('english',
-      body)`` -- documents without ANY query term match are
-      excluded from the BM25 candidate set entirely. The cosine
+      body)`` -- documents that do not hold EVERY query word
+      (``plainto_tsquery`` joins the words with AND) are
+      excluded from the BM25 candidate set entirely. Only with the
+      ``KB_SEARCH_PLAIN_SENTENCES`` switch on, for ``source="kb"``, and
+      only when that finds no row, a second BM25 pass keeps documents that
+      hold ANY query word. The cosine
       side has no such filter; it always returns up to
       :data:`CANDIDATE_LIMIT` rows ranked by distance.
     * A document appearing in only one signal's candidate set still
@@ -505,6 +510,22 @@ async def _retrieve_in_session(
         memory_kinds,
         time_window=time_window,
     )
+    # Switch KB_SEARCH_PLAIN_SENTENCES (#6784): a knowledge search whose
+    # every-word search found nothing runs once more with any word. Memory
+    # search and the search with no source never take this branch.
+    if not bm25_rows and source == "kb" and get_settings().kb_search_plain_sentences:
+        bm25_rows = await _bm25_candidates(
+            session,
+            tenant_id,
+            query,
+            source,
+            kind,
+            metadata_filters_json,
+            principal_sub,
+            memory_kinds,
+            time_window=time_window,
+            any_word=True,
+        )
     cosine_rows = await _cosine_candidates(
         session,
         tenant_id,
@@ -739,11 +760,20 @@ _TIME_WINDOW_PREDICATE_SQL: str = r"""
 # ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
 # predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
 # pinned to it at module load by :func:`_assert_predicate_inlined`.
+# ``:any_word`` picks the query form (#6784). False: ``plainto_tsquery`` (every
+# word, as always). True: the same words joined by OR. ``plainto_tsquery``
+# writes `` & `` only between words and a word never holds a space, so the
+# replace changes no word. The user's text stays a bound value; a query of
+# stop words only gives an empty query that matches nothing.
 _BM25_CANDIDATES_SQL = text(
     r"""
     SELECT id, ts_rank_cd(
         to_tsvector('english', body),
-        plainto_tsquery('english', :query)
+        CASE WHEN CAST(:any_word AS boolean)
+          THEN CAST(replace(CAST(plainto_tsquery('english', :query) AS text), ' & ', ' | ')
+                    AS tsquery)
+          ELSE plainto_tsquery('english', :query)
+        END
     ) AS score
     FROM documents
     WHERE tenant_id = :tenant_id
@@ -816,7 +846,11 @@ _BM25_CANDIDATES_SQL = text(
           END
         )
       )
-      AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
+      AND to_tsvector('english', body) @@ CASE WHEN CAST(:any_word AS boolean)
+          THEN CAST(replace(CAST(plainto_tsquery('english', :query) AS text), ' & ', ' | ')
+                    AS tsquery)
+          ELSE plainto_tsquery('english', :query)
+        END
     ORDER BY score DESC
     LIMIT :limit
     """
@@ -991,11 +1025,14 @@ async def _bm25_candidates(
     memory_kinds: list[str] | None = None,
     *,
     time_window: TimeWindow | None = None,
+    any_word: bool = False,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
 
-    Returns rows whose body contains at least one query term (the
-    ``@@`` filter), ranked descending. The ``CAST(:source AS text) IS
+    Returns rows whose body contains every query term (the ``@@``
+    filter), ranked descending. With ``any_word=True`` (only the
+    ``KB_SEARCH_PLAIN_SENTENCES`` fallback) a row needs any one query
+    term. The ``CAST(:source AS text) IS
     NULL OR ...`` pattern lets us bind a single SQL string for every
     filter combination; the asyncpg driver short-circuits the OR
     cleanly. The metadata-filter predicate uses the same null-or-match
@@ -1021,6 +1058,7 @@ async def _bm25_candidates(
             "principal_sub": principal_sub,
             "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
+            "any_word": any_word,
             **_time_window_binds(time_window),
         },
     )

@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -62,14 +63,15 @@ import pytest
 import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.db.models import AuditLog, Document
 from meho_backplane.retrieval.indexer import index_document
-from meho_backplane.retrieval.retriever import retrieve
+from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from meho_backplane.settings import get_settings
 
 from .._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
 from .conftest import DOCKER_AVAILABLE, SKIP_REASON, fetch_audit_rows_for_tenant  # noqa: F401
@@ -639,3 +641,209 @@ def test_module_imports_cleanly() -> None:
     assert len(_CORPUS_TENANT_A) == 15
     # Sanity: the helper used by the audit-row assertion still exports.
     assert callable(text)
+
+
+# ---------------------------------------------------------------------------
+# KB_SEARCH_PLAIN_SENTENCES (#6784): the any-word fallback of the knowledge search
+#
+# A knowledge search (source="kb") whose every-word search finds nothing runs
+# the word search again, and a passage needs any word. Switch off: as before.
+# Memory search and a search with no source do not change. The made-up
+# embedding gives the meaning half a fixed order, so only the word half is
+# under test.
+# ---------------------------------------------------------------------------
+
+_KBPS_TENANT_A = uuid.UUID(TENANT_A_ID)
+_KBPS_TENANT_B = uuid.UUID(TENANT_B_ID)
+
+#: (source, source_id, body). Made-up texts.
+_KBPS_CORPUS = (
+    (
+        "kb",
+        "restore",
+        "Restore the demo share from the snapshot when the nightly backup job fails.",
+    ),
+    ("kb", "mounts", "The demo share is mounted by the backup job."),
+    ("kb", "certs", "Rotate the certificate of the gateway every ninety days."),
+    ("kb", "holidays", "The office calendar lists every public holiday."),
+    ("memory", "note", "The nightly backup job of the demo share failed on the gateway."),
+)
+#: A long question. No passage holds every word ("ticket" is in none).
+_KBPS_LONG = (
+    "ticket: how do I restore the demo share after the nightly backup job failed on the gateway"
+)
+_KBPS_SHORT = "backup job"
+_KBPS_STOP_ONLY = "the of and it is to"
+
+
+@pytest.fixture(autouse=True)
+def _kbps_clear_settings_cache() -> Iterator[None]:
+    yield
+    get_settings.cache_clear()
+
+
+def _kbps_switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    monkeypatch.setenv("KB_SEARCH_PLAIN_SENTENCES", "true" if on else "false")
+    get_settings.cache_clear()
+
+
+def _kbps_probe_every_list(dbapi_connection: Any, *_: Any) -> None:
+    # The vector index (IVFFlat) was built on an empty table, so probing one
+    # list can miss rows of this small kbps_corpus. Probing every list makes the
+    # meaning search exact.
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET ivfflat.probes = 100")
+    cursor.close()
+
+
+@pytest.fixture
+async def kbps_corpus(pg_engine: None) -> AsyncIterator[None]:
+    engine = get_engine().sync_engine
+    event.listen(engine, "checkout", _kbps_probe_every_list)
+    fake = _make_stub_embedding_service()
+    with (
+        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
+        patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
+    ):
+        for source, source_id, body in _KBPS_CORPUS:
+            await index_document(
+                tenant_id=_KBPS_TENANT_A,
+                source=source,
+                source_id=source_id,
+                kind="kb-entry" if source == "kb" else "memory-tenant",
+                body=body,
+            )
+        # Tenant B holds a text with many question words. Tenant A must never see it.
+        await index_document(
+            tenant_id=_KBPS_TENANT_B,
+            source="kb",
+            source_id="other-tenant",
+            kind="kb-entry",
+            body="Restore the demo share after the nightly backup job failed on the gateway.",
+        )
+        yield
+    event.remove(engine, "checkout", _kbps_probe_every_list)
+
+
+async def _kbps_search(query: str, source: str | None = "kb") -> list[RetrievalHit]:
+    return await retrieve(
+        _KBPS_TENANT_A, query, source=source, limit=10, all_principals=source != "kb"
+    )
+
+
+def _kbps_shape(hits: list[RetrievalHit]) -> list[tuple[str, float, float | None, int | None]]:
+    return [(h.source_id, h.fused_score, h.bm25_score, h.bm25_rank) for h in hits]
+
+
+def _kbps_words(hits: list[RetrievalHit]) -> dict[str, float | None]:
+    return {h.source_id: h.bm25_score for h in hits}
+
+
+async def test_switch_off_long_question_gets_no_word_score(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    hits = await _kbps_search(_KBPS_LONG)
+    assert hits
+    assert all(h.bm25_score is None for h in hits)
+    assert all(h.bm25_rank is None for h in hits)
+
+
+async def test_switch_off_short_question_gets_word_scores(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    scores = _kbps_words(await _kbps_search(_KBPS_SHORT))
+    assert scores["restore"] is not None
+    assert scores["mounts"] is not None
+    assert scores["certs"] is None
+
+
+async def test_switch_on_long_question_ranks_by_question_words(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=True)
+    hits = await _kbps_search(_KBPS_LONG)
+    by_id = {h.source_id: h for h in hits}
+    # The passages that hold question words get a word score; others do not.
+    assert by_id["restore"].bm25_score is not None
+    assert by_id["mounts"].bm25_score is not None
+    assert by_id["certs"].bm25_score is not None
+    assert by_id["holidays"].bm25_score is None
+    # The passage with the most question words ranks first among them.
+    assert by_id["restore"].bm25_rank == 1
+    assert by_id["restore"].bm25_score > by_id["mounts"].bm25_score
+    # Passages of memory and of another tenant never show up in a kb search.
+    assert set(by_id) <= {"restore", "mounts", "certs", "holidays"}
+
+
+@pytest.mark.parametrize("query", [_KBPS_SHORT, "backup job demo share"])
+async def test_switch_on_every_word_match_is_unchanged(
+    query: str, kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    off = _kbps_shape(await _kbps_search(query))
+    _kbps_switch(monkeypatch, on=True)
+    on = _kbps_shape(await _kbps_search(query))
+    assert on == off
+    assert any(row[2] is not None for row in on)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        _KBPS_STOP_ONLY,
+        "demo-share",
+        "backup & job | share",
+        "it's \"quoted\" 'text' (a:b)",
+        "",
+        "   ",
+    ],
+)
+async def test_switch_on_odd_questions_give_no_error(
+    query: str, kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    off = _kbps_shape(await _kbps_search(query))
+    _kbps_switch(monkeypatch, on=True)
+    on = await _kbps_search(query)
+    if query.strip() in {"", _KBPS_STOP_ONLY}:
+        # No word survives, so there are no word hits.
+        assert all(h.bm25_score is None for h in on)
+    assert len(on) <= 10
+    assert isinstance(off, list)
+
+
+async def test_switch_on_hyphen_word_finds_its_passage(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=True)
+    hits = await _kbps_search("demo-share certificate zebra")
+    assert _kbps_words(hits)["certs"] is not None
+
+
+@pytest.mark.parametrize("source", ["memory", None])
+async def test_switch_on_other_sources_are_unchanged(
+    source: str | None, kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=False)
+    off = _kbps_shape(await _kbps_search(_KBPS_LONG, source=source))
+    _kbps_switch(monkeypatch, on=True)
+    on = _kbps_shape(await _kbps_search(_KBPS_LONG, source=source))
+    assert on == off
+    assert all(row[2] is None for row in on)
+
+
+async def test_second_search_keeps_the_tenant_and_the_filters(
+    kbps_corpus: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _kbps_switch(monkeypatch, on=True)
+    hits: list[Any] = await retrieve(
+        _KBPS_TENANT_B, _KBPS_LONG, source="kb", limit=10, metadata_filters={"nothing": "matches"}
+    )
+    # A metadata filter that no row holds leaves no hit, and no word hit either.
+    assert hits == []
+    own = await _kbps_search(_KBPS_LONG)
+    assert "other-tenant" not in {h.source_id for h in own}
+    other = await retrieve(_KBPS_TENANT_B, _KBPS_LONG, source="kb", limit=10)
+    assert {h.source_id for h in other} == {"other-tenant"}

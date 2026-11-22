@@ -13,9 +13,10 @@ points outside that folder, so an admin can move the secrets into it.
 * When the folder check is off on this install, the list is empty and
   ``check_off`` is true.
 
-Only Vault and OpenBao paths are checked. A path that MEHO built from the
-target name is inside the folder by design and is not listed. The answer
-holds names, tenant ids, the path and the reason, never a secret value.
+Only Vault and OpenBao paths are checked, with the same rule as the
+warning a read of the secret writes, so a target is listed exactly when
+that read warns. The answer holds names, tenant ids, the path and the
+reason, never a secret value.
 The list is read from the targets table when asked.
 """
 
@@ -32,7 +33,6 @@ from meho_backplane.auth.operator import Operator, TenantRole, is_human_principa
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
-from meho_backplane.connectors.vault.tenant_paths import is_derived_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import (
     count_tenants_with_own_vault_role,
     effective_tenant_scope_template_for_tenant,
@@ -91,8 +91,6 @@ def _outside_reason(row: TargetORM) -> str | None:
         return None
     kind, store_ref = split_credential_ref(ref, default_backend=get_settings().credential_backend)
     if kind != "vault":
-        return None
-    if is_derived_secret_ref(ref, tenant_id=row.tenant_id, target_name=row.name):
         return None
     return outside_tenant_folder_reason(
         row.tenant_id, mount=DEFAULT_KV_MOUNT, path=store_ref, read_only=True

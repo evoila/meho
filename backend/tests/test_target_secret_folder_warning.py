@@ -310,3 +310,43 @@ async def test_the_list_says_the_check_is_off(monkeypatch: pytest.MonkeyPatch) -
         assert response.json()["check_off"] is True
         assert response.json()["message"] == "The folder check is off on this install"
         assert response.json()["items"] == []
+
+
+async def _built_path_read_and_list(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
+    """Read the secret of a target with the path MEHO builds, then ask the admin list."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    ref = tenant_secret_ref(_TENANT, "built")
+    _, captured = await _read(monkeypatch, _Target(name="built", secret_ref=ref), _operator())
+    await _insert_target(name="built", secret_ref=ref)
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            listed = _get(client, key, tenant_role=TenantRole.TENANT_ADMIN.value)
+    assert listed.status_code == 200, listed.text
+    return _warnings(captured), [i["name"] for i in listed.json()["items"]]
+
+
+@pytest.mark.asyncio
+async def test_a_built_path_outside_another_folder_warns_and_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "kv/{tenant_id}/")
+    get_settings.cache_clear()
+
+    warnings, names = await _built_path_read_and_list(monkeypatch)
+
+    assert [w["target_name"] for w in warnings] == ["built"]
+    assert names == ["built"]
+
+
+@pytest.mark.asyncio
+async def test_a_built_path_inside_the_default_folder_is_not_warned_or_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings, names = await _built_path_read_and_list(monkeypatch)
+
+    assert warnings == []
+    assert names == []

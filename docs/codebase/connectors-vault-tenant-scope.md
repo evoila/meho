@@ -155,8 +155,9 @@ checked too, and gets a warning instead of a refusal. The read goes on.
   `meho targets outside-folder` list the targets whose path is outside the
   folder, read from the targets table when asked. A tenant admin sees their
   own tenant. A platform admin sees every tenant, or one with `tenant_id`.
-  A path MEHO built from the target name is inside by design and is not
-  listed. With the check off, the answer has `check_off: true` and no rows.
+  The list uses the same `outside_tenant_folder_reason` as the warning, so
+  a target is listed exactly when a read of its secret warns. With the
+  check off, the answer has `check_off: true` and no rows.
 
 ## The namespace convention
 

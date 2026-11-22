@@ -16,7 +16,11 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.store_errors import hide_store_address, store_text_for_log
+from meho_backplane.auth.store_errors import (
+    hide_store_address,
+    log_without_store_text,
+    store_text_for_log,
+)
 from meho_backplane.auth.vault import (
     VaultClientError,
     VaultRoleDeniedError,
@@ -286,6 +290,16 @@ def test_a_key_in_use_answer_shows_no_store_text() -> None:
     result = result_connector_error("op", error, 1.0)
     assert "currently referenced" not in result.model_dump_json()
     assert result.extras["upstream_message"] == "key 'k' is still used by these roles: r1"
+
+
+def test_a_caller_can_log_a_store_failure_without_the_store_text() -> None:
+    with capture_logs() as logs, log_without_store_text():
+        result_connector_vault_forbidden("op", _store_error(), None, 1.0)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1
+    assert events[0]["store_text"] is None
+    assert events[0]["store_request_id"] == "req-1"
+    assert _STORE_TEXT not in json.dumps(events, default=str)
 
 
 def test_the_store_error_builders_set_no_message_source() -> None:

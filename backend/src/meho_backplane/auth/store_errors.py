@@ -11,6 +11,9 @@ replaced by a mark (:func:`store_text_for_log`, :func:`log_store_error`).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Final
 
 import hvac.exceptions
@@ -29,6 +32,7 @@ __all__ = [
     "has_store_detail",
     "hide_store_address",
     "log_store_error",
+    "log_without_store_text",
     "store_request_id",
     "store_status",
     "store_text_for_log",
@@ -85,6 +89,23 @@ _PLAIN_VALUE: Final = re.compile(
     re.IGNORECASE,
 )
 _LABELLED_MARK: Final = rf"\g<label> {SECRET_FIELD_MARKER}"
+
+
+_log_holds_text: ContextVar[bool] = ContextVar("store_error_log_holds_text", default=True)
+
+
+@contextmanager
+def log_without_store_text() -> Iterator[None]:
+    """Log store request failures in this block without the store's text.
+
+    The health check uses it: its log holds class names only. The event still
+    has the error class, the store status and the request id.
+    """
+    token = _log_holds_text.set(False)
+    try:
+        yield
+    finally:
+        _log_holds_text.reset(token)
 
 
 def hide_store_address(text: str) -> str:
@@ -201,7 +222,7 @@ def log_store_error(exc: BaseException, *, op_id: str) -> None:
                 error_class=type(link).__name__,
                 store_status=store_status(link),
                 store_request_id=store_request_id(link),
-                store_text=store_text_for_log(link),
+                store_text=store_text_for_log(link) if _log_holds_text.get() else None,
             )
             return
 

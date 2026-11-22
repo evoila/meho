@@ -220,17 +220,16 @@ JSON-shaped (so it can grow without a migration):
     `targets_within_limit` reads the saved login types of all the targets
     in one read per tenant, so a target of a connector made from a saved
     API file is checked like any other.
-  - The target resolver (`targets/resolver.py`) treats a target outside
-    the list as a target that does not exist. When the exact-name step or
-    the alias step finds hits and none of them is inside the list, the
-    answer is `no_target`, the same as for a name with no match
-    (`_pick_one`). The lookup does not go on to the next step. The hits
-    of an `ambiguous_target` answer and the near-matches of a `no_target`
-    answer name only targets inside the list. Every tool that looks a
-    target up by name (`call_operation`, `preview_operation`, the
-    `target` filter of `meho_connector_list`, the docs tools, and a
-    handler that looks up a second target) gets the same answer. Test:
-    `tests/test_agent_connector_list_hidden_targets.py`.
+  - The target resolver (`targets/resolver.py`, `_pick_one`) does three
+    things with a list:
+    - When every hit of the exact-name step, or every hit of the alias
+      step, is outside the list, the answer is `no_target`, in the same
+      form as for a name that no target has.
+    - An answer never names a target outside the list, and never names
+      its product.
+    - The near-matches of a `no_target` answer leave out the targets
+      outside the list, so there can be fewer than five, or none.
+    Test: `tests/test_agent_connector_list_hidden_targets.py`.
   - `list_operation_groups` and `search_operations` refuse a
     `connector_id` outside the list before the handler runs, like
     `call_operation` (`_CONNECTOR_SCOPED_TOOLS` in `agent/toolset.py`).

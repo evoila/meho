@@ -742,8 +742,8 @@ _TOOL_THEN_OTHER: Final = (
     (("smbclient //h/share", f"smbclient //h/share -U bob%{PW}"), ("rpm -U pkg-1%2.rpm",)),
 )
 #: How the lines are split: a line end, a carriage return and a line end,
-#: two line ends, and a blank before the line end.
-_LINE_SPLITS: Final = ("\n", "\r\n", "\n\n", " \n")
+#: a carriage return alone, two line ends, and a blank before the line end.
+_LINE_SPLITS: Final = ("\n", "\r\n", "\r", "\n\n", " \n")
 #: (line, its secret values, JSON levels): inside a JSON string or a
 #: double-quoted command an escaped line end ends the command of the tool,
 #: so the options on the later line stay as on main.
@@ -753,7 +753,7 @@ _COMMAND_ENDS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
     for first in firsts
     for later in laters
     for split in _LINE_SPLITS
-    for levels in (1, 2)
+    for levels in (1, 2, 3)
 ] + [
     (line, (PW,) if PW in line else (), levels)
     for firsts, laters in _TOOL_THEN_OTHER
@@ -762,6 +762,7 @@ _COMMAND_ENDS_IN_JSON: Final[list[tuple[str, tuple[str, ...], int]]] = [
     for line in (
         'sh -c "' + first + "\\n" + later + '" && echo ok',
         'sh -c "' + first + "\\r\\n" + later + '" && echo ok',
+        'sh -c "' + first + "\\r" + later + '" && echo ok',
         "sh -c '" + first + "\n" + later + "' && echo ok",
     )
     for levels in (0, 1, 2)
@@ -779,6 +780,13 @@ def test_an_escaped_line_end_in_a_json_string_ends_the_command_of_a_tool(
         assert _changes_besides(text, values, policy) == []
         on_main = redact(text, _without_command_rule(policy)).redacted
         assert not _parses(on_main, levels) or _parses(redact(text, policy).redacted, levels)
+
+
+@pytest.mark.parametrize("levels", [1, 2, 3])
+def test_an_escaped_carriage_return_ends_the_command_of_a_tool(levels: int) -> None:
+    text = _in_json("mysql --version" + "\r" + "tar -pcf archive.tar files", levels)
+    for policy in (get_default_policy(), _content_policy()):
+        assert redact(text, policy).redacted == redact(text, _without_command_rule(policy)).redacted
 
 
 #: Windows paths with a backslash before ``n`` or ``r``: a written

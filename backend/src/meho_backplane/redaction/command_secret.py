@@ -731,7 +731,8 @@ _JSON_ESCAPES: Final[dict[str, str]] = {
     "\\": "\\",
     "/": "/",
     "n": "\n",
-    "r": "\r",
+    # A carriage return ends a command like a line end, so it is read as one.
+    "r": "\n",
     "t": "\t",
     "b": "\b",
     "f": "\f",
@@ -774,7 +775,8 @@ def _decode_json_strings(text: str) -> tuple[str, list[int], list[int]]:
                 string.append(_JSON_ESCAPES[escape])
                 pos = at + 2
             elif escape == "u" and _HEX4.fullmatch(text, at + 2, at + 6):
-                string.append(chr(int(text[at + 2 : at + 6], 16)))
+                char = chr(int(text[at + 2 : at + 6], 16))
+                string.append("\n" if char == "\r" else char)
                 pos = at + 6
             else:
                 break

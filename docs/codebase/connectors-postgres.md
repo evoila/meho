@@ -79,7 +79,7 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **each secret value of a connection text is hidden**: a value of `primary_conninfo` is read with the rules of libpq, and the fixed mark `[REDACTED:param_name]` stands in place of each secret value (`password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, `scram_server_key`, and the password of an address); every other character stays; a value that libpq cannot read (also one with a parameter name that is not a libpq key word) makes `postgres.settings` refuse the call when it holds a secret name or an address password, and stays as it is otherwise; a call without `names` is never refused |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **each secret value of a connection text is hidden**: a value of `primary_conninfo` is read with the rules of libpq, and the fixed mark `[REDACTED:param_name]` stands in place of each secret value (`password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, `scram_server_key`, and the password of an address); every other character stays; a value that libpq cannot read (also one with a parameter name that is not a libpq key word) makes `postgres.settings` refuse the call when it holds a secret name or an address password, and stays as it is otherwise; an address with a host that holds an at sign, or a port that is not empty and not a number, is a value libpq cannot read, and it holds an address password when a colon comes before an at sign in the part before the query part; a call without `names` is never refused |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
 | `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
@@ -207,7 +207,11 @@ role's rights. So the free-form op adds three checks:
    (also one with a parameter name that is not a libpq key word) makes
    `postgres.settings` refuse the call when it holds a secret name or an
    address password; the error names the setting and holds no part of the
-   value. Else the value stays as it is. A call without `names` is never
+   value. An address with a host that holds an at sign, or a port that is
+   not empty and not a number, is a value libpq cannot read (libpq refuses
+   it before it connects). It holds an address password when a colon comes
+   before an at sign in the part before the query part. Else the value
+   stays as it is. A call without `names` is never
    refused. The refusal for
    sessions names `postgres.activity`, which reads the same
    view without the `query` column. Views that show no secret value stay

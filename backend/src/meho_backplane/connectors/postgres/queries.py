@@ -335,6 +335,10 @@ _ASCII_SPACE = frozenset(" \t\n\r\v\f")
 #: or the forbidden ``%00``.
 _BROKEN_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})|%00")
 
+#: A port of the address form that libpq reads as a number (``strtol`` with
+#: white space around it).
+_PORT_NUMBER = re.compile(r"[ \t\n\r\v\f]*[+-]?[0-9]+[ \t\n\r\v\f]*")
+
 #: The parameter key words libpq reads, pinned to the pages "Parameter Key
 #: Words" of PostgreSQL 15 to 18, the releases this connector supports
 #: (https://www.postgresql.org/docs/18/libpq-connect.html#LIBPQ-PARAMKEYWORDS
@@ -491,28 +495,46 @@ def _address_password_span(text: str, i: int) -> tuple[_Span | None, int]:
     return span, stop + 1
 
 
-def _address_query_start(text: str, i: int) -> int | None:
-    """The index of the ``?`` that starts the query part, as libpq reads it.
+def _address_hosts(text: str, i: int) -> tuple[int, bool] | None:
+    """Read the host part of an address that starts at *i*, as libpq does.
 
-    Hosts follow at *i*, split by ``,``. A host that starts with ``[`` runs
-    to the next ``]``, so a ``?`` inside it does not count. Returns
-    ``len(text)`` when there is no query part and ``None`` when libpq cannot
-    read the host part.
+    Hosts are split by ``,``. A host that starts with ``[`` runs to the next
+    ``]``, so a ``?`` inside it does not count; any other host runs to the
+    next ``:``, ``/``, ``?`` or ``,``. A port follows a ``:`` and runs to the
+    next ``/``, ``?`` or ``,``. Returns the index of the ``?`` that starts the
+    query part (``len(text)`` when there is none) and whether every host and
+    port is one libpq can use: a host with no ``@`` and a port that is empty
+    or a number, after percent decoding. libpq refuses any other host or port
+    before it connects. Returns ``None`` when libpq cannot read the host part.
     """
     n = len(text)
+    usable = True
     while True:
         if i < n and text[i] == "[":
             close = text.find("]", i + 1)
             if close in (-1, i + 1) or text[close + 1 : close + 2] not in ("", ":", "/", "?", ","):
                 return None
+            host = text[i + 1 : close]
             i = close + 1
-        while i < n and text[i] not in "/?,":
-            i += 1
+        else:
+            start = i
+            while i < n and text[i] not in ":/?,":
+                i += 1
+            host = text[start:i]
+        if "@" in unquote(host):
+            usable = False
+        if i < n and text[i] == ":":
+            start = i = i + 1
+            while i < n and text[i] not in "/?,":
+                i += 1
+            port = unquote(text[start:i])
+            if port and not _PORT_NUMBER.fullmatch(port):
+                usable = False
         if i < n and text[i] == ",":
             i += 1
             continue
         question = text.find("?", i)
-        return n if question == -1 else question
+        return (n if question == -1 else question), usable
 
 
 def _address_secret_spans(text: str) -> list[_Span] | None:
@@ -524,15 +546,17 @@ def _address_secret_spans(text: str) -> list[_Span] | None:
     ``&``. White space is part of a value. Returns ``None`` when libpq cannot
     read the text (a broken percent code, an unclosed ``[``, a query
     parameter without exactly one ``=``, a parameter name that is not a libpq
-    key word after percent decoding). libpq also takes ``ssl=true``.
+    key word after percent decoding, a host with an ``@``, a port that is
+    not empty and not a number). libpq also takes ``ssl=true``.
     """
     if _BROKEN_PERCENT.search(text):
         return None
     password, host_start = _address_password_span(text, text.index("://") + 3)
     spans: list[_Span] = [] if password is None else [password]
-    question = _address_query_start(text, host_start)
-    if question is None:
+    hosts = _address_hosts(text, host_start)
+    if hosts is None or not hosts[1]:
         return None
+    question = hosts[0]
     i, n = question + 1, len(text)
     while i < n:
         amp = text.find("&", i)
@@ -553,7 +577,10 @@ def _holds_secret_shape(text: str) -> bool:
     """Whether a text that libpq cannot read holds a secret name or password.
 
     That is one of :data:`CONNECTION_TEXT_SECRET_KEYWORDS` in any case, also
-    percent-encoded, or an address whose user part holds a ``:``.
+    percent-encoded, or an address whose user part holds a ``:``. An address
+    with a host that holds an ``@``, or a port that is not empty and not a
+    number, holds a password when a ``:`` comes before an ``@`` in the part
+    before the query part.
     """
     lowered = unquote(text).lower()
     if any(name in lowered for name in CONNECTION_TEXT_SECRET_KEYWORDS):
@@ -562,9 +589,17 @@ def _holds_secret_shape(text: str) -> bool:
         return True
     if not text.lower().startswith(_ADDRESS_PREFIXES):
         return False
-    rest = text[text.index("://") + 3 :]
+    rest_start = text.index("://") + 3
+    rest = text[rest_start:]
     at, slash = rest.find("@"), rest.find("/")
-    return at != -1 and (slash == -1 or at < slash) and ":" in rest[:at]
+    if at != -1 and (slash == -1 or at < slash) and ":" in rest[:at]:
+        return True
+    hosts = _address_hosts(text, _address_password_span(text, rest_start)[1])
+    if hosts is None or hosts[1]:
+        return False
+    before_query = text[rest_start : hosts[0]]
+    colon = before_query.find(":")
+    return colon != -1 and "@" in before_query[colon + 1 :]
 
 
 def _connection_text_secret_spans(text: str) -> list[_Span] | None:
@@ -589,7 +624,11 @@ def _hide_connection_secrets(setting: str, text: str) -> str:
     Every other character stays as the server sent it. A text that libpq
     cannot read stays as it is when it holds no secret name and no address
     password. When it holds one, the call is refused with
-    :class:`PostgresSettingsRefusedError`.
+    :class:`PostgresSettingsRefusedError`. An address with a host that holds
+    an ``@``, or a port that is not empty and not a number, is a text libpq
+    cannot read (libpq refuses it before it connects); it holds an address
+    password when a ``:`` comes before an ``@`` in the part before the query
+    part.
     """
     spans = _connection_text_secret_spans(text)
     if spans is None:
@@ -637,8 +676,11 @@ async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> d
     the password of an address); every other
     character stays. A value that libpq cannot read stays as it is when it
     holds no secret name and no address password. When it holds one, the call
-    is refused with :class:`PostgresSettingsRefusedError`. The curated list
-    holds no such setting, so a call without *names* is never refused.
+    is refused with :class:`PostgresSettingsRefusedError`. An address with a
+    host that holds an at sign, or a port that is not empty and not a number,
+    is a value libpq cannot read; it holds an address password when a colon
+    comes before an at sign in the part before the query part. The curated
+    list holds no such setting, so a call without *names* is never refused.
     """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)

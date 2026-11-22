@@ -494,6 +494,34 @@ _REFUSED_CASES = [
     ),
 ]
 
+#: Addresses with a host that holds an at sign, or a port that is not a
+#: number, and a colon before an at sign: the call is refused.
+_HOST_OR_PORT_REFUSED_CASES = [
+    pytest.param(
+        "postgresql://repl:pw-08@15-xy@db.test/app",  # trufflehog:ignore
+        id="second-at-sign-in-the-host",
+    ),
+    pytest.param(
+        "postgresql://repl@cloud:pw-0815@db.test/app",  # trufflehog:ignore
+        id="at-sign-in-the-user-name-and-a-port-that-is-not-a-number",
+    ),
+    pytest.param(
+        "postgresql://repl:pw-08/15-xy@db.test/app",  # trufflehog:ignore
+        id="slash-in-the-password-and-a-port-that-is-not-a-number",
+    ),
+    pytest.param(
+        "postgresql://repl:pw-08@db.test@15-xy/app",  # trufflehog:ignore
+        id="at-sign-after-the-host",
+    ),
+]
+
+#: Addresses with a host or port libpq cannot use and no colon before an at
+#: sign: they stay as they are.
+_HOST_OR_PORT_KEPT_CASES = [
+    pytest.param("postgresql://db.test:primary/app", id="port-that-is-not-a-number"),
+    pytest.param("postgresql://repl@db@test/app", id="at-sign-in-the-host"),
+]
+
 #: Texts that libpq cannot read and that hold no secret: they stay as they are.
 _UNREADABLE_KEPT_CASES = [
     pytest.param("host='db.example.test port=5432", id="unclosed-quote"),
@@ -562,6 +590,28 @@ async def test_settings_hide_an_unreadable_text_whole_only_with_a_secret(value: 
     assert "out of names" in message
     assert "0815" not in message
     assert "rotation" not in message
+
+
+@pytest.mark.parametrize("value", _HOST_OR_PORT_REFUSED_CASES)
+@pytest.mark.asyncio
+async def test_settings_refuse_an_address_with_a_host_or_port_libpq_cannot_use(
+    value: str,
+) -> None:
+    with pytest.raises(PostgresSettingsRefusedError) as refused:
+        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
+    message = str(refused.value)
+    assert _SETTING in message
+    assert "out of names" in message
+    assert "pw-" not in message
+    assert "15-xy" not in message
+
+
+@pytest.mark.parametrize("value", _HOST_OR_PORT_KEPT_CASES)
+@pytest.mark.asyncio
+async def test_settings_keep_an_address_with_a_host_or_port_libpq_cannot_use_without_a_secret(
+    value: str,
+) -> None:
+    assert await _hidden(value) == value
 
 
 @pytest.mark.parametrize("value", _UNREADABLE_KEPT_CASES)

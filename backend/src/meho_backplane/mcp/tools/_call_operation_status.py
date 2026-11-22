@@ -264,19 +264,21 @@ async def read_own_request_over_mcp(
     owned = await _owned_request(operator, request_id)
     if owned is None:
         return _denied(op_id, request_id, "approval_request_not_found", _NOT_FOUND_MESSAGE)
-    if owned.connector_id != connector_id or owned.op_id != op_id:
-        return _denied(
-            op_id,
-            request_id,
-            "request_wrong_operation",
-            f"The request is for `{owned.op_id}` on `{owned.connector_id}`. Send those.",
-        )
+    # Before the wrong-operation check: that answer names the request's
+    # connector, and a refusal under a list names no connector outside it.
     if await stored_request_outside_limit(operator, owned):
         return _denied(
             op_id,
             request_id,
             CONNECTOR_NOT_ALLOWED,
             "The request is not for a target of this agent's allowed connectors.",
+        )
+    if owned.connector_id != connector_id or owned.op_id != op_id:
+        return _denied(
+            op_id,
+            request_id,
+            "request_wrong_operation",
+            f"The request is for `{owned.op_id}` on `{owned.connector_id}`. Send those.",
         )
     try:
         async with get_sessionmaker()() as session:

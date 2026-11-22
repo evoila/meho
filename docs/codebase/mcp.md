@@ -2255,7 +2255,9 @@ call_operation(connector_id, op_id, approval_request_id)
   `partial` or `unavailable`, and the added `extras` fields are left out,
   as for a check of a background call.
 - A hosted agent with a bound connector list gets `connector_not_allowed`
-  for a request outside the list.
+  for a request outside the list. This check runs before the
+  `request_wrong_operation` check, so the answer names no connector
+  outside the list, also when `connector_id` or `op_id` is wrong.
 - With the switch off, the input and its text are not in the tool. The
   measurement before it goes on by default is
   [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).

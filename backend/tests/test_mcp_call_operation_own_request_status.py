@@ -13,6 +13,8 @@ state of the caller's own request and runs nothing, behind the
 * another person, another tenant and an unknown id get the same answer;
 * a wrong connector or operation, and extra inputs, are refused and nothing
   is read;
+* under a hosted agent's connector list, a request outside the list is
+  refused before any other check, and the answer names nothing outside it;
 * a read writes one ``approval.result`` audit row and changes no request;
 * a stored result stays inside the response size limit with the added fields;
 * an approved secret reveal with ``MCP_REVEAL_FETCH`` on still runs the fetch.
@@ -20,6 +22,7 @@ state of the caller's own request and runs nothing, behind the
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -43,10 +46,13 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.tools._call_operation_status import read_own_request_over_mcp
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._target_connector_limit import connector_limit
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import create_pending_request
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
 from tests._reveal_fetch_helpers import (
@@ -373,9 +379,15 @@ async def test_a_request_that_did_not_run_is_denied_and_says_to_ask_again(
     assert "Ask again" in answer["error"]
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [{}, {"connector_id": "other-1.x"}, {"op_id": "demo.vm.list"}],
+    ids=["right-operation", "wrong-connector", "wrong-operation"],
+)
 async def test_another_person_another_tenant_and_unknown_id_get_the_same_answer(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, overrides: dict[str, str]
 ) -> None:
+    """The owner and tenant check runs first, so a wrong operation names nothing."""
     _switch(monkeypatch, status=True)
     request_id = await _park()
     other_tenant = uuid.UUID("00000000-0000-0000-0000-000000006795")
@@ -389,7 +401,7 @@ async def test_another_person_another_tenant_and_unknown_id_get_the_same_answer(
     answers = []
     for caller, asked in cases:
         _Caller.operator = caller
-        answer = _answer(_call(client, asked))
+        answer = _answer(_call(client, asked, **overrides))
         assert answer["status"] == "denied"
         assert answer["extras"]["error_code"] == _NOT_FOUND
         answer["extras"] = {k: v for k, v in answer["extras"].items() if k != "approval_request_id"}
@@ -415,6 +427,64 @@ async def test_a_wrong_connector_or_operation_is_refused_and_nothing_is_read(
     assert answer["status"] == "denied"
     assert answer["extras"]["error_code"] == "request_wrong_operation"
     assert await _result_rows() == before
+
+
+_IN_LIST = "other-1.x"
+
+
+def _arguments(request_id: uuid.UUID, **overrides: str) -> dict[str, Any]:
+    return {
+        "connector_id": _CONNECTOR,
+        "op_id": _OP,
+        "approval_request_id": str(request_id),
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize(
+    ("allowed", "overrides"),
+    [
+        (frozenset({_IN_LIST}), {}),
+        (frozenset(), {}),
+        (frozenset({_IN_LIST}), {"connector_id": _IN_LIST}),
+        (frozenset({_IN_LIST}), {"op_id": "demo.vm.list"}),
+    ],
+    ids=["right-operation", "empty-list", "wrong-connector", "wrong-operation"],
+)
+@pytest.mark.usefixtures("client")
+async def test_a_request_outside_the_connector_list_is_refused_and_names_nothing(
+    monkeypatch: pytest.MonkeyPatch, allowed: frozenset[str], overrides: dict[str, str]
+) -> None:
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    before = await _result_rows()
+
+    with connector_limit(allowed):
+        answer = await read_own_request_over_mcp(_REQUESTER, _arguments(request_id, **overrides))
+
+    assert answer["status"] == "denied"
+    assert answer["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
+    # Only the op_id field may hold what the caller sent.
+    text = json.dumps({k: v for k, v in answer.items() if k != "op_id"})
+    assert _CONNECTOR not in text
+    assert _OP not in text
+    assert await _result_rows() == before
+
+
+@pytest.mark.usefixtures("client")
+async def test_a_request_inside_the_connector_list_reads_its_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    before = await _result_rows()
+
+    with connector_limit(frozenset({_CONNECTOR, _IN_LIST})):
+        answer = await read_own_request_over_mcp(_REQUESTER, _arguments(request_id))
+
+    assert answer["status"] == "awaiting_approval"
+    assert answer["extras"]["approval_request_id"] == str(request_id)
+    assert await _result_rows() == before + 1
 
 
 @pytest.mark.parametrize(

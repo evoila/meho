@@ -353,6 +353,17 @@ policy unless its *value* matches a named pattern; a `{"upstream_auth":
 "Bearer eyJ…"}` value is. See `docs/codebase/redaction.md` for the
 named-pattern catalogue and policy resolution.
 
+**Credential write.** The preview of a call that `classify_op` names
+`credential_write` shows each secret input as the fixed mark
+`***REDACTED***`, in `redacted_body` and in `query`. It uses the same name
+rule and the same mark as the echo of a waiting call
+(`_scrub_secret_param_keys`, then the engine above). The method, the path
+and the other inputs stay as they are. The `preview_hash` is taken over
+what the preview shows, so it does not depend on a hidden value. A preview
+sends no request, so the trace has no span of it. It writes no audit row
+and no broadcast event, and its log line holds no input value. A hosted
+agent run stores the answer it got, so it stores the mark too.
+
 **Synthetic preview.** The `redacted_body` of a governed-tier typed /
 composite op is the safe view `safe_params_view` builds
 (`_composite_preview.py`), the same view the generic plan (`params_echo`)

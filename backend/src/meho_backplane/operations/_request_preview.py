@@ -100,7 +100,11 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
-from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
+from meho_backplane.operations._preview import (
+    _SENSITIVE_CLASSES,
+    _scrub_secret_param_keys,
+    has_preview_builder,
+)
 from meho_backplane.operations._preview_steps import (
     agent_step_refusal,
     preview_step_verdict,
@@ -765,9 +769,16 @@ def _redact_request_body(
     A body field the redactor masks in a real response is masked here too --
     no new raw-secret surface. A ``None`` body (no requestBody) round-trips
     to ``None`` without touching the engine.
+
+    For a credential write (``classify_op`` gives ``credential_write``) each
+    value under a secret name is first replaced by the fixed mark
+    (:func:`~meho_backplane.operations._preview._scrub_secret_param_keys`),
+    the same name rule and the same mark the echo of a waiting call uses.
     """
     if body is None:
         return None
+    if classify_op(op_id) == "credential_write":
+        body = _scrub_secret_param_keys(body)
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     redaction = apply_connector_boundary_redaction(
         body,
@@ -894,6 +905,13 @@ def _ok_ingested_envelope(
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
+    # A credential write shows its query inputs with the same mark as its
+    # body. The hash below is taken over what the preview shows.
+    query = request.query
+    if query and classify_op(op_id) == "credential_write":
+        query = _redact_request_body(
+            query, connector_id=connector_id, operator=operator, op_id=op_id
+        )
     _log.info(
         "preview_dispatch",
         connector_id=connector_id,
@@ -910,7 +928,7 @@ def _ok_ingested_envelope(
         "source_kind": descriptor.source_kind,
         "method": request.method,
         "resolved_path": request.path,
-        "query": request.query,
+        "query": query,
         "redacted_body": redacted_body,
     }
     envelope["preview_hash"] = compute_preview_hash(envelope)

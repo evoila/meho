@@ -76,7 +76,8 @@ def record_secret_read_as(login_id: str | None) -> None:
     box = _box_var.get()
     if box is None or not isinstance(login_id, str):
         return
-    cleaned = login_id.strip()[:_MAX_ID_CHARS]
+    # Keep printable characters only, so the database can always store the value.
+    cleaned = "".join(ch for ch in login_id if ch.isprintable()).strip()[:_MAX_ID_CHARS]
     if cleaned:
         box.value = cleaned
 

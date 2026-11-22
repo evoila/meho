@@ -123,6 +123,15 @@ def test_empty_ids_are_not_recorded(bad: str | None) -> None:
         assert current_secret_read_as() is None
 
 
+def test_id_is_cut_to_printable_text_and_a_fixed_length() -> None:
+    with track_secret_read_as():
+        record_secret_read_as("ab\x00c\nd" + "x" * 400)
+        value = current_secret_read_as()
+    assert value is not None
+    assert value.startswith("abcdx")
+    assert len(value) == 255
+
+
 def test_a_step_does_not_leave_its_value_on_the_parent() -> None:
     with track_secret_read_as():
         record_secret_read_as("parent-login")

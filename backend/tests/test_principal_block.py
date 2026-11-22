@@ -33,12 +33,11 @@ from fastapi.responses import PlainTextResponse
 from httpx import ASGITransport
 from sqlalchemy import select
 
-import meho_backplane.auth.principal_block as block_module
-import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     BLOCK_CACHE_SECONDS,
+    BLOCK_SCOPE_ALL,
     PRINCIPAL_BLOCKED_MESSAGE,
     block_principal,
     reset_block_cache,
@@ -80,6 +79,7 @@ _MCP_AUDIENCE = "https://meho.test/mcp"
 _BLOCKED = "person-to-block"
 _ROUTE = "/api/v1/principals/blocked"
 _WORK_ROUTE = "/api/v1/targets"
+_BLOCK_MODULE = "meho_backplane.auth.principal_block"
 
 
 @pytest.fixture(autouse=True)
@@ -202,14 +202,14 @@ async def test_block_made_by_another_process_is_seen_within_five_seconds(
     await _seed_tenants()
     person = _token(key, _BLOCKED)
     clock = [1000.0]
-    monkeypatch.setattr(block_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(f"{_BLOCK_MODULE}.time.monotonic", lambda: clock[0])
     assert (await ac.get(_WORK_ROUTE, headers=_auth(person))).status_code != 403
 
     async with get_sessionmaker()() as session:
         session.add(
             PrincipalBlock(
                 sub=_BLOCKED,
-                scope=block_module.BLOCK_SCOPE_ALL,
+                scope=BLOCK_SCOPE_ALL,
                 reason="written by another process",
                 blocked_by_sub="other-admin",
                 blocked_at=datetime.now(UTC),
@@ -233,7 +233,7 @@ async def test_unreadable_block_list_refuses_the_request(
     async def _broken(_sessionmaker: Any) -> frozenset[tuple[str, str]]:
         raise RuntimeError("database down")
 
-    monkeypatch.setattr(block_module, "_load_entries", _broken)
+    monkeypatch.setattr(f"{_BLOCK_MODULE}._load_entries", _broken)
     response = await ac.get(_WORK_ROUTE, headers=_auth(_token(key, "someone")))
 
     assert response.status_code == 503
@@ -257,7 +257,8 @@ async def test_tenant_admin_block_holds_in_their_tenant_only(
     # The admin of tenant B sees no block and cannot remove it.
     admin_b = _admin(key, tenant=_TENANT_B)
     assert (await ac.get(_ROUTE, headers=_auth(admin_b))).json() == {"blocked": []}
-    assert (await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin_b))).status_code == 404
+    not_removed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin_b))
+    assert not_removed.status_code == 404
     assert len(await _rows(_BLOCKED)) == 1
 
 
@@ -321,7 +322,8 @@ async def test_platform_admin_block_holds_in_every_tenant(
         assert response.status_code == 403
     # A tenant admin cannot lift the block of a platform admin.
     admin_a = _admin(key)
-    assert (await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin_a))).status_code == 404
+    not_removed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin_a))
+    assert not_removed.status_code == 404
     assert len(await _rows(_BLOCKED)) == 1
     # A platform admin lifts every block of the login.
     assert (await _block(ac, admin_a)).status_code == 201
@@ -453,7 +455,8 @@ async def test_block_again_updates_the_reason_and_unblock_of_nobody_is_404(
     ac, key = _client
     await _seed_tenants()
     admin = _admin(key)
-    assert (await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin))).status_code == 404
+    not_removed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin))
+    assert not_removed.status_code == 404
     await _block(ac, admin, reason="first")
     await _block(ac, admin, reason="second")
 
@@ -605,7 +608,7 @@ async def test_approved_call_does_not_run_while_the_asker_is_blocked(
         calls.append(kwargs)
         return OperationResult(status="ok", op_id=kwargs["op_id"], data={}, duration_ms=1.0)
 
-    monkeypatch.setattr(dispatcher_module, "dispatch", _fake_dispatch)
+    monkeypatch.setattr("meho_backplane.operations.dispatcher.dispatch", _fake_dispatch)
     await block_principal(_operator("admin-person"), "asker-person", "left the team")
 
     async with get_sessionmaker()() as session:

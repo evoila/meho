@@ -130,13 +130,13 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit_models import (
+    AuditEntryDetail,
     AuditQueryRequest,
     AuditReplayResult,
     AuditTraceResult,
     AuditTraceSearchResult,
 )
 from meho_backplane.audit_query import (
-    AuditEntry,
     AuditQueryFilters,
     AuditQueryResult,
     DurationParseError,
@@ -161,6 +161,11 @@ from meho_backplane.flight_recorder import (
     should_expose_to_agent,
 )
 from meho_backplane.flight_recorder.agent_view import agent_view_trace
+from meho_backplane.session_store.audit_links import (
+    may_read_sessions,
+    session_links_on,
+    stored_session_for,
+)
 from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
@@ -399,11 +404,11 @@ async def my_recent(
     return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 
 
-@router.get("/show/{audit_id}", response_model=AuditEntry)
+@router.get("/show/{audit_id}", response_model=AuditEntryDetail)
 async def show(
     audit_id: uuid.UUID,
     operator: Operator = _require_operator,
-) -> AuditEntry:
+) -> AuditEntryDetail:
     """Fetch a single audit row by id, scoped to the operator's tenant.
 
     Cross-tenant probe semantics: the substrate's first WHERE clause
@@ -412,13 +417,33 @@ async def show(
     zero rows. The route then surfaces 404 — never 403 — so a probing
     operator cannot distinguish "row doesn't exist" from "row belongs
     to another tenant".
+
+    ``stored_session_id`` names the stored agent session of the row (#4904).
+    It is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person
+    who may read sessions
+    (:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).
+    For anyone else, and for a row with no stored session, the answer has
+    no such field: it is the same as before the switch existed.
     """
     _bind_audit_overrides()
     filters = AuditQueryFilters(audit_id=audit_id, limit=1)
     result = await _dispatch(filters, operator=operator)
     if not result.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
-    return result.rows[0]
+    entry = result.rows[0]
+    link = None
+    if session_links_on() and may_read_sessions(operator):
+        async with get_sessionmaker()() as session:
+            link = await stored_session_for(
+                session,
+                tenant_id=operator.tenant_id,
+                audit_id=entry.id,
+                agent_session_id=entry.agent_session_id,
+                payload=entry.payload,
+            )
+    return AuditEntryDetail(
+        **entry.model_dump(), stored_session_id=link.session_id if link else None
+    )
 
 
 async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView | None:

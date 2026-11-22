@@ -81,6 +81,11 @@ person must approve it before it runs:
 | logs | `k8s.logs` | — |
 | exec | — | `k8s.exec` (`dangerous`) |
 
+`k8s.delete`, `k8s.label`, `k8s.annotate` and `k8s.namespace.create`
+always wait for a person, as `k8s.apply` and `k8s.exec` do. No standing
+grant, no agent grant and no run approval covers them. In sandbox mode a
+delete grant still covers `k8s.delete`.
+
 The `meho k8s …` CLI verbs below cover fourteen of the read ops. Reach
 every other op with `meho operation call k8s-1.x <op_id> --target …`
 or the agent's `call_operation`.
@@ -490,7 +495,10 @@ Initiative lands them):
   MEHO has `k8s.apply`, `k8s.delete`, `k8s.scale`, `k8s.cordon`,
   `k8s.rollout.restart`, `k8s.label`, `k8s.annotate`, `k8s.exec` (one
   command, not interactive) and the secret ops. They have no
-  `meho k8s` verb; a person must approve each call.
+  `meho k8s` verb; a person must approve each call. For `k8s.apply`,
+  `k8s.delete`, `k8s.label`, `k8s.annotate`, `k8s.namespace.create` and
+  `k8s.exec` no grant covers a call, except a delete grant for
+  `k8s.delete` in sandbox mode.
 - **Streaming** — `kubectl logs -f`, `kubectl exec -it`, watches. The
   MCP `tools/call` envelope has no streaming shape as of 2025-06-18.
 - **Helm** — `helm-vcf.sh` is its own wrapper retiring under a future

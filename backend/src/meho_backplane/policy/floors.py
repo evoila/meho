@@ -25,7 +25,9 @@ The floors come from the code, never from a file. They are:
   and no run approval clears them. These are an operation that reads,
   writes or makes a credential, one that connects to an address the caller gives, one marked
   for per-call approval, and one a classification makes always wait.
-  :func:`grant_may_clear` and :func:`run_approval_may_clear` say this.
+  :func:`grant_may_clear` and :func:`run_approval_may_clear` say this. In
+  sandbox mode a delete grant still clears an operation with the mark
+  ``sandbox_delete_grant`` (today only ``k8s.delete``).
 
 Pure functions; no database and no settings.
 """
@@ -65,8 +67,9 @@ class FloorHit:
 
     ``source`` is ``"role_floor"`` for the role floor and ``"floor"`` for
     the others. ``sandbox_delete_grant_clears`` is ``True`` only on the
-    destructive floor of a service login: there a sandbox delete grant may
-    still run the call.
+    destructive floor of a service login, and on the credential floor of a
+    service login's call of an op with the mark ``sandbox_delete_grant``:
+    there a sandbox delete grant may still run the call.
     """
 
     verdict: Literal["wait", "deny"]
@@ -108,6 +111,9 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 "wait",
                 "credential_waits",
                 "the operation reads, writes or makes a credential, so a person approves each call",
+                sandbox_delete_grant_clears=(
+                    asker.kind == "service" and "sandbox_delete_grant" in asked.op_class
+                ),
             )
         )
     if _token_call(asker) and asked.risk in KNOWN_NON_SAFE:
@@ -126,8 +132,13 @@ def grant_may_clear(asked: Asked, *, sandbox: bool) -> bool:
     """True when a standing grant may clear a service login's wait on *asked*.
 
     A delete-shaped operation can only be cleared by a sandbox delete grant.
+    In sandbox mode that grant also clears a credential operation with the
+    mark ``sandbox_delete_grant``.
     """
-    if asked.caller_address or asked.op_class & NO_GRANT_MARKS:
+    marks = asked.op_class & NO_GRANT_MARKS
+    if sandbox and "sandbox_delete_grant" in asked.op_class:
+        marks -= {"credential"}
+    if asked.caller_address or marks:
         return False
     return sandbox or "delete_shaped" not in asked.op_class
 

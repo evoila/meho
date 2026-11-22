@@ -40,6 +40,7 @@ from meho_backplane.auth.secret_read_as import (
     token_subject,
     track_secret_read_as,
 )
+from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
@@ -48,7 +49,7 @@ from meho_backplane.connectors.vault.ops_kv_generate import vault_kv_generate
 from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from tests._vault_fakes import install_fake_vault
 
@@ -299,6 +300,84 @@ async def test_logged_in_call_that_reads_no_secret_leaves_it_empty(
     assert len(fake.auth.jwt.login_calls) == 1
     assert fake.secrets.kv.v2.read_calls == []
     assert (await _row("vault.kv.list")).secret_read_as is None
+
+
+# ---------------------------------------------------------------------------
+# A connector call that reads the target's own login from Vault
+# ---------------------------------------------------------------------------
+
+
+class _SecretTarget(_Target):
+    """A target whose login is in Vault at a marker path."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "app-prod"
+        self.host = "app.example.com"
+        self.secret_ref = _MARKER_PATH
+
+
+async def _target_login_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    creds = await load_basic_credentials(target, operator)
+    return {"user": creds["username"]}
+
+
+async def _dispatch_target_login(
+    operator: Operator, monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> tuple[Any, Any]:
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.secret = {"username": "svc", "password": "made-up-value-0zzz"}
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.demo.target_login",
+        handler=_target_login_handler,
+        summary="Demo op that reads the target login.",
+        description="Demo op used by the secret-read-as tests.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding,
+        safety_level="safe",
+    )
+    return fake, operator
+
+
+@pytest.mark.asyncio
+async def test_target_login_read_names_the_caller(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    fake, operator = await _dispatch_target_login(_operator("person-sub"), monkeypatch, embedding)
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.demo.target_login",
+        target=_SecretTarget(),
+        params={},
+    )
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.read_calls == [{"path": _MARKER_PATH, "mount_point": "secret"}]
+    assert (await _row("vault.demo.target_login")).secret_read_as == "person-sub"
+
+
+@pytest.mark.asyncio
+async def test_refused_target_login_read_leaves_it_empty(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    fake, operator = await _dispatch_target_login(_operator("person-sub"), monkeypatch, embedding)
+    fake.secrets.kv.v2.read_exc = hvac.exceptions.Forbidden("permission denied")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.demo.target_login",
+        target=_SecretTarget(),
+        params={},
+    )
+    assert result.status != "ok"
+    assert len(fake.auth.jwt.login_calls) == 1
+    assert (await _row("vault.demo.target_login")).secret_read_as is None
 
 
 # ---------------------------------------------------------------------------

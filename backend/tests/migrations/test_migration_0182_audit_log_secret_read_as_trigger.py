@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Migration ``0181`` on a real PostgreSQL, with the append-only trigger in place.
+"""Migration ``0182`` on a real PostgreSQL, with the append-only trigger in place.
 
 The upgrade only adds the column ``audit_log.secret_read_as``. It runs no
 ``UPDATE``, so the ``audit_log`` append-only trigger does not fire: the
@@ -54,14 +54,14 @@ def _alembic(async_url: str, action: str, revision: str) -> None:
 
 @pytest.fixture(scope="module")
 def async_url() -> Iterator[str]:
-    """One PostgreSQL migrated to ``0180``, with one old audit row."""
+    """One PostgreSQL migrated to ``0181``, with one old audit row."""
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer(pgvector_test_image()) as container:
         url = container.get_connection_url().replace(
             "postgresql+psycopg2://", "postgresql+asyncpg://"
         )
-        _alembic(url, "upgrade", "0180")
+        _alembic(url, "upgrade", "0181")
         yield url
 
 
@@ -85,7 +85,7 @@ def test_upgrade_with_trigger_keeps_old_rows_empty_and_guard_in_place(async_url:
             id=row_id,
         )
     )
-    _alembic(async_url, "upgrade", "0181")
+    _alembic(async_url, "upgrade", "0182")
 
     old = asyncio.run(
         _scalar(async_url, "SELECT secret_read_as FROM audit_log WHERE id = :id", id=row_id)
@@ -103,8 +103,8 @@ def test_upgrade_with_trigger_keeps_old_rows_empty_and_guard_in_place(async_url:
 
 
 def test_downgrade_drops_the_column(async_url: str) -> None:
-    _alembic(async_url, "upgrade", "0181")
-    _alembic(async_url, "downgrade", "0180")
+    _alembic(async_url, "upgrade", "0182")
+    _alembic(async_url, "downgrade", "0181")
     present = asyncio.run(
         _scalar(
             async_url,

@@ -4011,7 +4011,9 @@ async def _handle_needs_approval(
         request.id,
         duration_ms,
         reused=reused,
-        audit_id=request.request_audit_id,
+        # A call that got the waiting request of the same call has its own
+        # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
+        audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
     )
 

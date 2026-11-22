@@ -2776,10 +2776,21 @@ of this is the same:
 - `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
   `work_ref` and the `reveal_secret` choice.
 
-The answer is the same as for a retry with the key: the same
-`approval_request_id`, `extras.approval_request_reused: true`, no new row,
-no second `approval.request` audit row and no second `approval.pending`
-event. A key that is different from the key of the waiting request does
+The answer has the same `approval_request_id` and
+`extras.approval_request_reused: true`. No new request row is made, and no
+second `approval.pending` event is sent. The call writes one audit row of
+its own in the same transaction (`_write_reuse_audit_row`). It is not a
+second `approval.request` row:
+
+- `path` is `approval.reuse`, `status_code` is 202 (waits for approval),
+  and `event_class` is `policy_decision`.
+- `payload.approval_request_id` names the reused request.
+- `agent_session_id` is the session of this call, not the session of the
+  first call. `parent_audit_id` is the first call's `approval.request` row.
+- The answer's `audit_id` is the id of this new row.
+
+A retry with the same key writes no such row: it gets the first call's
+`approval.request` row as its `audit_id`, as before. A key that is different from the key of the waiting request does
 not matter. MEHO keeps that other key in the table `approval_request_key`
 (one row per key, linked to the request; migration `0182`). The key lookup
 (`_find_idempotent_request`) reads it too, so a later retry with that key

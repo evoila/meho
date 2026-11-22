@@ -1209,6 +1209,31 @@ async def _link_reuse_key(
         )
 
 
+async def _write_reuse_audit_row(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Write the ``approval.reuse`` audit row of a call that got *request*.
+
+    Same transaction as the call. The row names the reused request and the
+    caller's own session. Its id is kept in ``request._reuse_audit_id``, so
+    the answer's ``audit_id`` is this row and not the first call's
+    ``approval.request`` row.
+    """
+    audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
+        operator=operator,
+        request=request,
+        path=_REUSE_PATH,
+        status_code=_APPROVAL_STATUS_CODE,
+        duration_ms=0.0,
+        caller_session=True,
+    )
+    request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
+
+
 def _same_call_reuse_applies(
     run_id: uuid.UUID | None,
     resume_parent: dict[str, Any] | None,
@@ -1513,8 +1538,16 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
+#: Audit path of a call that got the waiting request of the same call
+#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
+#: ``approval.request`` row.
+_REUSE_PATH = "approval.reuse"
+
+#: Audit paths written on the task of the call that waits.
+_CALLER_PATHS = frozenset({"approval.request", _REUSE_PATH})
+
 #: Audit paths that carry the runbook run and step of the call.
-_RUNBOOK_STEP_PATHS = frozenset({"approval.request", "approval.result"})
+_RUNBOOK_STEP_PATHS = frozenset({*_CALLER_PATHS, "approval.result"})
 
 
 async def _write_audit_row(
@@ -1528,6 +1561,7 @@ async def _write_audit_row(
     status_code: int,
     duration_ms: float,
     extra_payload: dict[str, Any] | None = None,
+    caller_session: bool = False,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
 
@@ -1552,6 +1586,10 @@ async def _write_audit_row(
     itself is the one stored as ``request.request_audit_id``, so it
     parent-links to the contextvar value instead of self-parenting;
     decision rows parent-link to the stored id.
+
+    *caller_session* is ``True`` for the ``approval.reuse`` row: it is
+    written on the task of the call that got the waiting request, so it
+    names that call's own session, not the session stored on *request*.
     """
     payload: dict[str, Any] = {
         "approval_request_id": str(request.id),
@@ -1620,7 +1658,12 @@ async def _write_audit_row(
     # session id. The decision rows are written later, on the approver's or
     # the expiry sweep's task, so the listener that marks CLI rows does not
     # see them: mark them here from the stored flag.
-    if request.session_from_client:
+    agent_session_id = request.agent_session_id
+    from_client = bool(request.session_from_client)
+    if caller_session:
+        agent_session_id = resolve_audit_session_id()
+        from_client = session_is_from_client()
+    if from_client:
         payload[SESSION_FROM_CLIENT_KEY] = True
     # The reviewer's name next to ``reviewed_by`` on an approve or reject row.
     if principal_name and payload.get("reviewed_by") == operator.sub:
@@ -1641,7 +1684,7 @@ async def _write_audit_row(
     # "decision" row can be written on the task of another call: a retry
     # that expires an old overdue request writes that request's decision
     # row while the retry's own rule is bound.
-    if path == "approval.request":
+    if path in _CALLER_PATHS:
         policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
@@ -1673,7 +1716,7 @@ async def _write_audit_row(
         tenant_id=operator.tenant_id,
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
-        agent_session_id=request.agent_session_id,
+        agent_session_id=agent_session_id,
         event_class=event_class,
         method="APPROVAL",
         path=path,
@@ -1899,6 +1942,7 @@ async def create_pending_request(
         if same_call is not None:
             reused = _reuse(same_call)
             await _link_reuse_key(session, reused, idempotency_key)
+            await _write_reuse_audit_row(session, operator, reused)
             return reused
 
     if proposed_effect is None:

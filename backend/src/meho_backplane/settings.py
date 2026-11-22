@@ -1631,8 +1631,10 @@ class Settings(BaseModel):
         already has one for the same call (same operation, connector, target,
         params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice).
         The answer has that request's id and ``approval_request_reused: true``.
-        It works with no ``idempotency_key`` and with a different key. Only a
-        waiting request inside its deadline is reused; a call inside an agent
+        The call writes its own ``approval.reuse`` audit row with the caller's
+        session, and the answer's ``audit_id`` is that row. It works with
+        no ``idempotency_key`` and with a different key. Only a waiting
+        request inside its deadline is reused; a call inside an agent
         run or a step of a multi-step operation always gets its own request.
         When off, every such call makes a new request. Env
         ``APPROVAL_SAME_CALL_REUSE``.

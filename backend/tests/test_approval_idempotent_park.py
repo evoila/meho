@@ -51,12 +51,13 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
 from meho_backplane.operations import reset_dispatcher_caches
-from meho_backplane.operations._audit import policy_rule_var, work_ref_var
+from meho_backplane.operations._audit import agent_session_id_var, policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     IdempotencyKeyConflictError,
+    ResumeRequester,
     approval_result_state,
     approve_request,
     create_pending_request,
@@ -783,6 +784,10 @@ async def _park_same_call(
     preview_hash: str | None = None,
     run_id: uuid.UUID | None = None,
     resume_parent: dict[str, Any] | None = None,
+    op_id: str = "POST:/vms",
+    connector_id: str = "gh-rest-3",
+    reveal_secret: bool = False,
+    requester: ResumeRequester | None = None,
 ) -> ApprovalRequest:
     operator = _operator(sub=sub).model_copy(update={"tenant_id": tenant_id})
     call_params = params if params is not None else {"name": "web-01"}
@@ -791,8 +796,8 @@ async def _park_same_call(
         request = await create_pending_request(
             s,
             operator=operator,
-            connector_id="gh-rest-3",
-            op_id="POST:/vms",
+            connector_id=connector_id,
+            op_id=op_id,
             target=target,
             params=call_params,
             params_hash=compute_params_hash(call_params),
@@ -800,6 +805,8 @@ async def _park_same_call(
             preview_hash=preview_hash,
             run_id=run_id,
             resume_parent=resume_parent,
+            reveal_secret=reveal_secret,
+            requester=requester,
             proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
@@ -987,3 +994,118 @@ async def test_same_call_without_a_key_parks_again_with_the_switch_off() -> None
     b = await _park_same_call()
     assert a.id != b.id
     assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"reveal_secret": True},
+        {"op_id": "POST:/vms/other"},
+        {"connector_id": "gh-rest-4"},
+    ],
+)
+async def test_the_same_params_with_another_choice_or_operation_get_their_own_request(
+    change: dict[str, Any],
+) -> None:
+    a = await _park_same_call()
+    b = await _park_same_call(**change)
+    assert b.id != a.id
+    assert getattr(b, "_reused", False) is False
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_rerun_for_an_earlier_requester_gets_its_own_request() -> None:
+    a = await _park_same_call()
+    rerun = await _park_same_call(
+        requester=ResumeRequester(sub="op-requester", act=None, name=None)
+    )
+    assert rerun.id != a.id
+    assert getattr(rerun, "_reused", False) is False
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_the_second_key_of_the_same_login_in_another_tenant_gets_its_own_request() -> None:
+    other_tenant = uuid.UUID("00000000-0000-0000-0000-000000006796")
+    a = await _park_same_call(key="key-a")
+    assert (await _park_same_call(key="key-b")).id == a.id
+
+    other = await _park_same_call(tenant_id=other_tenant, key="key-b")
+
+    assert other.id != a.id
+    assert other.tenant_id == other_tenant
+    assert getattr(other, "_reused", False) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_the_second_key_does_not_get_a_rejected_request() -> None:
+    a = await _park_same_call(key="key-a")
+    assert (await _park_same_call(key="key-b")).id == a.id
+    async with get_sessionmaker()() as s:
+        await reject_request(s, a.id, operator=_operator(sub="op-approver"), reason="no")
+        await s.commit()
+
+    retry_b = await _park_same_call(key="key-b")
+
+    assert retry_b.id != a.id
+    assert retry_b.status == ApprovalRequestStatus.PENDING.value
+    assert getattr(retry_b, "_reused", False) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_that_gets_the_waiting_request_writes_its_own_audit_row(
+    embedding: list[float],
+) -> None:
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"]}
+    first_session, second_session = uuid.uuid4(), uuid.uuid4()
+
+    token = agent_session_id_var.set(first_session)
+    try:
+        first = await call_operation(requester, bound)
+    finally:
+        agent_session_id_var.reset(token)
+    token = agent_session_id_var.set(second_session)
+    try:
+        second = await call_operation(requester, bound)
+    finally:
+        agent_session_id_var.reset(token)
+
+    request_id = first["extras"]["approval_request_id"]
+    assert second["extras"]["approval_request_id"] == request_id
+    assert second["extras"]["approval_request_reused"] is True
+    async with get_sessionmaker()() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(AuditLog)
+                    .where(AuditLog.method == "APPROVAL")
+                    .order_by(AuditLog.occurred_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [row.path for row in rows] == ["approval.request", "approval.reuse"]
+    request_row, reuse_row = rows
+    assert first["audit_id"] == str(request_row.id)
+    assert second["audit_id"] == str(reuse_row.id)
+    assert reuse_row.payload["approval_request_id"] == request_id
+    assert request_row.agent_session_id == first_session
+    assert reuse_row.agent_session_id == second_session
+    assert reuse_row.parent_audit_id == request_row.id
+    assert reuse_row.status_code == 202
+    assert await _approval_row_count() == 1

@@ -1109,7 +1109,7 @@ def _audit_fields() -> dict[str, Any]:
     }
 
 
-def test_the_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_filtered_search_switch_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KB_WIKI_FILTERED_SEARCH", raising=False)
     get_settings.cache_clear()
     assert get_settings().kb_wiki_filtered_search is False

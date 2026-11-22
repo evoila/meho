@@ -1593,6 +1593,13 @@ class Settings(BaseModel):
         time window or scope ``shared`` skips the wiki as before. When off,
         every filter skips the wiki. It stays off until a measurement shows
         it helps. Env ``KB_WIKI_FILTERED_SEARCH``.
+    kb_wiki_interleave:
+        Off by default. When on, ``search_knowledge`` lists the store hits
+        and the knowledge repo hits in turns (store 1, knowledge repo 1,
+        store 2, ...), so the knowledge repo's hits are not always last
+        and cut first when the answer is too large. When off, the store
+        hits come first. It stays off until a before-and-after
+        measurement shows it helps. Env ``KB_WIKI_INTERLEAVE``.
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
@@ -2612,6 +2619,7 @@ class Settings(BaseModel):
     )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     kb_wiki_filtered_search: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3825,6 +3833,9 @@ def get_settings() -> Settings:
         ),
         kb_wiki_filtered_search=parse_bool_env(
             os.environ.get("KB_WIKI_FILTERED_SEARCH"),
+        ),
+        kb_wiki_interleave=parse_bool_env(
+            os.environ.get("KB_WIKI_INTERLEAVE"),
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),

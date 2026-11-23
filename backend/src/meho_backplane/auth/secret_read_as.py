@@ -14,7 +14,13 @@ login. This module keeps that login's id for the audit row of the call:
 * The audit writer reads :func:`current_secret_read_as` when it writes the row.
 
 The value is the login's id only. It is never a token, a store path or a store
-address. A call that reads no secret leaves it empty.
+address. It names the login under which the secret this call used was read
+from the store, in this call or in an earlier call of the same caller:
+
+* The call reads the secret itself: the login of that read.
+* The call uses a login MEHO kept in memory: the login that read the secret
+  when it was kept, or :data:`KEPT_LOGIN_READER_UNKNOWN` when that is not known.
+* The call uses no secret: empty.
 
 The scope holds a small mutable box, not the id itself. A value that code sets
 in a copied context (a task or a worker thread) still reaches the box that the
@@ -35,8 +41,11 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "CHECK_RUNNER_IDENTITY",
+    "KEPT_LOGIN_READER_UNKNOWN",
     "MEHO_OWN_IDENTITY",
     "current_secret_read_as",
+    "record_caller_kv_read",
     "record_caller_secret_read",
     "record_secret_read_as",
     "token_subject",
@@ -45,6 +54,15 @@ __all__ = [
 
 #: The fixed text for a read that the store saw under MEHO's own identity.
 MEHO_OWN_IDENTITY = "meho"
+
+#: The fixed text for a read by the check runner whose token has no ``sub``.
+CHECK_RUNNER_IDENTITY = "check-runner"
+
+#: The fixed text for a call that used a kept login whose reader is not known.
+#: It never names the present caller. It cannot look like a login id: MEHO's
+#: own ids start with ``agent:``, ``system:`` or ``__``, and the login server's
+#: ids are UUIDs.
+KEPT_LOGIN_READER_UNKNOWN = "kept-login:reader-unknown"
 
 #: Longest id kept on a row. A login id is short; this only stops an odd value.
 _MAX_ID_CHARS = 255
@@ -93,9 +111,24 @@ def record_caller_secret_read(operator: Operator) -> None:
     """Note that a secret read passed under the login of *operator*'s token.
 
     Call it right after the store returned the secret, never after the login
-    alone. The id is the ``sub`` of the token MEHO sent to the store.
+    alone. The id is the ``sub`` of the token MEHO sent to the store. For the
+    check runner, whose token has no readable ``sub``, it is
+    :data:`CHECK_RUNNER_IDENTITY`: its ``operator.sub`` is the Sensor's owner,
+    who is not the login the store checked.
     """
-    record_secret_read_as(token_subject(operator.raw_jwt, operator.sub))
+    fallback = CHECK_RUNNER_IDENTITY if operator.check_runner_dispatch else operator.sub
+    record_secret_read_as(token_subject(operator.raw_jwt, fallback))
+
+
+def record_caller_kv_read(operator: Operator, payload: object) -> None:
+    """Note *operator*'s login when a KV-v2 read answer holds the secret data.
+
+    A read of a deleted latest version (``raise_on_deleted_version=False``)
+    comes back with no data, so it notes nothing.
+    """
+    outer = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(outer, dict) and isinstance(outer.get("data"), dict):
+        record_caller_secret_read(operator)
 
 
 def current_secret_read_as() -> str | None:

@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -1399,6 +1400,16 @@ def _policy_rule_fields() -> dict[str, Any]:
 _RUNBOOK_STEP_PATHS = frozenset({"approval.request", "approval.result"})
 
 
+def _request_row_columns() -> dict[str, Any]:
+    """The columns only the "request" row takes from the parking call's task.
+
+    The matched policy rule, and the login a secret store accepted
+    for the parking call so far (``secret_read_as``), for example the read of
+    the sink secret for the approval card of ``secret.move``.
+    """
+    return {**policy_rule_columns(), "secret_read_as": current_secret_read_as()}
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1524,7 +1535,7 @@ async def _write_audit_row(
     # that expires an old overdue request writes that request's decision
     # row while the retry's own rule is bound.
     if path == "approval.request":
-        policy_kwargs.update(policy_rule_columns())
+        policy_kwargs.update(_request_row_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*

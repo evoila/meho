@@ -65,7 +65,7 @@ import hvac
 import structlog
 
 import meho_backplane.auth.vault as _auth_vault
-from meho_backplane.auth.secret_read_as import record_caller_secret_read
+from meho_backplane.auth.secret_read_as import record_caller_kv_read, record_caller_secret_read
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     strip_credential_value,
@@ -268,7 +268,7 @@ class VaultKvSecretEndpoint:
                 mount_point=self._mount,
                 raise_on_deleted_version=False,
             )
-        record_caller_secret_read(operator)
+        record_caller_kv_read(operator, payload)
         secret_data = _structural_unwrap(payload, path=self._path)
         if self._field not in secret_data:
             raise VaultSecretRefError(
@@ -447,7 +447,7 @@ class VaultKvSecretEndpoint:
         try:
             self.check_write_allowed(operator)
             async with self._client(operator, op_id) as client:
-                exists, field = await asyncio.to_thread(self._read_state, client)
+                exists, field = await asyncio.to_thread(self._read_state, client, operator)
         except Exception as exc:
             _log.info(
                 "secret_broker.vault.sink_state_unknown",
@@ -460,8 +460,12 @@ class VaultKvSecretEndpoint:
             state["field_exists"] = field
         return state
 
-    def _read_state(self, client: hvac.Client) -> tuple[str, str]:
-        """Blocking read of ``(secret exists, field exists)`` (runs in a worker thread)."""
+    def _read_state(self, client: hvac.Client, operator: Operator) -> tuple[str, str]:
+        """Blocking read of ``(secret exists, field exists)`` (runs in a worker thread).
+
+        A read that returns a secret that is not deleted notes the caller's
+        login for the audit row.
+        """
         kv = client.secrets.kv.v2
         try:
             payload = kv.read_secret_version(
@@ -475,6 +479,7 @@ class VaultKvSecretEndpoint:
         metadata = _version_metadata(payload) or {}
         if metadata.get("deletion_time") or metadata.get("destroyed") is True:
             return "yes", NOT_KNOWN
+        record_caller_kv_read(operator, payload)
         data = _structural_unwrap(payload, path=self._path)
         return "yes", "yes" if self._field in data else "no"
 

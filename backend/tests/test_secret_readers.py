@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.secret_read_as import (
+    KEPT_LOGIN_READER_UNKNOWN,
+    current_secret_read_as,
+    record_secret_read_as,
+    track_secret_read_as,
+)
 from meho_backplane.auth.vault import VaultRoleDeniedError
 from meho_backplane.connectors._shared.secret_readers import SecretReaders, caller_id
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
@@ -167,3 +173,86 @@ def test_forget_drops_one_target_and_clear_drops_all() -> None:
     readers.clear()
 
     assert not readers.has_read(other, alice)
+
+
+# ---------------------------------------------------------------------------
+# The login a kept entry was read with, for the audit row
+# ---------------------------------------------------------------------------
+
+
+def test_has_read_notes_the_login_that_read_the_kept_secret() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_kept_entry_with_no_known_reader_notes_the_fixed_word() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == KEPT_LOGIN_READER_UNKNOWN
+        assert current_secret_read_as() != alice.sub
+
+
+def test_a_record_outside_a_call_scope_notes_the_fixed_word() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == KEPT_LOGIN_READER_UNKNOWN
+
+
+def test_has_read_that_answers_no_notes_nothing() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, _person("alice"))
+
+    with track_secret_read_as():
+        assert not readers.has_read(target, _person("bob"))
+        assert not readers.has_read(_Target(), _person("alice"))
+        assert current_secret_read_as() is None
+
+
+def test_the_system_operator_notes_nothing() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    system = synthesise_system_operator()
+    with track_secret_read_as():
+        record_secret_read_as("system-login-id")
+        readers.record(target, system)
+
+    with track_secret_read_as():
+        assert not readers.has_read(target, system)
+        assert current_secret_read_as() is None
+
+
+def test_each_caller_keeps_their_own_login() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    for sub in ("alice", "bob"):
+        with track_secret_read_as():
+            record_secret_read_as(f"{sub}-login-id")
+            readers.record(target, _person(sub))
+
+    for sub in ("bob", "alice"):
+        with track_secret_read_as():
+            assert readers.has_read(target, _person(sub))
+            assert current_secret_read_as() == f"{sub}-login-id"
+    assert readers.callers(target) == frozenset({("operator", "alice"), ("operator", "bob")})

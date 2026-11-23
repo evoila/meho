@@ -332,7 +332,12 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
-from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
@@ -438,10 +443,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
-from meho_backplane.operations._request_preview import (
-    compute_preview_hash,
-    preview_dispatch,
-)
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprint_value,
@@ -3625,7 +3627,7 @@ async def _destructive_binding_refusal(
             "for this (connector_id, op_id, target, params)",
             duration_ms,
         )
-    if compute_preview_hash(authoritative) != preview_hash:
+    if authoritative.get("preview_hash") != preview_hash:
         return result_preview_hash_mismatch(op_id, duration_ms)
 
     # Requirement 3: the mandatory blast-radius statement.
@@ -4017,6 +4019,7 @@ async def _handle_needs_approval(
         # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
         audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
+        already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )
 
 

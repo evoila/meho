@@ -50,7 +50,7 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var, policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
 from meho_backplane.operations._validate import compute_params_hash
@@ -64,6 +64,7 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.approved_reveal import fetch_approved_reveal
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
@@ -80,6 +81,7 @@ from tests.test_destructive_preview_binding import (
     _seed_target,
 )
 
+from . import _reveal_fetch_helpers as reveal_helpers
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
@@ -178,6 +180,9 @@ async def test_retried_destructive_call_returns_the_same_park(embedding: list[fl
     assert second["status"] == "awaiting_approval", second
     assert second["extras"]["approval_request_id"] == first["extras"]["approval_request_id"]
     assert second["extras"]["approval_request_reused"] is True
+    # A retry of a request that still waits keeps the waiting text.
+    assert "requires approval before execution" in second["error"]
+    assert "already approved" not in second["error"]
 
     assert await _approval_row_count() == 1
     assert await _request_audit_count() == 1
@@ -691,6 +696,9 @@ async def test_list_and_show_tell_approved_from_executed(embedding: list[float])
     )
     assert retry["extras"]["approval_request_id"] == request_id
     assert retry["extras"]["approval_request_reused"] is True
+    assert retry["error"] == (
+        f"awaiting_approval: the approval request {request_id} is already approved"
+    )
     assert await _approval_row_count() == 1
 
 
@@ -1158,3 +1166,91 @@ async def test_a_late_retry_that_gets_another_waiting_request_sends_the_old_expi
         expired = await s.get(ApprovalRequest, first_id)
         assert expired is not None
         assert expired.status == ApprovalRequestStatus.EXPIRED.value
+
+
+@pytest.mark.asyncio
+async def test_retry_of_an_approved_request_says_it_is_approved(embedding: list[float]) -> None:
+    """Approved, not yet run: the retry gets the same request and a true text."""
+    connector = _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    request_id = first["extras"]["approval_request_id"]
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
+        await s.commit()
+
+    retry = await call_operation(requester, bound)
+    assert retry["status"] == "awaiting_approval", retry
+    assert retry["extras"]["approval_request_id"] == request_id
+    assert retry["extras"]["approval_request_reused"] is True
+    assert set(retry["extras"]) == set(first["extras"]) | {"approval_request_reused"}
+    assert retry["error"] == (
+        f"awaiting_approval: the approval request {request_id} is already approved"
+    )
+    assert await _approval_row_count() == 1
+    assert connector.calls == []
+
+
+#: The reads of the secret value, made by :func:`_counting_read`.
+_secret_reads: list[dict[str, Any]] = []
+_plain_read = reveal_helpers._read_handler
+
+
+async def _counting_read(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    _secret_reads.append(params)
+    return await _plain_read(operator, target, params)
+
+
+@pytest.mark.asyncio
+async def test_retry_of_an_approved_secret_request_says_only_it_is_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approved request to show a secret value: the retry runs nothing, the value is still there."""
+    _secret_reads.clear()
+    monkeypatch.setattr(reveal_helpers, "_read_handler", _counting_read)
+    await reveal_helpers.register_vault_read()
+
+    requester = _operator(sub="op-requester")
+    call = {
+        "operator": requester,
+        "connector_id": reveal_helpers.CONNECTOR_ID,
+        "op_id": reveal_helpers.READ_OP,
+        "target": None,
+        "params": {"path": "app/db", "reveal_secret": True},
+        "idempotency_key": _KEY,
+    }
+    first = await dispatch(**call)
+    assert first.status == "awaiting_approval", first.error
+    request_id = uuid.UUID(first.extras["approval_request_id"])
+
+    reviewer = requester.model_copy(
+        update={"sub": "reviewer-6793", "tenant_role": TenantRole.TENANT_ADMIN}
+    )
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer)
+        await s.commit()
+
+    retry = await dispatch(**call)
+    assert retry.status == "awaiting_approval", retry.error
+    assert retry.extras["approval_request_id"] == str(request_id)
+    assert retry.extras["approval_request_reused"] is True
+    assert (
+        retry.error == f"awaiting_approval: the approval request {request_id} is already approved"
+    )
+    assert reveal_helpers.SECRET_VALUE not in retry.model_dump_json()
+    assert await _approval_row_count() == 1
+    assert _secret_reads == []
+
+    fetched = await fetch_approved_reveal(requester, request_id)
+    assert fetched.status == "ok", fetched.error
+    assert reveal_helpers.SECRET_VALUE in fetched.model_dump_json()
+    assert len(_secret_reads) == 1

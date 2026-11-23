@@ -15,14 +15,19 @@ audit row still names the login under which the secret was read:
 * phpIPAM: a refused store read after a failed login names no login, because
   the call used no kept secret;
 * SSH: a call that reuses the caller's open connection names the login that
-  read the secret when the connection was opened.
+  read the secret when the connection was opened;
+* a call that read a secret and then uses a kept entry with no known reader
+  keeps the login of its read (every kind of kept login);
+* Entra and Azure: a refused read of a changed secret reference names no
+  login, because the call used no kept entry.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -38,14 +43,22 @@ from meho_backplane.auth.secret_read_as import (
     track_secret_read_as,
 )
 from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
+from meho_backplane.connectors._shared.microsoft_login import (
+    ClientSecretCredentials,
+    MicrosoftAccessToken,
+)
 from meho_backplane.connectors._shared.vcf_auth import CredentialsCache
 from meho_backplane.connectors.adapters import ssh as ssh_module
+from meho_backplane.connectors.azure import connector as azure_module
+from meho_backplane.connectors.entra import connector as entra_module
 from meho_backplane.connectors.freeipa.connector import FreeipaConnector, _FreeipaSession
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.github.session import GitHubPATCredentials
 from meho_backplane.connectors.linux.connector import LinuxSshConnector
 from meho_backplane.connectors.phpipam.connector import PhpipamConnector
 from meho_backplane.connectors.phpipam.session import PhpipamCredentials
+from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
+from meho_backplane.connectors.proxmox.session import ProxmoxCredentials
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -358,3 +371,162 @@ async def test_ssh_reuse_of_an_open_connection_names_the_reader(
     assert await _rows(_SSH_OP) == subs
     assert store.reads == ["alice", "carol"]
     assert len(logins) == 2
+
+
+# ---------------------------------------------------------------------------
+# A kept login is noted only from what happened in this call
+# ---------------------------------------------------------------------------
+
+_READ_THEN_KEPT_OP = "vault.demo.read_then_kept_login"
+_GUID = "00000000-0000-0000-0000-00000000aaaa"
+_MICROSOFT_HOSTS = {"entra": "graph.microsoft.com", "azure": "management.azure.com"}
+
+
+async def _use_login(operator: Operator, target: Any) -> None:
+    """Use the target's login the way the connector under test does."""
+    connector = _CONNECTOR["connector"]
+    if isinstance(connector, LinuxSshConnector):
+        await connector._connect(target, operator)
+    else:
+        await connector.auth_headers(target, operator)
+
+
+async def _use_login_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    await _use_login(operator, target)
+    return {}
+
+
+async def _read_then_kept_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    await _CONNECTOR["first_store"].read(target, operator)
+    await _use_login(operator, target)
+    return {}
+
+
+def _kept_login_connector(
+    name: str, monkeypatch: pytest.MonkeyPatch, store_cls: type[_Store] = _Store
+) -> tuple[Any, _Store, _Target]:
+    """A connector of kind *name*, its store and a target; it logs in nowhere."""
+    if name in _MICROSOFT_HOSTS:
+        module = {"entra": entra_module, "azure": azure_module}[name]
+        cls: Any = getattr(module, f"{name.capitalize()}Connector")
+        token = MicrosoftAccessToken(
+            value="made-up-token", expires_in=3600, app_id=None, object_id=None, tenant_id=None
+        )
+        monkeypatch.setattr(module, "fetch_client_credentials_token", AsyncMock(return_value=token))
+        store = store_cls(
+            ClientSecretCredentials(tenant_id=_GUID, client_id=_GUID, client_secret="made-up")
+        )
+        target = _Target(host=_MICROSOFT_HOSTS[name], extras={"subscription_id": _GUID})
+        return cls(credentials_loader=store.read), store, target
+    if name == "ssh":
+        store = store_cls({"username": "svc", "password": "made-up", "known_hosts_insecure": True})
+        login = MagicMock()
+        login.is_closed.return_value = False
+        monkeypatch.setattr(ssh_module, "load_vault_secret_data", store.read)
+        monkeypatch.setattr(ssh_module, "_dial", AsyncMock(return_value=login))
+        return LinuxSshConnector(), store, _Target()
+    if name == "github":
+        connector, github_store = _github()
+        return connector, github_store, _Target()
+    store = store_cls(
+        ProxmoxCredentials(mode="token", token_id="svc@pam!meho", token_secret="made-up")
+    )
+    return ProxmoxConnector(credentials_loader=store.read), store, _Target()
+
+
+async def _call(op_id: str, target: _Target, sub: str = "alice") -> str:
+    result = await dispatch(
+        operator=_person(sub), connector_id="vault-1.x", op_id=op_id, target=target, params={}
+    )
+    return result.status
+
+
+@pytest.mark.parametrize("name", ["proxmox", "github", "entra", "azure", "ssh"])
+@pytest.mark.asyncio
+async def test_a_known_login_stays_when_a_kept_entry_has_no_known_reader(
+    name: str, monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    connector, store, target = _kept_login_connector(name, monkeypatch)
+    first_store = _Store({"made-up": "value"})
+    _CONNECTOR.update(connector=connector, first_store=first_store)
+    await _register(_OP, _use_login_handler, embedding)
+    await _register(_READ_THEN_KEPT_OP, _read_then_kept_handler, embedding)
+    # This read runs outside a call, so the kept entry has no known reader.
+    await _use_login(_person("alice"), target)
+    assert store.reads == ["alice"]
+
+    assert await _call(_READ_THEN_KEPT_OP, target) == "ok"
+    assert await _rows(_READ_THEN_KEPT_OP) == ["alice"]
+    assert first_store.reads == ["alice"]
+
+    # The same kept entry in a call that has noted no login.
+    assert await _call(_OP, target) == "ok"
+    assert await _rows(_OP) == [KEPT_LOGIN_READER_UNKNOWN]
+    assert store.reads == ["alice"]
+
+
+class _RefusesOtherReference(_Store):
+    """A store that refuses every secret reference but the first target's."""
+
+    async def read(self, target: Any, operator: Operator) -> Any:
+        if target.secret_ref != _Target().secret_ref:
+            self.reads.append(operator.sub)
+            raise PermissionError("made-up refusal")
+        return await super().read(target, operator)
+
+
+@pytest.mark.parametrize("name", list(_MICROSOFT_HOSTS))
+@pytest.mark.asyncio
+async def test_a_refused_read_of_a_changed_secret_reference_names_no_login(
+    name: str, monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    connector, store, target = _kept_login_connector(name, monkeypatch, _RefusesOtherReference)
+    _CONNECTOR["connector"] = connector
+    await _register(_OP, _use_login_handler, embedding)
+    changed = replace(target, secret_ref="tenants/test/made-up-other")
+    statuses, reads = [], []
+    for used in (target, target, changed, target):
+        before = len(store.reads)
+        statuses.append(await _call(_OP, used) == "ok")
+        reads.append(len(store.reads) - before)
+    # No kept entry: the read. A kept entry: its reader. The changed reference:
+    # no kept entry and a refused read. The first reference: its kept entry.
+    assert await _rows(_OP) == ["alice", "alice", None, "alice"]
+    assert statuses == [True, True, False, True]
+    assert reads == [1, 0, 1, 0]
+
+
+class _SlowStoreRefusesBob(_Store):
+    """A store read that lets the other calls run first, and refuses bob."""
+
+    async def read(self, target: Any, operator: Operator) -> Any:
+        await asyncio.sleep(0.01)
+        if operator.sub == "bob":
+            self.reads.append(operator.sub)
+            raise PermissionError("made-up refusal")
+        return await super().read(target, operator)
+
+
+@pytest.mark.parametrize("name", list(_MICROSOFT_HOSTS))
+@pytest.mark.asyncio
+async def test_calls_that_wait_for_the_first_read_name_only_their_own_login(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector, store, target = _kept_login_connector(name, monkeypatch, _SlowStoreRefusesBob)
+
+    async def one(sub: str) -> str | None:
+        with track_secret_read_as():
+            try:
+                await connector.auth_headers(target, _person(sub))
+            except PermissionError:
+                assert sub == "bob"
+            return current_secret_read_as()
+
+    noted = await asyncio.gather(one("alice"), one("bob"), one("carol"), one("alice"))
+    assert noted == ["alice", None, "carol", "alice"]
+    # The second call of alice waited for her first read and took the kept entry.
+    assert store.reads == ["alice", "bob", "carol"]

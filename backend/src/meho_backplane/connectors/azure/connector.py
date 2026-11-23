@@ -289,13 +289,25 @@ class AzureConnector(
         login = (credentials.tenant_id, credentials.client_id)
         scope = config.cloud.arm_scope if scope is None else scope
         key: _TokenKey = (*target_cache_key(target), *login, scope)
-        use_cache = _may_use_cache(operator) and self._readers.has_read(target, operator)
+        # ``has_read`` is asked last, only when a fresh token is there: a yes notes
+        # the caller's kept login for the audit row.
+        use_cache = _may_use_cache(operator)
         cached = self._tokens.get(key)
-        if use_cache and cached is not None and _monotonic() < cached.renew_at:
+        if (
+            use_cache
+            and cached is not None
+            and _monotonic() < cached.renew_at
+            and self._readers.has_read(target, operator)
+        ):
             return cached.token, login
         async with self._token_locks.setdefault(key, asyncio.Lock()):
             cached = self._tokens.get(key)
-            if use_cache and cached is not None and _monotonic() < cached.renew_at:
+            if (
+                use_cache
+                and cached is not None
+                and _monotonic() < cached.renew_at
+                and self._readers.has_read(target, operator)
+            ):
                 return cached.token, login
             token = await fetch_client_credentials_token(
                 credentials,
@@ -326,14 +338,15 @@ class AzureConnector(
         """Return the target's login, from the cache or from its secret."""
         key: _CredentialKey = (*target_cache_key(target), str(target.secret_ref or ""))
         checked = _may_use_cache(operator)
-        # A cached secret is used by a caller only after their own Vault read passed once.
-        use_cache = checked and self._readers.has_read(target, operator)
+        # A cached secret is used by a caller only after their own Vault read passed
+        # once. ``has_read`` is asked only when a cached secret is there, because a
+        # yes notes the caller's kept login.
         cached = self._credentials.get(key)
-        if use_cache and cached is not None:
+        if checked and cached is not None and self._readers.has_read(target, operator):
             return cached
         async with self._credential_locks.setdefault(key, asyncio.Lock()):
             cached = self._credentials.get(key)
-            if use_cache and cached is not None:
+            if checked and cached is not None and self._readers.has_read(target, operator):
                 return cached
             credentials = await self._credentials_loader(target, operator)
             self._credentials[key] = credentials

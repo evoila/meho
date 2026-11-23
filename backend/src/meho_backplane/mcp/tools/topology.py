@@ -1680,16 +1680,20 @@ async def _read_target_page(
     With a hosted agent's ``connectors`` list, the page holds only the
     targets the list allows, and the cursor is the name of the last of
     them. The read goes on past the rows the list leaves out until the
-    page is full or the targets end.
+    page is full or the targets end. It reads at least
+    :data:`_AGENT_TARGET_READ_ROWS` rows at a time, so a small ``limit``
+    and a list that leaves out most targets do not cost one read per
+    target.
     """
     agent_limited = allowed_connectors_var.get() is not None
+    read_rows = max(limit, _AGENT_TARGET_READ_ROWS) if agent_limited else limit
     kept: list[Any] = []
     read_any = False
     sessionmaker = get_sessionmaker()
     while True:
         page_stmt = stmt if cursor is None else stmt.where(TargetORM.name > cursor)
         async with sessionmaker() as session:
-            result = await session.execute(page_stmt.order_by(TargetORM.name).limit(limit))
+            result = await session.execute(page_stmt.order_by(TargetORM.name).limit(read_rows))
             rows: list[Any] = list(result.scalars().all() if whole_rows else result.all())
         read_any = read_any or bool(rows)
         if not agent_limited:
@@ -1698,9 +1702,14 @@ async def _read_target_page(
         if len(kept) >= limit:
             kept = kept[:limit]
             return kept, kept[-1].name, read_any
-        if len(rows) < limit:
+        if len(rows) < read_rows:
             return kept, None, read_any
         cursor = rows[-1].name
+
+
+#: The fewest target rows one read takes for a hosted agent with a
+#: ``connectors`` list (:func:`_read_target_page`).
+_AGENT_TARGET_READ_ROWS = 200
 
 
 async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> None:

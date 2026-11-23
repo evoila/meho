@@ -216,15 +216,20 @@ JSON-shaped (so it can grow without a migration):
     A target that picks no single connector is left out. Each page holds
     up to `limit` such targets, and its `next_cursor` is the name of the
     last of them (`_read_target_page` in `mcp/tools/topology.py` reads on
-    past the targets outside the list).
-  - The target resolver (`targets/resolver.py`) names only targets of
-    connectors in the list in the near-matches of a `no_target` answer and
-    the hits of an `ambiguous_target` answer. Every tool that looks a
-    target up by name (`call_operation`, `preview_operation`, the
-    `target` filter of `meho_connector_list`, the docs tools) gets the
-    same answer. The lookup itself does not change: an exact name of a
-    target outside the list still resolves, and the dispatcher refuses it
-    with `connector_not_allowed`.
+    past the targets outside the list, at least 200 rows at a time).
+    `targets_within_limit` reads the saved login types of all the targets
+    in one read per tenant, so a target of a connector made from a saved
+    API file is checked like any other.
+  - The target resolver (`targets/resolver.py`, `_pick_one`) does three
+    things with a list:
+    - When every hit of the exact-name step, or every hit of the alias
+      step, is outside the list, the answer is `no_target` with no close
+      names.
+    - An answer never names a target outside the list, and never names
+      its product.
+    - The near-matches of a `no_target` answer leave out the targets
+      outside the list, so there can be fewer than five, or none.
+    Test: `tests/test_agent_connector_list_hidden_targets.py`.
   - `list_operation_groups` and `search_operations` refuse a
     `connector_id` outside the list before the handler runs, like
     `call_operation` (`_CONNECTOR_SCOPED_TOOLS` in `agent/toolset.py`).

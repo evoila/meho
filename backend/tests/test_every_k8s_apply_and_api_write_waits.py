@@ -235,7 +235,6 @@ def test_a_credential_call_behind_a_path_prefix_waits(op_id: str) -> None:
         "PUT:/apis/helm.cattle.io/v1/namespaces/{namespace}/helmcharts/{name}/status",
         "PATCH:/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale",
         f"PUT:{_PREFIX}/apis/apps/v1/namespaces/{{namespace}}/statefulsets/{{name}}/status",
-        "PUT:/api/v1/namespaces/{name}/finalize",
         f"PATCH:{_PREFIX}/api/v1/namespaces/{{name}}/status/",
         "GET:/api/v1/namespaces/{name}",
         "GET:/api/v1/nodes",
@@ -301,6 +300,9 @@ _HELM_CHART_WRITE = "POST:/apis/helm.cattle.io/v1/namespaces/{namespace}/helmcha
 _WEBHOOK_WRITE = (
     f"PUT:{_PREFIX}/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations/{{name}}"
 )
+_EVICTION = "POST:/api/v1/namespaces/{namespace}/pods/{name}/eviction"
+_FINALIZE = "PUT:/api/v1/namespaces/{name}/finalize"
+_ADD_ON_ACTION = "PUT:/apis/widgets.example.test/v1/namespaces/{namespace}/widgets/{name}/start"
 _ALWAYS_WAITING = [
     "k8s.apply",
     _HELM_CHART_WRITE,
@@ -310,6 +312,10 @@ _ALWAYS_WAITING = [
     "PUT:/api/v1/nodes/{name}",
     "PUT:/api/v1/namespaces/{namespace}/services/{name}",
     "DELETE:/api/v1/namespaces/{namespace}/configmaps/{name}",
+    _EVICTION,
+    _FINALIZE,
+    _ADD_ON_ACTION,
+    f"POST:{_PREFIX}/apis/widgets.example.test/v1/widgets/{{name}}/restart",
 ]
 
 
@@ -360,8 +366,9 @@ _SENSOR_CALLS = [
     ("k8s-1.x", "k8s.apply", {"manifest": _manifest("v1", "ConfigMap")}),
     ("kubeapi-1.30", _HELM_CHART_WRITE, {}),
     ("kubeapi-1.30", _WEBHOOK_WRITE, {}),
+    ("kubeapi-1.30", _EVICTION, {}),
 ]
-_SENSOR_IDS = ["k8s-apply", "helm-chart-write", "webhook-write"]
+_SENSOR_IDS = ["k8s-apply", "helm-chart-write", "webhook-write", "pod-eviction"]
 
 
 @pytest.mark.parametrize(("connector_id", "op_id", "params"), _SENSOR_CALLS, ids=_SENSOR_IDS)

@@ -118,6 +118,7 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
     from meho_backplane.operations.service_grants import (
+        _sandbox_delete_exception,
         delete_grant_reason,
         descriptor_credential_reason,
         descriptor_credential_waits,
@@ -134,6 +135,9 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
         ),
         "delete_shaped": delete_grant_reason(op_id, patterns, descriptor) is not None,
         "classified_always_wait": descriptor.policy_always_wait,
+        "sandbox_delete_grant": _sandbox_delete_exception(
+            op_id, getattr(descriptor, "op_class", None), descriptor
+        ),
         "rights_change": is_rights_change_op(op_id),
     }
     return frozenset(name for name, on in marks.items() if on)

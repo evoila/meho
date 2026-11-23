@@ -2752,7 +2752,7 @@ def params_with_secret_fields_hidden(
 def _with_marker_at(node: Any, path: tuple[str, ...]) -> Any:
     """A copy of *node* with the value at *path* replaced by the marker.
 
-    A path that no longer leads to a field (an earlier step hid its parent)
+    A path that does not lead to a field (an earlier step hid its parent)
     changes nothing.
     """
     if not isinstance(node, dict) or path[0] not in node:

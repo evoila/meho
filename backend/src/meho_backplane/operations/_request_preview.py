@@ -100,7 +100,11 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
-from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
+from meho_backplane.operations._preview import (
+    _SENSITIVE_CLASSES,
+    _scrub_secret_param_keys,
+    has_preview_builder,
+)
 from meho_backplane.operations._preview_steps import (
     agent_step_refusal,
     preview_step_verdict,
@@ -112,6 +116,7 @@ from meho_backplane.operations._target_version_range import version_range_previe
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
+    compute_params_hash,
     params_errors,
     policy_gate,
     validate_params,
@@ -156,7 +161,7 @@ _PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
 PARAMS_DIGEST_KEY: Final[str] = "params_digest"
 
 
-def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
+def compute_preview_hash(envelope: Mapping[str, Any], *, params_digest: str | None = None) -> str:
     """Return a stable SHA-256 hex over a preview's canonicalised resolved envelope.
 
     The preview-result-hash binding for the ``destructive`` tier (#3197,
@@ -169,6 +174,9 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     param-swap between preview and the governed call. A synthetic preview
     also carries :data:`PARAMS_DIGEST_KEY`; it joins the projection when
     present, so a value the safe view hides still changes the hash.
+    ``params_digest`` is the same kind of digest kept out of the envelope:
+    an ingested credential write masks its secret values, so the digest of
+    its literal query and body joins the hash, but not the answer.
 
     Canonicalisation matches the params hashes in
     :mod:`meho_backplane.operations._validate`
@@ -178,6 +186,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     source = {key: envelope.get(key) for key in _PREVIEW_HASH_KEYS}
     if PARAMS_DIGEST_KEY in envelope:
         source[PARAMS_DIGEST_KEY] = envelope[PARAMS_DIGEST_KEY]
+    elif params_digest is not None:
+        source[PARAMS_DIGEST_KEY] = params_digest
     canonical = json.dumps(source, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -765,9 +775,16 @@ def _redact_request_body(
     A body field the redactor masks in a real response is masked here too --
     no new raw-secret surface. A ``None`` body (no requestBody) round-trips
     to ``None`` without touching the engine.
+
+    For a credential write (``classify_op`` gives ``credential_write``) each
+    value under a secret name is first replaced by the fixed mark
+    (:func:`~meho_backplane.operations._preview._scrub_secret_param_keys`),
+    the same name rule and the same mark the echo of a waiting call uses.
     """
     if body is None:
         return None
+    if classify_op(op_id) == "credential_write":
+        body = _scrub_secret_param_keys(body)
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     redaction = apply_connector_boundary_redaction(
         body,
@@ -894,6 +911,15 @@ def _ok_ingested_envelope(
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
+    # A credential write shows its query inputs with the same mark as its
+    # body. The keyed digest of the literal query and body keeps the hash
+    # bound to each hidden value; it goes into the hash, not the answer.
+    credential_write = classify_op(op_id) == "credential_write"
+    query = request.query
+    if query and credential_write:
+        query = _redact_request_body(
+            query, connector_id=connector_id, operator=operator, op_id=op_id
+        )
     _log.info(
         "preview_dispatch",
         connector_id=connector_id,
@@ -910,10 +936,15 @@ def _ok_ingested_envelope(
         "source_kind": descriptor.source_kind,
         "method": request.method,
         "resolved_path": request.path,
-        "query": request.query,
+        "query": query,
         "redacted_body": redacted_body,
     }
-    envelope["preview_hash"] = compute_preview_hash(envelope)
+    digest = (
+        compute_params_hash({"query": request.query, "body": request.body})
+        if credential_write
+        else None
+    )
+    envelope["preview_hash"] = compute_preview_hash(envelope, params_digest=digest)
     return envelope
 
 

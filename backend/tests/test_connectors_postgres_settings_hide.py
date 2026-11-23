@@ -492,10 +492,14 @@ _REFUSED_CASES = [
         "postgresql://repl:pw-0815@db.test/app?ssl=false",  # trufflehog:ignore
         id="unknown-address-parameter-with-an-address-password",
     ),
+    pytest.param(
+        "postgresql://db.test:5432/app@repl:x",  # trufflehog:ignore
+        id="address-with-an-at-sign-after-the-slash",
+    ),
 ]
 
-#: Addresses with a host that holds an at sign, or a port that is not a
-#: number, and a colon before an at sign: the call is refused.
+#: Addresses where MEHO cannot tell where the password ends: a raw at sign
+#: after the user part, with a colon before it. The call is refused.
 _HOST_OR_PORT_REFUSED_CASES = [
     pytest.param(
         "postgresql://repl:pw-08@15-xy@db.test/app",  # trufflehog:ignore
@@ -515,8 +519,8 @@ _HOST_OR_PORT_REFUSED_CASES = [
     ),
 ]
 
-#: Addresses with a host or port libpq cannot use and no colon before an at
-#: sign: they stay as they are.
+#: Addresses with a host or port libpq cannot use and no secret: they stay
+#: as they are. The values of hosts and ports decide nothing.
 _HOST_OR_PORT_KEPT_CASES = [
     pytest.param("postgresql://db.test:primary/app", id="port-that-is-not-a-number"),
     pytest.param("postgresql://repl@db@test/app", id="at-sign-in-the-host"),
@@ -558,14 +562,302 @@ _NO_SECRET_CASES = [
         id="address-with-ssl-true",
     ),
     pytest.param(
-        "postgresql://db.test:5432/app@repl:x",  # trufflehog:ignore
-        id="address-with-an-at-sign-after-the-slash",
-    ),
-    pytest.param(
         "postgresql://[2001:db8::1?password=x]/app",  # trufflehog:ignore
         id="address-with-a-question-mark-inside-a-bracket-host",
     ),
 ]
+
+
+#: Two made-up password pieces, built at run time. They must never show up in
+#: a refusal.
+_P1 = "pw" + "-one-" + "4711"  # trufflehog:ignore
+_P2 = "pw" + "-two-" + "4712"  # trufflehog:ignore
+_A = "postgresql://"
+_U = "repl"
+_H = "db.test"
+_D = "app"
+
+#: One row per connection form. The address form: the password of the user
+#: part and each secret parameter value become the mark.
+_FORM_MASKED_ROWS = [
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:5432/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:5432/{_D}",
+        id="address-with-a-number-port",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}",
+        id="address-with-no-port",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:/{_D}",
+        id="address-with-an-empty-port",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:primary/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:primary/{_D}",
+        id="address-port-not-a-number",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:primary/{_D}?port=5432",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:primary/{_D}?port=5432",
+        id="address-port-not-a-number-replaced-by-a-port-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:primary/{_D}?port=",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:primary/{_D}?port=",
+        id="address-port-not-a-number-replaced-by-an-empty-port-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}?port=primary",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}?port=primary",
+        id="port-parameter-not-a-number",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:5432/{_D}?port=primary",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:5432/{_D}?port=primary",
+        id="number-address-port-and-a-port-parameter-not-a-number",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:%205432/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:%205432/{_D}",
+        id="address-port-with-an-encoded-space",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:65536/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:65536/{_D}",
+        id="address-port-out-of-range",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@a.test:5432,b.test:5433/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@a.test:5432,b.test:5433/{_D}",
+        id="host-list-and-port-list",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@a.test%2Cb.test:5432%2C5433/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@a.test%2Cb.test:5432%2C5433/{_D}",
+        id="encoded-host-list-and-encoded-port-list",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}:5432%2C5433/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}:5432%2C5433/{_D}",
+        id="one-host-and-an-encoded-list-of-two-ports",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@a.test:5432,b.test:primary/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@a.test:5432,b.test:primary/{_D}",
+        id="host-list-with-a-port-not-a-number",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}?host=b.test",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}?host=b.test",
+        id="host-parameter-replaces-the-host",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}?hostaddr=127.0.0.1",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}?hostaddr=127.0.0.1",
+        id="hostaddr-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_H}/{_D}?user={_U}&password={_P1}",  # trufflehog:ignore
+        f"{_A}{_H}/{_D}?user={_U}&password={_M}",
+        id="password-parameter-only",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P2}@{_H}/{_D}?password={_P1}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}?password={_M}",
+        id="address-password-and-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}%40{_P2}@{_H}/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}",
+        id="encoded-at-sign-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_H}/{_D}?password={_P1}@{_P2}",  # trufflehog:ignore
+        f"{_A}{_H}/{_D}?password={_M}",
+        id="raw-at-sign-in-a-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_H}:5432/{_D}?password={_P1}@{_P2}",  # trufflehog:ignore
+        f"{_A}{_H}:5432/{_D}?password={_M}",
+        id="raw-at-sign-in-a-password-parameter-with-a-port",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}?application_name=wal@rcv",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@{_H}/{_D}?application_name=wal@rcv",
+        id="raw-at-sign-in-an-application-name",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@%40{_H}/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@%40{_H}/{_D}",
+        id="encoded-at-sign-starts-the-host",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@db%40test/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@db%40test/{_D}",
+        id="encoded-at-sign-inside-the-host",
+    ),
+    pytest.param(
+        f"{_A}{_U}@{_H}/{_D}?pass%77ord={_P1}",  # trufflehog:ignore
+        f"{_A}{_U}@{_H}/{_D}?pass%77ord={_M}",
+        id="encoded-password-parameter-name",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@[::1]:5432/{_D}",  # trufflehog:ignore
+        f"{_A}{_U}:{_M}@[::1]:5432/{_D}",
+        id="bracket-host-with-a-port",
+    ),
+    pytest.param(
+        f"host={_H} port=5432 user={_U} password={_P1} dbname={_D}",  # trufflehog:ignore
+        f"host={_H} port=5432 user={_U} password={_M} dbname={_D}",
+        id="key-word-plain",
+    ),
+    pytest.param(
+        f"host={_H} port=primary user={_U} password={_P1}",  # trufflehog:ignore
+        f"host={_H} port=primary user={_U} password={_M}",
+        id="key-word-port-not-a-number",
+    ),
+    pytest.param(
+        f"host=a.test,b.test port=5432,5433 user={_U} password={_P1}",  # trufflehog:ignore
+        f"host=a.test,b.test port=5432,5433 user={_U} password={_M}",
+        id="key-word-host-list-and-port-list",
+    ),
+    pytest.param(
+        f"host=db@test hostaddr=127.0.0.1 user={_U} password={_P1}",  # trufflehog:ignore
+        f"host=db@test hostaddr=127.0.0.1 user={_U} password={_M}",
+        id="key-word-at-sign-in-the-host-and-a-hostaddr",
+    ),
+    pytest.param(
+        f"host={_H} password={_P1}@{_P2}",  # trufflehog:ignore
+        f"host={_H} password={_M}",
+        id="key-word-at-sign-in-the-password",
+    ),
+    pytest.param(
+        f"host={_H} password='{_P1} {_P2}'",  # trufflehog:ignore
+        f"host={_H} password='{_M}'",
+        id="key-word-quoted-password-with-a-space",
+    ),
+    pytest.param(
+        f"host={_H} port= user={_U} password={_P1}",  # trufflehog:ignore
+        f"host={_H} port= user={_U} password={_M}",
+        id="key-word-nothing-after-the-equals-sign-of-port",
+    ),
+    pytest.param(
+        f"host=a.test,b.test port=5432,primary user={_U} password={_P1}",  # trufflehog:ignore
+        f"host=a.test,b.test port=5432,primary user={_U} password={_M}",
+        id="key-word-port-list-with-a-port-not-a-number",
+    ),
+]
+
+#: One row per connection form that holds no secret: it stays as it is.
+_FORM_KEPT_ROWS = [
+    pytest.param(
+        f"{_A}{_H}:5432/{_D}?application_name=wal@rcv",
+        id="no-user-part-and-an-at-sign-in-a-parameter",
+    ),
+]
+
+#: One row per connection form where MEHO cannot tell where a secret ends,
+#: or that libpq cannot read: the call is refused.
+_FORM_REFUSED_ROWS = [
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_P2}@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_U}@{_P2}:{_P1}@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-in-the-user-name",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}/{_P2}@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-slash-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}@{_P2}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-after-the-host",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_P2}@{_H}/{_D}?hostaddr=127.0.0.1",  # trufflehog:ignore
+        id="raw-at-sign-in-the-password-and-a-hostaddr-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_P2}@{_H}/{_D}?host=b.test",  # trufflehog:ignore
+        id="raw-at-sign-in-the-password-and-a-host-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}/{_P2}@{_H}/{_D}?port=5432",  # trufflehog:ignore
+        id="raw-slash-in-the-password-and-a-port-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}/{_P2}?x@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-slash-then-question-mark-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}/{_P2}?port=x@{_H}",  # trufflehog:ignore
+        id="raw-slash-question-mark-and-key-word-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_H}?password={_P1}@{_P2}",  # trufflehog:ignore
+        id="raw-at-sign-in-a-password-parameter-with-no-slash",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_P2}/x@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-then-raw-slash-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-starts-the-host",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/{_D}?unknownopt=1",  # trufflehog:ignore
+        id="unknown-parameter-and-an-address-password",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_H}/d@b",  # trufflehog:ignore
+        id="raw-at-sign-in-the-database-name",
+    ),
+    pytest.param(
+        f"{_A}{_U}:4711/{_P2}@{_H}/{_D}",  # trufflehog:ignore
+        id="digits-then-raw-slash-in-the-password",
+    ),
+    pytest.param(
+        f"{_A}{_H}:5432/d:x@b",
+        id="no-user-part-and-an-at-sign-in-the-database-name",
+    ),
+    pytest.param(
+        f"host={_H} password={_P1} {_P2}",  # trufflehog:ignore
+        id="key-word-raw-space-in-a-bare-password",
+    ),
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), _FORM_MASKED_ROWS)
+@pytest.mark.asyncio
+async def test_settings_hide_only_the_secret_of_each_connection_form(
+    value: str, expected: str
+) -> None:
+    assert await _hidden(value) == expected
+
+
+@pytest.mark.parametrize("value", _FORM_KEPT_ROWS)
+@pytest.mark.asyncio
+async def test_settings_keep_each_connection_form_with_no_secret(value: str) -> None:
+    assert await _hidden(value) == value
+
+
+@pytest.mark.parametrize("value", _FORM_REFUSED_ROWS)
+@pytest.mark.asyncio
+async def test_settings_refuse_each_connection_form_with_an_unclear_secret(value: str) -> None:
+    with pytest.raises(PostgresSettingsRefusedError) as refused:
+        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
+    message = str(refused.value)
+    assert _SETTING in message
+    assert _P1 not in message
+    assert _P2 not in message
+    assert "4711" not in message  # trufflehog:ignore
 
 
 @pytest.mark.parametrize(("value", "expected"), _KEY_WORD_CASES)

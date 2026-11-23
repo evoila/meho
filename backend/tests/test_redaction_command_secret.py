@@ -39,6 +39,9 @@ from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 from tests.test_redaction_command_secret_logs import _JSON_FORMS, _json_string
 
+#: The two command line rules: before and after the api_key rule.
+_COMMAND_RULES: Final = frozenset({"command_line_secret", "command_line_secret_rest"})
+
 PW: Final = "made-up-pw-4711"
 #: Built from pieces, so secret scanners do not flag the lines that use them.
 _USER_PW: Final = "bob" + ":" + PW
@@ -380,8 +383,8 @@ _LABEL: Final = re.compile(
 def _without_command_rule(policy: RedactionPolicy | None = None) -> RedactionPolicy:
     """*policy* (the default policy when not given) as it is on main: without this rule."""
     policy = policy or get_default_policy()
-    rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
-    assert len(rules) == len(policy.rules) - 1
+    rules = tuple(rule for rule in policy.rules if rule.pattern not in _COMMAND_RULES)
+    assert len(rules) == len(policy.rules) - 2
     return policy.model_copy(update={"rules": rules})
 
 
@@ -623,8 +626,20 @@ _TOOLS_THAT_RUN: Final[list[tuple[str, tuple[str, ...]]]] = [
         ("root 1234 0.0 0.1 12345 678 ? S 10:00 0:00 /opt/tools/", ""),
         ("sh -c 'sudo -n ", "'"),
         (f"sshpass -p {PW} /opt/tools/", ""),
+        ("sudo ", ""),
+        ("sudo -E ", ""),
+        ("timeout 5 ", ""),
+        ("chroot /x ", ""),
+        ("nohup ", " &"),
+        ("xargs -I{} ", " {}"),
+        ("kubectl exec pod -- ", ""),
+        ("docker exec ctr ", ""),
+        # After ``-exec`` of ``find`` the next word is the program it runs.
+        ("find . -name x -exec ", " \\;"),
+        ("find . -execdir ", " +"),
+        ("sudo find . -exec ", " \\;"),
     )
-]
+] + [(f"find . -exec curl -u {_USER_PW} https://x \\;", (PW,))]
 #: Lines of :data:`_SECRETS_OF` that are read in plain text only. In a JSON
 #: string a quoted value starts with an escaped quote, and that ends the value.
 _PLAIN_TEXT_ONLY: Final = {
@@ -660,8 +675,8 @@ _SECRETS_OF: Final[list[tuple[str, tuple[str, ...]]]] = [
     (_QUOTED_TOOL_IN_SINGLE, (PW,)),
     ("run --password=ab12cd next", ("ab12cd",)),
     ("DB_PASSWORD=ab12cd next", ("ab12cd",)),
-    ("run --password=ab12cd; echo ok", ()),
-    ("DB_PASSWORD=ab12cd; echo ok", ()),
+    ("run --password=ab12cd; echo ok", ("ab12cd",)),
+    ("DB_PASSWORD=ab12cd; echo ok", ("ab12cd",)),
     *_QUOTED_BEFORE_OPERATORS,
     *_JOINED_BEFORE_OPERATORS,
     *_TOOLS_THAT_RUN,
@@ -1121,6 +1136,47 @@ def test_a_tool_that_runs_after_a_command_or_from_any_folder_is_read(
         assert redact(line, policy).redacted == expected
 
 
+#: Harmless commands after a wrapper, with a quoted argument, or with an
+#: option that takes no value or an empty value.
+_AFTER_WRAPPERS: Final[list[str]] = [
+    "sudo find mysql -print",
+    "sudo find /opt/tools/mysql -print",
+    'find "some folder" mysql -print',
+    "sudo -u root find mysql -prune",
+    "sudo -E find mysql -print",
+    "sudo --preserve-env find mysql -print",
+    "nice -n 5 find mysql -perm 644",
+    "ionice -c3 find mysql -print",
+    "xargs find mysql -print",
+    "env LANG=C find mysql -print",
+    "time find mysql -print",
+    "timeout 5 find mysql -print",
+    "chroot /x find mysql -print",
+    "nohup find mysql -print",
+    "command find mysql -print",
+    "exec find mysql -print",
+    "doas find mysql -print",
+    "stdbuf -oL find mysql -print",
+    "if true; then find mysql -print; fi",
+    "sudo find mysql -print; echo ok",
+    "sudo find mysql -perm -4000",
+    "sudo du mysql -ph",
+    "sudo tail mysql -pretty",
+    "ansible-playbook --ask-pass site.yml",
+    "ansible-playbook --ask-become-pass site.yml",
+    "ansible-playbook --ask-vault-pass site.yml",
+    "mysql --skip-password -h db",
+    'run --password="" -v',
+    "DB_PASSWORD='' run",
+    "ps -p 123",
+    "ssh -p 22 host",
+    "mkdir -p a/b",
+    "cp -p a b",
+    "tar -pcf a.tar dir",
+    "curl -u name https://x",
+    "mysql -P 3306 -h db",
+    "gcc -pthread x.c",
+]
 #: Ordinary command lines with no secret in them.
 _ORDINARY: Final[list[str]] = [
     *_KEPT,
@@ -1154,6 +1210,10 @@ _ORDINARY: Final[list[str]] = [
     "sh -c 'find mysql -print'",
     '{"cmd": "find mysql -print"}',
     '{"cmd": "docker run --name \\"mysql\\" -p3306:3306 mysql"}',
+    # The program after any wrapper is the command; a tool name after a
+    # command that takes files or names is a file or a name.
+    *_AFTER_WRAPPERS,
+    *(json.dumps({"msg": line}) for line in _AFTER_WRAPPERS),
 ]
 
 

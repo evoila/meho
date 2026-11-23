@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Final
 
 import pytest
 
-from meho_backplane.redaction.command_secret import COMMAND_SECRET
+from meho_backplane.redaction.command_secret import COMMAND_SECRET, _cached_value_spans
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.policy import RedactionPolicy
 from meho_backplane.redaction.resolver import get_default_policy
+
+#: The two command line rules: before and after the api_key rule.
+_COMMAND_RULES: Final = frozenset({"command_line_secret", "command_line_secret_rest"})
 
 PW: Final = "made-up-pw-4711"
 #: Built from pieces, so secret scanners do not flag the lines that use them.
@@ -82,7 +86,7 @@ def _on_main(text: str) -> tuple[str, str]:
     from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY
 
     def without(policy: RedactionPolicy) -> RedactionPolicy:
-        rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
+        rules = tuple(rule for rule in policy.rules if rule.pattern not in _COMMAND_RULES)
         return policy.model_copy(update={"rules": rules})
 
     return (
@@ -228,3 +232,50 @@ def test_a_long_run_of_backslashes_in_a_double_quoted_string_is_read_in_one_step
     started = time.perf_counter()
     redact(text, get_default_policy())
     assert time.perf_counter() - started < 1.0
+
+
+# -- long runs of backslashes and quotes through both policies -------------------------
+
+_BS: Final = chr(92)
+_SQ: Final = chr(39)
+_DQ: Final = chr(34)
+
+
+def _long_texts(size: int) -> list[str]:
+    """Texts of about *size* characters: a value with a long run after it, and long runs."""
+    even = size - size % 2
+    return [
+        "run --password=" + _SQ + "x" + _SQ + _BS * even + "; echo ok",
+        "run --password=" + _SQ + "x" + _SQ + _BS * (even + 1) + "; echo ok",
+        "DB_PASSWORD=" + _SQ + "x" + _SQ + _BS * size + "; run",
+        "run --password=" + _DQ + "x" + _DQ + _BS * size + " | cat",
+        *(
+            "run --password=" + unit * (size // len(unit)) + "; echo ok"
+            for unit in (_BS, _SQ, _DQ, " ", "=", "--password ", _BS + _DQ, _BS + _SQ)
+        ),
+    ]
+
+
+def _cold_seconds(read: Callable[[str], object], text: str) -> float:
+    """How long *read* takes on *text*, without the values kept from an earlier read."""
+    _cached_value_spans.cache_clear()
+    started = time.perf_counter()
+    read(text)
+    return time.perf_counter() - started
+
+
+@pytest.mark.parametrize("case", range(len(_long_texts(10))))
+@pytest.mark.parametrize("policy", ["answer", "trace"])
+def test_a_long_run_after_a_password_value_is_read_in_linear_time(case: int, policy: str) -> None:
+    def read(text: str) -> object:
+        if policy == "answer":
+            return redact(text, get_default_policy())
+        return scrub_content(text)
+
+    half = _cold_seconds(read, _long_texts(100_000)[case])
+    full_text = _long_texts(200_000)[case]
+    assert len(full_text) >= 200_000
+    full = _cold_seconds(read, full_text)
+    assert full < 1.0
+    # Twice the text takes about twice the time; 0.05 seconds cover timer noise.
+    assert full <= 3 * half + 0.05

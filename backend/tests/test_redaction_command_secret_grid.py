@@ -32,6 +32,9 @@ from meho_backplane.redaction.flight_recorder._content import _CONTENT_POLICY, s
 from meho_backplane.redaction.policy import RedactionPolicy
 from meho_backplane.redaction.resolver import get_default_policy
 
+#: The two command line rules: before and after the api_key rule.
+_COMMAND_RULES: Final = frozenset({"command_line_secret", "command_line_secret_rest"})
+
 #: The made-up password, and the parts of it that must never be shown.
 PW: Final = "made-up-pw-4711"
 _PIECES: Final = ("made", "-up-", "pw-4", "4711")
@@ -203,8 +206,8 @@ def _problems(text: str, parse: Callable[[str], object]) -> list[str]:
 
 
 def _without_command_rule(policy: RedactionPolicy) -> RedactionPolicy:
-    rules = tuple(rule for rule in policy.rules if rule.pattern != "command_line_secret")
-    assert len(rules) == len(policy.rules) - 1
+    rules = tuple(rule for rule in policy.rules if rule.pattern not in _COMMAND_RULES)
+    assert len(rules) == len(policy.rules) - 2
     return policy.model_copy(update={"rules": rules})
 
 

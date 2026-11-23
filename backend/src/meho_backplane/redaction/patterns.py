@@ -343,6 +343,9 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "url_secret": URL_SECRET,
     # A value the api_key rule hides is left to it, so its answer stays the same.
     "command_line_secret": CommandSecretFinder(leave_to=_API_KEY),
+    # After the api_key rule: every value the first rule left that the
+    # api_key rule did not hide, hidden whole.
+    "command_line_secret_rest": CommandSecretFinder(rest=True),
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,

@@ -50,6 +50,7 @@ _EXPECTED_NAMES = {
     "bind_key_secret",
     "url_secret",
     "command_line_secret",
+    "command_line_secret_rest",
     "uuid",
     "ipv4",
     "ipv6",
@@ -729,6 +730,8 @@ def test_get_pattern_unknown_raises() -> None:
         # command_line_secret: a password on a command line, not a port
         ("command_line_secret", "mysql -u root -pmade-up-pw db", True),
         ("command_line_secret", "ssh -p 22 host", False),
+        ("command_line_secret_rest", "mysql -u root -pmade-up-pw db", True),
+        ("command_line_secret_rest", "ssh -p 22 host", False),
         # uuid: RFC 4122 canonical hex form
         (
             "uuid",
@@ -869,6 +872,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("url_secret", _URL_SECRET_FIXTURE_NEG, False),
     ("command_line_secret", "mysql -u root -pmade-up-pw db", True),
     ("command_line_secret", "ssh -p 22 host", False),
+    ("command_line_secret_rest", "mysql -u root -pmade-up-pw db", True),
+    ("command_line_secret_rest", "ssh -p 22 host", False),
     ("password_hash", _SHADOW_LINE_FIXTURE, True),
     ("password_hash", "daemon:*:19000:0:99999:7:::", False),
     ("ceph_key", _CEPH_KEYRING_FIXTURE, True),

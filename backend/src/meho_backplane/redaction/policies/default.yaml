@@ -86,6 +86,15 @@ rules:
     action: redact
     reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
+  # After the api_key rule: a command line value that the api_key rule
+  # did not hide, such as one that a ``;`` follows. The first command line
+  # rule leaves it, because the api_key rule would read its mark as a
+  # value and hide the option name too.
+  - name: strip-command-line-secret-rest
+    pattern: command_line_secret_rest
+    action: redact
+    reason: "password or token on a command line that the api_key rule did not hide"
+
   - name: strip-kubeconfig
     pattern: kubeconfig
     action: redact

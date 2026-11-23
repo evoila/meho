@@ -19,10 +19,13 @@ option name and the words around it stay readable:
   part after the first ``%`` of ``smbclient -U``. A tool name in quotes is
   read too: its options follow the closing quote. A tool name is read only
   when it names the program that runs: at the start of a command, also
-  with a path (``/opt/tools/mysql``), or after a command that runs it
-  (``sudo -n``). It is not read right after an option, whose value it is
+  with a path (``/opt/tools/mysql``), after a wrapper that runs it
+  (``sudo``, ``nice -n 5``, ``timeout 5``, ``chroot /x``, ``xargs``), or
+  after ``-exec`` of ``find``. The words of a command are split the way a
+  shell splits them, and the command is the first word after any wrapper.
+  A tool name is not read right after an option, whose value it is
   (``docker run --name "mysql"``), or as an argument of a command that
-  takes files or names (``find mysql``);
+  takes files or names (``sudo find mysql``, ``find "a b" mysql``);
 * environment style names that end in ``_PASS``, ``_PWD``, ``_PASSWORD``,
   ``_SECRET``, ``_TOKEN`` or ``_KEY``.
 
@@ -41,9 +44,12 @@ names in capitals or with ``.EXE``, and the other forms that Task lists.
 A value is read the way a shell reads one word: it ends at white space or
 at an operator (``; | & < > ( )``) that is not quoted or escaped. Quoted
 parts, escaped characters and several parts joined together are one
-value. A closing quote counts only on the line of the opening quote. A
-quote that is never closed is a plain character inside a value; a value
-that starts with one runs to the end of its line. In plain text an
+value. A part that starts with ``$'`` is ANSI-C quoted: a backslash takes
+the next character there, also a single quote. A closing quote counts
+only on the line of the opening quote. A quote that is never closed is a
+plain character inside a value. When a value starts with one, its end is
+not known, and the rest of its command is hidden, up to the next ``;``,
+``|``, ``&`` or line end. An empty value (``''``) is no secret. In plain text an
 escaped double quote belongs to the value, as in a shell word. Only
 inside a JSON string or a double-quoted command does a run of
 backslashes that a double quote follows end the value, before the
@@ -73,7 +79,8 @@ an older mark (``***REDACTED***``, ``<redacted>``) or only the characters a
 tool prints in place of a typed password, also written as JSON escapes.
 
 Names that look like a secret but are not one stay: paging tokens
-(``--next-token``), names that start with ``no``, a short list of ``_KEY``
+(``--next-token``), names that start with ``no``, ``ask`` or ``skip``
+(``--ask-pass`` takes no value), a short list of ``_KEY``
 names that hold no secret (``S3_KEY``, ``PARTITION_KEY``) and the compiler
 option ``-pthread``.
 
@@ -85,12 +92,17 @@ character other than white space or a quote follows the value. The
 policies run this rule first, and the pattern would read a mark with such
 a character after it as a value and hide the label too. When the value
 has quotes, the finder hides only the text of each quoted or bare part
-instead (``'a b'" c"``), so the label, the quotes and the next command stay. In a policy
-without the ``api_key`` rule such a value is not hidden.
+instead (``'a b'" c"``), so the label, the quotes and the next command
+stay. A second rule, ``command_line_secret_rest`` (the finder with
+*rest*), runs after the ``api_key`` rule and hides whole every value that
+is still readable. So a value is left to the ``api_key`` rule only when
+that rule hides at least a part of it. A value of only marks, quotes and
+backslashes is no secret, so the second rule keeps the work of the first.
 
 Every scan is linear. No pattern has a nested repeat, values are read by
 position, a form that starts inside an earlier hidden value is not read
-again, a run of backslashes is passed in one step, each JSON string and
+again, a run of backslashes is passed in one step (also when a value is
+split into its quoted parts), each JSON string and
 each shell word is decoded once per level, and the matches of
 *leave_to* are found once per text.
 """
@@ -98,6 +110,8 @@ each shell word is decoded once per level, and the matches of
 from __future__ import annotations
 
 import bisect
+import collections
+import functools
 import re
 from typing import Final
 
@@ -197,11 +211,7 @@ def _value_end(text: str, start: int, size: int | None = None, *, in_string: boo
             pos = min(run_end + (run_end - pos) % 2, size)
             continue
         if char in "'\"":
-            closing = (
-                text.find("'", pos + 1, size) + 1
-                if char == "'"
-                else _skip_double_quoted(text, pos, size)
-            )
+            closing = _closing_of(text, pos, size)
             if closing > 0 and _closes_value(text, pos, closing):
                 pos = closing
                 continue
@@ -209,15 +219,54 @@ def _value_end(text: str, start: int, size: int | None = None, *, in_string: boo
                 # A quote inside a word that is never closed is a plain character.
                 pos += 1
                 continue
-            line_end = text.find("\n", pos, size)
-            return size if line_end == -1 else line_end
+            # The end of the value is not known: hide the rest of the command.
+            command_end = _COMMAND_END.search(text, pos, size)
+            return size if command_end is None else command_end.start()
         break
     return pos
 
 
+#: What ends a command: a line end or an operator that joins commands.
+_COMMAND_END: Final = re.compile(r"[\n;|&]")
+#: A single quote or a backslash, read inside an ANSI-C quoted part (``$'...'``).
+_ANSI_MARK: Final = re.compile(r"['\\]")
+
+
+def _is_ansi_quote(text: str, quote: int) -> bool:
+    """True when the single quote at *quote* opens an ANSI-C quoted part (``$'a\\'b'``)."""
+    return text[quote] == "'" and quote > 0 and text[quote - 1] == "$"
+
+
+def _closing_of(text: str, opening: int, size: int) -> int:
+    """Index after the quote that closes the one at *opening*, or ``0`` when there is none.
+
+    In an ANSI-C quoted part a backslash takes the next character, also a
+    single quote.
+    """
+    if text[opening] == '"':
+        return max(_skip_double_quoted(text, opening, size), 0)
+    if not _is_ansi_quote(text, opening):
+        return text.find("'", opening + 1, size) + 1
+    pos = opening + 1
+    while (mark := _ANSI_MARK.search(text, pos, size)) is not None:
+        if mark.group(0) == "'":
+            return mark.end()
+        pos = mark.start() + 2
+    return 0
+
+
+#: The quotes and backslashes around and between hidden parts of a value.
+_NO_SECRET: Final = str.maketrans("", "", "'\"\\$")
+
+
 def _is_hidden(value: str) -> bool:
-    """True when *value* is a secret to hide: not empty and not hidden already."""
-    return bool(value) and _ALREADY_HIDDEN.fullmatch(value) is None
+    """True when *value* is a secret to hide.
+
+    An empty value (also ``''`` and ``""``) is no secret, and neither is a
+    value that holds only marks of an earlier step, with quotes or
+    backslashes around them.
+    """
+    return bool(_ALREADY_HIDDEN.sub("", value).translate(_NO_SECRET))
 
 
 def _value_span(
@@ -397,7 +446,7 @@ def _is_paging_token(words: list[str]) -> bool:
 
 def _is_secret_option(name: str) -> bool:
     words = _name_words(name)
-    if not words or words[0] == "no" or _is_paging_token(words):
+    if not words or words[0] in ("no", "ask", "skip") or _is_paging_token(words):
         return False
     return words[-1] in _SECRET_LAST_WORDS or words[-2:] == ["api", "key"]
 
@@ -693,6 +742,8 @@ _WRAPPERS: Final[dict[str, frozenset[str]]] = {
     "strace": frozenset({"-o", "-p", "-e", "-s", "-u", "-a", "-E", "-P"}),
     "watch": frozenset({"-n", "--interval"}),
     "runuser": frozenset({"-u", "-g", "-G", "--user", "--group"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "chroot": frozenset({"--userspec", "--groups"}),
     "nohup": frozenset(),
     "exec": frozenset({"-a"}),
     "command": frozenset(),
@@ -702,6 +753,11 @@ _WRAPPERS: Final[dict[str, frozenset[str]]] = {
     "do": frozenset(),
     "else": frozenset(),
 }
+#: Wrappers that take fixed words before the command they run: the time of
+#: ``timeout`` and the folder of ``chroot``.
+_WRAPPER_WORDS: Final[dict[str, int]] = {"timeout": 1, "chroot": 1}
+#: The options of ``find`` whose next word is a program it runs.
+_FIND_RUNS: Final = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: Container tools whose ``exec`` or ``run`` takes a container or image name next.
 _CONTAINER_TOOLS: Final = frozenset({"docker", "podman", "nerdctl", "kubectl", "oc", "crictl"})
 #: Commands whose plain words are files, folders or names, not a program to
@@ -727,6 +783,62 @@ def _word_back(text: str, end: int) -> str:
     return text[begin:end]
 
 
+def _partner(chunk: str, quote: int) -> int:
+    """The index of the quote that closes the one at *quote* in *chunk*, or ``-1``.
+
+    It is the next quote of the same kind with as many backslashes before
+    it, so ``\\"`` in a JSON string pairs only with ``\\"``.
+    """
+    level = 0
+    while quote - level > 0 and chunk[quote - level - 1] == "\\":
+        level += 1
+    pos = quote + 1
+    while (close := chunk.find(chunk[quote], pos)) != -1:
+        run = 0
+        while close - run > quote + 1 and chunk[close - run - 1] == "\\":
+            run += 1
+        if run == level:
+            return close
+        pos = close + 1
+    return -1
+
+
+def _shell_words(chunk: str) -> tuple[list[str], bool]:
+    """The words of *chunk*, split the way a shell splits them.
+
+    A quoted part with spaces belongs to its word (``"some folder"``). A
+    quote that is not closed in *chunk* opens a quoted command, which
+    starts after it (``sh -c 'sudo``); then the second value is true.
+    """
+    words: list[str] = []
+    word: list[str] = []
+    restarted = False
+    pos = 0
+    while pos < len(chunk):
+        char = chunk[pos]
+        if char.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            pos += 1
+            continue
+        if char in "'\"":
+            close = _partner(chunk, pos)
+            if close == -1:
+                # The opening quote of a quoted command: the command starts after it.
+                words, word, restarted = [], [], True
+                pos += 1
+                continue
+            word.append(chunk[pos : close + 1])
+            pos = close + 1
+            continue
+        word.append(char)
+        pos += 1
+    if word:
+        words.append("".join(word))
+    return words, restarted
+
+
 def _words_before(text: str, end: int) -> tuple[list[str], bool]:
     """The words of the command before *end*, first word first.
 
@@ -737,16 +849,8 @@ def _words_before(text: str, end: int) -> tuple[list[str], bool]:
     limit = max(0, end - _LOOK_BACK)
     chunk = text[limit:end]
     edge = max(chunk.rfind(char) for char in _COMMAND_EDGE)
-    words = chunk[edge + 1 :].split()
-    at_start = edge != -1 or limit == 0
-    for at in range(len(words) - 1, -1, -1):
-        word = words[at]
-        if word.count("'") % 2 or word.count('"') % 2:
-            # The opening quote of a quoted command (``'sudo``, ``"cmd":"find``):
-            # the command starts after it.
-            first = word[max(word.rfind("'"), word.rfind('"')) + 1 :]
-            return ([first] if first else []) + words[at + 1 :], True
-    return words, at_start
+    words, restarted = _shell_words(chunk[edge + 1 :])
+    return words, restarted or edge != -1 or limit == 0
 
 
 def _base(word: str) -> str:
@@ -756,29 +860,62 @@ def _base(word: str) -> str:
 def _hands_on(words: list[str]) -> bool:
     """True when a command in *words* runs the word after them (``sudo -n``, ``nice -n 5``)."""
     for at, word in enumerate(words):
-        options = _WRAPPERS.get(_base(word))
-        if options is None or (at and word == "exec" and _base(words[at - 1]) in _CONTAINER_TOOLS):
+        if at and word == "exec" and _base(words[at - 1]) in _CONTAINER_TOOLS:
             continue
-        rest = at + 1
-        while rest < len(words) and (
-            words[rest].startswith("-") or _ASSIGNMENT.fullmatch(words[rest])
-        ):
-            rest += 2 if words[rest] in options else 1
-        if rest == len(words):
+        if _base(word) in _WRAPPERS and _command_at(words, at) == len(words):
             return True
     return False
+
+
+def _command_at(words: list[str], at: int = 0) -> int:
+    """The index of the program that the command at *at* runs, after any wrapper.
+
+    A wrapper is skipped with its options, the values of those options and
+    its fixed words (``timeout 5``), and so is a variable set for the
+    command (``LANG=C``). ``len(words)`` when the next word is the program,
+    more when it is still the value of an option or a fixed word.
+    """
+    while at < len(words):
+        word = words[at]
+        options = _WRAPPERS.get(_base(word))
+        if options is None and not _ASSIGNMENT.fullmatch(word):
+            return at
+        at += 1
+        if options is None:
+            continue
+        while at < len(words) and (words[at].startswith("-") or _ASSIGNMENT.fullmatch(words[at])):
+            at += 2 if words[at] in options else 1
+        at += _WRAPPER_WORDS.get(_base(word), 0)
+    return at
 
 
 def _is_command_position(words: list[str], at_start: bool) -> bool:
     """True when a word after *words* is the program that runs, not an argument.
 
     It is after a command that runs the next word (``sudo -n``), after
-    ``--`` and after a variable set for the command (``LANG=C``). It is not
-    the value or argument after an option (``docker run --name``), the
-    container after ``docker exec``, or an argument of a command that
-    takes files or names (``find``). After other words (another command,
-    the columns of a process list, a log prefix) it is the program.
+    ``--``, after a variable set for the command (``LANG=C``) and after
+    ``-exec`` of ``find``. It is not the value or argument after an option
+    (``docker run --name``), the container after ``docker exec``, or an
+    argument of a command that takes files or names (``sudo find``).
+    After other words (another command, the columns of a process list, a
+    log prefix) it is the program.
     """
+    if not at_start:
+        return _after_words(words)
+    command = _command_at(words)
+    if command >= len(words):
+        return command == len(words)
+    if _base(words[command]) == "find":
+        runs = [at for at in range(command, len(words)) if words[at] in _FIND_RUNS]
+        if runs:
+            return _is_command_position(words[runs[-1] + 1 :], True)
+    if not _after_words(words[command:]):
+        return False
+    return _base(words[command]) not in _ARGUMENT_COMMANDS
+
+
+def _after_words(words: list[str]) -> bool:
+    """True when the word after *words* may be a program, when the command is not known."""
     if not words or _hands_on(words):
         return True
     last = words[-1]
@@ -790,7 +927,7 @@ def _is_command_position(words: list[str], at_start: bool) -> bool:
         return False
     if _ASSIGNMENT.fullmatch(last):
         return len(words) == 1 or not words[-2].startswith("-")
-    return not (at_start and _base(words[0]) in _ARGUMENT_COMMANDS)
+    return True
 
 
 def _runs_tool(text: str, match: re.Match[str]) -> bool:
@@ -924,13 +1061,33 @@ def _after_label(text: str, start: int, leave_to: re.Pattern[str]) -> bool:
     return any(m.end() == len(probe) and m.start() < cut for m in leave_to.finditer(probe))
 
 
-#: A quote that opens a part of a value (also written as a JSON escape, ``\\"``).
-_OPENING_QUOTE: Final = re.compile(r"""\\*['"]""")
+#: A quote or a backslash: where a part of a value may open.
+_QUOTE_OR_BACKSLASH: Final = re.compile(r"""['"\\]""")
+
+
+def _next_opening(text: str, pos: int, end: int) -> tuple[int, int] | None:
+    """The next quote that opens a part of a value, with the backslashes before it.
+
+    Returns where the backslashes start and the index after the quote
+    (``\\"`` is the opening quote of a JSON escape). Each run of
+    backslashes is read once, so the scan is linear.
+    """
+    while (mark := _QUOTE_OR_BACKSLASH.search(text, pos, end)) is not None:
+        if mark.group(0) != "\\":
+            return mark.start(), mark.end()
+        run = _BACKSLASHES.match(text, mark.start(), end)
+        run_end = end if run is None else run.end()
+        if run_end < end and text[run_end] in "'\"":
+            return mark.start(), run_end + 1
+        pos = run_end
+    return None
+
+
 #: The mark the policies write in place of a value of this rule.
 _OWN_MARK: Final = "[REDACTED:command_line_secret]"
 
 
-def _closing_quote(text: str, opening: re.Match[str], end: int) -> tuple[int, int]:
+def _closing_quote(text: str, opening: tuple[int, int], end: int) -> tuple[int, int]:
     """Where the part that *opening* starts ends: its text end and the index after its quote.
 
     A single quote closes at the next one. A double quote closes at the
@@ -938,15 +1095,19 @@ def _closing_quote(text: str, opening: re.Match[str], end: int) -> tuple[int, in
     (``\\"``), at the next one that is escaped the same way, whose
     backslashes stay outside the part.
     """
-    quote = text[opening.end() - 1]
+    begin, after = opening
+    quote = text[after - 1]
+    if quote == "'" and _is_ansi_quote(text, after - 1) and after - begin == 1:
+        close = _closing_of(text, after - 1, end)
+        return (end, end) if close == 0 else (close - 1, close)
     if quote == "'":
-        close = text.find("'", opening.end(), end)
+        close = text.find("'", after, end)
         return (end, end) if close == -1 else (close, close + 1)
-    escaped = opening.end() - opening.start() > 1
-    pos = opening.end()
+    escaped = after - begin > 1
+    pos = after
     while (close := text.find('"', pos, end)) != -1:
         run = close
-        while run > opening.end() and text[run - 1] == "\\":
+        while run > after and text[run - 1] == "\\":
             run -= 1
         if (close - run) % 2 == escaped:
             return (run if escaped else close, close + 1)
@@ -963,14 +1124,14 @@ def _value_parts(text: str, start: int, end: int) -> list[tuple[int, int]]:
     parts: list[tuple[int, int]] = []
     pos = start
     while pos < end:
-        opening = _OPENING_QUOTE.search(text, pos, end)
+        opening = _next_opening(text, pos, end)
         if opening is None:
             parts.append((pos, end))
             break
-        if opening.start() > pos:
-            parts.append((pos, opening.start()))
+        if opening[0] > pos:
+            parts.append((pos, opening[0]))
         part_end, pos = _closing_quote(text, opening, end)
-        parts.append((opening.end(), part_end))
+        parts.append((opening[1], part_end))
     if len(parts) == 1 and parts[0] == (start, end):
         return []
     return [(begin, stop) for begin, stop in parts if begin < stop]
@@ -1064,35 +1225,36 @@ def _decode_json_strings(text: str) -> tuple[str, list[int], list[int]]:
     ends: list[int] = []
     pos = 0
     while (opening := text.find('"', pos)) != -1:
-        string: list[str] = []
-        where: list[int] = []
+        # A string that turns out not to be one is taken off the lists again.
+        kept_parts, kept_places = len(parts), len(places)
         pos = opening + 1
         while (mark := _STRING_MARK.search(text, pos)) is not None:
             at = mark.start()
-            string.append(text[pos:at])
-            where.extend(range(pos, at))
+            if at > pos:
+                parts.append(text[pos:at])
+                places.extend(range(pos, at))
             pos = at + 1
             if text[at] != "\\":
                 break
             escape = text[at + 1 : at + 2]
             if escape in _JSON_ESCAPES:
-                string.append(_JSON_ESCAPES[escape])
+                parts.append(_JSON_ESCAPES[escape])
                 pos = at + 2
             elif escape == "u" and _HEX4.fullmatch(text, at + 2, at + 6):
                 char = chr(int(text[at + 2 : at + 6], 16))
-                string.append("\n" if char == "\r" else char)
+                parts.append("\n" if char == "\r" else char)
                 pos = at + 6
             else:
                 break
-            where.append(at)
-        if mark is None:
-            break
-        if text[mark.start()] == '"':
-            parts.extend(string)
-            places.extend(where)
+            places.append(at)
+        if mark is not None and text[mark.start()] == '"':
             ends.append(len(places))
             parts.append("\n")
             places.append(mark.start())
+            continue
+        del parts[kept_parts:], places[kept_places:]
+        if mark is None:
+            break
     return "".join(parts), places, ends
 
 
@@ -1131,29 +1293,29 @@ def _decode_shell_strings(text: str) -> tuple[str, list[int], list[int]]:
         pos = opening + 1
         if not _is_shell_word(text, opening):
             continue
-        string: list[str] = []
-        where: list[int] = []
+        kept_parts, kept_places = len(parts), len(places)
         while (mark := _SHELL_MARK.search(text, pos)) is not None:
             at = mark.start()
-            string.append(text[pos:at])
-            where.extend(range(pos, at))
+            if at > pos:
+                parts.append(text[pos:at])
+                places.extend(range(pos, at))
             pos = at + 1
             if text[at] != "\\":
                 break
             if text[at + 1 : at + 2] in _SHELL_ESCAPED:
-                string.append(text[at + 1])
+                parts.append(text[at + 1])
                 pos = at + 2
             else:
-                string.append("\\")
-            where.append(at)
-        if mark is None:
-            break
-        if text[mark.start()] == '"':
-            parts.extend(string)
-            places.extend(where)
+                parts.append("\\")
+            places.append(at)
+        if mark is not None and text[mark.start()] == '"':
             ends.append(len(places))
             parts.append("\n")
             places.append(mark.start())
+            continue
+        del parts[kept_parts:], places[kept_places:]
+        if mark is None:
+            break
     return "".join(parts), places, ends
 
 
@@ -1204,22 +1366,56 @@ def _value_spans(text: str) -> list[tuple[int, int]]:
     return merge_spans([*_plain_spans(text), *_json_spans(text)])
 
 
+@functools.lru_cache(maxsize=1)
+def _cached_value_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """:func:`_value_spans`, kept for the last text.
+
+    The two command line rules of a policy read the same text when the
+    rules between them hid nothing, so the text is read only once.
+    """
+    return tuple(_value_spans(text))
+
+
+#: Texts the first command line rule leaves with nothing for the second
+#: one: every value it found is replaced by its mark. When the rules in
+#: between hide nothing, the second rule gets one of these texts.
+_SETTLED: Final[collections.deque[str]] = collections.deque(maxlen=4)
+
+
+def _marked(text: str, spans: list[tuple[int, int]]) -> str:
+    """*text* with each span replaced by the mark of the first command line rule."""
+    parts: list[str] = []
+    pos = 0
+    for start, end in spans:
+        parts += [text[pos:start], _OWN_MARK]
+        pos = end
+    return "".join([*parts, text[pos:]])
+
+
 class CommandSecretFinder:
     """Report the secret value of each command line form listed in the module docstring.
 
     With *leave_to*, a value that pattern hides is left to it (see the
-    module docstring).
+    module docstring). With *rest*, the finder is the second rule, after
+    the *leave_to* pattern: a text that the first rule left with nothing
+    to hide is not read again.
     """
 
-    def __init__(self, leave_to: re.Pattern[str] | None = None) -> None:
+    def __init__(self, leave_to: re.Pattern[str] | None = None, *, rest: bool = False) -> None:
         self._leave_to = leave_to
+        self._rest = rest
 
     def secret_spans(self, text: str) -> list[tuple[int, int]]:
         """Return ``(start, end)`` of every secret value, left to right, never overlapping."""
-        spans = _value_spans(text)
+        if self._rest and text in _SETTLED:
+            return []
+        spans = list(_cached_value_spans(text))
         if self._leave_to is None or not spans:
             return spans
-        return _left_to(text, spans, self._leave_to)
+        kept = _left_to(text, spans, self._leave_to)
+        if kept == spans:
+            _SETTLED.append(_marked(text, spans))
+        return kept
 
 
 #: The finder on its own: it reports every value it reads.

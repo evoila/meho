@@ -119,6 +119,14 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "action": "redact",
                 "reason": "API key / access / refresh / session token / secret id",
             },
+            # After api_key: a command line value that the api_key rule did
+            # not hide, such as one that a ``;`` follows.
+            {
+                "name": "fr-command-line-secret-rest",
+                "pattern": "command_line_secret_rest",
+                "action": "redact",
+                "reason": "password or token on a command line that the api_key rule did not hide",
+            },
             {
                 "name": "fr-kubeconfig",
                 "pattern": "kubeconfig",

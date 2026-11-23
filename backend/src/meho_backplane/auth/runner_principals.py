@@ -66,6 +66,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakClientNotFoundError,
 )
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.runner_enrollment import new_enrollment_code
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
@@ -82,6 +83,7 @@ __all__ = [
     "RunnerPrincipalExistsError",
     "RunnerPrincipalNotFoundError",
     "RunnerPrincipalRead",
+    "RunnerPrincipalRegistered",
     "RunnerPrincipalService",
 ]
 
@@ -188,6 +190,17 @@ class RunnerPrincipalRead(BaseModel):
     package_set_digest: str | None = None
 
 
+class RunnerPrincipalRegistered(RunnerPrincipalRead):
+    """The answer of ``register``: the principal and its one-time enrollment code.
+
+    The code is shown once and never stored. The runner sends it with its
+    public key to enroll; it works once and until ``enrollment_code_expires_at``.
+    """
+
+    enrollment_code: str
+    enrollment_code_expires_at: datetime
+
+
 class RunnerPrincipalService:
     """Tenant-scoped register / list / get / revoke for runner principals.
 
@@ -202,7 +215,7 @@ class RunnerPrincipalService:
         tenant_id: uuid.UUID,
         created_by_sub: str,
         payload: RunnerPrincipalCreate,
-    ) -> RunnerPrincipalRead:
+    ) -> RunnerPrincipalRegistered:
         """Register a new runner principal.
 
         Generates the runner id up front, creates the Keycloak client
@@ -262,7 +275,9 @@ class RunnerPrincipalService:
         )
 
         # Phase 2: insert the DB row with the explicit generated id (rolls
-        # back the Keycloak client on any failure — see _insert_row).
+        # back the Keycloak client on any failure — see _insert_row). The row
+        # carries the hash of the one-time enrollment code.
+        code, code_hash, code_expires_at = new_enrollment_code(runner_id)
         row = RunnerPrincipal(
             id=runner_id,
             tenant_id=tenant_id,
@@ -272,6 +287,8 @@ class RunnerPrincipalService:
             owner_sub=owner,
             revoked=False,
             created_by_sub=created_by_sub,
+            enrollment_code_hash=code_hash,
+            enrollment_code_expires_at=code_expires_at,
         )
         entry = await self._insert_row(row, internal_id=internal_id, name=payload.name)
         self._log.info(
@@ -282,7 +299,11 @@ class RunnerPrincipalService:
             runner_id=str(runner_id),
             created_by_sub=created_by_sub,
         )
-        return entry
+        return RunnerPrincipalRegistered(
+            **entry.model_dump(),
+            enrollment_code=code,
+            enrollment_code_expires_at=code_expires_at,
+        )
 
     async def _provision_keycloak_client(
         self,
@@ -498,7 +519,12 @@ class RunnerPrincipalService:
         return RunnerPrincipalRead.model_validate(row)
 
     async def _disable_keycloak_client(
-        self, keycloak_internal_id: str, *, tenant_id: uuid.UUID, name: str
+        self,
+        keycloak_internal_id: str,
+        *,
+        tenant_id: uuid.UUID,
+        name: str,
+        remove_key: bool = False,
     ) -> None:
         """Disable the runner's Keycloak client — the authoritative kill switch.
 
@@ -511,6 +537,8 @@ class RunnerPrincipalService:
         try:
             async with kc_client:
                 await kc_client.disable_client(keycloak_internal_id)
+                if remove_key:
+                    await kc_client.clear_client_signed_jwt_key(keycloak_internal_id)
         except KeycloakClientNotFoundError:
             self._log.warning(
                 "runner_principal_revoke_keycloak_not_found",
@@ -518,6 +546,21 @@ class RunnerPrincipalService:
                 name=name,
                 keycloak_internal_id=keycloak_internal_id,
             )
+
+    async def _active_client(self, tenant_id: uuid.UUID, name: str) -> tuple[str, bool]:
+        """Return ``(keycloak_internal_id, has_enrolled_key)`` of a not revoked runner."""
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(RunnerPrincipal).where(
+                    RunnerPrincipal.tenant_id == tenant_id,
+                    RunnerPrincipal.name == name,
+                    RunnerPrincipal.revoked.is_(False),
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise RunnerPrincipalNotFoundError(name)
+            return row.keycloak_internal_id, row.key_enrolled_at is not None
 
     async def revoke(
         self,
@@ -533,7 +576,8 @@ class RunnerPrincipalService:
         Phase 1: look up the principal (must exist and not already be
         revoked) to obtain its ``keycloak_internal_id``.
         Phase 2: disable the Keycloak client (``enabled=false``) — the
-        authoritative kill switch.
+        authoritative kill switch.  When the runner enrolled its own
+        public key, the same step removes that key from the client.
         Phase 3: commit ``revoked=true`` in the DB.
 
         Keycloak is disabled *before* the DB row is marked so a Keycloak
@@ -555,23 +599,14 @@ class RunnerPrincipalService:
         started = time.monotonic()
         sessionmaker = get_sessionmaker()
         # Phase 1: validate + fetch the Keycloak internal id (read-only).
-        async with sessionmaker() as session:
-            result = await session.execute(
-                select(RunnerPrincipal).where(
-                    RunnerPrincipal.tenant_id == tenant_id,
-                    RunnerPrincipal.name == name,
-                    RunnerPrincipal.revoked.is_(False),
-                )
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                raise RunnerPrincipalNotFoundError(name)
-            keycloak_internal_id = row.keycloak_internal_id
+        keycloak_internal_id, has_key = await self._active_client(tenant_id, name)
 
         # Phase 2: disable the Keycloak client FIRST (authoritative kill
         # switch) — before any DB write, so a runner is never marked revoked
         # while it can still mint tokens.
-        await self._disable_keycloak_client(keycloak_internal_id, tenant_id=tenant_id, name=name)
+        await self._disable_keycloak_client(
+            keycloak_internal_id, tenant_id=tenant_id, name=name, remove_key=has_key
+        )
 
         # Phase 3: persist revoked=true now that the client is disabled.
         async with sessionmaker() as session:
@@ -587,6 +622,7 @@ class RunnerPrincipalService:
                 raise RunnerPrincipalNotFoundError(name)
             if not row.revoked:
                 row.revoked = True
+                row.enrollment_code_hash = None
                 row.updated_at = datetime.now(UTC)
                 await session.flush()
             await session.refresh(row)

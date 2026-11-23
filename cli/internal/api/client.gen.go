@@ -10220,6 +10220,21 @@ type RunnerAssignment struct {
 	Items             *[]RunnerWorkItem `json:"items,omitempty"`
 }
 
+// RunnerEnrollRequest A runner's one-time code and its public key (a JWK, EC P-256).
+type RunnerEnrollRequest struct {
+	EnrollmentCode string                 `json:"enrollment_code"`
+	PublicKey      map[string]interface{} `json:"public_key"`
+}
+
+// RunnerEnrollResponse What the runner needs to sign its login request.
+type RunnerEnrollResponse struct {
+	ClientId      string `json:"client_id"`
+	Issuer        string `json:"issuer"`
+	KeyId         string `json:"key_id"`
+	SigningAlg    string `json:"signing_alg"`
+	TokenEndpoint string `json:"token_endpoint"`
+}
+
 // RunnerPrincipal Principal context an executed op runs under, carried on each item.
 //
 // Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
@@ -10312,6 +10327,28 @@ type RunnerPrincipalRead struct {
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	WireVersion        *string            `json:"wire_version"`
+}
+
+// RunnerPrincipalRegistered The answer of “register“: the principal and its one-time enrollment code.
+//
+// The code is shown once and never stored. The runner sends it with its
+// public key to enroll; it works once and until “enrollment_code_expires_at“.
+type RunnerPrincipalRegistered struct {
+	CreatedAt               time.Time          `json:"created_at"`
+	CreatedBySub            string             `json:"created_by_sub"`
+	EnrollmentCode          string             `json:"enrollment_code"`
+	EnrollmentCodeExpiresAt time.Time          `json:"enrollment_code_expires_at"`
+	Id                      openapi_types.UUID `json:"id"`
+	KeycloakClientId        string             `json:"keycloak_client_id"`
+	KeycloakInternalId      string             `json:"keycloak_internal_id"`
+	LastSeenAt              *time.Time         `json:"last_seen_at"`
+	Name                    string             `json:"name"`
+	OwnerSub                string             `json:"owner_sub"`
+	PackageSetDigest        *string            `json:"package_set_digest"`
+	Revoked                 bool               `json:"revoked"`
+	TenantId                openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt               time.Time          `json:"updated_at"`
+	WireVersion             *string            `json:"wire_version"`
 }
 
 // RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
@@ -15240,6 +15277,9 @@ type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = Under
 // RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
 type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
 
+// EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody defines body for EnrollRunnerApiV1RunnerPrincipalsEnrollPost for application/json ContentType.
+type EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody = RunnerEnrollRequest
+
 // GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody defines body for GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost for application/json ContentType.
 type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody = RemoteWriteCapabilityGrant
 
@@ -18160,6 +18200,11 @@ type ClientInterface interface {
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody request with any body
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet request
 	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22085,6 +22130,30 @@ func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx co
 
 func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -38419,6 +38488,46 @@ func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server s
 		}
 
 	}
+
+	return req, nil
+}
+
+// NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest calls the generic EnrollRunnerApiV1RunnerPrincipalsEnrollPost builder with application/json body
+func NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest(server string, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody generates requests for EnrollRunnerApiV1RunnerPrincipalsEnrollPost with any type of body
+func NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/enroll")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -55633,6 +55742,11 @@ type ClientWithResponsesInterface interface {
 
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
 
+	// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse request with any body
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error)
+
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error)
+
 	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request
 	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error)
 
@@ -60578,7 +60692,7 @@ func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) StatusCode() int {
 type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *RunnerPrincipalRead
+	JSON201      *RunnerPrincipalRegistered
 	JSON422      *HTTPValidationError
 }
 
@@ -60592,6 +60706,29 @@ func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) Status() strin
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerEnrollResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69485,6 +69622,23 @@ func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWi
 		return nil, err
 	}
 	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse request with arbitrary body returning *EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse
+func (c *ClientWithResponses) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	rsp, err := c.EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	rsp, err := c.EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp)
 }
 
 // ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request returning *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse
@@ -78728,11 +78882,44 @@ func ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp *http.Res
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest RunnerPrincipalRead
+		var dest RunnerPrincipalRegistered
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse parses an HTTP response from a EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse call
+func ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp *http.Response) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerEnrollResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

@@ -720,6 +720,49 @@ stamp is a request side effect, and central enforcement is on by
 default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
 `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER` (default 3).
 
+## Runner login with a key pair made at the site
+
+A runner logs in in one of two modes. Which one runs is decided at start by
+`runner.login.open_signed_jwt_login`:
+
+- A login record (`runner-login.json`) in `MEHO_RUNNER_KEY_DIR`: key mode.
+- Else `MEHO_RUNNER_ENROLLMENT_CODE` set: enroll first, then key mode.
+- Else `MEHO_RUNNER_TOKEN` set: the fixed token mode (unchanged; no key,
+  no renewal).
+- Else a `RunnerConfigError` that names the variables.
+
+**Enrollment.**
+
+- `RunnerPrincipalService.register` makes a one-time code
+  `<runner id hex>.<secret>` (`auth/runner_enrollment.py::new_enrollment_code`)
+  and returns it once in `RunnerPrincipalRegistered`. Only its SHA-256 and
+  its expiry (30 minutes) are stored (`runner_principal.enrollment_code_hash`,
+  `enrollment_code_expires_at`, migration `0184`).
+- The runner makes an EC P-256 key (`runner/login.py::load_or_create_private_key`;
+  the file `runner-key.pem` has mode `0600`) and posts the public key (a JWK)
+  with the code to `POST /api/v1/runner-principals/enroll`
+  (`api/v1/runner_enrollment.py`). That route has no login: the code is the
+  proof.
+- `enroll_runner_key` refuses a private member in the key, a key that is not
+  P-256, and a wrong, used, expired or revoked code (all give 403
+  `enrollment_code_invalid`). The code is used up by an update that matches the
+  stored hash, so two requests at once cannot both win. When Keycloak cannot
+  store the key, the code is put back so the runner can retry.
+- `KeycloakAdminClient.set_client_signed_jwt_key` sets the client to
+  `client-jwt` and stores the key set in `jwks.string`.
+
+**Renewal.** `SignedJwtTokenProvider` signs a 60-second JWT (ES256, `kid`,
+`iss`=`sub`=client id, `aud`=issuer, unique `jti`) and posts it to the token
+endpoint with the `client_credentials` grant. It keeps the token and gets a new
+one when less than a quarter of its life (at least 30 seconds) is left.
+`RunnerClient` uses it through an `httpx.Auth` (`_ProviderAuth`): after a
+`401` it gets a new token and sends the call once more. Nothing in the module
+logs a key, a code, an assertion or a token.
+
+**Revoke.** `RunnerPrincipalService.revoke` disables the client and, when the
+runner had enrolled a key, also calls `clear_client_signed_jwt_key`. It also
+clears any unused code.
+
 ## Dependencies
 
 - `httpx` (already a direct backend dependency) for the poll/report
@@ -751,8 +794,8 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
   #2901 / #3187).
 - Heartbeat + central stale/unknown flipping — #2501.
 - The scoped per-runner service principal + credential scoping — #2502.
-  `MEHO_RUNNER_TOKEN` is the seam it fills; this chassis treats it as an
-  opaque bearer.
+  `MEHO_RUNNER_TOKEN` is the fixed-token seam; this chassis treats it as an
+  opaque bearer. The key mode above renews its own token.
 - Change ops over the gateway, any inbound listener, arbitrary TCP
   proxying — out of scope by the initiative's design principles.
 

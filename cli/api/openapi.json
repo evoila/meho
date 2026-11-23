@@ -10447,6 +10447,48 @@
         }
       }
     },
+    "/api/v1/runner-principals/enroll": {
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Enroll Runner",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``. A bad key gets 422.",
+        "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerEnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerEnrollResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runner-principals": {
       "get": {
         "tags": [
@@ -10528,7 +10570,7 @@
           "runner-principals"
         ],
         "summary": "Register Runner Principal",
-        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\nThe answer carries a one-time enrollment code, shown only here. The runner\nsends it with its own public key to ``POST /api/v1/runner-principals/enroll``.\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
         "operationId": "register_runner_principal_api_v1_runner_principals_post",
         "parameters": [
           {
@@ -10558,7 +10600,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                  "$ref": "#/components/schemas/RunnerPrincipalRegistered"
                 }
               }
             }
@@ -42507,6 +42549,63 @@
         "title": "RunnerAssignment",
         "description": "The runner's current work assignment, fetched each tick.\n\n``assignment_version`` is an opaque digest the runner echoes back as\n``known_version`` so central can answer an unchanged assignment with a\n``304`` (see :meth:`RunnerClient.fetch_assignment`)."
       },
+      "RunnerEnrollRequest": {
+        "properties": {
+          "enrollment_code": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Enrollment Code"
+          },
+          "public_key": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Public Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enrollment_code",
+          "public_key"
+        ],
+        "title": "RunnerEnrollRequest",
+        "description": "A runner's one-time code and its public key (a JWK, EC P-256)."
+      },
+      "RunnerEnrollResponse": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "issuer": {
+            "type": "string",
+            "title": "Issuer"
+          },
+          "token_endpoint": {
+            "type": "string",
+            "title": "Token Endpoint"
+          },
+          "signing_alg": {
+            "type": "string",
+            "title": "Signing Alg"
+          },
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_id",
+          "issuer",
+          "token_endpoint",
+          "signing_alg",
+          "key_id"
+        ],
+        "title": "RunnerEnrollResponse",
+        "description": "What the runner needs to sign its login request."
+      },
       "RunnerPrincipal": {
         "properties": {
           "sub": {
@@ -42652,6 +42751,97 @@
         ],
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."
+      },
+      "RunnerPrincipalRegistered": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
+          },
+          "package_set_digest": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set Digest"
+          },
+          "enrollment_code": {
+            "type": "string",
+            "title": "Enrollment Code"
+          },
+          "enrollment_code_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Enrollment Code Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "last_seen_at",
+          "enrollment_code",
+          "enrollment_code_expires_at"
+        ],
+        "title": "RunnerPrincipalRegistered",
+        "description": "The answer of ``register``: the principal and its one-time enrollment code.\n\nThe code is shown once and never stored. The runner sends it with its\npublic key to enroll; it works once and until ``enrollment_code_expires_at``."
       },
       "RunnerResult": {
         "properties": {

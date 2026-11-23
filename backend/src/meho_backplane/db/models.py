@@ -5266,6 +5266,14 @@ class RunnerPrincipal(Base):
     # call (the runner list shows it). ``NULL`` until the runner calls after
     # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The one-time enrollment code (migration 0184): only its SHA-256 is
+    # stored, and the column is emptied when the code is used. The expiry and
+    # the time the runner enrolled its public key sit beside it.
+    enrollment_code_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enrollment_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    key_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(

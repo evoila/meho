@@ -75,6 +75,7 @@ from meho_backplane.auth.runner_principals import (
     RunnerPrincipalExistsError,
     RunnerPrincipalNotFoundError,
     RunnerPrincipalRead,
+    RunnerPrincipalRegistered,
     RunnerPrincipalService,
 )
 from meho_backplane.auth.runner_write_allowlist import (
@@ -184,14 +185,17 @@ async def show_runner_principal(
 
 @router.post(
     "",
-    response_model=RunnerPrincipalRead,
+    response_model=RunnerPrincipalRegistered,
     status_code=http_status.HTTP_201_CREATED,
 )
 async def register_runner_principal(
     body: RunnerPrincipalCreate,
     operator: Operator = _require_admin,
-) -> RunnerPrincipalRead:
+) -> RunnerPrincipalRegistered:
     """Register a new runner principal (creates Keycloak client + DB row).
+
+    The answer carries a one-time enrollment code, shown only here. The runner
+    sends it with its own public key to ``POST /api/v1/runner-principals/enroll``.
 
     ``tenant_admin`` only. The minted Keycloak client's token carries a
     hardcoded ``principal_kind=runner`` mapper and a read-only

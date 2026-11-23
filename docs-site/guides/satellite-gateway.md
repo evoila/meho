@@ -75,16 +75,45 @@ satellite's identity (a Keycloak client `runner:<name>`, tagged
 
 ```bash
 meho runner-principal register edge-dc-a
-# → the principal: id, Keycloak client runner:edge-dc-a, owner
+# → the principal: id, Keycloak client runner:edge-dc-a, owner,
+#   and a one-time enrollment code
 ```
 
-Register prints no token. MEHO stores the client's secret in Vault
-(under the same path pattern as agent secrets). Set `MEHO_RUNNER_ID` to
-the runner name (`edge-dc-a`). `MEHO_RUNNER_TOKEN` is a bearer token of
-that Keycloak client.
+Register prints a one-time enrollment code. It is shown once, it works
+once, and it ends after 30 minutes. Copy it now. MEHO stores only a hash
+of it. MEHO also stores the client's secret in Vault (under the same path
+pattern as agent secrets). Set `MEHO_RUNNER_ID` to the runner name
+(`edge-dc-a`).
 
 **2. Deploy the runner** inside the isolated network — the same image,
-started in runner mode, configured entirely through `MEHO_RUNNER_*` env:
+started in runner mode, configured entirely through `MEHO_RUNNER_*` env.
+The runner logs in in one of two ways.
+
+*Its own key pair (recommended).* On its first start the runner makes a
+key pair, keeps the private key in `MEHO_RUNNER_KEY_DIR` (default
+`/var/lib/meho/runner-key`, file mode `0600`) and sends only the public
+key, with the enrollment code, to central. Central puts the public key on
+the runner's Keycloak client (signed JWT client login). From then on the
+runner signs its own login request and gets a short token. It asks for a
+new token before the old one ends, and once more after a `401`. No person
+hands it a token. The private key never leaves the site.
+
+```bash
+MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
+MEHO_RUNNER_ID=edge-dc-a \
+MEHO_RUNNER_ENROLLMENT_CODE=<code-from-register> \
+python -m meho_backplane.runner
+```
+
+Put `MEHO_RUNNER_KEY_DIR` on a volume that stays when the runner
+restarts. After the first start the runner finds its key there, so the
+code is not needed again. A runner whose key is lost needs a new
+registration. `MEHO_RUNNER_TOKEN_URL` sets the login server's token address
+when the runner must reach it under another name than central tells it.
+
+*A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
+Keycloak client instead. The runner sends it as it is and does not renew
+it; give it a new one by hand when it ends. This mode works as before.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
@@ -98,8 +127,7 @@ Optional knobs: `MEHO_RUNNER_TICK_INTERVAL_SECONDS` (poll cadence),
 spool bounds).
 
 There is no chart, package or installer for the runner yet; you write your
-own container setup. The runner does not renew its token; when the token
-expires, give it a new one by hand.
+own container setup.
 
 **3. Confirm central sees it:**
 
@@ -140,6 +168,10 @@ switch:
 meho runner-principal revoke edge-dc-a
 ```
 
+Revoke disables the runner's Keycloak client and removes its public key
+there. The runner gets no new token, and its calls with the token it has
+stop working when that token ends.
+
 ## Satellite vs. the in-process check runner
 
 Do not confuse the satellite with the **in-process check runner** that
@@ -154,7 +186,8 @@ runner (step 4 above), for the targets central cannot reach.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID` / `TOKEN`) is missing or malformed. | Set all three; the error names the offender. |
+| The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID`) is missing or malformed, or it has neither `MEHO_RUNNER_TOKEN`, nor `MEHO_RUNNER_ENROLLMENT_CODE`, nor a key in `MEHO_RUNNER_KEY_DIR`. | Set the missing one; the error names it. |
+| The runner exits 1 with `runner_login_error` and "enrollment was refused" | The enrollment code is wrong, was used, has ended, or its runner is revoked. | Register the runner again and use the new code. |
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. You cannot see them in MEHO yet. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
@@ -166,7 +199,7 @@ runner (step 4 above), for the targets central cannot reach.
 - Changes through a satellite.
 - Reads that need a stored password (the runner has no Vault login of its own).
 - Generic operations (made from an API spec) on a satellite.
-- A chart or installer, and token renewal.
+- A chart or installer.
 - The per-check interval.
 - A CLI command or page that shows runner results.
 

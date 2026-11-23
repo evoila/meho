@@ -57,6 +57,7 @@ without starving the request slot.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -703,6 +704,88 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak disable_client PUT failed: HTTP {put_resp.status_code}"
             )
+
+    async def set_client_signed_jwt_key(
+        self, keycloak_internal_id: str, *, jwks: dict[str, Any], signing_alg: str
+    ) -> None:
+        """Make the client log in with a signed JWT checked against *jwks*.
+
+        Sets ``clientAuthenticatorType=client-jwt`` and puts the public key set
+        in the client's ``jwks.string`` attribute, so the client's own private
+        key signs its login. Every other part of the client stays as it is (the
+        Admin API ``PUT`` replaces the whole representation, so this reads it
+        first).
+
+        Raises :class:`KeycloakClientNotFoundError` on an unknown id.
+        """
+
+        def _apply(representation: dict[str, Any]) -> None:
+            representation["clientAuthenticatorType"] = "client-jwt"
+            attributes = dict(representation.get("attributes") or {})
+            attributes["use.jwks.url"] = "false"
+            attributes["use.jwks.string"] = "true"
+            attributes["jwks.string"] = json.dumps(jwks)
+            attributes["token.endpoint.auth.signing.alg"] = signing_alg
+            representation["attributes"] = attributes
+
+        await self._update_client(keycloak_internal_id, _apply, "set_client_signed_jwt_key")
+
+    async def clear_client_signed_jwt_key(self, keycloak_internal_id: str) -> None:
+        """Remove the client's public key and go back to the client secret login.
+
+        Raises :class:`KeycloakClientNotFoundError` on an unknown id.
+        """
+
+        def _apply(representation: dict[str, Any]) -> None:
+            representation["clientAuthenticatorType"] = "client-secret"
+            attributes = dict(representation.get("attributes") or {})
+            for name in (
+                "use.jwks.url",
+                "use.jwks.string",
+                "jwks.string",
+                "token.endpoint.auth.signing.alg",
+            ):
+                attributes.pop(name, None)
+            representation["attributes"] = attributes
+
+        await self._update_client(keycloak_internal_id, _apply, "clear_client_signed_jwt_key")
+
+    async def _update_client(
+        self,
+        keycloak_internal_id: str,
+        apply: Callable[[dict[str, Any]], None],
+        what: str,
+    ) -> None:
+        """Read the client representation, change it with *apply*, write it back."""
+        assert self._http is not None
+        assert self._token
+        url = f"{self._admin_url}/clients/{keycloak_internal_id}"
+        try:
+            get_resp = await self._http.get(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak {what} GET network error: {type(exc).__name__}"
+            ) from exc
+        if get_resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if get_resp.status_code != 200:
+            raise KeycloakAdminError(f"Keycloak {what} GET failed: HTTP {get_resp.status_code}")
+        representation: dict[str, Any] = get_resp.json()
+        apply(representation)
+        try:
+            put_resp = await self._http.put(
+                url,
+                content=json.dumps(representation),
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak {what} PUT network error: {type(exc).__name__}"
+            ) from exc
+        if put_resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if put_resp.status_code not in (200, 204):
+            raise KeycloakAdminError(f"Keycloak {what} PUT failed: HTTP {put_resp.status_code}")
 
     async def delete_client(self, keycloak_internal_id: str) -> None:
         """Delete the Keycloak client identified by *keycloak_internal_id*.

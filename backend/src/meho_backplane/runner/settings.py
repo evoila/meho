@@ -25,6 +25,7 @@ from functools import lru_cache
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 __all__ = [
+    "DEFAULT_KEY_DIR",
     "DEFAULT_SPOOL_DIR",
     "DEFAULT_SPOOL_MAX_FILES",
     "DEFAULT_TICK_INTERVAL_SECONDS",
@@ -40,6 +41,10 @@ DEFAULT_TICK_INTERVAL_SECONDS = 60.0
 #: ``/var/lib`` (mutable runtime state) rather than the baked-content
 #: ``/opt/meho`` convention the chassis uses for read-only assets.
 DEFAULT_SPOOL_DIR = "/var/lib/meho/runner-spool"
+
+#: Default folder for the runner's own key pair and login record. It must be
+#: on a kept volume, so the key survives a restart.
+DEFAULT_KEY_DIR = "/var/lib/meho/runner-key"
 
 #: Default cap on spooled batch files. Bounds disk growth on a runner
 #: whose uplink to central stays partitioned for a long time.
@@ -60,13 +65,22 @@ class RunnerSettings(BaseModel):
     Frozen so the resolved config cannot drift mid-process. ``runner_token``
     is ``repr``-excluded (mould: chassis secret fields) so it never lands
     in a structured log line via an accidental ``logger.bind(settings=...)``.
+
+    The runner logs in one of two ways. With ``MEHO_RUNNER_TOKEN`` it sends that
+    fixed token. Without it, it signs its own login with a key pair made at the
+    site: the first start needs ``MEHO_RUNNER_ENROLLMENT_CODE`` (the one-time
+    code from ``meho runner-principal register``); later starts use the key
+    kept in ``key_dir``.
     """
 
     model_config = ConfigDict(frozen=True)
 
     central_url: str = Field(min_length=1)
     runner_id: str = Field(min_length=1)
-    runner_token: str = Field(min_length=1, repr=False)
+    runner_token: str | None = Field(default=None, repr=False)
+    enrollment_code: str | None = Field(default=None, repr=False)
+    key_dir: str = Field(min_length=1)
+    token_endpoint_override: str | None = None
     tick_interval_seconds: float = Field(gt=0.0)
     spool_dir: str = Field(min_length=1)
     spool_max_files: int = Field(gt=0)
@@ -81,6 +95,14 @@ def _require_env(name: str) -> str:
     if not value.strip():
         raise RunnerConfigError(f"required env var {name} is empty")
     return value
+
+
+def _optional_env(name: str) -> str | None:
+    """Return the stripped value of ``os.environ[name]``, or ``None`` when empty."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    return raw.strip()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -120,7 +142,10 @@ def get_runner_settings() -> RunnerSettings:
         return RunnerSettings(
             central_url=_require_env("MEHO_RUNNER_CENTRAL_URL"),
             runner_id=_require_env("MEHO_RUNNER_ID"),
-            runner_token=_require_env("MEHO_RUNNER_TOKEN"),
+            runner_token=_optional_env("MEHO_RUNNER_TOKEN"),
+            enrollment_code=_optional_env("MEHO_RUNNER_ENROLLMENT_CODE"),
+            key_dir=os.environ.get("MEHO_RUNNER_KEY_DIR") or DEFAULT_KEY_DIR,
+            token_endpoint_override=_optional_env("MEHO_RUNNER_TOKEN_URL"),
             tick_interval_seconds=_env_float(
                 "MEHO_RUNNER_TICK_INTERVAL_SECONDS", DEFAULT_TICK_INTERVAL_SECONDS
             ),

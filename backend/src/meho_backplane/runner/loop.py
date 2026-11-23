@@ -53,6 +53,7 @@ from meho_backplane.runner.client import (
     RunnerWireVersionMismatchError,
 )
 from meho_backplane.runner.executor import execute_work_item
+from meho_backplane.runner.login import open_signed_jwt_login
 from meho_backplane.runner.settings import RunnerSettings, get_runner_settings
 from meho_backplane.runner.spool import ResultSpool
 from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
@@ -186,10 +187,12 @@ async def _run_loop(settings: RunnerSettings) -> None:
     )
     state = RunnerState()
     spool = ResultSpool(settings.spool_dir, max_files=settings.spool_max_files)
+    provider = await open_signed_jwt_login(settings)
     async with RunnerClient(
         central_url=settings.central_url,
         runner_id=settings.runner_id,
-        token=settings.runner_token,
+        token=None if provider is not None else settings.runner_token,
+        token_provider=provider,
     ) as client:
         while True:
             try:

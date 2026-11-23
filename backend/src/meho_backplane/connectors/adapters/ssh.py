@@ -472,10 +472,10 @@ class SshConnector(Connector):
         # Maps the pool key ``(tenant_id, id, caller kind, sub, secret_ref,
         # host, port)`` (``_pool_key``) → (SSHClientConnection, last_used
         # monotonic timestamp). The tenant-unique ``(tenant_id, id)`` part
-        # keeps two tenants' same-named targets apart (evoila/meho#1682). The
-        # caller part keeps one login per caller: a connection is handed back
-        # only to the caller whose own Vault read opened it. The target values
-        # part hands a connection back only to a call with the same secret
+        # keeps two tenants' same-named targets apart. The caller part keeps
+        # one login per caller: a connection is handed back only to the
+        # caller whose own Vault read opened it. The target values part
+        # hands a connection back only to a call with the same secret
         # reference, host and port it was opened with.
         self._connections: dict[PoolKey, tuple[asyncssh.SSHClientConnection, float]] = {}
         # Short-lived lock protecting only _connections and _connect_locks dicts.

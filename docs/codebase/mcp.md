@@ -2174,6 +2174,11 @@ text, so both switches can be on. With it off, the tool is the registered
 one and a call that sends the input is refused with `-32602`. See "Getting
 an approved secret value on MCP" below.
 
+A fifth switch, `MCP_OWN_REQUEST_STATUS` (off by default), adds the same
+input for another use: reading the state of the caller's own approval
+request. When both switches are on, the input has one text that covers
+both. See "Reading the state of your own approval request" below.
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second
@@ -2211,6 +2216,56 @@ call_operation(connector_id, op_id, approval_request_id)
   the command line (`meho secret read --approval <id> --field <name>`), in
   the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.
 - Tests: `tests/test_mcp_reveal_fetch.py`.
+
+## Reading the state of your own approval request (`MCP_OWN_REQUEST_STATUS`, off by default)
+
+A call that waits for approval answers `awaiting_approval` with
+`extras.approval_request_id`. On the default tool list there is no other way
+to follow that request: `meho_approvals_get` needs the operator role and
+`mcp:admin`. With the switch on, the caller sends:
+
+```
+call_operation(connector_id, op_id, approval_request_id)
+```
+
+The caller needs the request id. It learns only the state of a request of its own login.
+"Own" means the same login. So an agent that acts for a person reads that person's requests.
+The read checks no agent grant.
+
+- The code is in `mcp/tools/_call_operation_status.py`. The handler hands
+  the call over when it has `approval_request_id`. The call runs nothing,
+  makes no new request and writes no call record.
+- With `MCP_REVEAL_FETCH` also on, an approved secret reveal of the caller
+  still goes to the value fetch above. Every other request goes here.
+- Only `connector_id`, `op_id` and `approval_request_id` may be sent
+  (`-32602`, `own_request_status_extra_inputs`). `connector_id` and `op_id`
+  must be the ones of the request (`request_wrong_operation`). Both checks
+  run before anything is read.
+- A request of another login, of another tenant and an unknown id all get
+  `approval_request_not_found`, word for word.
+- Each read writes one `approval.result` audit row, as
+  `GET /api/v1/approvals/{id}/result` does
+  (`approval_queue.read_approval_result`).
+- The answer by state: waiting gives the same `awaiting_approval` answer as
+  the first call; approved and not finished gives `status: "pending"` with
+  `extras.result_state` (`not_started` or `started`); approved and run gives
+  the stored result with `extras.result_state` added; rejected, expired and
+  withdrawn give `status: "denied"` with `extras.error_code` of
+  `approval_request_rejected`, `approval_request_expired` or
+  `approval_request_withdrawn`, and a sentence that says to ask again.
+- The stored result goes through the response size limit, with the added
+  fields and the data notice counted (see "Response wire ceiling"). An `ok`
+  answer over the limit keeps its status and `audit_id`. `delivery` is
+  `partial` or `unavailable`, and the added `extras` fields are left out,
+  as for a check of a background call.
+- A hosted agent with a bound connector list gets `connector_not_allowed`
+  for a request outside the list. This check runs before the
+  `request_wrong_operation` check, so the answer names no connector
+  outside the list, also when `connector_id` or `op_id` is wrong.
+- With the switch off, the input and its text are not in the tool. The
+  measurement before it goes on by default is
+  [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).
+- Tests: `tests/test_mcp_call_operation_own_request_status.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

@@ -50,7 +50,7 @@ from typing import Any, Literal
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.secret_read_as import record_caller_secret_read
+from meho_backplane.auth.secret_read_as import record_caller_kv_read
 from meho_backplane.connectors.vault.ops import (
     _MOUNT_PROPERTY,
     _PATH_PROPERTY,
@@ -270,7 +270,7 @@ async def read_kv_copy(
         return {**report, "reason": "forbidden"}, None
     except hvac.exceptions.InvalidPath:
         return {**report, "reason": "not_found"}, None
-    record_caller_secret_read(operator)
+    record_caller_kv_read(operator, payload)
 
     data = payload["data"]
     report["version"] = (data.get("metadata") or {}).get("version")

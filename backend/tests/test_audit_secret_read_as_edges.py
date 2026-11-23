@@ -6,8 +6,9 @@
 * A check runner token without a ``sub`` names the fixed text
   ``check-runner``, never the Sensor's owner.
 * A read of a deleted latest version returns no secret data, so it names
-  no login. This holds for ``vault.kv.read``, the shared target login
-  loader and the Vault side of the secret broker.
+  no login. This holds for ``vault.kv.read``, ``vault.kv.compare``, the
+  shared target login loader, the Vault side of the secret broker and the
+  Vault read of the pfSense OpenVPN user operations.
 * The read of the sink secret for the approval card of ``secret.move``
   names the caller on the row of the call that waits for approval.
 * A child call that reads names the caller on its own row; the parent
@@ -20,9 +21,10 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
@@ -39,10 +41,12 @@ from meho_backplane.auth.secret_read_as import (
     track_secret_read_as,
 )
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors.pfsense import ops_openvpn_user
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoint
 from meho_backplane.connectors.vault import VaultConnector
+from meho_backplane.connectors.vault.kv_compare import vault_kv_compare
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -221,6 +225,51 @@ async def test_broker_read_of_a_deleted_latest_version_names_no_login(
             await endpoint.read_secret(_operator("person-sub"))
         assert current_secret_read_as() is None
     assert len(fake.secrets.kv.v2.read_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_of_two_deleted_copies_names_no_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = install_fake_vault(monkeypatch)
+    _deleted_latest_version(fake)
+    paths = [{"path": _PATH, "key": "password"}, {"path": f"{_PATH}-copy", "key": "password"}]
+    with track_secret_read_as():
+        result = await vault_kv_compare(_operator("person-sub"), None, {"paths": paths})
+        assert current_secret_read_as() is None
+    assert [copy["reason"] for copy in result["copies"]] == ["not_found", "not_found"]
+    assert len(fake.secrets.kv.v2.read_calls) == 2
+
+
+def _pfsense_vault(monkeypatch: pytest.MonkeyPatch, data: dict[str, Any] | None) -> None:
+    """A Vault for the pfSense user operations whose KV-v2 answer holds *data*."""
+
+    @asynccontextmanager
+    async def _client(_operator: Operator, **_kw: Any) -> AsyncIterator[Any]:
+        client = MagicMock()
+        client.adapter.get = lambda _url: {"data": {"type": "kv", "options": {"version": "2"}}}
+        client.secrets.kv.v2.read_secret_version = lambda **_kw: {
+            "data": {"data": data, "metadata": {"version": 4}}
+        }
+        yield client
+
+    monkeypatch.setattr(ops_openvpn_user, "vault_client_for_operator", _client)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [(None, None), ({"password": "made-up-value-0zzz"}, "person-sub")],
+    ids=["only-version-information", "secret-data"],
+)
+async def test_pfsense_vault_read_names_the_caller_only_for_secret_data(
+    monkeypatch: pytest.MonkeyPatch, data: dict[str, Any] | None, expected: str | None
+) -> None:
+    _pfsense_vault(monkeypatch, data)
+    with track_secret_read_as():
+        version, _ = await ops_openvpn_user._vault_state(_operator("person-sub"), _MOUNT, _PATH)
+        assert current_secret_read_as() == expected
+    assert version == 4
 
 
 # ---------------------------------------------------------------------------

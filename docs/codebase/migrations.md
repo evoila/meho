@@ -599,6 +599,11 @@ writes it in the same transaction as the operation rows (#5019). An older
 build never reads it, so it changes nothing after a rollback; the next
 start of a build that knows the table writes it again.
 
+Migration `0182` adds `embedding_state`: one row with the model that made
+the stored vectors. The upgrade writes the model the install runs
+(`RETRIEVAL_EMBEDDING_MODEL`, or the shipped default) and embeds nothing.
+An older build never reads it, so a rollback is safe.
+
 Before #1607 the probe demanded strict `current == head` equality, which
 poisoned the deploy lifecycle twice over (live 2026-06-08, v0.12.0): the
 moment the pre-upgrade Job committed `0037`, the *still-running* prior pods

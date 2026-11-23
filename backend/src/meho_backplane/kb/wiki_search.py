@@ -82,10 +82,13 @@ from meho_backplane.docs_search import (
     CollectionNotReadyError,
     DocsChunk,
     DocsReadError,
+    DocsScope,
     UnknownCollectionError,
     build_docs_scope,
     collection_capability_key,
+    forwarded_scope,
     read_docs,
+    resolve_backend,
     resolve_entitled_ready_collection,
     search_docs,
 )
@@ -93,18 +96,22 @@ from meho_backplane.kb.file_walker import KbFileParseError, parse_front_matter
 from meho_backplane.kb.page_export import KbExportPage, KbExportRemoval, KbExportSkip, plan_entry
 from meho_backplane.kb.provenance import read_provenance
 from meho_backplane.kb.schemas import KB_SOURCE
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.docs_collections import DocCollection
+    from meho_backplane.docs_search import DocsScope
     from meho_backplane.kb.schemas import KbEntry
 
 __all__ = [
     "DOCS_ADDON_CAPABILITY",
     "KbWikiSearch",
+    "WikiExactFilters",
     "WikiSkipReason",
     "search_wiki",
     "wiki_collection_of",
+    "wiki_exact_filters",
     "wiki_note_for",
 ]
 
@@ -145,6 +152,58 @@ class KbWikiSearch(BaseModel):
     duplicate_count: int = 0
 
 
+# The longest product or version that read_docs takes (MCP schema and
+# POST /api/v1/read_docs). A wiki hit is read with the values of its search.
+_WIKI_FILTER_MAX_CHARS = 128
+
+
+class WikiExactFilters(BaseModel):
+    """The ``product`` and ``version`` a knowledge search sends to the wiki's index."""
+
+    model_config = ConfigDict(frozen=True)
+
+    product: str | None = None
+    version: str | None = None
+
+
+def wiki_exact_filters(
+    filters: Mapping[str, object] | None,
+    *,
+    has_time_window: bool = False,
+    shared_scope: bool = False,
+    kind: str | None = None,
+) -> WikiExactFilters | None:
+    """Return the filters the wiki's index may apply, or ``None``.
+
+    The same rule for ``search_knowledge`` and ``POST /api/v1/retrieve``.
+    With ``KB_WIKI_FILTERED_SEARCH`` off the answer is always ``None``, so
+    every filter skips the wiki as before. With it on, the answer is a value
+    only when the search has no time window, is not in the shared scope, has
+    no ``kind``, and its filters are only ``product`` and/or ``version``,
+    each a string that is not blank and at most 128 characters long, the
+    longest value ``read_docs`` takes. Anything else gives ``None``. A value
+    is kept as the caller gave it, spaces included, so the index gets the
+    same string the knowledge store filters by, and ``read_docs`` reads its
+    hits with that same string.
+    """
+    if not get_settings().kb_wiki_filtered_search:
+        return None
+    if has_time_window or shared_scope or kind is not None or not filters:
+        return None
+    if not set(filters) <= {"product", "version"}:
+        return None
+    if not all(
+        isinstance(value, str) and value.strip() and len(value) <= _WIKI_FILTER_MAX_CHARS
+        for value in filters.values()
+    ):
+        return None
+    product, version = filters.get("product"), filters.get("version")
+    return WikiExactFilters(
+        product=product if isinstance(product, str) else None,
+        version=version if isinstance(version, str) else None,
+    )
+
+
 async def wiki_collection_of(tenant_id: uuid.UUID) -> str | None:
     """Return the docs collection key where *tenant_id* keeps its lessons, or ``None``."""
     async with get_sessionmaker()() as session:
@@ -161,6 +220,7 @@ async def search_wiki(
     limit: int,
     stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     filtered: bool,
+    exact: WikiExactFilters | None = None,
 ) -> KbWikiSearch | None:
     """Search the caller's wiki collection; ``None`` when the tenant has none.
 
@@ -169,21 +229,33 @@ async def search_wiki(
     holds as imported copies.
     *filtered* is true when the search uses filters, a time window or the
     shared scope: the wiki cannot apply them, so it is not searched.
+    *exact* (from :func:`wiki_exact_filters`) names filters the wiki can
+    apply. Then a filtered search still runs, but only when the collection
+    sends them to its index as exact filters (``scope_filters``); else the
+    wiki is not searched and the answer says the index cannot apply them.
     """
     key = await wiki_collection_of(operator.tenant_id)
     if key is None:
         return None
     if DOCS_ADDON_CAPABILITY not in operator.capabilities:
         return _not_searched(key, "docs_addon_off")
-    if filtered:
+    if filtered and exact is None:
         return _not_searched(key, "filtered")
     structlog.contextvars.bind_contextvars(audit_collection=key)
     try:
         async with get_sessionmaker()() as session:
             collection = await resolve_entitled_ready_collection(session, operator, key)
-        result = await search_docs(
-            operator, query, scope=build_docs_scope(key), collection=collection, limit=limit
-        )
+        scope = build_docs_scope(key)
+        if exact:
+            # Not built by build_docs_scope: it strips, and the index must get
+            # the same string the store filters by.
+            scope = DocsScope(
+                collection_key=scope.collection_key, product=exact.product, version=exact.version
+            )
+        if exact and forwarded_scope(scope, resolve_backend(collection).ref).mode != "filters":
+            structlog.contextvars.unbind_contextvars("audit_collection")
+            return _not_searched(key, "filtered", _INDEX_CANNOT_FILTER)
+        result = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
     except CollectionForbiddenError:
         return _not_searched(key, "not_entitled")
     except UnknownCollectionError:
@@ -194,7 +266,7 @@ async def search_wiki(
         _log.warning("kb_wiki_search_unavailable", collection_key=key, error=str(exc))
         return _not_searched(key, "index_unavailable")
     hits = [chunk.model_copy(update={"collection": key}) for chunk in result.chunks]
-    copies = await _imported_copies(operator, key, collection, stored, hits)
+    copies = await _imported_copies(operator, scope, collection, stored, hits)
     kept = [chunk for chunk in hits if chunk.chunk_id not in copies]
     structlog.contextvars.bind_contextvars(
         audit_wiki_status=_SEARCHED, audit_wiki_hit_count=len(kept)
@@ -235,10 +307,20 @@ async def wiki_note_for(entry: KbEntry) -> dict[str, str] | None:
     return {"collection": key, "export": export, "message": f"{lead} {tail}"}
 
 
-def _not_searched(key: str, reason: WikiSkipReason) -> KbWikiSearch:
+#: Why the wiki is not searched when a product or version filter cannot be applied.
+_INDEX_CANNOT_FILTER: Final[str] = (
+    "its index does not apply product and version as exact filters; "
+    "search again without them to include it"
+)
+
+
+def _not_searched(key: str, reason: WikiSkipReason, why: str | None = None) -> KbWikiSearch:
     structlog.contextvars.bind_contextvars(audit_wiki_status=reason)
     return KbWikiSearch(
-        collection=key, searched=False, reason=reason, message=_message(key, reason)
+        collection=key,
+        searched=False,
+        reason=reason,
+        message=_message(key, reason) if why is None else _wiki_not_searched(key, why),
     )
 
 
@@ -256,12 +338,16 @@ def _message(key: str, reason: WikiSkipReason) -> str:
             "search again without them to include it"
         ),
     }[reason]
+    return _wiki_not_searched(key, why)
+
+
+def _wiki_not_searched(key: str, why: str) -> str:
     return f"Your wiki (docs collection `{key}`) was not searched: {why}."
 
 
 async def _imported_copies(
     operator: Operator,
-    key: str,
+    scope: DocsScope,
     collection: DocCollection,
     stored: Iterable[tuple[uuid.UUID | None, str, Mapping[str, object]]],
     hits: list[DocsChunk],
@@ -297,7 +383,7 @@ async def _imported_copies(
             continue
         page_key = _page_identity(chunk)
         if page_key not in pages:
-            pages[page_key] = await _whole_page(operator, key, collection, chunk.read_handle)
+            pages[page_key] = await _whole_page(operator, scope, collection, chunk.read_handle)
         page = pages[page_key]
         if page and any(page == bodies[slug] for slug in slugs):
             copies.add(chunk.chunk_id)
@@ -305,19 +391,25 @@ async def _imported_copies(
 
 
 async def _whole_page(
-    operator: Operator, key: str, collection: DocCollection, read_handle: str
+    operator: Operator, scope: DocsScope, collection: DocCollection, read_handle: str
 ) -> str | None:
     """Return the whole wiki page of a hit without its lesson header, or ``None``.
 
     ``None`` when the page cannot be read in full: the read is refused or
     fails, it has no text, or the backend cut it or has more of it to read.
+    A read handle is bound to the filters of the search that made it, so the
+    read uses the *scope* of that search, with its product and version.
     """
     try:
         read = await read_docs(
-            operator, read_handle, scope=build_docs_scope(key), collection=collection, mode="page"
+            operator, read_handle, scope=scope, collection=collection, mode="page"
         )
     except (DocsReadError, CorpusUnavailable) as exc:
-        _log.info("kb_wiki_page_read_failed", collection_key=key, reason=type(exc).__name__)
+        _log.info(
+            "kb_wiki_page_read_failed",
+            collection_key=scope.collection_key,
+            reason=type(exc).__name__,
+        )
         return None
     if read.text is None or read.truncated or read.next is not None:
         return None

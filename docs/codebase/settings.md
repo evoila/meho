@@ -93,7 +93,14 @@ spec:
   an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
   `null` means "use the instance default" (`false` for the switches,
   inherit or none for the others).
+
   `policies: null` resets all of them.
+
+  Note: `KB_WIKI_FILTERED_SEARCH` is not a key of this file. It is an
+  environment variable for the whole instance. It is off by default. When
+  on, a knowledge search with only `product` and `version` filters also
+  searches the tenant's wiki, but only if the collection's index applies
+  exact filters (see [kb.md](kb.md#wiki-search-5976)).
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on
   `PATCH /api/v1/conventions/{slug}`; delete the convention and import it

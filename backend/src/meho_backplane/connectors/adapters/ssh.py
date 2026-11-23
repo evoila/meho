@@ -635,7 +635,8 @@ class SshConnector(Connector):
         The call uses a login MEHO kept open, so the audit row names the login
         that read the secret when the connection was opened, or
         :data:`~meho_backplane.auth.secret_read_as.KEPT_LOGIN_READER_UNKNOWN`
-        when that is not known. The system caller notes nothing.
+        when that is not known and the call has noted no login. The system
+        caller notes nothing.
         """
         self._connections[cache_key] = (conn, time.monotonic())
         if operator is not None and not is_system_operator(operator):

@@ -423,7 +423,8 @@ There are three cases:
   target's login after the first store read. The field names the login that
   read the secret when it was kept. When the kept entry does not know who
   read it, the field holds the fixed text `kept-login:reader-unknown`. It
-  never names the present caller in that case. A second caller always reads
+  never names the present caller in that case. The fixed text never takes the
+  place of a login the same call has already noted. A second caller always reads
   the secret once with their own login first (`SecretReaders`,
   `connectors/_shared/secret_readers.py`), so a row never names a caller who
   did not read. A connector notes the kept login only when it takes the kept

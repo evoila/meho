@@ -256,3 +256,36 @@ def test_each_caller_keeps_their_own_login() -> None:
             assert readers.has_read(target, _person(sub))
             assert current_secret_read_as() == f"{sub}-login-id"
     assert readers.callers(target) == frozenset({("operator", "alice"), ("operator", "bob")})
+
+
+def test_the_fixed_word_never_takes_the_place_of_a_noted_login() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    readers.record(target, alice)
+
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_store_read_takes_the_place_of_the_fixed_word() -> None:
+    with track_secret_read_as():
+        record_secret_read_as(KEPT_LOGIN_READER_UNKNOWN)
+        record_secret_read_as("alice-login-id")
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_known_reader_of_a_kept_entry_takes_the_place_of_an_earlier_note() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        record_secret_read_as("earlier-login-id")
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"

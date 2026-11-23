@@ -19,7 +19,8 @@ from the store, in this call or in an earlier call of the same caller:
 
 * The call reads the secret itself: the login of that read.
 * The call uses a login MEHO kept in memory: the login that read the secret
-  when it was kept, or :data:`KEPT_LOGIN_READER_UNKNOWN` when that is not known.
+  when it was kept. When that is not known, :data:`KEPT_LOGIN_READER_UNKNOWN`,
+  unless the call has already noted a login: that login stays.
 * The call uses no secret: empty.
 
 The scope holds a small mutable box, not the id itself. A value that code sets
@@ -97,12 +98,17 @@ def record_secret_read_as(login_id: str | None) -> None:
     """Note the login a store accepted for the current call.
 
     Does nothing outside a call scope, and for an empty id.
+    :data:`KEPT_LOGIN_READER_UNKNOWN` is noted only when the call has noted
+    nothing yet, so it never takes the place of a known login. Every other id
+    takes the place of an earlier note.
     """
     box = _box_var.get()
     if box is None or not isinstance(login_id, str):
         return
     # Keep printable characters only, so the database can always store the value.
     cleaned = "".join(ch for ch in login_id if ch.isprintable()).strip()[:_MAX_ID_CHARS]
+    if cleaned == KEPT_LOGIN_READER_UNKNOWN and box.value is not None:
+        return
     if cleaned:
         box.value = cleaned
 

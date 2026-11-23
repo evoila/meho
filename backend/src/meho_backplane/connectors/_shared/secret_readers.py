@@ -33,7 +33,7 @@ used was read from the store (``secret_read_as``, see
   that read the secret when the entry was kept (:meth:`SecretReaders.record`
   stores it). When that login is not known, it notes
   :data:`~meho_backplane.auth.secret_read_as.KEPT_LOGIN_READER_UNKNOWN`, never
-  the present caller.
+  the present caller. A login that the call has already noted then stays.
 * The call uses no secret: nothing is noted.
 
 A target change forgets the readers of that target
@@ -115,12 +115,13 @@ class SecretReaders:
     def has_read(self, target: TenantScopedTargetLike, operator: Operator) -> bool:
         """Return whether *operator* has read the secret of *target* in this process.
 
-        On yes, the caller uses a kept entry, so this notes the login that
-        read the secret when it was kept, for the audit row of the call
+        Ask it last, only when a kept entry is there and is used on yes: on
+        yes it notes the login that read the secret when it was kept, for the
+        audit row of the call
         (:data:`~meho_backplane.auth.secret_read_as.KEPT_LOGIN_READER_UNKNOWN`
-        when that login is not known). A store read later in the same call
-        replaces the note. The system operator never has read: it runs the
-        loader every time.
+        when that login is not known and the call has noted none). A store
+        read later in the same call replaces the note. The system operator
+        never has read: it runs the loader every time.
         """
         if is_system_operator(operator):
             return False

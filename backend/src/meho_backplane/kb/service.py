@@ -136,10 +136,23 @@ from meho_backplane.kb.shared import (
     visible_to,
 )
 from meho_backplane.lesson_header import add_candidate_expiry, normalise_lesson_header
-from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
+from meho_backplane.retrieval.retriever import (
+    CANDIDATE_LIMIT,
+    RetrievalHit,
+    every_word_match_exists,
+    retrieve,
+)
 from meho_backplane.retrieval.time_window import TimeWindow
+from meho_backplane.settings import get_settings
 
-__all__ = ["KbIngestRootError", "KbListOrder", "KbSearchScope", "KbService", "add_shared_hits"]
+__all__ = [
+    "KbIngestRootError",
+    "KbListOrder",
+    "KbSearchScope",
+    "KbService",
+    "add_shared_hits",
+    "kb_any_word",
+]
 
 #: Row order of :meth:`KbService.list_entries`. ``"slug"`` (the default)
 #: sorts A to Z by slug; ``"newest"`` puts the most recently updated
@@ -519,6 +532,15 @@ class KbService:
             metadata_filters = residual or None
 
         own_filters = _own_scope_filters(tenant_id, metadata_filters, scope)
+        any_word = await kb_any_word(
+            tenant_id,
+            query,
+            kind=kind_filter,
+            own_filters=own_filters,
+            shared_filters=metadata_filters if scope != "tenant" else None,
+            include_shared=scope != "tenant",
+            time_window=time_window,
+        )
         ranked: list[RetrievalHit] = []
         if own_filters is not None:
             ranked = await retrieve(
@@ -529,6 +551,7 @@ class KbService:
                 limit=CANDIDATE_LIMIT,
                 metadata_filters=own_filters or None,
                 time_window=time_window,
+                any_word=any_word,
             )
         if scope != "tenant":
             ranked = await add_shared_hits(
@@ -539,6 +562,7 @@ class KbService:
                 limit=CANDIDATE_LIMIT,
                 metadata_filters=metadata_filters,
                 time_window=time_window,
+                any_word=any_word,
             )
         return _group_by_entry(ranked, limit, shared_owner_tenants())
 
@@ -564,6 +588,70 @@ def _own_scope_filters(
     return filters
 
 
+def _shared_targets(
+    tenant_id: uuid.UUID, metadata_filters: dict[str, Any] | None
+) -> tuple[frozenset[uuid.UUID], dict[str, Any]] | None:
+    """Return the shared owner tenants to search and their filters, or ``None``.
+
+    ``None`` when there is no other owner, or when a ``shared`` filter of the
+    caller other than ``true`` excludes every shared entry.
+    """
+    owners = shared_owner_tenants() - {tenant_id}
+    filters = dict(metadata_filters or {})
+    if not owners or filters.get(META_SHARED, True) is not True:
+        return None
+    filters[META_SHARED] = True
+    return owners, filters
+
+
+async def kb_any_word(
+    tenant_id: uuid.UUID,
+    query: str,
+    *,
+    kind: str | None,
+    own_filters: dict[str, Any] | None,
+    shared_filters: dict[str, Any] | None,
+    include_shared: bool,
+    time_window: TimeWindow | None = None,
+    principal_sub: str | None = None,
+) -> bool | None:
+    """Decide once, for one whole knowledge search, whether to use any word (#6784).
+
+    The rule: if a passage in ANY searched tenant holds every word of the
+    question, no tenant uses the any-word search. If none does, all of them
+    may. The searched tenants are exactly the ones the search will query,
+    with the same filters: the own tenant when *own_filters* is not ``None``
+    and, when *include_shared*, the shared owners of
+    :func:`_shared_targets`. An every-word hit that the search later drops
+    (the caller has an entry with the same slug, or the limit) still counts:
+    the question then keeps the every-word search, as it does today.
+
+    Returns ``None`` when the ``KB_SEARCH_PLAIN_SENTENCES`` switch is off (no
+    extra query, the callers pass nothing new to ``retrieve``), else the
+    answer to pass as ``any_word`` to every ``retrieve`` of the search.
+    """
+    if not get_settings().kb_search_plain_sentences:
+        return None
+    targets: list[tuple[uuid.UUID, dict[str, Any] | None]] = []
+    if own_filters is not None:
+        targets.append((tenant_id, own_filters or None))
+    if include_shared:
+        shared = _shared_targets(tenant_id, shared_filters)
+        if shared is not None:
+            targets.extend((owner, shared[1]) for owner in sorted(shared[0]))
+    for target_tenant, filters in targets:
+        if await every_word_match_exists(
+            target_tenant,
+            query,
+            kind=kind,
+            metadata_filters=filters,
+            time_window=time_window,
+            principal_sub=principal_sub,
+        ):
+            return False
+    return True
+
+
 async def add_shared_hits(
     own: list[RetrievalHit],
     *,
@@ -573,6 +661,7 @@ async def add_shared_hits(
     limit: int,
     metadata_filters: dict[str, Any] | None,
     time_window: TimeWindow | None = None,
+    any_word: bool | None = None,
 ) -> list[RetrievalHit]:
     """Add the kb hits of the shared scope to *own*, best first, at most *limit*.
 
@@ -582,12 +671,13 @@ async def add_shared_hits(
     than ``true`` excludes every shared entry, so then *own* is returned
     unchanged. Used by :meth:`KbService.search_entries` and by
     ``POST /api/v1/retrieve`` with ``source="kb"`` (``meho kb search``).
+    *any_word* is the answer of :func:`kb_any_word`, made for the whole
+    search (own tenant and shared owners), and goes to every ``retrieve``.
     """
-    owners = shared_owner_tenants() - {tenant_id}
-    filters = dict(metadata_filters or {})
-    if not owners or filters.get(META_SHARED, True) is not True:
+    targets = _shared_targets(tenant_id, metadata_filters)
+    if targets is None:
         return own
-    filters[META_SHARED] = True
+    owners, filters = targets
     own_slugs = {_hit_slug(hit) for hit in own}
     merged = list(own)
     for owner in sorted(owners):
@@ -599,6 +689,7 @@ async def add_shared_hits(
             limit=limit,
             metadata_filters=filters,
             time_window=time_window,
+            any_word=any_word,
         )
         merged.extend(hit for hit in shared_hits if _hit_slug(hit) not in own_slugs)
     merged.sort(key=lambda hit: hit.fused_score, reverse=True)

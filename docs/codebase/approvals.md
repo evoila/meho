@@ -2801,12 +2801,23 @@ keeps no tenant or login: they come from the request row.
   request may have run, so it is never returned. A rejected, withdrawn,
   expired or overdue request gives a new one. The lookup expires nothing.
 - Only a direct call is checked. A call inside an agent run, a step of a
-  multi-step operation, or a re-run for an earlier requester always gets
-  its own request.
+  multi-step operation (both kinds: one sent through `dispatch_child`, and
+  one saved to restart after approval), or a re-run for an earlier
+  requester always gets its own request. A step sent through
+  `dispatch_child` is found by its depth (`composite_depth_var` is not the
+  top level).
 - Only a stored direct request is reused. A stored request of an agent run
   (`run_id` set) or of a step of a multi-step operation (`resume_parent`
-  set) is never returned to a direct call: approving it would run that run
-  or that multi-step operation, not the direct call.
+  set, or `composite_step` true) is never returned to a direct call:
+  approving it would run that run or that step, not the direct call. A
+  step sent through `dispatch_child` marks its request with
+  `composite_step` (migration `0182`; NULL on older rows reads as false).
+- A retry with the same key still gets its request back, also for a step.
+- A late retry with key A can expire its overdue request A and then get a
+  waiting request B of the same call. The answer is B with
+  `approval_request_reused: true`. After commit the dispatcher still
+  publishes `approval.expired` for A, and no second `approval.pending` for
+  B.
 - Not covered: two calls that arrive at the same moment can still make two
   requests. There is no database lock for this case.
 

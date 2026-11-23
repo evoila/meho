@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Create ``approval_request_key``: more retry keys of one approval request.
+"""Create ``approval_request_key`` and add ``approval_request.composite_step``.
 
 Revision ID: 0182
 Revises: 0181
@@ -11,14 +11,18 @@ With ``APPROVAL_SAME_CALL_REUSE`` on, a call with retry key B can get the
 waiting request of the same call that was made with key A. The request row
 holds only key A. This table keeps key B, so a later retry with key B gets
 the same request, also after it was approved.
+
+``approval_request.composite_step`` marks a request that a step of a
+multi-step operation made (a call sent through ``dispatch_child``). A direct
+call never gets such a request through the same-call lookup.
 ``docs/codebase/approvals.md``.
 
 Reversibility
 -------------
 
-Purely additive. An older image never reads the table, so a rollback is
-safe. ``downgrade()`` drops the table; a retry with such a key B then makes
-a new request.
+Purely additive. An older image never reads the table or the column, so a
+rollback is safe. ``downgrade()`` drops both; a retry with such a key B then
+makes a new request.
 """
 
 from collections.abc import Sequence
@@ -45,10 +49,12 @@ __all__ = [
 
 _TABLE = "approval_request_key"
 _INDEX = "approval_request_key_key_idx"
+_REQUEST_TABLE = "approval_request"
+_STEP_COLUMN = "composite_step"
 
 
 def upgrade() -> None:
-    """Create the table and its lookup index."""
+    """Create the table and its lookup index, and add the step mark."""
     op.create_table(
         _TABLE,
         sa.Column("approval_request_id", sa.Uuid(), primary_key=True, nullable=False),
@@ -56,9 +62,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(_INDEX, _TABLE, ["idempotency_key"])
+    op.add_column(_REQUEST_TABLE, sa.Column(_STEP_COLUMN, sa.Boolean(), nullable=True))
 
 
 def downgrade() -> None:
-    """Drop the table."""
+    """Drop the step mark and the table."""
+    op.drop_column(_REQUEST_TABLE, _STEP_COLUMN)
     op.drop_index(_INDEX, table_name=_TABLE)
     op.drop_table(_TABLE)

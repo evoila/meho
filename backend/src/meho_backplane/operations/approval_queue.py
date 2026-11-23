@@ -1234,6 +1234,13 @@ async def _write_reuse_audit_row(
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
 
 
+def _is_composite_step() -> bool:
+    """True when this call is a step a multi-step operation sent through ``dispatch_child``."""
+    from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
+
+    return composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+
+
 def _same_call_reuse_applies(
     run_id: uuid.UUID | None,
     resume_parent: dict[str, Any] | None,
@@ -1242,12 +1249,15 @@ def _same_call_reuse_applies(
     """True when a direct call may get the waiting request of the same call.
 
     Needs the switch ``APPROVAL_SAME_CALL_REUSE``. A call inside an agent
-    run, a step of a multi-step operation, or a re-run for an earlier
-    requester always gets its own request.
+    run, a step of a multi-step operation (one sent through
+    ``dispatch_child``, or one saved to restart after approval), or a re-run
+    for an earlier requester always gets its own request.
     """
     from meho_backplane.settings import get_settings
 
     if run_id is not None or resume_parent is not None or requester is not None:
+        return False
+    if _is_composite_step():
         return False
     return get_settings().approval_same_call_reuse
 
@@ -1271,9 +1281,9 @@ async def _find_same_call_pending_request(
     Only a ``pending`` request inside its deadline counts: an approved one
     may have run, and an overdue one can no longer be approved. Nothing is
     expired here. A request of an agent run or of a step of a multi-step
-    operation (``resume_parent`` set) never counts: approving it runs that
-    run or that multi-step operation, not this direct call. The match is the
-    same as for a retry key: same operation, connector, target, params,
+    operation (``resume_parent`` or ``composite_step`` set) never counts:
+    approving it runs that run or that step, not this direct call. The match
+    is the same as for a retry key: same operation, connector, target, params,
     ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
     choice.
     """
@@ -1298,6 +1308,7 @@ async def _find_same_call_pending_request(
         # instead of SQL NULL for a direct call.
         if (
             existing.resume_parent is None
+            and not existing.composite_step
             and params_hash_matches(params, existing.params_hash)
             and existing.preview_hash == preview_hash
             and existing.work_ref == work_ref_var.get()
@@ -1863,10 +1874,12 @@ async def create_pending_request(
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past
             its deadline is not returned: it is expired in this
-            transaction and a new request is parked. The new row then
-            carries the expired one as ``_expired_request`` (else
+            transaction and a new request is parked. The returned row
+            then carries the expired one as ``_expired_request`` (else
             ``None``), so the caller can publish ``approval.expired``
-            after commit. ``None`` keeps the old behaviour.
+            after commit. That holds also when the returned row is
+            another waiting request that the call got (``_reused``).
+            ``None`` keeps the old behaviour.
         requester: The requester to save on the row instead of *operator*
             (#4217). Set for a composite step that waits again while an
             approved request is re-run: the new request belongs to the
@@ -1906,8 +1919,10 @@ async def create_pending_request(
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
 
+    expired_request: ApprovalRequest | None = None
+
     def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
-        return _reuse_idempotent_request(
+        reused = _reuse_idempotent_request(
             existing,
             op_id=op_id,
             connector_id=connector_id,
@@ -1915,8 +1930,11 @@ async def create_pending_request(
             params=params,
             preview_hash=preview_hash,
         )
+        # A late retry can expire its old request and still get another
+        # waiting request: the caller then sends the old one's expiry event.
+        reused._expired_request = expired_request  # type: ignore[attr-defined]
+        return reused
 
-    expired_request: ApprovalRequest | None = None
     if idempotency_key is not None:
         live, expired_request = await _resolve_idempotent_request(
             session,
@@ -2060,6 +2078,7 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        composite_step=True if _is_composite_step() else None,
         allowed_connectors=stored_connector_limit(),
         **_policy_rule_fields(),
     )

@@ -1109,3 +1109,52 @@ async def test_a_call_that_gets_the_waiting_request_writes_its_own_audit_row(
     assert reuse_row.parent_audit_id == request_row.id
     assert reuse_row.status_code == 202
     assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_late_retry_that_gets_another_waiting_request_sends_the_old_expiry(
+    embedding: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Key A passes its deadline, key B makes B, a retry with key A expires A and gets B."""
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    recorded: list[tuple[str, uuid.UUID]] = []
+
+    async def _record(**kwargs: Any) -> None:
+        recorded.append((kwargs["decision"], kwargs["request"].id))
+
+    monkeypatch.setattr(approval_queue_module, "record_approval_step_event", _record)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"]}
+    first = await call_operation(requester, {**bound, "idempotency_key": "key-a"})
+    first_id = uuid.UUID(first["extras"]["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, first_id)
+        assert row is not None and row.expires_at is not None
+        late = row.expires_at + timedelta(seconds=1)
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: late)
+
+    second = await call_operation(requester, {**bound, "idempotency_key": "key-b"})
+    second_id = uuid.UUID(second["extras"]["approval_request_id"])
+    assert second_id != first_id
+
+    retry = await call_operation(requester, {**bound, "idempotency_key": "key-a"})
+    assert retry["status"] == "awaiting_approval", retry
+    assert uuid.UUID(retry["extras"]["approval_request_id"]) == second_id
+    assert retry["extras"]["approval_request_reused"] is True
+    assert recorded == [
+        ("pending", first_id),
+        ("pending", second_id),
+        ("expired", first_id),
+    ]
+    async with get_sessionmaker()() as s:
+        expired = await s.get(ApprovalRequest, first_id)
+        assert expired is not None
+        assert expired.status == ApprovalRequestStatus.EXPIRED.value

@@ -1634,8 +1634,11 @@ class Settings(BaseModel):
         The call writes its own ``approval.reuse`` audit row with the caller's
         session, and the answer's ``audit_id`` is that row. It works with
         no ``idempotency_key`` and with a different key. Only a waiting
-        request inside its deadline is reused; a call inside an agent
-        run or a step of a multi-step operation always gets its own request.
+        request inside its deadline is reused. A call inside an agent run,
+        a step of a multi-step operation (one sent through
+        ``dispatch_child``, or one saved to restart after approval) and a
+        re-run for an earlier requester always get their own request, and
+        a direct call never gets the request of such a step.
         When off, every such call makes a new request. Env
         ``APPROVAL_SAME_CALL_REUSE``.
     audit_session_links:

@@ -353,3 +353,26 @@ def test_switch_on_tool_text_says_the_new_rule(
     # Only the text changes: the input schema is the same in both states.
     _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
     assert shown["inputSchema"] == _shown_preview_tool()["inputSchema"]
+
+
+_INGESTED_CREDENTIAL_WRITE_TEXT = (
+    "An ingested credential write previews with each secret input shown as `***REDACTED***`"
+)
+
+
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+def test_short_text_says_how_each_kind_of_credential_write_previews(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    _switch(monkeypatch, "MCP_SHORT_TOOL_TEXTS", True)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", switch_on)
+
+    description = _shown_preview_tool()["description"]
+
+    assert _INGESTED_CREDENTIAL_WRITE_TEXT in description
+    assert "cannot be previewed" not in description
+    if switch_on:
+        assert "a typed one shows its plan only, never the params" in description
+        assert 'a typed one stays `status="unavailable"`' not in description
+    else:
+        assert 'a typed one stays `status="unavailable"`' in description

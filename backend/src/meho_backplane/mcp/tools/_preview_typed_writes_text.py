@@ -61,9 +61,9 @@ PREVIEW_OPERATION_TYPED_WRITES_SHORT: Final = ShortText(
         '`status="unavailable"`, except a destructive or approval-gated one: ',
         '`status="unavailable"`, except a write: ',
     ).replace(
-        "A credential write cannot be previewed.",
-        "A credential write shows its plan only, never the params, and only "
-        "when it has its own safe preview.",
+        'a typed one stays `status="unavailable"`.',
+        "a typed one shows its plan only, never the params, and only when it "
+        "has its own safe preview.",
     ),
     inputs=PREVIEW_OPERATION_SHORT.inputs,
 )

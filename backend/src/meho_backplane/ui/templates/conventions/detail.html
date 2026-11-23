@@ -19,6 +19,8 @@
   Author / edit / delete affordances land in T2 (#1838-T2); this Task is
   read-only.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Convention: {{ convention.slug }} &middot; MEHO Operator Console{% endblock %}
@@ -91,9 +93,7 @@
           <span class="badge badge-outline badge-sm" data-kind="{{ convention.kind }}">
             {{ convention.kind }}
           </span>
-          <span class="badge badge-ghost badge-sm font-mono" title="Priority">
-            priority {{ convention.priority }}
-          </span>
+          {{ badge("priority " ~ convention.priority, variant="quiet", class="font-mono", title="Priority") }}
         </div>
       </div>
       <div class="text-xs opacity-70 flex flex-wrap gap-x-4 gap-y-1">

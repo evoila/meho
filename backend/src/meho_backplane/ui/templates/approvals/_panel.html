@@ -25,6 +25,7 @@
   from the bottom of the screen, each row stacks, its text wraps instead
   of being cut, and the Review button fills the row width.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "_references.html" import subject %}
 <dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Pending approvals">
@@ -55,7 +56,7 @@
               <p class="font-mono text-sm [overflow-wrap:anywhere] sm:truncate">{{ req.op_id }}</p>
               {% if req.chain %}
                 <p class="truncate text-xs" data-approval-chain-step="{{ req.chain.step }}">
-                  <span class="badge badge-sm badge-info">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
+                  {{ badge("Step " ~ req.chain.step ~ " of " ~ req.chain.total, variant="info") }}
                   <span class="text-base-content/55">in change ticket</span>
                   <span class="font-mono">{{ req.chain.work_ref }}</span>
                 </p>

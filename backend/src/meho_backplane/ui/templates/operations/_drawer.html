@@ -101,7 +101,7 @@
           {{ badge("requires approval", variant="outline", title="Requires approval") }}
         {% endif %}
         {% if descriptor.group_key %}
-          <span class="badge badge-ghost badge-sm">group: {{ descriptor.group_key }}</span>
+          {{ badge("group: " ~ descriptor.group_key, variant="quiet") }}
         {% endif %}
       </div>
 

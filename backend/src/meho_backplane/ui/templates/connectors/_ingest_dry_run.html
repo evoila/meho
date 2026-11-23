@@ -16,6 +16,7 @@
                        operations_grouped, connector_id} from the
                        ``IngestionResultModel`` projection.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <div role="status" class="alert alert-info items-start" data-ingest-dry-run>
   {{ icon("check", class="size-5 shrink-0") }}
@@ -32,12 +33,8 @@
       <span class="badge badge-success badge-sm" data-inserted-count>
         {{ ingestion.inserted_count }} would insert
       </span>
-      <span class="badge badge-ghost badge-sm">
-        {{ ingestion.updated_count }} would update
-      </span>
-      <span class="badge badge-ghost badge-sm">
-        {{ ingestion.skipped_count }} skipped
-      </span>
+      {{ badge(ingestion.updated_count ~ " would update", variant="quiet") }}
+      {{ badge(ingestion.skipped_count ~ " skipped", variant="quiet") }}
     </div>
   </div>
 </div>

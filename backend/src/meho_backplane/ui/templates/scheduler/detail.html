@@ -106,7 +106,7 @@
           {% if trigger.skip_count and trigger.skip_count > 0 %}
             <dt class="opacity-60">Skips</dt>
             <dd>
-              <span class="badge badge-warning badge-sm">{{ trigger.skip_count }} consecutive</span>
+              {{ badge(trigger.skip_count ~ " consecutive", variant="warning") }}
             </dd>
             <dt class="opacity-60">Skip reason</dt>
             <dd class="font-mono text-xs">{{ trigger.last_skip_reason or "—" }}</dd>

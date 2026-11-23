@@ -204,9 +204,7 @@
       Rendering <span class="font-mono">{{ node_count }}</span> nodes /
       <span class="font-mono">{{ edge_count }}</span> edges
       {%- if truncated %}
-        <span class="badge badge-warning badge-sm ml-2">
-          Capped at {{ graph_node_cap }} -- narrow the filter or use the dependents query (T3) for larger sets.
-        </span>
+        {{ badge("Capped at " ~ graph_node_cap ~ " -- narrow the filter or use the dependents query (T3) for larger sets.", variant="warning", class="ml-2") }}
       {%- endif %}
     </div>
     <label class="flex flex-row items-center gap-2">

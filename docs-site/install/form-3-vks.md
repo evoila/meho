@@ -26,15 +26,18 @@ Two people take part. They can be the same person.
 
 **Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
-The page uses these example values. Use your own in their place.
+The page uses these example values. They do not work on a real cluster.
+Collect your own values before you start, and use them in their place.
 
-| Example | What it is |
-|---|---|
-| `meho.example.com` | The DNS name of MEHO |
-| `meho` | The namespace, and the name of the Helm release |
-| `registry.example.com/meho` | Your own image registry, only with no internet |
-| `192.0.2.20` | The address of Traefik |
-| `192.0.2.10` | A vCenter that MEHO manages |
+| Example | What it is | Where you get it |
+|---|---|---|
+| `meho.example.com` | The DNS name of MEHO | You choose it, in your own domain. Your DNS team makes the record in [Step 1.6](#16-the-dns-name). |
+| `meho` | The namespace, and the name of the Helm release | Keep `meho`, or choose another name. |
+| `registry.example.com/meho` | Your own image registry, only with no internet | Your registry admin. |
+| `192.0.2.20` | The address of Traefik | A free address from the Supervisor's load balancer range. Ask your vSphere admin. Or leave it out, and the Supervisor picks one ([Step 1.4](#14-traefik-the-way-in)). |
+| `vsan-default-storage-policy` | A storage class of the cluster | The list from `kubectl get storageclass` ([Step 1.5](#15-a-default-storage-class)). |
+| `tls.crt`, `tls.key` | The certificate for the DNS name, and its key | Your certificate team, or cert-manager ([Step 1.7](#17-the-certificate)). |
+| `192.0.2.10` | A vCenter that MEHO manages | Your vSphere admin. |
 
 **Tools on your laptop:**
 
@@ -90,6 +93,10 @@ that user or group (`--user` or `--group` in place of
 This makes a kubeconfig file (a login file for `kubectl` and Helm) with a
 token that lasts 8 hours. Give the file to the installer in a safe way.
 
+Run these lines in a folder that is not a git repository, for example a
+new empty folder. The file holds a working login, and a file in a git
+repository is easy to commit by mistake.
+
 ```bash
 umask 077
 SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
@@ -122,17 +129,40 @@ this one. A token that never ends is possible with a Secret of type
 `kubernetes.io/service-account-token`, but Kubernetes calls that a
 legacy way.
 
+**When the token has ended**, commands fail with
+`the server has asked for the client to provide credentials`. Then run
+`unset KUBECONFIG`, so that you use the cluster admin's login again,
+and run the commands of this step again. They make a new file with a
+new token.
+
 ### 1.4 Traefik, the way in
 
 VKS brings no ingress controller (the program that takes web traffic
 from outside and sends it to MEHO). Install Traefik from its Helm chart,
-in its own namespace. Write `traefik-values.yaml`:
+in its own namespace.
+
+**The address of Traefik.** The Supervisor gives load balancer addresses
+only from its own range. Your vSphere admin set that range when they
+turned on the Supervisor (in vCenter, under Workload Management, in the
+network settings of the Supervisor). You have two choices:
+
+- **A fixed address:** ask your vSphere admin for a free address in that
+  range, and put it in `loadBalancerIP` below. You can then make the DNS
+  record and the certificate before the install.
+- **No fixed address:** leave out `loadBalancerIP`. The Supervisor
+  picks a free address. You make the DNS record and the certificate
+  after this step. If the Service is ever deleted, the address can
+  change.
+
+Write `traefik-values.yaml`:
 
 ```yaml
 service:
   spec:
     type: LoadBalancer
-    # Optional: a fixed address from the Supervisor's load balancer.
+    # Optional: a fixed address. It must be a free address from the
+    # Supervisor's load balancer range, or the address never comes.
+    # Leave out this line to let the Supervisor pick a free address.
     loadBalancerIP: 192.0.2.20
 # Only with no internet: the Traefik image from your registry. Copy it
 # there first, as in Step 2.2. MEHO's image list does not include it.
@@ -171,37 +201,92 @@ address under `EXTERNAL-IP`. The Supervisor's load balancer gives that
 address. In the first seconds, one event `SyncLoadBalancerFailed` can
 show up. It goes away when the address comes.
 
+If `EXTERNAL-IP` stays `<pending>` for more than two minutes, look at
+the events:
+
+```bash
+kubectl -n traefik describe service traefik | tail -5
+```
+
+`VirtualMachineService IP not found` means the Supervisor cannot give
+the address. Most often, `loadBalancerIP` is not in the Supervisor's
+range, or another service already uses it. Fix the address in
+`traefik-values.yaml`, then delete the Service and install it again, so
+that the Supervisor gets a new request:
+
+```bash
+kubectl -n traefik delete service traefik
+sleep 60   # the load balancer can need up to 60 seconds to free the old address
+helm upgrade traefik traefik/traefik --version 42.3.1 -n traefik -f traefik-values.yaml --wait
+```
+
+Note the address under `EXTERNAL-IP`. You need it in Step 1.6.
+
 ### 1.5 A default storage class
 
 VKS makes one storage class for each vSphere storage policy of the
 Supervisor namespace, and marks none as the default. MEHO's disks need a
 default, or a class named in your values file.
 
+First list the classes of your cluster:
+
 ```bash
 kubectl get storageclass
+```
+
+The names come from the storage policies of your vSphere. Pick one
+from the list. If you are not sure which, ask your vSphere admin which
+policy is meant for this cluster. Then mark it as the default. Use its
+name in place of `vsan-default-storage-policy`:
+
+```bash
 kubectl patch storageclass vsan-default-storage-policy \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 kubectl get storageclass
 ```
 
-Use the name of your class in place of `vsan-default-storage-policy`.
 After the patch, the class shows `(default)` after its name.
+`Error from server (NotFound)` means the name is not in the list.
 
 ### 1.6 The DNS name
 
-Make a DNS record for `meho.example.com` that points to the
-`EXTERNAL-IP` of Traefik. Check it from your laptop:
+MEHO needs a DNS name that points to the `EXTERNAL-IP` of Traefik.
+Nobody makes this record for you. You do it, or your DNS team does:
+
+1. Choose the name, in your own domain, for example `meho.example.com`.
+2. Ask your DNS team for an A record (the DNS entry that points a name
+   to an address): your MEHO name → the `EXTERNAL-IP` from Step 1.4.
+3. Wait until the record exists, then check it from your laptop:
 
 ```bash
-getent hosts meho.example.com
+dig +short meho.example.com
 ```
 
-You should see `192.0.2.20       meho.example.com`.
+You should see `192.0.2.20`, the address of Traefik. An empty answer
+means the record is not there yet, or your laptop asks another DNS
+server. `dig` works on Linux and macOS. Do not use `getent hosts` on
+macOS: it prints nothing there, even when the name exists.
+
+If your cluster runs ExternalDNS (a tool that makes DNS records by
+itself), it can make this record for you. Ask your cluster admin.
 
 ### 1.7 The certificate
 
-Put the certificate for `meho.example.com` and its key into the
-namespace. The installer may do this too.
+MEHO needs a certificate for its DNS name, and the key of that
+certificate. Get them from your certificate team, or from cert-manager
+if your cluster runs it. Ask for:
+
+- the DNS name of Step 1.6 in the certificate;
+- the certificate in PEM format (text that starts with
+  `-----BEGIN CERTIFICATE-----`), with the certificates of the
+  authority that signed it after it, in one file;
+- the key in PEM format, without a password.
+
+Save the certificate as `tls.crt` and the key as `tls.key`, in the
+folder where you run the command below. Keep the key secret, and delete
+both files after the command.
+
+Put them into the namespace. The installer may do this too.
 
 ```bash
 kubectl -n meho create secret tls meho-tls --cert=tls.crt --key=tls.key
@@ -333,6 +418,10 @@ This file:
 
 It expects Traefik in the namespace `traefik`. If yours is in another
 namespace, change `traefik` in the file.
+
+You do not run anything with this file now. Step 4 installs MEHO once,
+with this file and your own file of Step 3.2 together. Where both set
+the same value, your own file wins.
 
 ### 3.2 `values.yaml`, your own
 
@@ -477,6 +566,9 @@ COMMIT=$(helm show chart oci://ghcr.io/evoila/meho-chart --version 0.45.0 | sed 
 bash install-verify.sh --host meho.example.com --namespace meho --release meho --expected-git-sha "$COMMIT"
 ```
 
+If your laptop does not trust the authority of your certificate yet,
+add `--cacert <the authority's file>` to the last line.
+
 You should see six lines that start with `[ok]`, and at the end:
 
 ```text
@@ -594,10 +686,13 @@ install is left.
 
 | What you see | Why, and what to do |
 |---|---|
+| Traefik's `EXTERNAL-IP` stays `<pending>`, with `VirtualMachineService IP not found` | The Supervisor cannot give the address in `loadBalancerIP`. It is not in the Supervisor's range, or it is in use. See the end of Step 1.4. |
+| `error: Cannot read file tls.crt` | The certificate files are not in the folder where you ran the command (Step 1.7). |
 | "unbound immediate PersistentVolumeClaims" for some seconds | Normal on vSAN. It goes away when vSphere has made the disk. If it stays, the cluster has no default storage class (Step 1.5). |
 | A pod stays in `ImagePullBackOff` | With your own registry: check the digest copy (Step 2.2), the pull secret (Step 2.4) and the trust of the nodes (Step 2.3). |
 | `x509: certificate signed by unknown authority` in a pull | The nodes do not trust your registry (Step 2.3). |
 | `https://meho.example.com/ui/` shows an error 503 | Your `values-vks.yaml` is an old copy without the web console. Take it again (Step 3.1) and run `helm upgrade` with the same command as Step 4. |
 | `http://meho.example.com` answers with a page, not 404 | Your `values-vks.yaml` is an old copy without the HTTPS-only setting. Same fix. |
 | The worker nodes are rebuilt every few minutes | A firewall rule, for example in NSX, blocks the traffic from the workers to the control plane. Remove that rule. |
+| `the server has asked for the client to provide credentials` | The installer's token has ended after 8 hours. Run `unset KUBECONFIG`, then Step 1.3 again. |
 | Your login to another MEHO is gone | You ran `meho login` without its own folder. Log in to that MEHO again. |

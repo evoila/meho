@@ -197,8 +197,10 @@ PREVIEW_OPERATION_SHORT: Final = ShortText(
         "destructive call needs. A typed operation gives "
         '`status="unavailable"`, except a destructive or approval-gated one: '
         '`method="COMPOSITE"` with the redacted params and a `preview_hash`. An '
-        "ingested credential write previews with each secret input shown as "
-        '`***REDACTED***`; a typed one stays `status="unavailable"`.'
+        "ingested credential write previews with text under a secret name (like "
+        "`password`) in the query or body shown as `***REDACTED***`; the path "
+        'shows as built. A typed one stays `status="unavailable"`, unless it is '
+        "destructive: then it shows the redacted params and a `preview_hash`."
     ),
     inputs={
         "op_id": "Operation id from `search_operations`.",

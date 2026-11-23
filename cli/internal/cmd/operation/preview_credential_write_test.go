@@ -21,8 +21,8 @@ const (
 )
 
 // previewMarkServer answers every preview with the envelope the backplane
-// sends for an ingested credential write: each secret input is the fixed
-// mark, in `redacted_body` and in `query`. It counts the requests it gets.
+// sends for an ingested credential write: text under a secret name is the
+// fixed mark, in `redacted_body` and in `query`. It counts the requests it gets.
 func previewMarkServer(t *testing.T, requests *int) *httptest.Server {
 	t.Helper()
 	const envelope = `{"status":"ok","op_id":"PUT:/repos/{owner}/{repo}/actions/secrets/{name}",` +

@@ -12,10 +12,11 @@ not a credential write keeps its literal body and query.
 
 The tests search the whole answer for the value, on the shared funnel
 (:func:`~meho_backplane.operations.meta_tools.preview_operation`), on the MCP
-tool handler and on the REST route. A preview writes no audit row and logs
-no input value: the tests count the audit rows before and after the
-preview, and search the logs for the value. A hosted agent run saves the answer
-in its run record; a test searches the saved event for the value.
+tool handler and on the REST route. A preview adds no operation audit row
+and logs no input value: the tests count the audit rows before and after the
+preview, and search the logs for the value. The REST test mounts the route
+alone, so its count holds operation rows and no row of the HTTP request. A hosted
+agent run saves the answer in its run record; a test searches the saved event for the value.
 
 Every value below is made up.
 """

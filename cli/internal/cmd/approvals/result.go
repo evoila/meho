@@ -187,7 +187,7 @@ func noResultMessage(v *api.ApprovalResultView) string {
 	case api.ApprovalRequestStatusRejected:
 		return "No output: the request was rejected, so the operation did not run."
 	case api.ApprovalRequestStatusExpired:
-		return "No output: the request expired before anyone decided, so the operation did not run."
+		return "No output: the request expired and the operation did not run."
 	case api.ApprovalRequestStatusWithdrawn:
 		return "No output: the sender withdrew the request, so the operation did not run."
 	default:

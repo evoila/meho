@@ -5681,6 +5681,7 @@ type DashboardMemberView struct {
 	OpId            string                            `json:"op_id"`
 	Pending         bool                              `json:"pending"`
 	RawState        DashboardMemberViewRawState       `json:"raw_state"`
+	RunnerName      *string                           `json:"runner_name"`
 	SensorId        openapi_types.UUID                `json:"sensor_id"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
@@ -10331,12 +10332,13 @@ type RunnerPrincipalRead struct {
 //   - “error“ — the handler raised; the exception is summarised in
 //     “error“ and never re-raised into the tick loop.
 type RunnerResult struct {
-	CheckRef  string                  `json:"check_ref"`
-	Error     *string                 `json:"error"`
-	OpId      string                  `json:"op_id"`
-	Result    *map[string]interface{} `json:"result"`
-	ResultUid string                  `json:"result_uid"`
-	Status    string                  `json:"status"`
+	CheckRef   string                  `json:"check_ref"`
+	Error      *string                 `json:"error"`
+	OpId       string                  `json:"op_id"`
+	ProducedAt *time.Time              `json:"produced_at"`
+	Result     *map[string]interface{} `json:"result"`
+	ResultUid  string                  `json:"result_uid"`
+	Status     string                  `json:"status"`
 }
 
 // RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
@@ -11025,6 +11027,7 @@ type SensorCreate struct {
 	Params              *map[string]interface{} `json:"params,omitempty"`
 	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
 	RetryTimes          *int                    `json:"retry_times,omitempty"`
+	RunnerName          *string                 `json:"runner_name"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -11114,6 +11117,7 @@ type SensorRead struct {
 	PendingState        *SensorReadPendingState `json:"pending_state"`
 	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
 	RetryTimes          int                     `json:"retry_times"`
+	RunnerName          *string                 `json:"runner_name"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//

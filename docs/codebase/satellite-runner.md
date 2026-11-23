@@ -695,6 +695,62 @@ five-state rollup #2506 defines (`UNKNOWN → degraded`). #2501 landed the
 marker + audit trail only; the flip is observable on the
 `runner_assignments` row and in the `gateway.runner.stale` audit path.
 
+### Checks that run at a site (`RUNNER_CHECKS_ENABLED`)
+
+Off by default. Off: `POST /api/v1/checks/results` only stores the rows, the
+runner's list holds only the hand-written items, a dead runner flips only
+`stale_at`, and `runner_name` is refused on a Sensor create.
+
+On, a Sensor with `runner_name = <runner>` is a check of that runner:
+
+- **List.** `gateway/assignment_service.py::materialize_assignment` adds one
+  work item for each active Sensor of the runner, after the hand-written
+  items. `check_ref` is the Sensor id. The op must be a runnable, safe,
+  handler-backed descriptor; else the item is dropped with a warning, like a
+  hand-written item.
+- **Results.** `api/v1/checks.py::post_results` screens the batch
+  (`gateway/runner_checks.py::screen_batch`), stores it
+  (`gateway/repository.py::ingest_new_results`), counts the new rows
+  (`count_results`), clears the stale marker, commits, then hands each
+  counted Sensor to `investigate_on_transition` (mails, investigator).
+  A result counts only when `check_ref` is the id of an **active Sensor of
+  this runner in this tenant** and `op_id` is the Sensor's op. Else it is
+  stored, logged (`runner_result_not_in_list`) and counted as `not_in_list`.
+- **The rule runs at the centre.** The runner sends `result` only. MEHO
+  redacts it like a central answer
+  (`apply_connector_boundary_redaction`) and reads the Sensor's assertion on
+  it. A runner status other than `ok` reads `unknown` (`runner_refused`,
+  `runner_error`).
+- **Time.** The time of a counted result is `received_at` (central clock),
+  plus one microsecond per result of the same batch. `RunnerResult.produced_at`
+  (optional, the runner clock) serves only to refuse a time more than 60 s
+  in the future (not stored, outcome `future_time`) and to drop a result made
+  at or before the Sensor's `last_evaluated_at` (outcome `old`). The
+  monotonic guard of `record_sensor_result` drops anything else that is not
+  newer. A re-posted `result_uid` is a duplicate and is never counted.
+- **Next due time.** Each counted result moves `next_fire_at` to
+  `received_at + interval`, so the rollup derives `unknown` for a check whose
+  runner stops reporting even before the sweeper flips it.
+- **Size.** 256 KB for one answer (compact JSON), 4 MB for a batch. An
+  answer over the cap is stored without payload (`error = "answer too
+  large"`) and the Sensor reads `unknown` with that reason (`too_large`).
+- **Stale runner.** `gateway/deadman.py` flips `stale_at`; with the switch
+  on it then calls `mark_runner_sensors_unknown`, which records `unknown`
+  (`runner_stale`) on each active Sensor of the runner, `retry_times + 1`
+  times so the confirmation gate passes, and hands them to the transition
+  detector. A Sensor bind creates an empty assignment row
+  (`ensure_assignment_row`) so the sweeper watches a runner that has only
+  Sensors. The next accepted result batch clears the marker and normal
+  results follow.
+- **Measure.** `runner_check_results_total{outcome}` with `counted`,
+  `not_in_list`, `too_large`, `future_time`, `old`.
+- **Clean-up.** Raw rows older than `RUNNER_CHECK_RESULTS_RETENTION_DAYS`
+  (7) are deleted by the evidence prune tick
+  (`checks/evidence_retention.py`).
+
+The hand-written list (`PUT /api/v1/checks/assignment/{runner}`) still works;
+the docs call it the old way.
+
 **Console fleet page (`/ui/runners`, #2589).** The read-only operator
 console surface for the fleet: one row per registered runner principal
 (`include_revoked=True` so a decommissioned runner still shows), with a

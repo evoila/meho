@@ -34555,6 +34555,11 @@
             "type": "string",
             "title": "Op Id"
           },
+          "runner_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Runner Name"
+          },
           "raw_state": {
             "type": "string",
             "enum": [
@@ -42681,6 +42686,12 @@
             "type": "string",
             "nullable": true,
             "title": "Error"
+          },
+          "produced_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Produced At"
           }
         },
         "type": "object",
@@ -43543,6 +43554,13 @@
             "nullable": true,
             "title": "Tenant Id"
           },
+          "runner_name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Runner Name"
+          },
           "force": {
             "type": "boolean",
             "title": "Force",
@@ -43723,6 +43741,11 @@
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
+          },
+          "runner_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Runner Name"
           },
           "created_at": {
             "type": "string",

@@ -254,6 +254,8 @@ NOT_AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "result_reduction_max_nodes",
         "retrieval_embedding_model",
         "retrieval_model_cache_dir",
+        "runner_check_results_retention_days",
+        "runner_checks_enabled",
         "sandbox_delete_grants_from_api",
         "sandbox_mode",
         "sandbox_mode_confirm",

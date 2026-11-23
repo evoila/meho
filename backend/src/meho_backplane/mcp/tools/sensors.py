@@ -44,6 +44,7 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
+from meho_backplane.checks.runner_binding import SensorRunnerBindingError
 from meho_backplane.checks.schemas import SensorCreate, SensorRead, SensorResultsQuery
 from meho_backplane.checks.service import (
     SensorAdminService,
@@ -69,7 +70,13 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
 
 
 def _row_to_dict(entry: SensorRead) -> dict[str, Any]:
-    """Serialise a :class:`SensorRead` to the MCP wire dict."""
+    """Serialise a :class:`SensorRead` to the MCP wire dict.
+
+    ``runner_name`` is left out for a check that no runner runs, so the answer
+    for such a check keeps its fields.
+    """
+    if entry.runner_name is None:
+        return entry.model_dump(mode="json", exclude={"runner_name"})
     return entry.model_dump(mode="json")
 
 
@@ -224,6 +231,8 @@ async def _create_handler(
         raise McpInvalidParamsError(exc.error_code) from exc
     except SensorConnectorMismatchError as exc:
         raise McpInvalidParamsError(f"{exc.error_code}: {exc}") from exc
+    except SensorRunnerBindingError as exc:
+        raise McpInvalidParamsError(exc.error_code) from exc
     except SensorNameConflictError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
     structlog.contextvars.bind_contextvars(audit_sensor_id=str(entry.id))

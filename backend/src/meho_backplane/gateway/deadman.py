@@ -82,6 +82,7 @@ from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerAssignmentRow, RunnerPrincipal
 from meho_backplane.gateway.queue import GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
+from meho_backplane.gateway.runner_checks import investigate_counted, mark_runner_sensors_unknown
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     SYSTEM_OPERATOR_SUB,
@@ -228,12 +229,40 @@ async def _run_one_tick() -> None:
 
     duration_ms = (time.perf_counter() - tick_started) * 1000.0
     await _audit_flips(flipped, duration_ms=duration_ms)
+    if get_settings().runner_checks_enabled:
+        await _mark_sensors_unknown(flipped)
     _log.info(
         "gateway_deadman_tick_done",
         flipped=len(flipped),
         threshold_seconds=_threshold_seconds(),
         duration_ms=duration_ms,
     )
+
+
+async def _mark_sensors_unknown(flipped: list[tuple[uuid.UUID, str, float]]) -> None:
+    """Set the Sensors of each stale runner to ``unknown``, one runner at a time.
+
+    Runs after the flips committed. A failure for one runner is logged and
+    does not stop the others.
+    """
+    sessionmaker = get_sessionmaker()
+    for tenant_id, runner_name, _lapse in flipped:
+        try:
+            async with sessionmaker() as session:
+                marked = await mark_runner_sensors_unknown(
+                    session,
+                    tenant_id=tenant_id,
+                    runner_name=runner_name,
+                    now=datetime.now(UTC),
+                )
+                await session.commit()
+            await investigate_counted(tenant_id, marked)
+        except Exception:
+            _log.exception(
+                "gateway_deadman_mark_sensors_failed",
+                tenant_id=str(tenant_id),
+                runner=runner_name,
+            )
 
 
 async def _audit_flips(

@@ -147,6 +147,7 @@ def _member_view(
         name=sensor.name,
         connector_id=sensor.connector_id,
         op_id=sensor.op_id,
+        runner_name=sensor.runner_name,
         raw_state=evaluation.raw_state,
         effective_state=evaluation.effective_state,
         pending=evaluation.pending,

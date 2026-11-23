@@ -63,6 +63,9 @@
               <td>
                 <div class="font-medium">{{ m.name }}</div>
                 <div class="font-mono text-xs opacity-60">{{ m.connector_id }} &middot; {{ m.op_id }}</div>
+                {% if m.runner_name %}
+                  <div class="text-xs opacity-60">runs at: runner {{ m.runner_name }}</div>
+                {% endif %}
                 {% if m.status == "paused" %}
                   <span class="badge badge-outline badge-xs">paused</span>
                 {% endif %}

@@ -69,7 +69,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.checks.connector_fit import connector_fit_for_target, with_connector_fit
 from meho_backplane.checks.repository import create_sensor, list_sensor_results
+from meho_backplane.checks.runner_binding import bind_sensor_to_runner
 from meho_backplane.checks.schemas import (
+    SensorConnectorFit,
     SensorCreate,
     SensorRead,
     SensorResultListResponse,
@@ -451,6 +453,35 @@ def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None
         )
 
 
+async def _precheck_create(
+    tenant_id: uuid.UUID,
+    created_by_sub: str,
+    payload: SensorCreate,
+) -> SensorConnectorFit | None:
+    """The checks that run before :meth:`SensorAdminService.create` writes a row.
+
+    Refuses a foreign ``identity_sub`` (#2699, a pure in-memory ownership
+    check, so it runs first), an unknown or non-safe op, and a connector that
+    does not fit the target unless ``force`` is set. Returns the connector fit.
+    """
+    _require_owned_identity_sub(payload.identity_sub, created_by_sub)
+    product, version, impl_id = parse_connector_id(payload.connector_id)
+    descriptor = await lookup_descriptor(
+        tenant_id=tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=payload.op_id,
+    )
+    if descriptor is None:
+        raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
+    _require_read(payload, descriptor)
+    fit = await connector_fit_for_target(tenant_id, payload.connector_id, payload.target)
+    if fit is not None and fit.warning is not None and not payload.force:
+        raise SensorConnectorMismatchError(fit.warning, fit.matching_connector_id)
+    return fit
+
+
 class SensorAdminService:
     """Tenant-scoped CRUD over :class:`Sensor`.
 
@@ -504,30 +535,14 @@ class SensorAdminService:
             tightening migration) propagates rather than being misreported
             as a name conflict -- the boundary maps it to a 500.
         """
-        # Identity-attribution guard (#2699) -- runs first, before any DB read,
-        # because it is a pure in-memory ownership check on the audited dispatch
-        # principal. See :func:`_require_owned_identity_sub`.
-        _require_owned_identity_sub(payload.identity_sub, created_by_sub)
-
-        # Safe-only create guard -- resolve the descriptor and refuse a
-        # non-safe / unknown op before any DB write.
-        product, version, impl_id = parse_connector_id(payload.connector_id)
-        descriptor = await lookup_descriptor(
-            tenant_id=tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
-            op_id=payload.op_id,
-        )
-        if descriptor is None:
-            raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
-        _require_read(payload, descriptor)
-        fit = await connector_fit_for_target(tenant_id, payload.connector_id, payload.target)
-        if fit is not None and fit.warning is not None and not payload.force:
-            raise SensorConnectorMismatchError(fit.warning, fit.matching_connector_id)
+        fit = await _precheck_create(tenant_id, created_by_sub, payload)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await _lock_and_require_operation(session, tenant_id, payload)
+            if payload.runner_name is not None:
+                await bind_sensor_to_runner(
+                    session, tenant_id=tenant_id, runner_name=payload.runner_name
+                )
             try:
                 row = await create_sensor(
                     session,
@@ -548,6 +563,7 @@ class SensorAdminService:
                     retry_backoff_seconds=payload.retry_backoff_seconds,
                     identity_sub=payload.identity_sub,
                     created_by_sub=created_by_sub,
+                    runner_name=payload.runner_name,
                 )
                 await session.commit()
             except IntegrityError as exc:

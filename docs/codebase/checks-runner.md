@@ -20,6 +20,12 @@ evaluation plane:
 Both start and stop together behind `SENSOR_RUNNER_ENABLED`. The
 watchdog deliberately has no enable flag of its own.
 
+The loop runs only Sensors without a `runner_name`. A Sensor with a
+runner name runs at its site: `claim_due_sensors` skips it, and its results
+reach `record_sensor_result` through `POST /api/v1/checks/results`
+(`gateway/runner_checks.py`, switch `RUNNER_CHECKS_ENABLED`). See
+`docs/codebase/satellite-runner.md`.
+
 ## Key types
 
 - `run_one_sensor_tick()` (`checks/runner.py`) — one deterministic tick;
@@ -170,6 +176,14 @@ non-`safe` operation for approval. See `sensor.md`, step 4 of
   returns; the watchdog then reports the runner as stalled. Each Vault
   read the runner makes also passes the tenant path check for the
   sensor's tenant (`docs/codebase/connectors-vault-tenant-scope.md`).
+
+- `RUNNER_CHECKS_ENABLED` (default `false`) — results of a runner count
+  as check results (`docs/codebase/satellite-runner.md`).
+- `RUNNER_CHECK_RESULTS_RETENTION_DAYS` (default 7, `0` keeps) — the
+  evidence prune tick (`checks/evidence_retention.py`) also deletes raw
+  `runner_check_results` rows older than this. It runs while
+  `CHECKS_EVIDENCE_PRUNE_ENABLED` is on, also when
+  `CHECKS_EVIDENCE_RETENTION_DAYS` is `0`.
 
 ## Log lines
 

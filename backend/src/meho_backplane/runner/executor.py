@@ -96,6 +96,7 @@ def _result(
         status=status,
         result=payload,
         error=error,
+        produced_at=datetime.now(UTC),
     )
 
 

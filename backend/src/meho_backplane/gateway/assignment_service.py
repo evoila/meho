@@ -42,11 +42,12 @@ from typing import Any
 from uuid import UUID
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.resolver import resolve_connector_or_label
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorStatus
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.gateway import repository
 from meho_backplane.gateway.errors import (
@@ -55,10 +56,12 @@ from meho_backplane.gateway.errors import (
     AssignmentTargetUnknownError,
 )
 from meho_backplane.gateway.schemas import AssignmentDocument, AuthoredCheckItem
-from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.runner import wire
 from meho_backplane.runner.package_set import local_package_set, package_set_mismatch_message
 from meho_backplane.runner.satellite_tier import SatelliteMintTier, classify_satellite_tier
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
@@ -236,10 +239,34 @@ async def materialize_assignment(
         if work_item is not None and _package_set_matches(work_item, runner_package_set):
             work_items.append(work_item)
 
+    if get_settings().runner_checks_enabled:
+        for sensor in await _active_runner_sensors(session, tenant_id, runner_name):
+            sensor_item = await _materialize_sensor(
+                session, tenant_id=tenant_id, sensor=sensor, principal=principal
+            )
+            if sensor_item is not None and _package_set_matches(sensor_item, runner_package_set):
+                work_items.append(sensor_item)
+
     return wire.RunnerAssignment(
         assignment_version=compute_assignment_version(work_items),
         items=work_items,
     )
+
+
+async def _active_runner_sensors(
+    session: AsyncSession, tenant_id: UUID, runner_name: str
+) -> list[Sensor]:
+    """The active Sensors of *tenant_id* that run on *runner_name*, oldest first."""
+    result = await session.execute(
+        select(Sensor)
+        .where(
+            Sensor.tenant_id == tenant_id,
+            Sensor.runner_name == runner_name,
+            Sensor.status == SensorStatus.ACTIVE.value,
+        )
+        .order_by(Sensor.created_at, Sensor.id)
+    )
+    return list(result.scalars().all())
 
 
 async def _materialize_item(
@@ -286,8 +313,33 @@ async def _materialize_item(
             op=authored.op,
         )
         return None
-    assert descriptor is not None and descriptor.handler_ref is not None
+    return _work_item(
+        check_ref=authored.check_ref,
+        op=authored.op,
+        params=dict(authored.params),
+        target=target,
+        product=cls.product,
+        version=cls.version,
+        impl_id=cls.impl_id,
+        descriptor=descriptor,
+        principal=principal,
+    )
 
+
+def _work_item(
+    *,
+    check_ref: str,
+    op: str,
+    params: dict[str, Any],
+    target: TargetORM | None,
+    product: str,
+    version: str,
+    impl_id: str,
+    descriptor: EndpointDescriptor | None,
+    principal: wire.RunnerPrincipal,
+) -> wire.RunnerWorkItem:
+    """Build the wire work item for a runnable, safe *descriptor*."""
+    assert descriptor is not None and descriptor.handler_ref is not None
     package_set = local_package_set()
     needs_package_set = (
         package_set.digest
@@ -295,18 +347,87 @@ async def _materialize_item(
         else None
     )
     return wire.RunnerWorkItem(
-        check_ref=authored.check_ref,
-        op_id=authored.op,
-        product=cls.product,
-        version=cls.version,
-        impl_id=cls.impl_id,
+        check_ref=check_ref,
+        op_id=op,
+        product=product,
+        version=version,
+        impl_id=impl_id,
         handler_ref=descriptor.handler_ref,
-        params=dict(authored.params),
+        params=params,
         safety_level=descriptor.safety_level,
         principal=principal,
-        target_descriptor=descriptor_from_target(target),
+        target_descriptor=descriptor_from_target(target) if target is not None else None,
         package_set=needs_package_set,
     )
+
+
+async def _materialize_sensor(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    sensor: Sensor,
+    principal: wire.RunnerPrincipal,
+) -> wire.RunnerWorkItem | None:
+    """Materialise one Sensor bound to a runner, or ``None`` (logged) if it cannot run.
+
+    ``check_ref`` is the Sensor id. The connector comes from the Sensor, the
+    target from its stored target name. Secret-reveal params are taken off,
+    like in the central check loop.
+    """
+    target: TargetORM | None = None
+    target_name = _sensor_target_name(sensor)
+    if sensor.target is not None:
+        if target_name is None:
+            _log.warning(
+                "assignment_item_dropped",
+                reason="sensor_target_unreadable",
+                sensor_id=str(sensor.id),
+            )
+            return None
+        try:
+            target = await resolve_target(session, tenant_id, target_name)
+        except (TargetNotFoundError, AmbiguousTargetError):
+            _log.warning(
+                "assignment_item_dropped",
+                reason="target_unresolved",
+                sensor_id=str(sensor.id),
+                target_name=target_name,
+            )
+            return None
+    product, version, impl_id = parse_connector_id(sensor.connector_id)
+    descriptor = await lookup_descriptor(
+        tenant_id=tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=sensor.op_id,
+    )
+    if not _is_runnable_safe(descriptor):
+        _log.warning(
+            "assignment_item_dropped",
+            reason="op_unresolved_or_unsafe",
+            sensor_id=str(sensor.id),
+            op=sensor.op_id,
+        )
+        return None
+    params, _ = split_reveal_secret(dict(sensor.params))
+    return _work_item(
+        check_ref=str(sensor.id),
+        op=sensor.op_id,
+        params=params,
+        target=target,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        descriptor=descriptor,
+        principal=principal,
+    )
+
+
+def _sensor_target_name(sensor: Sensor) -> str | None:
+    """The target name stored on *sensor* (``{"name": ...}``), or ``None``."""
+    name = sensor.target.get("name") if sensor.target is not None else None
+    return name if isinstance(name, str) and name else None
 
 
 def _package_set_matches(item: wire.RunnerWorkItem, runner_package_set: str) -> bool:

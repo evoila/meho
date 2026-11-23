@@ -58,6 +58,44 @@ re-posted oldest-first; a failed assignment fetch keeps the **cached**
 assignment running, so the satellite keeps evaluating its last-known
 checks while the uplink is down.
 
+## Checks that run at a site
+
+A check (a sensor) can run on a runner instead of in the central pod. Set
+`runner_name` when you create the sensor. The name must be a runner of the
+same tenant that is not revoked. This needs the switch
+`RUNNER_CHECKS_ENABLED`, which is off by default.
+
+With the switch **on**:
+
+- The runner's list holds one item for each active sensor with its name.
+  `check_ref` is the sensor id. The central check loop does not run these
+  sensors.
+- The runner sends the answer of the operation. MEHO reads the sensor's rule
+  on that answer and sets the state. The runner never sends a state.
+- The check shows on the dashboard, sends mails on a change and on recovery,
+  and can start the investigator, like a central check. The dashboard row
+  says "runs at: runner `<name>`".
+- A result for a `check_ref` that is not an active sensor of this runner in
+  this tenant is stored and not counted.
+- A runner time in the future is refused. A result made before the last
+  counted one is dropped. A result that was posted before (a re-post from the
+  disk spool) is not counted again.
+- An answer over 256 KB, or a batch over 4 MB, gives the check the state
+  `unknown` with the reason "answer too large".
+- When the runner stops reporting, its checks get the state `unknown`. They
+  are never green. When the runner is back, normal results follow.
+- MEHO counts the results by outcome in `runner_check_results_total`
+  (`counted`, `not_in_list`, `too_large`, `future_time`, `old`).
+
+With the switch **off**, MEHO only stores runner results, and `runner_name`
+is refused on create.
+
+The hand-written list (`PUT /api/v1/checks/assignment/{runner}`) still works.
+Prefer sensors with a `runner_name`.
+
+MEHO keeps the raw rows of runner results for 7 days
+(`RUNNER_CHECK_RESULTS_RETENTION_DAYS`; `0` keeps them).
+
 ## Changes through a satellite (not built yet)
 
 A satellite cannot run a change today. Parts of a design exist in the code
@@ -147,8 +185,9 @@ evaluates [sensors](sensors-quickstart.md) inside the central pod.
 Sensors always run in the central pod, on targets central can reach
 directly (the background-credential story is in
 [Sensors and your credential backend](sensors-quickstart.md#sensors-and-your-credential-backend)).
-Satellite checks are a separate list that a tenant_admin writes for each
-runner (step 4 above), for the targets central cannot reach.
+A check that runs at a site is a sensor with a `runner_name` (see
+[Checks that run at a site](#checks-that-run-at-a-site)). The list that a
+tenant_admin writes for each runner (step 4 above) also still works.
 
 ## What can go wrong here
 
@@ -157,12 +196,11 @@ runner (step 4 above), for the targets central cannot reach.
 | The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID` / `TOKEN`) is missing or malformed. | Set all three; the error names the offender. |
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
-| Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. You cannot see them in MEHO yet. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
+| Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. With `RUNNER_CHECKS_ENABLED` on, results of a sensor with a `runner_name` count as check results. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
 | `403` registering a runner principal | `meho runner-principal register` / `revoke` need **tenant_admin**. | Enroll under a tenant_admin session; `show` / `list` are operator-level. |
 
 ## What is not built yet
 
-- Results on dashboards, mails and the investigator.
 - Changes through a satellite.
 - Reads that need a stored password (the runner has no Vault login of its own).
 - Generic operations (made from an API spec) on a satellite.

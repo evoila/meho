@@ -161,6 +161,9 @@ class SensorCreate(BaseModel):
     ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
+    #: Name of a runner of this tenant that runs the check at its site. Needs
+    #: ``RUNNER_CHECKS_ENABLED``. ``None`` means the central check loop runs it.
+    runner_name: Annotated[str | None, Field(min_length=1, max_length=_NAME_MAX_LENGTH)] = None
     #: Create the Sensor even when its connector does not fit the target's
     #: product and version. Without it such a create is refused with
     #: ``sensor_connector_mismatch``. Not stored on the row.
@@ -270,6 +273,7 @@ class SensorRead(BaseModel):
     pending_count: int
     identity_sub: str
     created_by_sub: str
+    runner_name: str | None = None
     created_at: datetime
     updated_at: datetime
     # Not a column: filled by the service on list and create from the

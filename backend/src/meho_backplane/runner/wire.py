@@ -284,6 +284,11 @@ class RunnerResult(BaseModel):
     status: str
     result: dict[str, Any] | None = None
     error: str | None = None
+    #: When the runner made the result, on the runner's clock. Central never
+    #: uses it as the time of the check (it uses the time it received the
+    #: result). It only refuses a time in the future and drops a result made
+    #: before the last one it counted. A runner that sends none is accepted.
+    produced_at: datetime | None = None
 
 
 class RunnerResultBatch(BaseModel):

@@ -70,7 +70,7 @@ import structlog
 from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, SensorResult
+from meho_backplane.db.models import AuditEventClass, RunnerCheckResult, SensorResult
 from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS, wait_until_first_run
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -131,6 +131,32 @@ async def _delete_sensor_results_older_than(cutoff: datetime) -> int:
     return dropped
 
 
+async def _delete_runner_results_older_than(cutoff: datetime) -> int:
+    """Delete raw runner result rows received before *cutoff*; return the count."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            delete(RunnerCheckResult).where(RunnerCheckResult.received_at < cutoff)
+        )
+        await session.commit()
+        dropped: int = result.rowcount or 0  # type: ignore[attr-defined]
+    return dropped
+
+
+async def _prune_runner_results() -> None:
+    """Keep raw runner results for ``RUNNER_CHECK_RESULTS_RETENTION_DAYS`` days.
+
+    ``0`` keeps them. Runs in every prune tick, also when the evidence
+    retention is off.
+    """
+    days = get_settings().runner_check_results_retention_days
+    if days == 0:
+        return
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    dropped = await _delete_runner_results_older_than(cutoff)
+    _log.info("runner_check_results_pruned", dropped_rows=dropped, retention_days=days)
+
+
 async def _write_prune_audit_row(
     *,
     dropped_rows: int,
@@ -183,6 +209,7 @@ async def _run_one_prune_tick() -> None:
     tick_started = time.perf_counter()
     settings = get_settings()
     retention_days = settings.checks_evidence_retention_days
+    await _prune_runner_results()
 
     if retention_days == 0:
         _log.info(

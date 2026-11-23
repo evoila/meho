@@ -209,6 +209,20 @@ history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
 
+### A check that runs at a site (`runner_name`)
+
+`sensor.runner_name` (nullable) names a runner of the same tenant. A Sensor
+with a `runner_name` runs on that runner, never in the central check loop
+(`claim_due_sensors` leaves it out). Create accepts `runner_name` only when
+`RUNNER_CHECKS_ENABLED` is on and the runner exists, is not revoked and
+belongs to the tenant (`checks/runner_binding.py`, 422
+`sensor_runner_checks_disabled` or `sensor_runner_unknown`). The runner's
+results set the state through `record_sensor_result`, the same write path as
+the central loop: see `docs/codebase/satellite-runner.md`, "Checks that run
+at a site". The dashboard member view carries `runner_name`, and the console
+row says "runs at: runner <name>". With the switch off the column is only
+stored. The MCP sensor answers leave `runner_name` out when it is `null`.
+
 ### Connector fit (#5858)
 
 `checks/connector_fit.py` answers one question: does the Sensor's

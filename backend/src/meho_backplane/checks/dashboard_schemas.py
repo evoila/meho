@@ -205,6 +205,9 @@ class DashboardMemberView(BaseModel):
     name: str
     connector_id: str
     op_id: str
+    #: The runner that runs this check at its site, or ``None`` for a check
+    #: that the central check loop runs.
+    runner_name: str | None = None
     #: The member's current derived state (paused -> ``skip``, stale ->
     #: ``unknown``, else the persisted ``last_state``).
     raw_state: CheckState

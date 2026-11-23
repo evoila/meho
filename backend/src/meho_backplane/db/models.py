@@ -6017,6 +6017,12 @@ class RunnerCheckResult(Base):
             "received_at",
             postgresql_using="btree",
         ),
+        # The clean-up job deletes rows older than the retention window.
+        Index(
+            "runner_check_results_received_at_idx",
+            "received_at",
+            postgresql_using="btree",
+        ),
         sa.CheckConstraint(
             "status IN ('ok', 'refused', 'error')",
             name="ck_runner_check_results_status",
@@ -9555,6 +9561,10 @@ class Sensor(Base):
         default="__sensor__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Name of the runner (``runner_principal.name``, same tenant) that runs
+    # this check at a site. ``NULL`` means the central check loop runs it.
+    # A soft reference: the runner row is never hard-deleted.
+    runner_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

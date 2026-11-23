@@ -23,8 +23,10 @@ from meho_backplane.db.models import RunnerAssignmentRow, RunnerCheckResult
 from meho_backplane.runner.wire import RunnerResult
 
 __all__ = [
+    "ensure_assignment_row",
     "get_assignment_row",
     "get_stale_markers",
+    "ingest_new_results",
     "ingest_results",
     "upsert_assignment_row",
 ]
@@ -97,6 +99,23 @@ async def upsert_assignment_row(
     return row
 
 
+async def ensure_assignment_row(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    runner_name: str,
+) -> None:
+    """Make sure ``(tenant_id, runner_name)`` has an assignment row.
+
+    A new row has an empty document. An existing row is left as it is. The
+    dead-man sweeper only watches runners that have a row. Does not commit.
+    """
+    row = await get_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+    if row is None:
+        session.add(RunnerAssignmentRow(tenant_id=tenant_id, runner_name=runner_name, items=[]))
+        await session.flush()
+
+
 async def ingest_results(
     session: AsyncSession,
     *,
@@ -106,19 +125,34 @@ async def ingest_results(
 ) -> tuple[int, int]:
     """Persist a runner's result batch idempotently; return ``(accepted, duplicates)``.
 
+    ``accepted + duplicates == len(results)``: a within-batch repeat of a
+    ``result_uid`` counts once as accepted and the rest as duplicates. See
+    :func:`ingest_new_results` for the rules.
+    """
+    new = await ingest_new_results(
+        session, tenant_id=tenant_id, runner_name=runner_name, results=results
+    )
+    return len(new), len(results) - len(new)
+
+
+async def ingest_new_results(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    runner_name: str,
+    results: list[RunnerResult],
+) -> list[RunnerResult]:
+    """Persist a runner's result batch idempotently; return the results that were new.
+
     Idempotency key is ``(tenant_id, runner_name, result_uid)``. Portable
     across PostgreSQL and SQLite: dedupe the batch by ``result_uid``, read
     back which of those uids already exist, then insert only the new ones.
-    A re-posted spool batch therefore inserts nothing and is reported
-    entirely as duplicates. ``received_at`` is left to the ORM default
-    (central clock) — never taken from the client. Does not commit.
-
-    ``accepted + duplicates == len(results)``: a within-batch repeat of a
-    ``result_uid`` counts once as accepted and the rest as duplicates.
+    A re-posted spool batch therefore inserts nothing and returns an empty
+    list. ``received_at`` is left to the ORM default (central clock) -- never
+    taken from the client. Does not commit.
     """
-    total = len(results)
-    if total == 0:
-        return 0, 0
+    if not results:
+        return []
 
     # Dedupe within the batch, preserving first-seen order.
     seen: set[str] = set()
@@ -138,7 +172,7 @@ async def ingest_results(
     )
     already: set[str] = set(existing_result.scalars().all())
 
-    accepted = 0
+    new: list[RunnerResult] = []
     for item in unique:
         if item.result_uid in already:
             continue
@@ -154,6 +188,6 @@ async def ingest_results(
                 error=item.error,
             )
         )
-        accepted += 1
+        new.append(item)
 
-    return accepted, total - accepted
+    return new

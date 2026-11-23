@@ -126,7 +126,13 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
     asyncio.run(_do())
 
 
-def _seed_sensor(*, tenant_id: uuid.UUID, name: str, last_state: str = "ok") -> uuid.UUID:
+def _seed_sensor(
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    last_state: str = "ok",
+    runner_name: str | None = None,
+) -> uuid.UUID:
     now = datetime.now(UTC)
     sensor_id = uuid.uuid4()
 
@@ -158,6 +164,7 @@ def _seed_sensor(*, tenant_id: uuid.UUID, name: str, last_state: str = "ok") -> 
                     state_since=now - timedelta(hours=1),
                     identity_sub="__sensor__",
                     created_by_sub="op-admin",
+                    runner_name=runner_name,
                 )
             )
 
@@ -317,6 +324,22 @@ def test_detail_renders_member_table() -> None:
     assert "disk-space" in body  # member sensor name
     assert "vmware.vm.list" in body  # member op id
     assert "degraded" in body  # the member + rollup badge
+
+
+def test_detail_shows_where_a_runner_check_runs() -> None:
+    """A member bound to a runner says "runs at: runner <name>"; a central member does not."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    at_site = _seed_sensor(tenant_id=_TENANT_A, name="site-disk", runner_name="runner-site-1")
+    central = _seed_sensor(tenant_id=_TENANT_A, name="central-disk")
+    dash_id = _seed_dashboard(tenant_id=_TENANT_A, name="mixed", sensor_ids=[at_site, central])
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get(f"/ui/checks/{dash_id}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert response.text.count("runs at: runner") == 1
+    assert "runs at: runner runner-site-1" in response.text
 
 
 def test_detail_shows_who_acknowledged_a_member_until_when_and_why() -> None:

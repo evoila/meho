@@ -38,6 +38,7 @@ construction.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Final
 
 import structlog
@@ -63,13 +64,19 @@ from meho_backplane.gateway.errors import (
     AssignmentTargetUnknownError,
     AssignmentValidationError,
 )
-from meho_backplane.gateway.repository import ingest_results
+from meho_backplane.gateway.repository import ingest_new_results
+from meho_backplane.gateway.runner_checks import (
+    count_results,
+    investigate_counted,
+    screen_batch,
+)
 from meho_backplane.gateway.schemas import (
     AssignmentDocument,
     AssignmentDocumentResponse,
     ResultIngestResponse,
 )
 from meho_backplane.runner import wire
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -218,11 +225,31 @@ async def post_results(
             wire_version=wire_version,
             package_set=package_set,
         )
-        accepted, duplicates = await ingest_results(
+        results = list(batch.results)
+        runner_checks = get_settings().runner_checks_enabled
+        received_at = datetime.now(UTC)
+        too_large: set[str] = set()
+        if runner_checks:
+            screened = screen_batch(results, received_at, runner_name=batch.runner_id)
+            results, too_large = screened.results, screened.too_large
+        stored = await ingest_new_results(
             session,
             tenant_id=operator.tenant_id,
             runner_name=batch.runner_id,
-            results=list(batch.results),
+            results=results,
+        )
+        accepted, duplicates = len(stored), len(results) - len(stored)
+        counted = (
+            await count_results(
+                session,
+                tenant_id=operator.tenant_id,
+                runner_name=batch.runner_id,
+                stored=stored,
+                too_large=too_large,
+                received_at=received_at,
+            )
+            if runner_checks
+            else []
         )
         # Recovery clear seam (#2501): an accepted result batch proves the
         # runner is alive and reporting, so reset any dead-man flip marker
@@ -230,6 +257,7 @@ async def post_results(
         # only clear path. Idempotent when the runner was never flipped.
         await clear_runner_stale(session, tenant_id=operator.tenant_id, runner_name=batch.runner_id)
         await session.commit()
+    await investigate_counted(operator.tenant_id, counted)
     return ResultIngestResponse(accepted=accepted, duplicates=duplicates)
 
 

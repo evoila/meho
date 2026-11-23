@@ -85,6 +85,7 @@ async def create_sensor(
     identity_sub: str,
     created_by_sub: str,
     base: datetime | None = None,
+    runner_name: str | None = None,
 ) -> Sensor:
     """Insert a sensor with a materialised first ``next_fire_at``.
 
@@ -134,6 +135,7 @@ async def create_sensor(
         retry_backoff_seconds=retry_backoff_seconds,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
+        runner_name=runner_name,
     )
     session.add(row)
     await session.flush()
@@ -414,6 +416,8 @@ async def claim_due_sensors(
         .where(
             Sensor.status == SensorStatus.ACTIVE.value,
             Sensor.next_fire_at <= now,
+            # A check bound to a runner runs at its site, never here.
+            Sensor.runner_name.is_(None),
         )
         .order_by(Sensor.next_fire_at.asc())
         .limit(limit)

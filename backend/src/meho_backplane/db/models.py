@@ -5266,7 +5266,7 @@ class RunnerPrincipal(Base):
     # call (the runner list shows it). ``NULL`` until the runner calls after
     # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # The one-time enrollment code (migration 0184): only its SHA-256 is
+    # The one-time enrollment code (migration 0185): only its SHA-256 is
     # stored, and the column is emptied when the code is used. The expiry and
     # the time the runner enrolled its public key sit beside it.
     enrollment_code_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -7782,6 +7782,12 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
             name="ck_approval_request_outcome_check_reason",
+        ),
+        # Matches migration 0184: a request that ended without a run is
+        # never started, under any release.
+        sa.CheckConstraint(
+            "status NOT IN ('rejected', 'expired', 'withdrawn') OR resumed_at IS NULL",
+            name="ck_approval_request_ended_not_started",
         ),
     )
 

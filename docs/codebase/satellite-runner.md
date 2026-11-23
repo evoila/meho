@@ -737,7 +737,7 @@ A runner logs in in one of two modes. Which one runs is decided at start by
   `<runner id hex>.<secret>` (`auth/runner_enrollment.py::new_enrollment_code`)
   and returns it once in `RunnerPrincipalRegistered`. Only its SHA-256 and
   its expiry (30 minutes) are stored (`runner_principal.enrollment_code_hash`,
-  `enrollment_code_expires_at`, migration `0184`).
+  `enrollment_code_expires_at`, migration `0185`).
 - The runner makes an EC P-256 key (`runner/login.py::load_or_create_private_key`;
   the file `runner-key.pem` has mode `0600`) and posts the public key (a JWK)
   with the code to `POST /api/v1/runner-principals/enroll`

@@ -1119,7 +1119,7 @@ the lesson header (`mcp/tools/_search_filters.py`):
 `search_knowledge` also takes `scope`: `all` (default), `tenant` or
 `shared`. A named filter wins over the same key in `filters`.
 
-With `KB_SEARCH_WORD_HINT` on (off by default), `search_knowledge` tells
+With `KB_SEARCH_WORD_HINT` on (Helm: `config.kbSearchWordHint`; off by default), `search_knowledge` tells
 the agent to search with a few key words, and its answer has `word_match`
 (`some` or `none`). See "MCP `search_knowledge` tool surface" in
 `retrieval.md`.
@@ -1184,7 +1184,7 @@ query and `limit`:
 2. A search with `filters`, header filters, a time window or
    `scope="shared"` (REST: `kind` or `metadata_filters`) does not search
    the wiki: the wiki cannot apply them. The switch
-   `KB_WIKI_FILTERED_SEARCH` (setting `kb_wiki_filtered_search`, off by
+   `KB_WIKI_FILTERED_SEARCH` (Helm: `config.kbWikiFilteredSearch`; setting `kb_wiki_filtered_search`, off by
    default) makes one exception, decided by
    `kb/wiki_search.py::wiki_exact_filters` for both paths: a search
    whose only filters are `product` and/or `version` (each a non-blank
@@ -1247,7 +1247,7 @@ The answer:
   answer, `wiki` included. When the answer is too large, the
   lowest-ranked hits are left out first, so wiki hits go before store
   hits.
-- With `KB_WIKI_INTERLEAVE` on (setting `kb_wiki_interleave`, off by
+- With `KB_WIKI_INTERLEAVE` on (Helm: `config.kbWikiInterleave`; setting `kb_wiki_interleave`, off by
   default), `hits` takes the two lists in turns: store hit 1, wiki hit 1,
   store hit 2, wiki hit 2, and so on; the rest of the longer list
   follows (`mcp/tools/knowledge.py::_ordered_hits`). The two engines give

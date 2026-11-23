@@ -757,6 +757,9 @@ data:
   # texts for the biggest tools on the MCP tool list.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  KB_SEARCH_WORD_HINT: "false"
+  KB_WIKI_FILTERED_SEARCH: "false"
+  KB_WIKI_INTERLEAVE: "false"
   FILE_REF_PARAMS: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
   # Tool profiles with a connector list. Off by default.

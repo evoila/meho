@@ -521,6 +521,21 @@
           "enum": ["true", "false"],
           "description": "Check a new knowledge entry for similar entries first; when some exist, nothing is written and the writer gets the list. Rendered into `KB_SIMILAR_CHECK`. Default `\"false\"`: off until model tests show it helps. See `docs/codebase/kb.md`."
         },
+        "kbSearchWordHint": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "The word half of `search_knowledge` also finds passages that hold only some words of a long question. Rendered into `KB_SEARCH_WORD_HINT`. Default `\"false\"`: off until a measurement shows it helps. See `docs/codebase/kb.md`."
+        },
+        "kbWikiFilteredSearch": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "A product or version filter on `search_knowledge` can still search the wiki. Rendered into `KB_WIKI_FILTERED_SEARCH`. Default `\"false\"`: off until a measurement shows it helps. See `docs/codebase/kb.md`."
+        },
+        "kbWikiInterleave": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "`search_knowledge` mixes wiki hits into the knowledge hits in turns. Rendered into `KB_WIKI_INTERLEAVE`. Default `\"false\"`: off until a measurement shows it helps. See `docs/codebase/kb.md`."
+        },
         "fileRefParams": {
           "type": "string",
           "enum": ["true", "false"],

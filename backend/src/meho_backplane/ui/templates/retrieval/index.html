@@ -57,7 +57,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Retrieval{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Run a query in-process and read back the ranked hits with the
         per-signal RRF score &amp; rank breakdown the substrate carries.
       </p>
@@ -119,7 +119,7 @@
           </label>
           <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
             <label class="flex flex-col gap-1 w-full sm:w-48">
-              <span class="text-sm font-medium">Source <span class="opacity-50">(optional)</span></span>
+              <span class="text-sm font-medium">Source <span class="text-subtle">(optional)</span></span>
               {#- Source datalist (#2458): the tenant's distinct retrieval-visible
                   source namespaces, enumerated by a SELECT DISTINCT over the
                   ``documents`` table. ``list=`` keeps the input free-typing (kinds
@@ -145,7 +145,7 @@
               </datalist>
             </label>
             <label class="flex flex-col gap-1 w-full sm:w-48">
-              <span class="text-sm font-medium">Kind <span class="opacity-50">(optional)</span></span>
+              <span class="text-sm font-medium">Kind <span class="text-subtle">(optional)</span></span>
               {#- Kind datalist (#2458): the tenant's distinct retrieval-visible
                   kinds from the same SELECT DISTINCT; a user-scoped memory kind
                   another principal owns is excluded (own-principal scoped). -#}
@@ -198,7 +198,7 @@
               inline and overlapped the adjacent controls. As a full-width note
               it can no longer collide; the Source input references it via
               ``aria-describedby``. -#}
-          <p id="retrieval-source-help" class="text-xs opacity-60">
+          <p id="retrieval-source-help" class="text-xs text-subtle">
             Retrieval sources only. Docs-corpus collections are a separate
             substrate &mdash; search them on
             <a href="/ui/corpus" class="link">/ui/corpus</a>, not here.

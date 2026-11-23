@@ -42,14 +42,14 @@
     <div class="alert alert-error" role="alert" aria-live="assertive">
       <div>
         <h3 class="font-semibold">Invalid lookback window</h3>
-        <p class="text-sm opacity-90">{{ error_message }}</p>
+        <p class="text-sm text-muted">{{ error_message }}</p>
       </div>
     </div>
 
   {% elif report is not none %}
     {# ---------- Window header ---------- #}
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <p class="text-sm opacity-70" aria-live="polite">
+      <p class="text-sm text-muted" aria-live="polite">
         <span class="font-mono">{{ report.total_searches }}</span>
         search{% if report.total_searches != 1 %}es{% endif %} counted
         &middot; <span class="font-mono">{{ report.since.strftime("%Y-%m-%d %H:%M") }}</span>
@@ -65,7 +65,7 @@
       <div class="alert alert-info" role="status">
         <div>
           <h3 class="font-semibold">REST excluded &mdash; only audited /mcp search tools are counted</h3>
-          <p class="text-sm opacity-90">
+          <p class="text-sm text-muted">
             A zero here does <strong>not</strong> mean "no retrieval activity".
             The REST <span class="font-mono">POST /api/v1/retrieve</span>
             diagnostic queries (including this console's Diagnostics tab) audit
@@ -121,7 +121,7 @@
       {# total_searches > 0 but no buckets would be a contradiction; guard anyway. #}
       <div class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body text-center py-8">
-          <p class="text-sm opacity-50">No per-day breakdown available for this window.</p>
+          <p class="text-sm text-subtle">No per-day breakdown available for this window.</p>
         </div>
       </div>
     {% endif %}
@@ -130,7 +130,7 @@
     {# ---------- Initial prompt (no run yet) ---------- #}
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
       <div class="card-body text-center py-10">
-        <p class="text-base opacity-50">
+        <p class="text-base text-subtle">
           Pick a lookback window and run to read back audited search usage per
           surface.
         </p>

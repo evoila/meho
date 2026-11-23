@@ -166,11 +166,11 @@
         <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive">
           <div class="text-sm">
             <h4 class="font-semibold">You cannot approve your own request</h4>
-            <p class="mt-1 opacity-90">
+            <p class="mt-1 text-muted">
               {{ error_message }} You may still deny it.
             </p>
             {% if error_hint %}
-              <p class="mt-1 opacity-90" data-testid="approval-refusal-hint">{{ error_hint }}</p>
+              <p class="mt-1 text-muted" data-testid="approval-refusal-hint">{{ error_hint }}</p>
             {% endif %}
           </div>
         </div>
@@ -181,7 +181,7 @@
         <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive" data-testid="approval-fresh-sign-in">
           <div class="text-sm">
             <h4 class="font-semibold">Sign in again to approve</h4>
-            <p class="mt-1 opacity-90">
+            <p class="mt-1 text-muted">
               An approval needs a recent sign-in with your password or a passkey.
               A destructive operation needs a sign-in of its own.
               Sign in again, then open this request and approve it.
@@ -193,9 +193,9 @@
         <div class="alert alert-error mt-4" role="alert" aria-live="assertive">
           <div>
             <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
-            <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+            <p class="text-sm text-muted">{{ error_message | default("The decision could not be completed.") }}</p>
             {% if error_hint %}
-              <p class="text-sm opacity-90" data-testid="approval-refusal-hint">{{ error_hint }}</p>
+              <p class="text-sm text-muted" data-testid="approval-refusal-hint">{{ error_hint }}</p>
             {% endif %}
           </div>
         </div>
@@ -246,7 +246,7 @@
             {% if request.reviewer %}by {{ subject(request.reviewer) }}{% endif %}
           </h4>
           {% if decision_ts %}
-            <p class="text-sm opacity-90">
+            <p class="text-sm text-muted">
               <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
           {% endif %}
@@ -275,35 +275,35 @@
           {% if request.result_state %}
             {% set run_label, run_class = result_state_pill.get(request.result_state, (request.result_state, "badge-ghost")) %}
             <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
-              <dt class="opacity-70">Run</dt>
+              <dt class="text-muted">Run</dt>
               <dd><span class="badge badge-sm {{ run_class }}" data-result-state="{{ request.result_state }}">{{ run_label }}</span></dd>
               {#- The start of the latest run (#5026): a re-run after a
                   failed run shows its own start, not the first attempt's. -#}
               {% if request.run_started_at %}
-                <dt class="opacity-70">Run started</dt>
+                <dt class="text-muted">Run started</dt>
                 <dd><time datetime="{{ request.run_started_at }}" class="font-mono text-xs" data-testid="approval-run-started-at">{{ request.run_started_at }}</time></dd>
               {% endif %}
               {% if request.outcome %}
                 {% if request.outcome.result_status %}
-                  <dt class="opacity-70">Result status</dt>
+                  <dt class="text-muted">Result status</dt>
                   <dd class="font-mono">{{ request.outcome.result_status }}</dd>
                 {% endif %}
                 {% if request.outcome.exit_code is not none %}
-                  <dt class="opacity-70">Exit code</dt>
+                  <dt class="text-muted">Exit code</dt>
                   <dd class="font-mono" data-testid="approval-exit-code" data-exit-code="{{ request.outcome.exit_code }}">{{ request.outcome.exit_code }}{% if request.outcome.exit_code != 0 %} (the script failed){% endif %}</dd>
                 {% endif %}
                 {% if request.outcome.error_code %}
-                  <dt class="opacity-70">Error code</dt>
+                  <dt class="text-muted">Error code</dt>
                   <dd class="font-mono [overflow-wrap:anywhere]">{{ request.outcome.error_code }}</dd>
                 {% endif %}
                 {#- The guidance of an uncertain run is the advice the banner
                     above already gives (#5025). -#}
                 {% if request.outcome.guidance and request.result_state != "uncertain" %}
-                  <dt class="opacity-70">Next step</dt>
+                  <dt class="text-muted">Next step</dt>
                   <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ request.outcome.guidance }}</dd>
                 {% endif %}
                 {% if request.outcome.audit_href %}
-                  <dt class="opacity-70">Audit</dt>
+                  <dt class="text-muted">Audit</dt>
                   <dd><a class="link font-mono text-xs" href="{{ request.outcome.audit_href }}">{{ request.outcome.audit_id }}</a></dd>
                 {% endif %}
               {% endif %}
@@ -320,13 +320,13 @@
               earlier check: show it as such and offer the form again. -#}
           {% if request.outcome_check %}
             <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome-check" data-verdict="{{ request.outcome_check.verdict }}" data-earlier="{{ 'true' if request.outcome_unknown else 'false' }}">
-              <dt class="opacity-70">{{ "Earlier check" if request.outcome_unknown else "Checked" }}</dt>
+              <dt class="text-muted">{{ "Earlier check" if request.outcome_unknown else "Checked" }}</dt>
               <dd>{{ "It happened" if request.outcome_check.verdict == "happened" else "It did not happen" }}</dd>
-              <dt class="opacity-70">Note</dt>
+              <dt class="text-muted">Note</dt>
               <dd class="[overflow-wrap:anywhere]">{{ request.outcome_check.note }}</dd>
-              <dt class="opacity-70">Checked by</dt>
+              <dt class="text-muted">Checked by</dt>
               <dd>{{ subject(request.outcome_check.checker) }}</dd>
-              <dt class="opacity-70">Checked at</dt>
+              <dt class="text-muted">Checked at</dt>
               <dd><time datetime="{{ request.outcome_check.checked_at }}" class="font-mono text-xs">{{ request.outcome_check.checked_at }}</time></dd>
             </dl>
           {% endif %}
@@ -367,11 +367,11 @@
               ordinary decision. -#}
           {% if request.delegation %}
             <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-delegation">
-              <dt class="opacity-70">Instructed by</dt>
+              <dt class="text-muted">Instructed by</dt>
               <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.instructed_by }}</dd>
-              <dt class="opacity-70">Instruction</dt>
+              <dt class="text-muted">Instruction</dt>
               <dd class="[overflow-wrap:anywhere]">&ldquo;{{ request.delegation.instruction }}&rdquo;</dd>
-              <dt class="opacity-70">Refs</dt>
+              <dt class="text-muted">Refs</dt>
               <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.refs | join(", ") }}</dd>
             </dl>
           {% endif %}
@@ -396,12 +396,12 @@
       aria-labelledby="meho-approval-detail-title"
     >
       <div class="flex items-baseline justify-between gap-4">
-        <dt class="shrink-0 text-base-content/55">Operation</dt>
+        <dt class="shrink-0 text-subtle">Operation</dt>
         <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ request.op_id }}</dd>
       </div>
       {% if request.rights_change %}
         <div class="flex items-baseline justify-between gap-4" data-approval-rights-change>
-          <dt class="shrink-0 text-base-content/55">Rights change</dt>
+          <dt class="shrink-0 text-subtle">Rights change</dt>
           <dd class="text-right font-semibold">An admin approves it in the web console</dd>
         </div>
       {% endif %}
@@ -409,7 +409,7 @@
           rights: only a platform admin approves it, and the card says why. -#}
       {% if request.get("platform_admin_reason") %}
         <div class="flex items-baseline justify-between gap-4" data-approval-platform-admin>
-          <dt class="shrink-0 text-base-content/55">Platform admin must approve</dt>
+          <dt class="shrink-0 text-subtle">Platform admin must approve</dt>
           <dd class="text-right [overflow-wrap:anywhere]">{{ request.get("platform_admin_reason") }}</dd>
         </div>
       {% endif %}
@@ -417,13 +417,13 @@
           when routing stored them; otherwise today's rule applies. -#}
       {% if request.who_can_approve %}
         <div class="flex items-baseline justify-between gap-4" data-approval-who-can-approve>
-          <dt class="shrink-0 text-base-content/55">Who can approve</dt>
+          <dt class="shrink-0 text-subtle">Who can approve</dt>
           <dd class="text-right [overflow-wrap:anywhere]">{{ request.who_can_approve }}</dd>
         </div>
       {% endif %}
       {% if request.reveal_secret %}
         <div class="flex items-baseline justify-between gap-4" data-approval-reveal-secret>
-          <dt class="shrink-0 text-base-content/55">Hidden values</dt>
+          <dt class="shrink-0 text-subtle">Hidden values</dt>
           <dd class="text-right font-semibold text-error">Returned to the requester</dd>
         </div>
       {% endif %}
@@ -434,12 +434,12 @@
           field was supplied (the placeholder stands). -#}
       {% if reviewer_context.subject %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Subject</dt>
+          <dt class="shrink-0 text-subtle">Subject</dt>
           <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ reviewer_context.subject }}</dd>
         </div>
       {% endif %}
       <div class="flex items-baseline justify-between gap-4">
-        <dt class="shrink-0 text-base-content/55">Connector</dt>
+        <dt class="shrink-0 text-subtle">Connector</dt>
         <dd class="font-mono">{{ request.connector_id }}</dd>
       </div>
       {#- Resolved target name + product/version alongside the bare GUID
@@ -448,11 +448,11 @@
           rides ``proposed_effect`` below. -#}
       {% if reviewer_context.target_name %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Target</dt>
+          <dt class="shrink-0 text-subtle">Target</dt>
           <dd class="text-right [overflow-wrap:anywhere]">
             <span class="font-medium">{{ reviewer_context.target_name }}</span>
             {% if reviewer_context.target_product %}
-              <span class="font-mono text-xs opacity-60">{{ reviewer_context.target_product }}{% if reviewer_context.target_version %} {{ reviewer_context.target_version }}{% endif %}</span>
+              <span class="font-mono text-xs text-subtle">{{ reviewer_context.target_product }}{% if reviewer_context.target_version %} {{ reviewer_context.target_version }}{% endif %}</span>
             {% endif %}
           </dd>
         </div>
@@ -462,23 +462,23 @@
           so the reviewer sees it is one sub-op of a larger operation. -#}
       {% if reviewer_context.parent_composite_op_id %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Part of</dt>
+          <dt class="shrink-0 text-subtle">Part of</dt>
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.parent_composite_op_id }}</dd>
         </div>
       {% endif %}
       <div class="flex items-baseline justify-between gap-4">
-        <dt class="shrink-0 text-base-content/55">Requested by</dt>
+        <dt class="shrink-0 text-subtle">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
       {#- The people behind an agent, service or runner login: they count as
           the requester, so the approver sees who is really asking. -#}
       {% if request.people_behind is not none %}
         <div class="flex items-baseline justify-between gap-4" data-approval-people-behind>
-          <dt class="shrink-0 text-base-content/55">Behind it</dt>
+          <dt class="shrink-0 text-subtle">Behind it</dt>
           <dd class="flex flex-col items-end gap-1 text-right">
             {% for entry in request.people_behind %}
               <span class="flex flex-wrap items-baseline justify-end gap-1">
-                <span class="text-base-content/55">{{ entry.why_text }}</span>
+                <span class="text-subtle">{{ entry.why_text }}</span>
                 {{ subject(entry.person) }}
               </span>
             {% else %}
@@ -492,7 +492,7 @@
           request to the work that issued it. -#}
       {% if reviewer_context.work_ref %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Change ticket</dt>
+          <dt class="shrink-0 text-subtle">Change ticket</dt>
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.work_ref }}</dd>
         </div>
       {% endif %}
@@ -500,10 +500,10 @@
           requests under the same change ticket, numbered oldest first. -#}
       {% if request.chain %}
         <div class="flex items-baseline justify-between gap-4" data-approval-chain-step="{{ request.chain.step }}">
-          <dt class="shrink-0 text-base-content/55">Step</dt>
+          <dt class="shrink-0 text-subtle">Step</dt>
           <dd class="text-right">
             <span class="font-semibold">{{ request.chain.step }} of {{ request.chain.total }}</span>
-            <span class="opacity-70">waiting in this change ticket</span>
+            <span class="text-muted">waiting in this change ticket</span>
             <a
               class="link link-primary ml-1 text-xs"
               href="/ui/approvals?tab=pending&order=oldest&work_ref={{ request.chain.work_ref | urlencode }}"
@@ -514,20 +514,20 @@
       {% endif %}
       {% if reviewer_context.run_id %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Run</dt>
+          <dt class="shrink-0 text-subtle">Run</dt>
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.run_id }}</dd>
         </div>
       {% endif %}
       {% if request.created_at %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">Requested at</dt>
+          <dt class="shrink-0 text-subtle">Requested at</dt>
           <dd><time datetime="{{ request.created_at }}" class="font-mono text-xs">{{ request.created_at }}</time></dd>
         </div>
       {% endif %}
       {#- The MEHO release the request was made under (#5030). -#}
       {% if request.release_id %}
         <div class="flex items-baseline justify-between gap-4">
-          <dt class="shrink-0 text-base-content/55">MEHO release</dt>
+          <dt class="shrink-0 text-subtle">MEHO release</dt>
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
         </div>
       {% endif %}
@@ -536,13 +536,13 @@
       {% if request.policy_rule %}
         {% set rule = request.policy_rule %}
         <div class="flex items-baseline justify-between gap-4" data-testid="approval-policy-rule">
-          <dt class="shrink-0 text-base-content/55">Policy rule</dt>
+          <dt class="shrink-0 text-subtle">Policy rule</dt>
           <dd class="text-xs [overflow-wrap:anywhere] text-right">
             <span class="font-mono">{{ rule.get("source") }}:{{ rule.get("rule_id") }}</span>
             {%- if request.policy_version is not none %} (policy version {{ request.policy_version }}){% endif %}
             {%- if rule.get("text") %}: {{ rule.get("text") }}{% endif %}
             {%- if not rule.get("decided") %}
-              <span class="text-base-content/55" data-policy-rule-shadow>(shadow: watched only, today's checks decided)</span>
+              <span class="text-subtle" data-policy-rule-shadow>(shadow: watched only, today's checks decided)</span>
             {%- endif %}
           </dd>
         </div>
@@ -565,7 +565,7 @@
     {% set effect = request.proposed_effect or {} %}
     <div class="mt-3">
       <div class="flex items-center justify-between gap-3">
-        <p class="text-base-content/55 text-sm">Proposed effect</p>
+        <p class="text-subtle text-sm">Proposed effect</p>
         <div class="flex items-center gap-2">
           {% if effect.get("safety_level") %}
             {{ proposed_effect_safety_badge(effect.get("safety_level")) }}
@@ -586,13 +586,13 @@
         <dl class="mt-2 space-y-1 text-xs" data-testid="approval-classification">
           {% if not effect.get("category") %}
             <div class="flex items-baseline justify-between gap-4">
-              <dt class="shrink-0 text-base-content/55">Category</dt>
+              <dt class="shrink-0 text-subtle">Category</dt>
               <dd>none: two classification rules disagree</dd>
             </div>
           {% endif %}
           {% if effect.get("labels") %}
             <div class="flex items-baseline justify-between gap-4">
-              <dt class="shrink-0 text-base-content/55">Labels</dt>
+              <dt class="shrink-0 text-subtle">Labels</dt>
               <dd class="font-mono [overflow-wrap:anywhere] text-right">
                 {%- for key, value in effect.get("labels") | dictsort -%}
                   {{ key }}={{ value }}{% if not loop.last %}, {% endif %}
@@ -602,7 +602,7 @@
           {% endif %}
           {% if effect.get("classification_rule") %}
             <div class="flex items-baseline justify-between gap-4">
-              <dt class="shrink-0 text-base-content/55">Classification rule</dt>
+              <dt class="shrink-0 text-subtle">Classification rule</dt>
               <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ effect.get("classification_rule") }}</dd>
             </div>
           {% endif %}
@@ -621,7 +621,7 @@
         <div class="alert alert-warning mt-2" role="alert">
           <div>
             <h4 class="font-semibold text-sm">Write may be denied</h4>
-            <p class="text-xs opacity-90">
+            <p class="text-xs text-muted">
               The connector identity may lack write permission — the approved
               write may still be denied when it runs.
             </p>
@@ -636,7 +636,7 @@
         <div class="alert alert-warning mt-2" role="alert" aria-label="Target warnings">
           <div>
             <h4 class="font-semibold text-sm">Check the target</h4>
-            <ul class="text-xs opacity-90 list-disc pl-4">
+            <ul class="text-xs text-muted list-disc pl-4">
               {% for note in target_notes %}<li>{{ note }}</li>{% endfor %}
             </ul>
           </div>
@@ -649,7 +649,7 @@
         <div class="alert alert-error mt-2" role="alert" data-preview-failed>
           <div>
             <h4 class="font-semibold text-sm">No preview</h4>
-            <p class="text-xs opacity-90">MEHO could not build the preview of this change.</p>
+            <p class="text-xs text-muted">MEHO could not build the preview of this change.</p>
           </div>
         </div>
       {% elif effect.get("preview_unavailable") %}
@@ -658,7 +658,7 @@
         <div class="alert alert-error mt-2" role="alert">
           <div>
             <h4 class="font-semibold text-sm">Blast radius unknown</h4>
-            <p class="text-xs opacity-90">
+            <p class="text-xs text-muted">
               The preview builder failed, so the effect of this write is
               unknown{% if effect.get("preview_error") %}:
               <span class="font-mono">{{ effect.get("preview_error") }}</span>{% endif %}.
@@ -673,7 +673,7 @@
           <div class="alert alert-warning mt-2" role="note">
             <div>
               <h4 class="font-semibold text-sm">Values deliberately redacted</h4>
-              <p class="text-xs opacity-90">
+              <p class="text-xs text-muted">
                 This is a credential-class write; its values are intentionally
                 withheld from the approval record. Treat as elevated risk.
               </p>
@@ -682,7 +682,7 @@
         {% elif effect.get("preview_reason") == "connector_did_not_populate" %}
           <div class="alert mt-2" role="note">
             <div>
-              <p class="text-xs opacity-90">
+              <p class="text-xs text-muted">
                 No preview was populated by the connector for this operation.
               </p>
             </div>
@@ -702,13 +702,13 @@
             {% for entry in run_commands %}
               <li>
                 {% if entry is mapping and entry.get("echo_omitted") %}
-                  <span class="opacity-80">{{ entry.get("echo_omitted") }}</span>
+                  <span class="text-muted">{{ entry.get("echo_omitted") }}</span>
                 {% elif entry is mapping %}
                   <table class="table table-xs">
                     <tbody>
                       {% for key, value in entry | dictsort %}
                         <tr>
-                          <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
+                          <th class="align-top font-mono font-normal text-subtle">{{ key }}</th>
                           <td class="font-mono [overflow-wrap:anywhere]">
                             {% if value is mapping or (value is sequence and value is not string) %}
                               <pre class="whitespace-pre-wrap text-xs">{{ value | tojson(indent=2) }}</pre>
@@ -747,7 +747,7 @@
           {% if blast.get("object") %}
             <dl class="mt-2 text-sm">
               <div class="flex items-baseline justify-between gap-4">
-                <dt class="shrink-0 text-base-content/55">Object</dt>
+                <dt class="shrink-0 text-subtle">Object</dt>
                 <dd class="font-mono [overflow-wrap:anywhere]">
                   {% set obj = blast.get("object") %}
                   {% if obj is mapping or (obj is sequence and obj is not string) %}
@@ -761,7 +761,7 @@
           {% endif %}
           {% set children = blast.get("children") %}
           <div class="mt-2 text-sm">
-            <p class="text-base-content/55">
+            <p class="text-subtle">
               Child objects also destroyed
               {% if children is sequence and children is not string %}({{ children | length }}){% endif %}
             </p>
@@ -778,7 +778,7 @@
                 {% endfor %}
               </ul>
             {% else %}
-              <p class="mt-1 text-xs opacity-80">None — only the object above is destroyed.</p>
+              <p class="mt-1 text-xs text-muted">None — only the object above is destroyed.</p>
             {% endif %}
           </div>
         </div>
@@ -799,7 +799,7 @@
             <tbody>
               {% for key, value in fields | dictsort if not (shows_script and key.startswith("script")) %}
                 <tr>
-                  <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
+                  <th class="align-top font-mono font-normal text-subtle">{{ key }}</th>
                   <td class="font-mono [overflow-wrap:anywhere]">
                     {% if value is mapping or (value is sequence and value is not string) %}
                       <pre class="whitespace-pre-wrap text-xs">{{ value | tojson(indent=2) }}</pre>
@@ -815,7 +815,7 @@
       {% endif %}
 
       <details class="mt-2">
-        <summary class="cursor-pointer text-xs text-base-content/55">Show raw JSON</summary>
+        <summary class="cursor-pointer text-xs text-subtle">Show raw JSON</summary>
         <pre class="mt-1 max-h-48 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap" aria-label="Proposed effect raw JSON">{{ request.proposed_effect | tojson(indent=2) }}</pre>
       </details>
     </div>
@@ -826,7 +826,7 @@
           ask. Suppressed when the post-403 banner above already says it. -#}
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="no" data-approve-reason="{{ approve_right.reason }}">
         <h4 class="font-semibold">You requested this — you cannot approve it</h4>
-        <p class="mt-1 opacity-90">{{ approve_right.message }}</p>
+        <p class="mt-1 text-muted">{{ approve_right.message }}</p>
       </div>
     {% elif request.status == "pending" and approve_blocked and not error_status %}
       {#- #3329: the person may not approve this request (wrong group, a role
@@ -834,7 +834,7 @@
           the approve shows when it refuses. -#}
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-approve-right="no" data-approve-reason="{{ approve_right.reason }}">
         <h4 class="font-semibold">You cannot approve this request</h4>
-        <p class="mt-1 opacity-90">{{ approve_right.message }} You may still deny it.</p>
+        <p class="mt-1 text-muted">{{ approve_right.message }} You may still deny it.</p>
       </div>
     {% elif request.status == "pending" and not approve_blocked %}
       {#- #3329: the person may approve. For an own change, say that the
@@ -847,7 +847,7 @@
     {% if request.status == "pending" %}
       {#- A second person is a second login: MEHO tells people apart by the
           login ID in the token, not by who sits behind it. -#}
-      <p class="mt-3 text-xs opacity-80" data-testid="approval-second-login">
+      <p class="mt-3 text-xs text-muted" data-testid="approval-second-login">
         A second person means a second login. MEHO cannot tell when two logins belong to one person.
       </p>
     {% endif %}
@@ -857,7 +857,7 @@
           for the password. The Approve button below is a sign-in link. -#}
       <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-testid="approval-sign-in-note">
         <h4 class="font-semibold">Sign in again to approve</h4>
-        <p class="mt-1 opacity-90">
+        <p class="mt-1 text-muted">
           Your sign-in is too old for an approval, or it did not ask for your
           password. Denying needs no new sign-in.
         </p>
@@ -911,7 +911,7 @@
         {% if safety %}
           <div class="mt-2 flex flex-wrap items-center gap-2">
             {{ proposed_effect_safety_badge(safety) }}
-            <span class="text-xs opacity-80">safety level: <span class="font-semibold">{{ safety }}</span></span>
+            <span class="text-xs text-muted">safety level: <span class="font-semibold">{{ safety }}</span></span>
           </div>
         {% endif %}
       </div>
@@ -925,7 +925,7 @@
         the shared reason via ``hx-include``, and disables itself during dispatch
         exactly as the single-click form did before (#1693 / #1754). -#}
     <label class="mt-4 flex w-full max-w-md flex-col gap-1">
-      <span class="text-xs">Reason <span class="opacity-60">(optional)</span></span>
+      <span class="text-xs">Reason <span class="text-subtle">(optional)</span></span>
       {# Single shared reason field; each confirm form pulls it via
          hx-include so the operator types it once. A textarea, not a text
          input: the delegated-decision trailer (``Instructed-by:`` /
@@ -990,7 +990,7 @@
          the CSRF header echo, the shared reason, and the double-fire guard,
          exactly as the single-click form did before. #}
       <div x-show="armed === 'reject'" x-cloak class="flex flex-col items-stretch gap-2">
-        <p class="text-xs text-base-content/70 [overflow-wrap:anywhere]" data-approval-confirm="reject">
+        <p class="text-xs text-muted [overflow-wrap:anywhere]" data-approval-confirm="reject">
           This denial is terminal &mdash; the requester must re-file to try again.
           Denying does not run the write.
         </p>
@@ -1039,7 +1039,7 @@
       </div>
       {% endif %}
       <div x-show="armed === 'approve'" x-cloak class="flex flex-col items-stretch gap-2">
-        <p class="text-xs text-base-content/70 [overflow-wrap:anywhere]" data-approval-confirm="approve">
+        <p class="text-xs text-muted [overflow-wrap:anywhere]" data-approval-confirm="approve">
           Approving dispatches <span class="font-mono">{{ request.op_id }}</span>
           via <span class="font-mono">{{ request.connector_id }}</span> immediately{% if safety %}
           at safety level <span class="font-semibold">{{ safety }}</span>{% endif %}.

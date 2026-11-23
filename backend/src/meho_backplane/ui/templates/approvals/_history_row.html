@@ -95,7 +95,7 @@
         <span class="badge badge-sm badge-info shrink-0" data-approval-chain-step="{{ req.chain.step }}">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
       {% endif %}
     </div>
-    <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
+    <p class="text-xs text-subtle [overflow-wrap:anywhere] sm:truncate">
       <span>{{ req.connector_id }}</span>
       <span aria-hidden="true">&middot;</span>
       <span>requested by {{ subject(req.requester) }}</span>

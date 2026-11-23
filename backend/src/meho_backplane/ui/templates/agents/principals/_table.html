@@ -36,7 +36,7 @@
           {% for principal in principals %}
             <tr data-principal-name="{{ principal.name }}">
               <td class="font-mono font-medium break-all">{{ principal.name }}</td>
-              <td class="font-mono text-xs opacity-70 break-all">
+              <td class="font-mono text-xs text-muted break-all">
                 {{ principal.keycloak_client_id }}
               </td>
               <td>
@@ -46,9 +46,9 @@
                   <span class="badge badge-sm badge-success" data-revoked="false">active</span>
                 {% endif %}
               </td>
-              <td class="text-xs opacity-70 break-all">{{ principal.owner_sub }}</td>
-              <td class="text-xs opacity-70 break-all">{{ principal.created_by_sub }}</td>
-              <td class="text-xs opacity-60" data-created-at="{{ principal.created_at.isoformat() }}">
+              <td class="text-xs text-muted break-all">{{ principal.owner_sub }}</td>
+              <td class="text-xs text-muted break-all">{{ principal.created_by_sub }}</td>
+              <td class="text-xs text-subtle" data-created-at="{{ principal.created_at.isoformat() }}">
                 {{ principal.created_at.isoformat() }}
               </td>
               {% if can_write %}
@@ -76,7 +76,7 @@
   {% else %}
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body items-center py-10 text-center">
-        <p class="opacity-70">
+        <p class="text-muted">
           {% if include_revoked %}
             No agent principals (active or revoked) for this tenant.
           {% else %}
@@ -84,7 +84,7 @@
           {% endif %}
         </p>
         {% if can_write %}
-          <p class="text-sm opacity-60">
+          <p class="text-sm text-subtle">
             Use the "Register principal" button above to define one.
           </p>
         {% endif %}

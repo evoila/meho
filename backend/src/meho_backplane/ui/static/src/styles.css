@@ -121,7 +121,31 @@
    (#162037): node colours and lines at least 3:1, text at least 4.5:1.
    ════════════════════════════════════════════════════════════════════ */
 
+/*
+   Text tokens. Secondary text is a solid colour, never base-content
+   faded with opacity-* or /<n>: faded text drops to 2.5-3.5:1 on the
+   light theme (base-content at 60% is 2.65:1 on the page), and no
+   alpha both looks muted and passes. Each value reaches 4.5:1 on the
+   page (base-200), on cards (base-100) and on the blue sheen at the top
+   of .meho-card (about #DFECF7 light, #1A2542 dark).
+
+     text-muted   descriptions, nav, table cells     light 5.9:1 · dark 6.7:1
+     text-subtle  metadata, hashes, labels, hints     light 4.6:1 · dark 4.6:1
+
+   The semantic text colours: the brand's green and amber are fills, not
+   text (1.85:1 and 2.17:1 on white), and its red is 4.49:1 on the page.
+   In the light theme text-success / -warning / -error and the soft
+   badges use darker shades of the same hues. In the dark theme the
+   brand colours themselves pass, so these point back at them.
+   tests/test_ui_text_contrast.py checks every value here.
+*/
 :root {
+  --meho-text-muted: #545866;
+  --meho-text-subtle: #646879;
+  --meho-success-text: #0A775A;
+  --meho-warning-text: #8A610D;
+  --meho-error-text: #AE2121;
+
   --meho-glow:
     radial-gradient(ellipse 70% 38% at 50% -12%, oklch(89% 0.03 275 / 0.22), transparent 60%);
   --meho-grain-opacity: 0.012;
@@ -142,6 +166,12 @@
 }
 
 [data-theme="evoila-dark"] {
+  --meho-text-muted: #AEB6C6;
+  --meho-text-subtle: #8796B5;
+  --meho-success-text: var(--color-success);
+  --meho-warning-text: var(--color-warning);
+  --meho-error-text: var(--color-error);
+
   --meho-graph-target: #38bdf8;
   --meho-graph-vm: #4ade80;
   --meho-graph-host: #fb923c;
@@ -160,6 +190,12 @@
 
 @media (prefers-color-scheme: dark) {
   [data-theme="evoila-system"] {
+    --meho-text-muted: #AEB6C6;
+    --meho-text-subtle: #8796B5;
+    --meho-success-text: var(--color-success);
+    --meho-warning-text: var(--color-warning);
+    --meho-error-text: var(--color-error);
+
     --meho-graph-target: #38bdf8;
     --meho-graph-vm: #4ade80;
     --meho-graph-host: #fb923c;
@@ -205,6 +241,56 @@ body::after {
 /* ════════════════════════════════════════════════════════════════════
    Chrome + component voice
    ════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Headings in the brand's headline colour (navy on light, near-white on
+ * dark), one step above body text, so a title and the description under
+ * it differ in colour as well as weight. In the base layer, so a
+ * heading's own text-* utility (text-error…) still wins. Inside an
+ * alert or a coloured fill a heading keeps inheriting that container's
+ * *-content colour, as before.
+ */
+@layer base {
+  h1, h2, h3, h4 {
+    color: var(--evoila-headline);
+  }
+
+  :is(.alert, .badge, .btn, [class*="bg-primary"], [class*="bg-secondary"],
+      [class*="bg-accent"], [class*="bg-neutral"], [class*="bg-info"],
+      [class*="bg-success"], [class*="bg-warning"], [class*="bg-error"])
+    :is(h1, h2, h3, h4) {
+    color: inherit;
+  }
+}
+
+/* The two secondary text levels; values and ratios above :root. */
+@utility text-muted {
+  color: var(--meho-text-muted);
+}
+
+@utility text-subtle {
+  color: var(--meho-text-subtle);
+}
+
+/*
+ * Readable semantic text. Unlayered, so it beats the layered utilities
+ * and DaisyUI's badge-soft, which colour text with the fill colour.
+ * Solid badges (badge-success…) keep the fill with *-content text on it.
+ */
+.text-success,
+.badge-soft.badge-success {
+  color: var(--meho-success-text);
+}
+
+.text-warning,
+.badge-soft.badge-warning {
+  color: var(--meho-warning-text);
+}
+
+.text-error,
+.badge-soft.badge-error {
+  color: var(--meho-error-text);
+}
 
 /*
  * badge-ghost + badge-outline inside a coloured alert (#2460).
@@ -353,7 +439,7 @@ a.meho-card:hover,
   font-weight: 500;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+  color: var(--meho-text-subtle);
 }
 
 /* Navbar glass: translucent over the glow, hairline bottom border. */
@@ -374,7 +460,7 @@ a.meho-card:hover,
   border-radius: 0.5rem;
   gap: 0.625rem;
   font-weight: 500;
-  color: color-mix(in oklch, var(--color-base-content) 75%, transparent);
+  color: var(--meho-text-muted);
   transition: color 150ms ease, background-color 150ms ease;
 }
 

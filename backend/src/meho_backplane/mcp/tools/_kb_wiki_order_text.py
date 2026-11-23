@@ -7,7 +7,9 @@ It follows the ``KB_WIKI_INTERLEAVE`` switch (off by default). While it is
 off, nothing here changes the tool text or the answer. When it is on, the
 hits come in turns (store hit, knowledge repo hit, ...), so the text no
 longer says "best first" for the whole list. It says each list is best
-first, and the cut text says the hits at the end of the list were left out.
+first. The full text and the cut text say the hits at the end of the list
+were left out: a cut can drop the first knowledge repo hit, which is the
+best of its list.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "INTERLEAVED_ORDER",
+    "PARTIAL_IN_TURNS",
     "PARTIAL_REMEDIATION_IN_TURNS",
     "PLAIN_ORDER",
+    "PLAIN_PARTIAL",
     "with_wiki_order_text",
 ]
 
@@ -31,6 +35,14 @@ PLAIN_ORDER: Final[str] = "one hit per entry, best first"
 #: The same words while the switch is on.
 INTERLEAVED_ORDER: Final[str] = (
     "one hit per entry, store hits and knowledge repo hits in turns (each list best first)"
+)
+
+#: The words of the full text about a cut answer while the switch is off.
+PLAIN_PARTIAL: Final[str] = "`delivery` is `partial` when low hits were left out"
+
+#: The same words while the switch is on.
+PARTIAL_IN_TURNS: Final[str] = (
+    "`delivery` is `partial` when hits at the end of the list were left out"
 )
 
 #: The cut text while the switch is on: the last places of the turn list go first.
@@ -49,7 +61,9 @@ def with_wiki_order_text(
         shown = inner(definition, operator)
         if not get_settings().kb_wiki_interleave:
             return shown
-        text = shown.description.replace(PLAIN_ORDER, INTERLEAVED_ORDER)
+        text = shown.description.replace(PLAIN_ORDER, INTERLEAVED_ORDER).replace(
+            PLAIN_PARTIAL, PARTIAL_IN_TURNS
+        )
         return shown.model_copy(update={"description": text})
 
     return for_settings

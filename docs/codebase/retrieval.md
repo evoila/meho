@@ -178,7 +178,8 @@ retrieve()
         ├── embedding compute (encode_one — one fastembed forward-pass)
         ├── _vector_literal (Python list[float] → pgvector text literal)
         ├── metadata_filters JSON serialisation (sort_keys=True)
-        ├── _bm25_candidates, then _cosine_candidates (one after the other, same session)
+        ├── _bm25_candidates (with any word instead, only the kb fallback below),
+        │   then _cosine_candidates (one after the other, same session)
         │     (raw SQL — pgvector / PG-FTS operators have no SQLAlchemy ORM)
         ├── _rrf_fuse (pure function, in-process)
         └── _hydrate_hits (single IN-fetch for the top-limit ids)
@@ -190,6 +191,55 @@ passage mapping, plus the mandatory per-principal predicate (`principal_sub`, se
 notes above) is applied symmetrically so the fused list is the
 intersection of two equally-scoped sets and neither signal can surface
 a user-scoped memory row the caller does not own.
+
+### Any-word fallback for the knowledge search (#6784)
+
+The word half uses `plainto_tsquery`, so a passage needs **every** word
+of the question. A long question almost never gets a word score. The
+switch `KB_SEARCH_PLAIN_SENTENCES` (setting `kb_search_plain_sentences`,
+off by default, listed by `GET /version`) adds a fallback:
+
+- It applies only when `source="kb"` (this includes the passage rows and
+  the shared scope). With the switch off, nothing changes.
+- MEHO decides **once for the whole knowledge search**, not once per
+  tenant. A search joins the caller's own passages with the shared
+  passages of the owner tenants, as the scope asks. If a passage in **any**
+  of those tenants holds every word, no tenant uses the any-word search.
+  If none does, all of them use it. The decision is in one place,
+  `kb_any_word` in `kb/service.py`; it runs the every-word search with
+  the filters of each searched tenant and stops at the first match.
+  `search_entries` and `POST /api/v1/retrieve` with `source="kb"` call it
+  and pass the answer as `any_word` to every `retrieve`. The similar-entry
+  check (`kb/similar.py`) does not: it always passes `any_word=False`, so
+  its answer is the same with the switch off and on. Its question is the
+  whole new entry, and extra word hits could push an entry that is close
+  in meaning out of its candidates. `any_word=True` means: use the any-word query at once.
+  `any_word=False`: never. `any_word=None` (a single-tenant call such as
+  the UI diagnostics): that call decides alone, any word only when its
+  own every-word search finds no row.
+- The searched tenants are exactly the ones the search queries. A scope
+  that leaves the shared entries out, or a `shared` filter other than
+  `true`, leaves them out of the decision too. An every-word shared hit
+  that the search drops later (the caller has an entry with the same slug,
+  or the limit) still counts: the question keeps the every-word search,
+  as it does today.
+- The any-word query is the first `ANY_WORD_MAX_WORDS` (32) different
+  words of the question, in question order, joined by OR, so a passage
+  needs any of them. Words are counted after stop words are dropped and
+  words are stemmed; a repeated word counts once. Later words do not
+  count. Each OR word adds matching rows and rank work, so without the
+  limit a 2,000-character question took about 2 seconds per statement on
+  a few thousand passages; with it, about 60 ms, the same as a short
+  question. The rank is the same `ts_rank_cd`: more question words, closer
+  together, rank higher. The tenant, source, kind, filter, time window and
+  principal rules are the same text of the same statement, and a search
+  never reads a tenant it did not read before.
+- With the switch off, `kb_any_word` runs no query and the callers make the
+  same calls as before.
+- The meaning half and the rank fusion do not change.
+- Memory search, a search with no source and the operations search do
+  not change, also with the switch on.
+- A question of stop words only gives an empty word query and no word hit.
 
 ### API surface (`POST /api/v1/retrieve`)
 
@@ -308,6 +358,91 @@ lowest-ranked hits are left out, `delivery` is `partial` and
 `omitted_hits` says how many. A passage is never cut. Snippets,
 passage texts and heading titles are wrapped as untrusted text.
 
+**Key-word hint (`KB_SEARCH_WORD_HINT`, off by default).** The word half
+of the search needs every word of the question in one passage, so a pasted
+ticket sentence often gets no word score. With the switch on, the `query`
+text of the tool tells the agent to search with a few key words and to
+search again with other words when `word_match` is `none`. The answer has
+one more field, `word_match`: `some` when at least one store hit has a word
+score (`bm25_score`), `none` when no hit has one (also for an empty answer).
+Knowledge repo hits (`source: wiki`) do not count. With the switch off,
+the tool text and the answer are as before. `GET /version` lists the
+switch. Code: `mcp/tools/_kb_word_hint.py`; tests:
+`tests/test_kb_word_hint.py`. The gain is measured on #6758.
+
+With `KB_SEARCH_PLAIN_SENTENCES` also on, a hit that holds only some
+question words has a word score, so `word_match` is `none` only when no
+passage holds one of the first 32 different words of the question.
+
+### How to change the embedding model
+
+A model change needs more than the setting. Stored vectors keep the model
+that made them until you embed them again. A search compares the vector of
+the question with those stored vectors, so after a change without the
+command below, knowledge, memory and operations search all get worse, and
+MEHO says nothing about it except the warning at start.
+
+1. Set `RETRIEVAL_EMBEDDING_MODEL` to the new model. It must make
+   384-wide vectors: the column is `vector(384)`. Make the model files
+   available (`retrieval.modelCache`) and restart MEHO.
+2. At start MEHO compares the setting with the table `embedding_state`
+   (one row: `model`, `dimension`, `updated_at`; migration `0182` writes the
+   model the install runs at upgrade). On a difference it logs
+   `embedding_model_mismatch` with both names and still starts. Only when
+   the switch `EMBEDDING_MODEL_HEALTH_CHECK` is on (off by default) does it
+   also add the readiness check `embedding_model` with the same text. With
+   the switch off, or when the models match, there is no such check, so the
+   health answer (and the `meho_status` tool) is the same as before.
+   `GET /version` lists the switch with the other agent switches.
+3. In the backplane container run
+   `python -m meho_backplane.retrieval.reembed`. Options: `--dry-run`
+   counts the rows and writes nothing; `--batch-size N` sets the batch
+   (default 50). It prints progress and does three things:
+   - every `documents` row that is not a knowledge passage (knowledge
+     heads, memory rows, other sources) is embedded again from its body;
+   - every knowledge entry goes through the normal write path
+     (`kb/revisions.py`), which rebuilds its passages under the new
+     model's window and with new passage ids. The entry keeps its
+     revision and metadata. The write names the revision it read, so an
+     entry changed or deleted during the run is read again or skipped,
+     never written back with old content;
+   - every `endpoint_descriptor` row is embedded from its stored text. A
+     row with no vector gets one.
+
+   In the first and the third step, each row is read again right before
+   its vector is written. A row whose text changed while it was encoded is
+   encoded again with the new text, and a deleted row is skipped. So an
+   edit made during the run keeps its text, its time and a matching vector.
+
+   No row gets a new `created_at` or `updated_at`. Rebuilt passages take
+   the earliest `created_at` and the latest `updated_at` of the passages
+   they replace. Passages that are not rebuilt keep their own times.
+   Searches that filter by date give the same rows as before.
+
+   A row or entry is tried three times. When it changed during each try,
+   it keeps its old vector. The command still works through every step,
+   then exits with 1 and keeps the old model in `embedding_state`.
+
+   When every row is done, it stores the new model in `embedding_state`.
+4. The command is safe to run twice. If it stops half way or exits with
+   1, run it again; the record stays on the old model until a run ends
+   with every row done. MEHO checks the record only at start, so after a
+   successful run the last line says "Restart MEHO to clear the start
+   warning." Restart MEHO to clear the warning (and, with the switch on,
+   the readiness check).
+
+Turn the switch `EMBEDDING_MODEL_HEALTH_CHECK` on when you change the
+model, and run the re-embed command.
+
+The command runs only inside the backplane container, like the database
+migration. It has no REST route, no CLI verb and no MCP tool, so it writes
+no audit row and checks no role. If it ever gets a route or a verb, it
+needs an audit row per run and a role check.
+
+Searches mix old and new vectors while the command runs, so plan a
+maintenance window. With the shipped default model the command writes the
+same vectors again; nothing at start embeds anything.
+
 ### Agent search runner
 
 A check that asks the knowledge index directly cannot see what MEHO does
@@ -361,6 +496,59 @@ lines leave it out, and only the failed-call line counts it.
 kind, result, place and reason, the knowledge search switch values from
 `GET /version` ("not shown" when the server does not list them), the
 version and the date. It holds no question text.
+
+### German and English page set for the agent search runner
+
+`backend/scripts/retrieval_eval/kb_language_set/` holds a small made-up
+knowledge set, so a person can measure `search_knowledge` in German and in
+English with the runner above. It is test tooling: it adds no route,
+setting or operation. All products, error codes and pages are made up.
+
+- **Pages.** 24 Markdown pages in `pages/de/` and `pages/en/`, each with the
+  lesson header that `POST /api/v1/kb/import` needs (`type`, `applies_to`,
+  `status: confirmed`) and 3 to 6 sections. There are 12 topics from IT
+  support and server operations. Four topics have a German and an English
+  page, four have only a German page and four only an English page. Eight more
+  pages are near misses: they share a product name and many words with a topic
+  page but answer something else.
+- **Questions.** `questions.de.yaml` and `questions.en.yaml` (the runner's
+  question file has no language field, so there is one file per language).
+  Each topic has one ticket question (a full sentence, `kind: meaning`) and
+  one key word question (2 to 4 words, `kind: exact`). `expect` is the page in
+  the question's language, or the page in the other language when there is
+  none. No question repeats six words in a row of its page.
+- **Load.** `kb_language_set_load.py` sends the pages in one
+  `POST /api/v1/kb/import`. The path of each page below `pages/` (for example
+  `de/vpn-verbindung-bricht-ab.md`) becomes `provenance.relative_path`, which
+  is what the runner compares with `expect`.
+
+Load the pages, then run the runner once per language, from `backend/`:
+
+```bash
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.kb_language_set_load \
+  --url <meho-address> [--dry-run]
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
+  --url <meho-address> --questions scripts/retrieval_eval/kb_language_set/questions.de.yaml \
+  --report report-de.md
+MEHO_TOKEN=<token> uv run python -m scripts.retrieval_eval.agent_search \
+  --url <meho-address> --questions scripts/retrieval_eval/kb_language_set/questions.en.yaml \
+  --report report-en.md
+```
+
+Use a `tenant_admin` token for both steps. The import route
+(`POST /api/v1/kb/import`) takes only a `tenant_admin` login or a login with
+the `kb_import_only` claim. The runner's search (`search_knowledge` over MCP)
+needs the `operator` role or higher, and a `kb_import_only` login has no MCP
+access at all. So one `tenant_admin` token covers both.
+
+The load script reads the token from `--token-env` (default `MEHO_TOKEN`) and
+never prints it. It prints the counts created, updated, unchanged and skipped,
+and a second run reports every page as unchanged. `--dry-run` sends
+`dry_run: true` and writes nothing.
+
+**Use a test tenant.** The import writes into the tenant of the token, and the
+pages stay there. Never load this set into a tenant that holds real knowledge,
+or the made-up pages show up in real answers and the numbers are wrong.
 
 ### Offline KB passage benchmark (#3765)
 

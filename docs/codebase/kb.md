@@ -1092,6 +1092,10 @@ until the entry is deleted.
    once its entry has passages, so no entry shows twice. The time
    window is checked in the same SQL, before the `LIMIT` (see
    [Search filters](#search-filters-5726)).
+   With the switch `KB_SEARCH_PLAIN_SENTENCES` on, a question that
+   no passage matches word for word, in the own tenant or in the shared
+   scope, gets a word search in all of them where a passage needs only one
+   of the first 32 different words of the question ([retrieval.md](./retrieval.md#any-word-fallback-for-the-knowledge-search-6784)).
 3. Unless `scope="tenant"`, add the hits of the shared scope
    (`add_shared_hits`, with the same filters and time window). With
    `scope="shared"` the own tenant is searched only for its `shared`
@@ -1114,6 +1118,11 @@ the lesson header (`mcp/tools/_search_filters.py`):
 
 `search_knowledge` also takes `scope`: `all` (default), `tenant` or
 `shared`. A named filter wins over the same key in `filters`.
+
+With `KB_SEARCH_WORD_HINT` on (off by default), `search_knowledge` tells
+the agent to search with a few key words, and its answer has `word_match`
+(`some` or `none`). See "MCP `search_knowledge` tool surface" in
+`retrieval.md`.
 
 Example: the confirmed lessons for one product version from the last
 90 days are `status="confirmed"`, `product`, `version` and
@@ -1174,7 +1183,30 @@ query and `limit`:
 1. The caller needs the docs add-on (`meho-docs` capability).
 2. A search with `filters`, header filters, a time window or
    `scope="shared"` (REST: `kind` or `metadata_filters`) does not search
-   the wiki: the wiki cannot apply them.
+   the wiki: the wiki cannot apply them. The switch
+   `KB_WIKI_FILTERED_SEARCH` (setting `kb_wiki_filtered_search`, off by
+   default) makes one exception, decided by
+   `kb/wiki_search.py::wiki_exact_filters` for both paths: a search
+   whose only filters are `product` and/or `version` (each a non-blank
+   string of at most 128 characters, the longest value `read_docs`
+   takes, so each wiki hit can be read; named filters, or the same keys in `filters` /
+   `metadata_filters`), with no time window, not `scope="shared"` and
+   no `kind`, still searches the wiki. `search_wiki` then sends
+   `product` and `version` exactly as given, with any spaces at their
+   ends kept (not through `build_docs_scope`, which strips): the index
+   gets the same string the store filters by. The page read for the
+   copy check uses the same values, and `read_docs` (MCP and REST)
+   reads such a hit when the caller sends the same values
+   (`docs/codebase/docs-search.md`, `exact_read_scope`). It searches
+   only when the collection sends them to its index as exact filters
+   (`backend.ref["scope_filters"] is True` and no soft `scope`, the
+   result of `forwarded_scope`). Otherwise the wiki is not searched,
+   `reason` is `filtered`, and the message says the index does not apply
+   product and version as exact filters. Any other filter gives
+   `filtered` as before. With the switch off, every filter skips the
+   wiki, and the answer and the audit fields are as before. The
+   off/on/off measurement is tracked on the Initiative of the knowledge
+   search work (#6758).
 3. The same entitlement and readiness check as `search_docs`
    (`resolve_entitled_ready_collection`, capability
    `meho-docs:<collection>`), then the same docs search service
@@ -1215,6 +1247,17 @@ The answer:
   answer, `wiki` included. When the answer is too large, the
   lowest-ranked hits are left out first, so wiki hits go before store
   hits.
+- With `KB_WIKI_INTERLEAVE` on (setting `kb_wiki_interleave`, off by
+  default), `hits` takes the two lists in turns: store hit 1, wiki hit 1,
+  store hit 2, wiki hit 2, and so on; the rest of the longer list
+  follows (`mcp/tools/knowledge.py::_ordered_hits`). The two engines give
+  scores that cannot be compared, so turns are used and not a score
+  sort. The size limit still leaves out the last places first, now from
+  both lists. MEHO records as retrieved only the store hits that are in
+  the delivered part of `hits`. With the switch off, the order is as
+  described above. The REST answer does not change. The switch is
+  measured with the retrieval-eval runner (off, on, off) before anyone
+  asks to turn it on.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
   `wiki.hits`; `null` on every other call. `meho kb search` prints the
   wiki hits after the table, or the line that says why the wiki was not

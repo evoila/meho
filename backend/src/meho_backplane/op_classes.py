@@ -46,6 +46,7 @@ __all__ = [
     "declare_per_call_approval",
     "declare_root_shell",
     "declare_safe_writes",
+    "declare_sandbox_delete_grant",
     "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
@@ -56,6 +57,7 @@ __all__ = [
     "needs_per_call_approval",
     "params_make_credential_call",
     "returns_no_secret_value",
+    "sandbox_delete_grant_allowed",
     "waits_when_set",
 ]
 
@@ -76,6 +78,7 @@ _NO_SECRET_VALUE: set[str] = set()
 _WAIT_WHEN_SET: dict[str, frozenset[str]] = {}
 _CREDENTIAL_CAPABLE: set[str] = set()
 _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
+_SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
 
@@ -221,6 +224,40 @@ def declare_credential_capable(op_ids: Iterable[str]) -> None:
     _CREDENTIAL_CAPABLE.update(op_ids)
 
 
+def declare_sandbox_delete_grant(op_ids: Iterable[str]) -> None:
+    """Mark *op_ids* as ops a sandbox delete grant may cover, although they always wait.
+
+    An op marked here waits for a person on every call because its
+    connector marked it with :func:`declare_credential_capable`. In sandbox
+    mode a live delete grant may still cover it, and only a delete grant:
+    no standing grant, no agent grant and no run approval does. Mark only
+    an op that has a delete sign and no credential class. Raises
+    :exc:`ValueError` when an op id has a declared credential class
+    (:func:`declared_op_class`). Safe to call twice with the same ids.
+    """
+    op_ids = tuple(op_ids)
+    for op_id in op_ids:
+        op_class = declared_op_class(op_id)
+        if op_class is not None and op_class.startswith("credential_"):
+            raise ValueError(
+                f"op id {op_id!r} is declared as {op_class!r}; "
+                "a sandbox delete grant never covers a credential operation"
+            )
+    _SANDBOX_DELETE_GRANT.update(op_ids)
+
+
+def sandbox_delete_grant_allowed(op_id: str) -> bool:
+    """Return ``True`` when *op_id* is marked with :func:`declare_sandbox_delete_grant`.
+
+    ``False`` for an op id that has a declared credential class, also when
+    the class was declared after the mark.
+    """
+    op_class = declared_op_class(op_id)
+    if op_class is not None and op_class.startswith("credential_"):
+        return False
+    return op_id in _SANDBOX_DELETE_GRANT
+
+
 def declare_credential_capable_match(match: Callable[[str], bool]) -> None:
     """Mark every op id for which *match* returns ``True`` as credential capable.
 
@@ -342,5 +379,6 @@ def _reset_declared_op_classes_for_testing() -> None:
     _WAIT_WHEN_SET.clear()
     _CREDENTIAL_CAPABLE.clear()
     _CREDENTIAL_CAPABLE_MATCHES.clear()
+    _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()

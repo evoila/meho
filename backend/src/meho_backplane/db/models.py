@@ -6574,6 +6574,26 @@ class SandboxModeState(Base):
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
 
 
+class EmbeddingState(Base):
+    """Which embedding model made the stored vectors: exactly one row.
+
+    The migration writes the model the install runs at upgrade time. MEHO
+    compares the row with ``RETRIEVAL_EMBEDDING_MODEL`` at every start and
+    logs ``embedding_model_mismatch`` when they differ. The command
+    ``python -m meho_backplane.retrieval.reembed`` updates the row after it
+    has embedded every stored vector again.
+    """
+
+    __tablename__ = "embedding_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_embedding_state_single_row"),)
+
+
 class OperationCatalogState(Base):
     """Which release last wrote the built-in operation rows: one row (#5019).
 

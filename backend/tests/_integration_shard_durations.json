@@ -51,6 +51,7 @@
   "tests/integration/test_operations_ingest_github.py": 0.0,
   "tests/integration/test_operations_ingest_vcenter.py": 5.47,
   "tests/integration/test_operations_ingest_vi_json.py": 9.93,
+  "tests/integration/test_reembed_row_lock_pg.py": 15.0,
   "tests/integration/test_retrieval_e2e.py": 5.26,
   "tests/integration/test_retrieve_principal_isolation_e2e.py": 4.35,
   "tests/integration/test_runbook_retry_overlap_pg.py": 5.98,

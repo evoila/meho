@@ -97,7 +97,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb.schemas import KB_SOURCE
 from meho_backplane.kb.service import add_shared_hits, kb_any_word
-from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki
+from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki, wiki_exact_filters
 from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.retriever import MemoryEligibility, RetrievalHit, retrieve
 
@@ -354,6 +354,7 @@ async def retrieve_endpoint(
             limit=body.limit,
             stored=[(hit.tenant_id, hit.source_id, hit.doc_metadata) for hit in hits],
             filtered=body.kind is not None or bool(body.metadata_filters),
+            exact=wiki_exact_filters(body.metadata_filters, kind=body.kind),
         )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))

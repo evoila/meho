@@ -1485,17 +1485,25 @@ jobs:
 
   redaction-compare:
     name: Secret hiding compared with the base branch
-    # Compares the secret-hiding snapshot of this pull request with the one
-    # on the base branch (backend/tests/snapshots/redaction_compare.jsonl).
+    # Builds, for the base branch and for this pull request, the list of
+    # hidden and shown parts of each fixed input on each secret-hiding step,
+    # each side from its own code and input set, and judges the two lists.
     # It fails when the base hides a part that the pull request shows, when a
-    # plain part that the base shows is now hidden, or when an answer changed
-    # in another way, unless backend/tests/snapshots/redaction_compare_approved.yaml
-    # lists the difference with a reason. A secret part that the pull request
-    # newly hides passes. See docs/codebase/redaction.md, "Compare with main".
+    # plain part that the base shows is now hidden, when an answer changed in
+    # another way, or when an input of the base is gone, unless
+    # backend/tests/snapshots/redaction_compare_approved.yaml lists the
+    # difference with a reason. A secret part that the pull request newly
+    # hides passes. The checked-in file backend/tests/snapshots/
+    # redaction_compare.jsonl holds only one checksum per input; the lists
+    # are built here, stay under RUNNER_TEMP, and are never uploaded.
+    # See docs/codebase/redaction.md, "Compare with main".
     #
-    # The rule script comes from the base branch (`git show`), so a pull
-    # request cannot weaken the check that judges it. Nothing is built or
-    # installed: the script uses only the Python standard library.
+    # The rule script comes from the base commit (`git show`), so a pull
+    # request cannot weaken the check that judges it. The judge runs with
+    # `python3 -I` and uses only the standard library.
+    #
+    # It passes with "no compare on the base branch yet" only when the base
+    # commit has no rule script. Otherwise any failed step fails the job.
     #
     # Non-required check. Only when the change touches backend/.
     needs: changes
@@ -1504,7 +1512,9 @@ jobs:
       needs.changes.outputs.backend_python == 'true'
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
-    timeout-minutes: 5
+    # Two environment syncs (about 1 to 2 minutes each with the uv cache)
+    # and two record builds (seconds each); the cap is a hang backstop.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -1516,31 +1526,43 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Judge the snapshot against the base branch
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Build and judge the records of the base and of the pull request
         shell: bash
         run: |
           set -euo pipefail
           base=HEAD^1
           script=scripts/ci/redaction_compare.py
-          snapshot=backend/tests/snapshots/redaction_compare.jsonl
-          if ! git cat-file -e "${base}:${script}" 2>/dev/null \
-            || ! git cat-file -e "${base}:${snapshot}" 2>/dev/null; then
+          approved=backend/tests/snapshots/redaction_compare_approved.yaml
+          if ! git cat-file -e "${base}:${script}" 2>/dev/null; then
             echo "no compare on the base branch yet"
             exit 0
           fi
           dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
           git show "${base}:${script}" > "${dir}/redaction_compare.py"
-          git show "${base}:${snapshot}" > "${dir}/base.jsonl"
           # The base's approved entries are already merged: they approve
           # nothing and are never stale. No base file counts as empty.
-          approved=backend/tests/snapshots/redaction_compare_approved.yaml
           if git cat-file -e "${base}:${approved}" 2>/dev/null; then
             git show "${base}:${approved}" > "${dir}/base-approved.yaml"
           else
             printf 'approved: []\n' > "${dir}/base-approved.yaml"
           fi
+          git worktree add --detach "${dir}/base" "${base}"
+          # Each side gets its own environment and runs its own code and
+          # input set, with the base's rule script.
+          (cd "${dir}/base/backend" && uv sync --frozen \
+            && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
+          (cd backend && uv sync --frozen \
+            && uv run python "${dir}/redaction_compare.py" --records "${dir}/head.jsonl")
           python3 -I "${dir}/redaction_compare.py" \
-            --judge "${dir}/base.jsonl" "${snapshot}" \
+            --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
             --approved "${approved}" \
             --base-approved "${dir}/base-approved.yaml"
 

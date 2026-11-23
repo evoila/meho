@@ -1,21 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Run the fixed inputs through each secret-hiding step and record what happens.
+"""Run the fixed inputs through each secret-hiding step.
 
-For each input and step, the record lists the planted parts that the answer
-no longer holds (``hidden``) and the ones it still holds (``shown``), a
-hash of the whole answer (``sha``), and a hash of the answer without its
-planted parts (``rest``). For ``rest``, every planted part (secret or plain)
-and every hiding marker becomes one ``<hidden>`` token. So a change that only
-hides or shows a planted part keeps ``rest`` the same, and any other change
-of the answer does not.
-A plain part counts as shown only where it stands outside a hiding marker.
-So ``--[REDACTED:password]`` in place of ``--password <value>`` hides the
-label ``password`` too, and the judge sees that the label is gone.
-``scripts/ci/redaction_compare.py`` writes these records to
-``tests/snapshots/redaction_compare.jsonl`` and judges two such files
-against each other.
+Two outputs come from the same answers:
+
+* ``snapshot_lines()`` gives one line per input: the input id and one
+  sha256 checksum (``sum``) over the full answers of all steps the input
+  runs on. ``scripts/ci/redaction_compare.py --write`` writes these lines to
+  ``tests/snapshots/redaction_compare.jsonl``, and the snapshot test fails
+  when the code's answers no longer match them. The file holds no lists of
+  hidden and shown parts.
+* ``records()`` gives one record per input and step: the planted parts that
+  the answer no longer holds (``hidden``) and the ones it still holds
+  (``shown``), a hash of the whole answer (``sha``), and a hash of the
+  answer without its planted parts (``rest``). The CI job builds these
+  records with ``redaction_compare.py --records``, for the base branch and
+  for the pull request, each from its own code, and judges them against
+  each other. They are never committed.
+
+For ``rest``, every planted part (secret or plain) and every hiding marker
+becomes one ``<hidden>`` token. So a change that only hides or shows a
+planted part keeps ``rest`` the same, and any other change of the answer
+does not. A plain part counts as shown only where it stands outside a hiding
+marker. So ``--[REDACTED:password]`` in place of ``--password <value>``
+hides the label ``password`` too, and the judge sees that the label is gone.
 """
 
 from __future__ import annotations
@@ -105,13 +114,27 @@ def record(item: CompareInput, path: str, text: str) -> dict[str, Any]:
     }
 
 
+def _answers(item: CompareInput) -> dict[str, str]:
+    """The full answer text of each step that *item* runs on."""
+    return {path: answer_text(STEPS[path](_fresh(item.payload))) for path in sorted(item.paths)}
+
+
 def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]:
     """One record per input and step, sorted by id and step."""
     for item in items if items is not None else secret_inputs():
-        for path in sorted(item.paths):
-            yield record(item, path, answer_text(STEPS[path](_fresh(item.payload))))
+        for path, text in _answers(item).items():
+            yield record(item, path, text)
+
+
+def checksum(item: CompareInput) -> str:
+    """One sha256 over the full answers of all steps of *item* (a JSON object, sorted keys)."""
+    return _sha(json.dumps(_answers(item), sort_keys=True, separators=(",", ":")))
 
 
 def snapshot_lines(items: list[CompareInput] | None = None) -> list[str]:
-    """The snapshot file as lines, sorted, one JSON record each."""
-    return [json.dumps(r, sort_keys=True, separators=(",", ":")) for r in records(items)]
+    """The snapshot file as lines, sorted by input id: ``{"id": ..., "sum": ...}``."""
+    chosen = items if items is not None else secret_inputs()
+    return [
+        json.dumps({"id": item.id, "sum": checksum(item)}, sort_keys=True, separators=(",", ":"))
+        for item in sorted(chosen, key=lambda item: item.id)
+    ]

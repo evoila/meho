@@ -1018,33 +1018,44 @@ before a reviewer reads the pull request.
   answer, `hide_command_text` and `hide_shell_script`
   (`backend/tests/redaction_compare/answers.py`).
 - **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
-  one line for each input and step: the parts the step hides, the parts it
-  shows, a hash of the whole answer (`sha`), and a hash of the answer
-  without its planted parts (`rest`). For `rest`, each planted part
-  (secret or plain) and each hiding marker becomes one `<hidden>` token. A
-  plain part counts as shown only where it stands outside a hiding marker.
-  So `--[REDACTED:password]` in place of `--password <value>` hides the
-  label `password` too, and the job sees it as a plain part now hidden.
-  `--password [REDACTED:password]` hides only the value. A test checks that each
-  planted part, labels too, stands in its input with the same spelling.
-  `backend/tests/test_redaction_compare_snapshot.py` fails when the code's
-  answers differ from it. The same file checks three properties on main: a
-  text with no secret comes back unchanged, hiding twice gives the answer
-  of hiding once, and the time grows in a straight line with the size.
+  one line for each input, sorted by id: the input id and one sha256
+  checksum (`sum`) over the full answers of all steps the input runs on.
+  It holds no lists of hidden and shown parts.
+  `backend/tests/test_redaction_compare_snapshot.py` fails on any change of
+  any answer, also when a step only starts or stops hiding a value, and
+  names the inputs that changed, are missing or are new. The same file
+  checks three properties on main: a text with no secret comes back
+  unchanged, hiding twice gives the answer of hiding once, and the time
+  grows in a straight line with the size.
 - **Write the snapshot again.** From `backend/`:
   `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
-- **The CI job** "Secret hiding compared with the base branch" runs the
-  rule of `scripts/ci/redaction_compare.py --judge` on the base branch's
-  snapshot and the pull request's snapshot. It fails when a part that the
-  base hides is now shown, when a plain part that the base shows is now
-  hidden, when the answer changed in another way, or when an input of the
-  base is missing from the pull request's snapshot (an empty snapshot
-  fails for every input). A secret part that
-  the base showed and the pull request hides passes: that is the purpose
-  of a fix. When a part is hidden or shown, the job still compares `rest`,
-  so another change of the same answer (lost quotes, a dropped field)
-  fails as `text`, next to the part difference. An approved entry for the
-  part does not cover it: the other change needs its own `text` entry.
+- **The records.** `redaction_compare.py --records FILE`, run from a
+  `backend/` folder, writes one record for each input and step: the parts
+  the step hides, the parts it shows, a hash of the whole answer (`sha`),
+  and a hash of the answer without its planted parts (`rest`). For `rest`,
+  each planted part (secret or plain) and each hiding marker becomes one
+  `<hidden>` token. A plain part counts as shown only where it stands
+  outside a hiding marker. So `--[REDACTED:password]` in place of
+  `--password <value>` hides the label `password` too, and the job sees it
+  as a plain part now hidden. `--password [REDACTED:password]` hides only
+  the value. A test checks that each planted part, labels too, stands in
+  its input with the same spelling. The records are never committed.
+- **The CI job** "Secret hiding compared with the base branch" makes a
+  second checkout of the base commit and syncs one environment for the
+  base and one for the pull request. It builds the base records with the
+  base's own code and input set, and the pull request records with the
+  pull request's own code and input set. Both files stay in the job's
+  temporary folder. Then it runs the rule of
+  `scripts/ci/redaction_compare.py --judge` on the two record files. It
+  fails when a part that the base hides is now shown, when a plain part
+  that the base shows is now hidden, when the answer changed in another
+  way, or when an input of the base is missing from the pull request's
+  records. A secret part that the base showed and the pull request hides
+  passes: that is the purpose of a fix. When a part is hidden or shown,
+  the job still compares `rest`, so another change of the same answer
+  (lost quotes, a dropped field) fails as `text`, next to the part
+  difference. An approved entry for the part does not cover it: the other
+  change needs its own `text` entry.
 - **A wanted difference.** List it in
   `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
   the step, the part id (or `text`, or `removed` for a dropped input) and
@@ -1055,11 +1066,14 @@ before a reviewer reads the pull request.
   never fails the job, so it can stay after the merge. To approve the same
   input, step and part again, add a new entry (for example with a new
   reason).
-- **The rules come from the base branch.** The job reads the script and
-  the snapshot of the base with `git show`, so a pull request cannot weaken
-  the check that judges it. The approved file is the one of the pull
-  request: it is the open list that a reviewer reads. The first pull
-  request that adds the script has no base script yet, and the job passes.
+- **The rules come from the base branch.** The job reads the rule script
+  of the base commit with `git show` and runs the judge with
+  `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The approved file is the one of the pull request: it is the open list
+  that a reviewer reads. The job passes with "no compare on the base
+  branch yet" only when the base commit has no rule script. When it has
+  one, any failed step fails the job: the second checkout, either
+  environment sync, either record build, or the judge.
 
 ## Known issues / future work
 

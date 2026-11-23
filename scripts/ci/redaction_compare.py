@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-"""Write and judge the secret-hiding snapshot (docs/codebase/redaction.md, "Compare with main").
+"""Write the secret-hiding snapshot, build records and judge them (docs/codebase/redaction.md).
 
   --write                    write backend/tests/snapshots/redaction_compare.jsonl
-                             from the current code (run from backend/ with uv run)
+                             from the current code: one checksum per input over
+                             the full answers of all steps, nothing else
+                             (run from backend/ with uv run)
+  --records FILE             write the full records (id, step, hidden, shown,
+                             sha, rest) of the current code to FILE (run from
+                             a backend/ folder with uv run; it imports that
+                             folder's own tests.redaction_compare code)
   --judge BASE HEAD --approved FILE [--base-approved FILE]
-                             compare two snapshots; exit 1 on a difference that
-                             the approved file does not list. Only the entries
-                             that are not in the base's approved file count.
+                             compare two record files; exit 1 on a difference
+                             that the approved file does not list. Only the
+                             entries that are not in the base's approved file
+                             count.
 
 The judge uses only the standard library. The CI job reads this script from
 the base branch, so a pull request cannot weaken the rule that judges it.
+It builds the records of the base and of the pull request in the job, each
+from its own code; the records are never committed.
 
 A part id starting with "s" is a secret value; "p" is a plain word. A
 difference is one of:
@@ -20,7 +29,7 @@ difference is one of:
   text           the answer changed in another way; when a part is hidden or
                  shown, the answer without its planted parts ("rest") is
                  compared, so this is also found next to a part difference
-  removed        the base has the input, the head snapshot does not
+  removed        the base has the input, the head records do not
 A secret part that the base showed and the head hides passes: that is a fix.
 """
 
@@ -129,11 +138,21 @@ def write() -> None:
     print(f"wrote {SNAPSHOT}")
 
 
+def write_records(target: Path) -> None:
+    sys.path.insert(0, os.getcwd())
+    from tests.redaction_compare.answers import records
+
+    lines = [json.dumps(r, sort_keys=True, separators=(",", ":")) for r in records()]
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"wrote the records to {target}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--records", metavar="FILE")
     parser.add_argument("--judge", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--approved")
     parser.add_argument("--base-approved")
@@ -141,10 +160,13 @@ def main() -> int:
     if args.write:
         write()
         return 0
+    if args.records:
+        write_records(Path(args.records))
+        return 0
     if args.judge and args.approved:
         base_approved = Path(args.base_approved) if args.base_approved else None
         return judge(Path(args.judge[0]), Path(args.judge[1]), Path(args.approved), base_approved)
-    parser.error("use --write, or --judge BASE HEAD --approved FILE")
+    parser.error("use --write, --records FILE, or --judge BASE HEAD --approved FILE")
     return 2
 
 

@@ -3,12 +3,14 @@
 
 """The secret-hiding steps still answer the way the snapshot records, and keep three properties.
 
-``tests/snapshots/redaction_compare.jsonl`` records, for about 1,500 made-up
-inputs and each secret-hiding step, which planted parts the step hides and
-which it shows, a hash of the whole answer, and a hash of the answer
-without its planted parts. The CI job "Secret hiding
-compared with the base branch" judges this file of a pull request against
-the same file of the base branch. This test keeps the file true to the code.
+``tests/snapshots/redaction_compare.jsonl`` holds, for each of about 1,500
+made-up inputs, one checksum over the full answers of all secret-hiding
+steps the input runs on. It holds no lists of hidden and shown parts. This
+test fails on any change of any answer, also when a step only starts or
+stops hiding a value, and names the inputs. The CI job "Secret hiding
+compared with the base branch" builds the lists of hidden and shown parts
+itself, for the base branch and for the pull request, each from its own
+code, and judges them.
 
 When the code changes an answer on purpose, write the snapshot again, from
 ``backend/``::
@@ -43,20 +45,34 @@ _SNAPSHOT = Path(__file__).parent / "snapshots" / "redaction_compare.jsonl"
 _WRITE_COMMAND = "uv run python ../scripts/ci/redaction_compare.py --write"
 
 
+def _sums(lines: list[str]) -> dict[str, str]:
+    return {entry["id"]: entry["sum"] for entry in map(json.loads, lines) if entry}
+
+
 def test_answers_match_the_snapshot() -> None:
-    expected = _SNAPSHOT.read_text(encoding="utf-8").splitlines()
-    actual = snapshot_lines()
+    expected = _sums(_SNAPSHOT.read_text(encoding="utf-8").splitlines())
+    actual = _sums(snapshot_lines())
     if actual == expected:
         return
-    old, new = set(expected), set(actual)
-    changed = sorted(new - old)[:20]
-    lines = "\n".join(f"  {line}" for line in changed)
+    changed = sorted(i for i in expected.keys() & actual.keys() if expected[i] != actual[i])
+    missing = sorted(expected.keys() - actual.keys())
+    new = sorted(actual.keys() - expected.keys())
+    report = [
+        f"{len(changed)} input(s) answer differently: {changed[:20]}",
+        f"{len(missing)} input(s) are in the snapshot but no longer built: {missing[:20]}",
+        f"{len(new)} input(s) are new and not in the snapshot: {new[:20]}",
+    ]
     pytest.fail(
-        f"{len(new - old)} record(s) differ from the snapshot. First {len(changed)}:\n{lines}\n"
-        f"If the change is wanted, run from backend/: {_WRITE_COMMAND}\n"
+        "\n".join(report) + f"\nIf the change is wanted, run from backend/: {_WRITE_COMMAND}\n"
         "then list each wanted difference with a reason in "
         "tests/snapshots/redaction_compare_approved.yaml."
     )
+
+
+def test_the_snapshot_holds_one_checksum_per_input_and_nothing_else() -> None:
+    entries = [json.loads(line) for line in _SNAPSHOT.read_text(encoding="utf-8").splitlines()]
+    assert all(set(entry) == {"id", "sum"} for entry in entries)
+    assert [entry["id"] for entry in entries] == sorted(i.id for i in secret_inputs())
 
 
 def test_input_set_is_about_fifteen_hundred_and_stable() -> None:

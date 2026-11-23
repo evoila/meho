@@ -12,5 +12,5 @@
 #     reason: one line that says why the change is wanted
 #
 # "part" is a part id, "text" for any other change of the answer, or
-# "removed" for an input that the head snapshot no longer has.
+# "removed" for an input that the records of the pull request no longer have.
 approved: []

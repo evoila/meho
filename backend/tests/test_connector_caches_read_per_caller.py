@@ -28,24 +28,34 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs
 
+import httpx
 import pytest
+import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultRoleDeniedError
-from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.microsoft_login import ClientSecretCredentials
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.vcf_auth import CredentialsCache
 from meho_backplane.connectors.argocd.connector import ArgoCdConnector
 from meho_backplane.connectors.azure.connector import AzureConnector
 from meho_backplane.connectors.entra.connector import EntraConnector
 from meho_backplane.connectors.freeipa.connector import FreeipaConnector, _FreeipaSession
 from meho_backplane.connectors.github.connector import GitHubRestConnector
+from meho_backplane.connectors.github.session import GitHubPATCredentials
 from meho_backplane.connectors.harbor.connector import HarborConnector
 from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
+from meho_backplane.connectors.keycloak.session import KeycloakClientCredentials
 from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
 from meho_backplane.connectors.phpipam.connector import PhpipamConnector
 from meho_backplane.connectors.phpipam.session import PhpipamCredentials
@@ -156,10 +166,10 @@ def _creds_cache_case(name: str, cls: type, secret: Any = _BASIC) -> _Case:
         name=name,
         secret=secret,
         make=lambda loader: cls(credentials_loader=loader),
-        warm=lambda c, t: c._creds_cache.__setitem__(target_cache_key(t), secret),
+        warm=lambda c, t: c._creds_cache.__setitem__(target_secret_cache_key(t), secret),
         call=lambda c, t, op: c.auth_headers(t, op),
         readers=lambda c: c._readers,
-        cached=lambda c, t: target_cache_key(t) in c._creds_cache,
+        cached=lambda c, t: target_secret_cache_key(t) in c._creds_cache,
     )
 
 
@@ -223,20 +233,20 @@ CASES: list[_Case] = [
         secret=_BASIC,
         make=lambda loader: KeycloakConnector(credentials_loader=loader),
         warm=lambda c, t: c._admin_tokens.__setitem__(
-            target_cache_key(t), _CachedToken("made-up-token", _FAR_FUTURE)
+            target_secret_cache_key(t), _CachedToken("made-up-token", _FAR_FUTURE)
         ),
         call=lambda c, t, op: c.auth_headers(t, op),
         readers=lambda c: c._readers,
-        cached=lambda c, t: target_cache_key(t) in c._admin_tokens,
+        cached=lambda c, t: target_secret_cache_key(t) in c._admin_tokens,
     ),
     _Case(
         name="github",
         secret=_BASIC,
         make=lambda loader: GitHubRestConnector(credentials_loader=loader),
-        warm=lambda c, t: c._pat_tokens.__setitem__(target_cache_key(t), "made-up-pat"),
+        warm=lambda c, t: c._pat_tokens.__setitem__(target_secret_cache_key(t), "made-up-pat"),
         call=lambda c, t, op: c.auth_headers(t, op),
         readers=lambda c: c._readers,
-        cached=lambda c, t: target_cache_key(t) in c._pat_tokens,
+        cached=lambda c, t: target_secret_cache_key(t) in c._pat_tokens,
     ),
     _Case(
         name="profiled",
@@ -369,3 +379,167 @@ async def test_a_read_of_another_secret_reference_does_not_count(case: _Case) ->
     # A caller whose read of the present reference passes gets the entry.
     await case.call(connector, changed, _person("carol"))
     assert vault.reads == ["bob", "carol"]
+
+
+# ---------------------------------------------------------------------------
+# A kept login is used only for the secret reference it was made from
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LoginCase:
+    """A connector, the secret stored under a reference, and the login a call uses."""
+
+    name: str
+    make: Callable[[Callable[..., Awaitable[Any]]], Any]
+    secret: Callable[[str], Any]
+    login: Callable[[Any, _Target, Operator], Awaitable[str]]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+def _basic(ref: str) -> dict[str, str]:
+    return {"username": "svc", "password": f"password-of-{ref}"}
+
+
+async def _auth_header(connector: Any, target: _Target, operator: Operator) -> str:
+    return str((await connector.auth_headers(target, operator))["Authorization"])
+
+
+async def _keycloak_login(connector: Any, target: _Target, operator: Operator) -> str:
+    def _token(request: httpx.Request) -> httpx.Response:
+        secret = parse_qs(request.content.decode())["client_secret"][0]
+        return httpx.Response(200, json={"access_token": f"token-of-{secret}", "expires_in": 3600})
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(url__regex=r"/protocol/openid-connect/token$").mock(side_effect=_token)
+        return await _auth_header(connector, target, operator)
+
+
+def _kubeconfig(ref: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": "default",
+        "contexts": [{"name": "default", "context": {"cluster": "c1", "user": "u1"}}],
+        "clusters": [{"name": "c1", "cluster": {"server": "https://k8s.example.invalid"}}],
+        "users": [{"name": "u1", "user": {"token": f"token-of-{ref}"}}],
+    }
+
+
+async def _kubernetes_rest_login(connector: Any, target: _Target, operator: Operator) -> str:
+    def _build(config: dict[str, Any]) -> MagicMock:
+        return MagicMock(close=AsyncMock(), login=config["users"][0]["user"]["token"])
+
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        side_effect=_build,
+    ):
+        return str((await connector._get_api_client(target, operator)).login)
+
+
+async def _kubernetes_ws_login(connector: Any, target: _Target, operator: Operator) -> str:
+    def _build(configuration: Any) -> MagicMock:
+        return MagicMock(close=AsyncMock(), login=str(configuration.api_key))
+
+    with patch("meho_backplane.connectors.kubernetes.connector.WsApiClient", side_effect=_build):
+        return str((await connector._get_ws_api_client(target, operator)).login)
+
+
+async def _vcf_login(cache: Any, target: _Target, operator: Operator) -> str:
+    return str((await cache.get(target, operator))["password"])
+
+
+def _creds_login_case(name: str, cls: type, secret: Callable[[str], Any] = _basic) -> _LoginCase:
+    return _LoginCase(
+        name=name,
+        make=lambda loader: cls(credentials_loader=loader),
+        secret=secret,
+        login=_auth_header,
+    )
+
+
+LOGIN_CASES: list[_LoginCase] = [
+    _creds_login_case(
+        "github", GitHubRestConnector, lambda ref: GitHubPATCredentials(token=f"pat-of-{ref}")
+    ),
+    _LoginCase(
+        name="keycloak",
+        make=lambda loader: KeycloakConnector(credentials_loader=loader),
+        secret=lambda ref: KeycloakClientCredentials(client_id="meho", client_secret=ref),
+        login=_keycloak_login,
+    ),
+    _LoginCase(
+        name="kubernetes-rest",
+        make=lambda loader: KubernetesConnector(kubeconfig_loader=loader),
+        secret=_kubeconfig,
+        login=_kubernetes_rest_login,
+    ),
+    _LoginCase(
+        name="kubernetes-ws",
+        make=lambda loader: KubernetesConnector(kubeconfig_loader=loader),
+        secret=_kubeconfig,
+        login=_kubernetes_ws_login,
+    ),
+    _creds_login_case("harbor", HarborConnector),
+    _creds_login_case("argocd", ArgoCdConnector, lambda ref: {"token": f"token-of-{ref}"}),
+    _creds_login_case("hetzner_robot", HetznerRobotConnector),
+    _creds_login_case("rabbitmq", RabbitMqConnector),
+    _creds_login_case(
+        "proxmox",
+        ProxmoxConnector,
+        lambda ref: ProxmoxCredentials(mode="token", token_id="svc@pam!meho", token_secret=ref),
+    ),
+    _LoginCase(
+        name="vcf-credentials-cache",
+        make=lambda loader: CredentialsCache(loader, product_label="vcf-demo"),
+        secret=_basic,
+        login=_vcf_login,
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", LOGIN_CASES, ids=str)
+async def test_a_call_uses_only_the_login_made_from_the_secret_its_target_names(
+    case: _LoginCase,
+) -> None:
+    """Two secret references of one target give two logins, and a call uses its own.
+
+    A call that started before the target's reference changed still holds the
+    first reference, also after another call kept a login made from the new
+    secret. It uses the login made from the secret it read.
+    """
+    reads: list[tuple[str, str]] = []
+
+    async def _load(target: Any, operator: Operator) -> Any:
+        reads.append((operator.sub, str(target.secret_ref)))
+        return case.secret(str(target.secret_ref))
+
+    connector = case.make(_load)
+    first = _Target()
+    changed = replace(first, secret_ref="tenants/test/made-up-other")
+    alice, carol = _person("alice"), _person("carol")
+
+    # Carol's call sees the new reference and keeps a login made from it.
+    new_login = await case.login(connector, changed, carol)
+    # Alice's call still holds the first reference: she reads it, and her call
+    # uses the login made from it, not carol's.
+    first_login = await case.login(connector, first, alice)
+
+    assert first_login != new_login
+    assert reads == [("carol", "tenants/test/made-up-other"), ("alice", _SECRET_REF)]
+    # Later calls of both take their own kept login with no new read.
+    assert await case.login(connector, first, alice) == first_login
+    assert await case.login(connector, changed, carol) == new_login
+    assert len(reads) == 2
+    # A target change drops the kept logins of both references.
+    await (
+        connector.invalidate(first)
+        if isinstance(connector, CredentialsCache)
+        else connector.invalidate_credentials(first)
+    )
+    assert await case.login(connector, changed, carol) == new_login
+    assert reads[2:] == [("carol", "tenants/test/made-up-other")]

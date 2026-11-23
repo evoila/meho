@@ -44,7 +44,10 @@ from meho_backplane.auth.secret_read_as import (
     record_caller_secret_read,
     track_secret_read_as,
 )
-from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.microsoft_login import (
     ClientSecretCredentials,
     MicrosoftAccessToken,
@@ -245,7 +248,7 @@ async def test_a_kept_entry_with_no_known_reader_names_the_fixed_word(
     target = _Target()
     connector, store = _connector(name, target)
     if name == "github":
-        connector._pat_tokens[target_cache_key(target)] = "made-up-pat"
+        connector._pat_tokens[target_secret_cache_key(target)] = "made-up-pat"
     # The reader is recorded outside a call, so the store read noted nothing.
     connector._readers.record(target, _person("alice"))
     values, reads = await _run_calls(connector, store, target, ["alice"], embedding)
@@ -276,10 +279,10 @@ _VCF_CASE = _Case(
     name="vcf",
     secret=_BASIC,
     make=lambda loader: CredentialsCache(loader, product_label="vcf-demo"),
-    warm=lambda c, t: c._cache.__setitem__(target_cache_key(t), dict(_BASIC)),
+    warm=lambda c, t: c._cache.__setitem__(target_secret_cache_key(t), dict(_BASIC)),
     call=lambda c, t, op: c.get(t, op),
     readers=lambda c: c.readers,
-    cached=lambda c, t: target_cache_key(t) in c._cache,
+    cached=lambda c, t: target_secret_cache_key(t) in c._cache,
 )
 
 

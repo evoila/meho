@@ -169,7 +169,10 @@ Each connector that holds Vault-sourced credentials or session tokens caches
 them per target, with no operator dimension. The key is the target's
 `(tenant_id, id)` (`target_cache_key` in
 `backend/src/meho_backplane/connectors/_shared/cache_key.py`), so two
-same-named targets in two tenants never share an entry. Login tokens use
+same-named targets in two tenants never share an entry. A cache of a
+credential, token or client made from the target's secret also keys on the
+secret reference (`target_secret_cache_key`), so a call uses only an entry
+made from the secret reference its own target names. Login tokens use
 `credential_cache_key` instead: two targets in one tenant with the same
 secret and the same login address share one token and one login.
 This is intentional under the only auth model State 2 supports

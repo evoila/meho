@@ -19,6 +19,11 @@ login. `SecretReaders` keeps that check when the cache is warm:
   read. When the target's `secret_ref` changes, every caller reads the new
   secret once, also a caller whose read of the old reference ends after the
   change.
+- The cached entry is kept per secret reference too
+  (`target_secret_cache_key`, or `credential_cache_key` for login tokens).
+  A call uses only an entry made from the secret reference its own target
+  names, so a call that started before the reference changed never uses a
+  login made from the new secret.
 - A refused read raises, and the caller is not recorded. So Vault's answer
   reaches every caller, also when the cache is warm.
 - The vendor still sees one login per credential. A new caller gets the

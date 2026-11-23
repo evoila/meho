@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Iterator
+import re
+import secrets
+import string
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -17,6 +21,7 @@ from structlog.testing import capture_logs
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.store_errors import (
+    _KNOWN_REASONS,
     hide_store_address,
     log_without_store_text,
     store_text_for_log,
@@ -34,6 +39,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.connectors.vault import ops as vault_ops
 from meho_backplane.connectors.vault.ops_identity_oidc import _key_in_use_error
 from meho_backplane.operations import _preview, dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
@@ -164,6 +170,37 @@ def test_a_one_word_host_is_replaced_only_where_it_is_an_address(
         assert hide_store_address(kept) == kept
     for address in ("http://vault/v1/x", "vault:8200", "HTTPConnectionPool(host='vault')"):
         assert "<secret store>" in hide_store_address(f"failed at {address}")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'namespaces "vault" not found',
+        "permission denied on secret/data/vault/config",
+        "GET https://git.example/team/vault/raw/main failed",
+        "auth/vault-jwt/login",
+    ],
+)
+def test_a_one_word_host_in_a_name_or_path_stays(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    assert _sanitize_free_text(text) == text
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text", ["Failed to resolve 'vault' (no such host)", "login as meho@vault failed"]
+)
+def test_a_one_word_host_after_resolve_or_at_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    for shown in (hide_store_address(text), _sanitize_free_text(text)):
+        assert "<secret store>" in shown
+        assert "vault" not in shown
 
 
 class _FakeJwt:
@@ -645,3 +682,132 @@ async def test_a_failed_login_through_the_dispatcher_keeps_the_answer_keys(
     assert set(result.extras) == {"error_code", "exception_class", "exception_message"}
     assert result.extras["error_code"] == "connector_error"
     _assert_clean(result)
+
+
+_REASON_WITHHELD_WORDS = "the store gave a reason that MEHO does not log"
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _random_value(length: int) -> str:
+    """A made-up value with a digit in it, so no fixed word of the log holds it."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(length - 1)) + secrets.choice(
+        string.digits
+    )
+
+
+@pytest.mark.parametrize("phrase", sorted(_KNOWN_REASONS))
+def test_the_log_keeps_a_listed_reason_after_token(phrase: str) -> None:
+    text = "error validating token: " + phrase
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "error validating token: invalid audience (aud) claim: "
+        "audience claim does not match any expected audience",
+        "error validating token: error verifying token signature: oidc: malformed jwt: "
+        "go-jose/go-jose: compact JWS format must have three parts",
+        "jwt: signature is invalid",
+    ],
+)
+def test_the_log_keeps_joined_listed_reasons(text: str) -> None:
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    ("template", "length"),
+    [
+        ("error validating token: {}", 4),
+        ("error validating token: token is expired {}", 4),
+        ("error validating token: token is expired: {}", 4),
+        ("error validating token: {}: token is expired", 4),
+        ("bad token: {}", 40),
+        ("jwt: eyJ{}", 40),
+        ("error validating token: password={}", 4),
+    ],
+)
+def test_the_log_withholds_a_reason_that_is_not_listed(template: str, length: int) -> None:
+    value = _random_value(length)
+    logged = store_text_for_log(hvac.exceptions.InvalidRequest(template.format(value)))
+    assert value not in logged
+    assert "REDACTED" in logged
+    assert _REASON_WITHHELD_WORDS in logged
+
+
+async def test_both_events_keep_a_listed_reason_and_withhold_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = "error validating token: token is expired"
+    value = _random_value(4)
+    for text in (kept, "error validating token: " + value):
+        fake = _FakeClient(hvac.exceptions.InvalidRequest(text))
+        monkeypatch.setattr(vault_module, "_build_client", lambda *_a, _f=fake, **_k: _f)
+        with capture_logs() as logs:
+            with pytest.raises(VaultClientError):
+                async with vault_client_for_operator(_operator()):
+                    pytest.fail("body must not run when login raises")
+            result_connector_error("op", hvac.exceptions.InvalidRequest(text), 1.0)
+
+        events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+        assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+        for event in events:
+            assert value not in json.dumps(event, default=str)
+            if text == kept:
+                assert event["store_text"] == kept
+            else:
+                assert _REASON_WITHHELD_WORDS in event["store_text"]
+
+
+def test_no_listed_reason_holds_a_value_form() -> None:
+    for phrase in _KNOWN_REASONS:
+        assert ":" not in phrase
+        assert "=" not in phrase
+        assert not re.search(r"\d{4,}", phrase)
+        assert not re.search(r"[\"'`]", phrase)
+        assert all(len(word) < 20 for word in phrase.split())
+
+
+class _FailingCapabilities:
+    def __init__(self, exc: Exception) -> None:
+        self.sys = type("S", (), {"get_capabilities": self._raise})()
+        self._exc = exc
+
+    def _raise(self, **_: Any) -> None:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "has_traceback"),
+    [
+        (KeyError("made-up-key"), True),
+        (
+            hvac.exceptions.Forbidden(
+                "permission denied",
+                method="POST",
+                url=f"{_ADDR}/v1/sys/capabilities-self",
+            ),
+            False,
+        ),
+    ],
+)
+async def test_the_preflight_log_has_a_traceback_only_without_store_detail(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception, has_traceback: bool
+) -> None:
+    @contextlib.asynccontextmanager
+    async def _client(*_: Any, **__: Any) -> AsyncIterator[_FailingCapabilities]:
+        yield _FailingCapabilities(exc)
+
+    monkeypatch.setattr(vault_ops, "vault_client_for_target", _client)
+    with capture_logs() as logs:
+        result = await vault_ops.vault_capabilities_preflight(
+            _operator(), "op", [("secret/data/x", frozenset({"create"}))], object()
+        )
+
+    assert result is None
+    (event,) = [e for e in logs if e["event"] == "vault_capability_preflight_failed"]
+    if has_traceback:
+        assert event["exc_info"] is exc
+    else:
+        assert event.get("exc_info") is None
+        assert _HOST not in json.dumps(event, default=str)

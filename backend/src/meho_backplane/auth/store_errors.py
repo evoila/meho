@@ -54,6 +54,10 @@ STORE_FAILED_TEXT: Final = "The secret store returned an error."
 _TEXT_WITHHELD: Final = "<store text withheld>"
 
 #: A longer store text is withheld from the log, so the cleaning stays cheap.
+#: Where a one-word host stands as an address: after ``//`` or ``@``, and in
+#: the ``host='...'`` and ``resolve '...'`` forms of the HTTP client.
+_ADDRESS_LEAD: Final = r"(?:(?<=//)|(?<=@)|(?<=host=')|(?<=host=\")|(?<=resolve ')|(?<=resolve \"))"
+
 _LOG_INPUT_LIMIT: Final = 8192
 _LOG_TEXT_CAP: Final = 2048
 
@@ -89,10 +93,69 @@ _QUOTE_OR_ESCAPE: Final = re.compile(r"[\"`\\]|(?<!\w)'|'(?!\w)")
 _PLAIN_VALUE: Final = re.compile(
     r"(?P<label>(?:password|passwd|passphrase|pwd|client_secret|secret_id"
     r"|token|secret|jwt|api_?key)\w{0,32}(?=\s*[=:]))"
-    r"\s*[=:]\s*\S.*",
+    r"\s*(?P<sep>[=:])\s*(?P<rest>\S.*)",
     re.IGNORECASE | re.DOTALL,
 )
-_LABELLED_MARK: Final = rf"\g<label> {SECRET_FIELD_MARKER}"
+
+#: The words after which the store writes the reason of a failed login.
+_REASON_LABELS: Final = frozenset({"token", "secret", "jwt"})
+
+#: Plain words of the store's own login error texts (Vault, OpenBao and the
+#: JWT libraries they use). None holds a value or a colon. After a reason
+#: label and a colon, the log keeps the rest only when each part of it,
+#: split at ": ", is one of these.
+_KNOWN_REASONS: Final = frozenset(
+    phrase.casefold()
+    for phrase in (
+        "invalid role name",
+        "token is expired",
+        "permission denied",
+        "signature is invalid",
+        "error verifying token signature",
+        "oidc",
+        "malformed jwt",
+        "go-jose/go-jose",
+        "compact JWS format must have three parts",
+        "invalid audience (aud) claim",
+        "audience claim does not match any expected audience",
+        "invalid issuer (iss) claim",
+        "invalid subject (sub) claim",
+        "invalid ID (jti) claim",
+        "invalid not before (nbf) claim",
+        "token not yet valid",
+        "invalid expiration time (exp) claim",
+        "invalid issued at (iat) claim",
+        "token issued in the future",
+        "no issued at (iat), not before (nbf), or expiration time (exp) claims in token",
+        "token must be signed",
+        "token signed with unexpected algorithm",
+        "no known key successfully validated the token signature",
+        "token missing kid header parameter",
+        "error validating claims",
+        "missing role",
+        "missing token",
+        "invalid token",
+        "audience claim found in JWT but no audiences bound to the role",
+        "role with oidc role_type is not allowed",
+        "token is malformed",
+        "token signature is invalid",
+        "token is missing required claim",
+        "token has invalid audience",
+        "token used before issued",
+        "go-jose/go-jose/jwt",
+        "validation failed, token is expired (exp)",
+        "validation failed, token not valid yet (nbf)",
+        "validation failed, invalid issuer claim (iss)",
+        "validation failed, invalid audience claim (aud)",
+        "failed to verify id token signature",
+        "id token not signed",
+    )
+)
+
+#: Said in the log in place of a reason that holds words not on the list.
+_REASON_WITHHELD: Final = (
+    "(the store gave a reason that MEHO does not log; see the store's own log)"
+)
 
 
 _log_holds_text: ContextVar[bool] = ContextVar("store_error_log_holds_text", default=True)
@@ -122,7 +185,9 @@ def hide_store_address(text: str) -> str:
 
     The full address, the host with its port and the bare host are replaced.
     A one-word host (``vault``) is replaced only where it is used as an
-    address, so the same word in a sentence or a field name stays. ``text``
+    address (after ``//`` or ``@``, and in ``host='...'`` and
+    ``resolve '...'``), so the same word in a sentence, a path, a quoted
+    name or a field name stays. ``text``
     is returned unchanged when no address is configured.
     """
     try:
@@ -139,7 +204,7 @@ def hide_store_address(text: str) -> str:
         if "." in addr.host or ":" in addr.host:
             patterns.append(rf"(?<![\w-]){host}(?![\w-]|\.\d)")
         else:
-            patterns.append(rf"(?<=[/@'\"]){host}(?![\w-])")
+            patterns.append(rf"{_ADDRESS_LEAD}{host}(?![\w-])")
     for pattern in patterns:
         text = re.sub(pattern, STORE_ADDRESS_MARK, text, flags=re.IGNORECASE)
     return text
@@ -175,13 +240,55 @@ def store_text_for_log(exc: BaseException) -> str:
             text = str(exc)
         if len(text) > _LOG_INPUT_LIMIT:
             return _TEXT_WITHHELD
-        text = hide_secret_text(_withhold_from_first_quote(hide_store_address(text)))
-        text = _STORE_TOKEN.sub(SECRET_FIELD_MARKER, text)
-        text = _PLAIN_VALUE.sub(_LABELLED_MARK, text)
-        cleaned = str(redact(text, get_default_policy()).redacted).strip()
+        text = hide_store_address(text)
+        reason = _known_reason(text)
+        if reason is not None:
+            text = text[: reason.end("label")]
+        cleaned = _clean_for_log(text)
+        if reason is not None:
+            cleaned += _text_after_label(reason)
     except Exception:  # fail closed, and never raise on an error path
         return _TEXT_WITHHELD
     return cleaned[:_LOG_TEXT_CAP]
+
+
+def _clean_for_log(text: str) -> str:
+    text = hide_secret_text(_withhold_from_first_quote(text))
+    text = _STORE_TOKEN.sub(SECRET_FIELD_MARKER, text)
+    text = _PLAIN_VALUE.sub(_mark_labelled_value, text)
+    return str(redact(text, get_default_policy()).redacted).strip()
+
+
+def _is_reason_label(match: re.Match[str]) -> bool:
+    """Say whether *match* is the plain word ``token``, ``secret`` or ``jwt`` and a colon."""
+    start = match.start("label")
+    before = match.string[start - 1] if start else ""
+    return (
+        match.group("label").casefold() in _REASON_LABELS
+        and match.group("sep") == ":"
+        and not (before.isalnum() or before == "_")
+    )
+
+
+def _known_reason(text: str) -> re.Match[str] | None:
+    """Return the label match when the whole rest after it is listed reasons."""
+    match = _PLAIN_VALUE.search(text)
+    if match is None or not _is_reason_label(match):
+        return None
+    parts = match.group("rest").split(": ")
+    if all(part.strip().casefold() in _KNOWN_REASONS for part in parts):
+        return match
+    return None
+
+
+def _text_after_label(match: re.Match[str]) -> str:
+    """Return the separator and the listed reasons after the label, as written."""
+    return match.string[match.end("label") :].rstrip()
+
+
+def _mark_labelled_value(match: re.Match[str]) -> str:
+    marked = f"{match.group('label')} {SECRET_FIELD_MARKER}"
+    return f"{marked} {_REASON_WITHHELD}" if _is_reason_label(match) else marked
 
 
 def store_status(exc: BaseException) -> int | None:

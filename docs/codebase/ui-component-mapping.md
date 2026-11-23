@@ -33,7 +33,7 @@ page.
 | `btn btn-ghost btn-xs` | `button(…, variant="quiet", size="xs")` | 66 |
 | `btn btn-error btn-sm` | `button(…, variant="danger")` | 25 |
 | `btn btn-ghost btn-sm btn-square` | `button(label, variant="quiet", icon=…)` | 24 |
-| `btn btn-outline btn-sm` | **see "outline alone" below** | 15 |
+| `btn btn-outline btn-sm` | **undecided — see below** | 15 |
 | `btn btn-warning btn-sm` | `button(…, variant="warning")` | 13 |
 | `btn btn-outline btn-error btn-sm` | `button(…, variant="danger-quiet")` | 8 |
 | `btn btn-primary btn-xs` | `button(…, variant="primary", size="xs")` | 7 |
@@ -82,7 +82,7 @@ batch that hit it, because none could be resolved by the person doing the
 conversion without changing how a page looks.
 
 **Two are settled.** The UI lead chose to widen the enum in both, over a
-silent restyle; `meho-ui` 0.7.0 ships them (meho-ui#17, 2026-11-23). They are
+silent restyle; `meho-ui` 0.7.0 ships them (2026-11-23). They are
 kept here with their reasoning because the reasoning is the point, not the
 open question.
 
@@ -118,6 +118,27 @@ elements.
 Of the 67, far fewer were actually reachable: most bare `btn` elements also
 carry `hx-*`, and several bare badges take a dynamic class. The decision
 unblocked them in principle; the other blockers on this page still apply.
+
+### 1b. `btn-outline` with no colour — 18 elements — **open**
+
+The buttons table points here. 18 buttons across 15 files carry
+`btn btn-outline` and no colour — most of them in `runbooks/_detail_actions.html`
+(3), `vault/index.html` (2) and the topology pages.
+
+`variant` has no value for this. The enum's only outline member is
+`danger-quiet`, which is `btn-outline btn-error`: outline **plus** a colour.
+A bare `btn-outline` is the style on its own, and the compiled CSS gives it
+its own border and a transparent background, so it is neither `quiet`
+(`btn-ghost`, no border) nor `danger-quiet` (red).
+
+It is the button-side twin of case 2 below, which was resolved for badges by
+naming the pair `quiet-outline`. The same answer would be a `default-outline`
+or `outline` button variant.
+
+**Not decided.** It needs the UI lead, and per P2.1's rule a template that
+needs a variant the set does not have opens an issue against the component
+set rather than reaching for raw markup. Most of these 18 also carry `hx-*`,
+so the attribute problem below blocks them even once a variant exists.
 
 ### 2. `badge-ghost badge-outline` together — 13 elements — **RESOLVED: `quiet-outline`**
 
@@ -207,8 +228,9 @@ attribute order and whitespace cannot hide a difference. Then each changed
 template is rendered whole, before and after, through the app's real Jinja
 environment and compared the same way.
 
-So far: **128 badges and 32 buttons across 62 templates**, every one
-identical. That is 128 of 340 badges and 32 of 406 buttons.
+So far: **191 badges and 38 buttons across 89 templates**, every one
+identical. That is 191 of 340 badges and 38 of 406 buttons; 149 raw badges
+remain.
 
 It earns its keep. On the buttons it caught two converter faults that read
 fine in a diff: a bare `data-classify-request` dropped from two submit
@@ -256,8 +278,8 @@ the remaining batches.
 
 | Family | In tree | Mechanically convertible | What stops the rest |
 |---|---|---|---|
-| `badge` | 340 | **166 done** | 32 nested labels, 26 dynamic classes, 5 unmapped |
-| `btn` | 406 | **39 done** | 337 unnamed attributes, 9 dynamic classes, 7 nested labels |
+| `badge` | 340 | **191 done** | 35 dynamic classes, 13 entity labels, 5 unmapped |
+| `btn` | 406 | **38 done** | 337 unnamed attributes, 9 dynamic classes, 15 outline-alone |
 | `alert` | 175 | ~7 | 133 of 140 wrap nested markup |
 | `modal` | 73 | — | same shape as `alert` |
 

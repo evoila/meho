@@ -450,6 +450,7 @@ async def test_destructive_request_checks_the_preview_again(
         "query": {},
         "redacted_body": None,
     }
+    envelope["preview_hash"] = preview_module.compute_preview_hash(envelope)
 
     async def _preview(**_kwargs: Any) -> dict[str, Any]:
         return envelope

@@ -26878,6 +26878,72 @@
         }
       }
     },
+    "/ui/settings": {
+      "get": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings",
+        "description": "``GET /ui/settings``: the upload form.",
+        "operationId": "ui_settings_ui_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/settings/preview": {
+      "post": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings Preview",
+        "description": "``POST /ui/settings/preview``: the mistakes and the diff. Writes nothing.",
+        "operationId": "ui_settings_preview_ui_settings_preview_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/settings/apply": {
+      "post": {
+        "tags": [
+          "ui-settings"
+        ],
+        "summary": "Ui Settings Apply",
+        "description": "``POST /ui/settings/apply``: checks the file again, then adds or updates.",
+        "operationId": "ui_settings_apply_ui_settings_apply_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

@@ -10,8 +10,10 @@ what changed.
 The design is the internal note `core.md` §5. The code is in
 `backend/src/meho_backplane/instance_settings/` (`schema.py`, `diff.py`,
 `service.py`) and `backend/src/meho_backplane/api/v1/instance_settings.py`.
-MEHO 0.45.0 ships the REST endpoints below. The command line and the
-console do not have the settings file yet.
+MEHO 0.45.0 ships the REST endpoints below. The web console has the
+settings file page (`/ui/settings`, see
+[The settings file page of the web console](#the-settings-file-page-of-the-web-console)).
+The command line does not have the settings file yet.
 
 The policy file (categories and classifications) is a separate file with
 its own import that waits for an admin's approval: see [policy.md](policy.md).
@@ -156,10 +158,9 @@ Tenant rows and conventions change no approval or gate.
 - The preview with a token works. It shows the change in `diff` and names
   each such path in `warnings`. It writes nothing.
 - A value equal to the stored one is no change and is not refused.
-- The web console cannot apply a settings file yet. Until it has a
-  settings page, these two changes cannot be made at all; they have no
-  REST route of their own. Turning the gate on applies with a token, so
-  after that the gate stays on until then.
+- A person makes these two changes on the settings file page of the web
+  console (`/ui/settings`). They have no REST route of their own. The
+  403 reason and the preview warning name that page.
 
 - The apply locks the rows of the tenants in the file before it reads
   their policies, and holds the lock until its commit. A second import of
@@ -337,10 +338,11 @@ file yet.
   a script, an AI tool with a person's login) that applies such a file gets
   403 with the reason "A settings file that adds or changes targets is
   applied in the web console. A call with a token cannot write targets at
-  once." Nothing is written, and no approval request is made. While the
-  console has no settings page, add or change targets through the target
-  routes (a call with a token waits for approval there), then import the
-  file: its target entries then match and are no change. The preview
+  once." Nothing is written, and no approval request is made. A person
+  applies such a file on the settings file page of the web console
+  (`/ui/settings`); with a token, add or change targets through the
+  target routes (a call with a token waits for approval there), then
+  import the file: its target entries then match and are no change. The preview
   works with a token, and so does a file that changes no target (a target
   entry equal to the stored one is no change). Two policies also change
   only in the web console: `run_approval_target_kinds` turned on and
@@ -422,6 +424,34 @@ nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 - `diff` in the answer is what actually changed; `revision_id` is the new
   revision.
 - An unchanged file gives an empty diff and writes no revision.
+
+### The settings file page of the web console
+
+`ui/routes/settings.py`, templates in `ui/templates/settings/`:
+
+- `GET /ui/settings`: the page with the upload form.
+- `POST /ui/settings/preview`: runs `build_plan` and shows every mistake
+  with its reason, the warnings, a note for each change that only a
+  person in the web console may make, and every row of the diff. Writes
+  nothing. It calls `note_preview`, so it writes no execution audit row.
+- `POST /ui/settings/apply`: runs `apply_import` and shows what really
+  changed, the items in `failed`, and the revision id.
+
+The console operator has `web_session` true, so targets,
+`run_approval_target_kinds` turned on and `announce_gate_enabled` turned
+off apply here. The gate (`require_ui_settings_admin`) asks for a person
+first (403 `human_principal_required` for an agent, service or runner
+login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`).
+`build_plan` refuses a file that names another tenant for a
+`tenant_admin`; the page shows that refusal. The CSRF check of the console
+runs on both POST routes.
+
+The upload is multipart (the CSRF middleware caps a url-encoded body at
+256 KiB). The preview keeps no state: its apply form sends the same file
+bytes as base64, and the apply checks the file again before it writes.
+The apply binds `op_id=settings.import`, so the chassis audit middleware
+writes one row for it before the answer leaves; when that write fails, the
+answer is a 500. Tests: `tests/test_ui_settings_file.py`.
 
 ### `POST /api/v1/settings/conventions-drift`
 

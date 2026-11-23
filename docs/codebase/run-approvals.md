@@ -40,8 +40,8 @@ status. MEHO records the decision; there is no second-person step.
 - `Tenant.run_approval_target_kinds_enabled` (migration `0143`, default
   `false`): the tenant setting for target kinds
   (`policies.run_approval_target_kinds`). Only the settings file sets it;
-  turning it on applies only in the web console, which has no settings
-  page yet.
+  turning it on applies only in the web console, on the settings file
+  page (`/ui/settings`).
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
   `RunApprovalCreate`, `RunApprovalRevoke`, `RunApprovalRead`
   (`status`: `pending`, `approved`, `revoked`, `ended`, `expired`).

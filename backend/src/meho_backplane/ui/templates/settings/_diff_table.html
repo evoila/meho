@@ -1,0 +1,40 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The diff of a settings file as a table: one row for each added, changed
+  or "not in file" entry. Every row is shown. Context: ``rows`` (see
+  :func:`~meho_backplane.ui.routes.settings.diff_rows`).
+-#}
+<div class="overflow-x-auto rounded-box border border-base-300">
+  <table class="table table-sm" data-settings-diff>
+    <thead>
+      <tr>
+        <th>Change</th>
+        <th>Part</th>
+        <th>Tenant</th>
+        <th>Name</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr data-settings-row data-kind="{{ row.kind }}">
+          <td>
+            {% if row.kind == "added" %}
+              <span class="badge badge-success badge-sm">added</span>
+            {% elif row.kind == "changed" %}
+              <span class="badge badge-info badge-sm">changed</span>
+            {% else %}
+              <span class="badge badge-ghost badge-sm">not in file</span>
+            {% endif %}
+          </td>
+          <td>{{ row.section }}</td>
+          <td class="font-mono text-xs">{{ row.tenant }}</td>
+          <td class="font-mono">{{ row.key }}</td>
+          <td class="font-mono text-xs break-all">{{ row.detail }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

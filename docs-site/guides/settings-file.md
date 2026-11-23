@@ -15,10 +15,12 @@ store.
 The categories and classifications of operations are in a separate file:
 see [The policy file](policy-file.md).
 
-!!! note "REST only"
+!!! note "REST and the web console"
 
-    The command line and the web console do not have it yet. Today you
-    use the settings file through the REST API, as shown on this page.
+    The command line does not have it yet. You export the file and read
+    the history through the REST API, as shown on this page. You import a
+    file through the REST API or on the **Settings file** page of the web
+    console (see [Apply a file in the web console](#apply-a-file-in-the-web-console)).
 
 ## Who may use it
 
@@ -50,14 +52,14 @@ with a token waits for approval. When you send such a file with a token
   the file that is the same as the stored one is no change.
 - Two policies change only in the web console:
   `run_approval_target_kinds` turned on and `announce_gate_enabled`
-  turned off. The web console cannot apply a settings file yet, so these
-  two changes cannot be made at all today. See
+  turned off. Apply such a file on the **Settings file** page of the web
+  console. See
   [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
   The other policies and the conventions apply with a token.
 
-The web console does not have the settings file yet. Until it does, add
-or change each target with `meho targets` or the target API (with a
-token it waits for approval), then import the file.
+Apply such a file on the **Settings file** page of the web console
+(`/ui/settings`). See
+[Apply a file in the web console](#apply-a-file-in-the-web-console).
 
 To call the API from a shell, get a token with the CLI. The value is a
 live login: do not log it or share it.
@@ -128,16 +130,12 @@ Two policies decide how far an approval reaches or whether a gate runs:
   target kind, not only one target.
 - `announce_gate_enabled: false` turns the announce gate off.
 
-These two changes apply only for a person in the web console. The web
-console cannot apply a settings file yet, so today these two changes
-cannot be made at all. When you send such a file with a token (the CLI, a
-script or an AI tool), MEHO answers `403`, names each policy, and saves
+These two changes apply only for a person in the web console: apply the
+file on the **Settings file** page (`/ui/settings`). When you send such a
+file with a token (the CLI, a script or an AI tool), MEHO answers `403`,
+names each policy, and saves
 nothing from the file, also not its other parts. This includes
 `policies: null` when the gate is on, because it turns the gate off.
-
-!!! warning "Turn the announce gate on only if you want to keep it on"
-    Turning the gate on applies with a token. Turning it off again
-    cannot be done until the web console can apply a settings file.
 
 - The preview works with a token. It shows the change in `diff` and
   names it in `warnings`.
@@ -250,6 +248,36 @@ What the import does:
 - A file that changes nothing gives an empty `diff` and no new history
   entry.
 - One audit row covers the whole import.
+
+### Apply a file in the web console
+
+The **Settings file** page of the web console (`/ui/settings`) runs the
+same preview and import as the REST API. A person in the web console may
+make every change of the file, also the ones that MEHO refuses with a
+token: targets, `run_approval_target_kinds: true` and
+`announce_gate_enabled: false`.
+
+1. Open **Settings file** in the side menu.
+2. Choose your `meho-settings.yaml` and click **Show preview**. MEHO
+   shows every change of the file. When the file has mistakes, MEHO
+   lists each one with its reason and offers no **Apply** button.
+3. Read the preview. A change that MEHO accepts only from a person in
+   the web console has its own note.
+4. Click **Apply**. MEHO checks the file again and saves it. The answer
+   shows what really changed, and the id of the new entry in the
+   history.
+
+Who may use the page:
+
+- A person with `tenant_admin`, for a file with only their own tenant.
+- A [platform admin](several-tenants.md#the-platform-admin-role) who
+  is a person, for any file.
+- Everyone else gets `403`. An agent, a service or a runner login gets
+  `human_principal_required`, and any other role gets
+  `insufficient_role`.
+
+One audit row covers each apply. When MEHO cannot write the audit row,
+the page shows an error, not the result.
 
 ### What the checks refuse
 

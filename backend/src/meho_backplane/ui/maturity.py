@@ -94,6 +94,8 @@ SURFACE_FEATURE: dict[str, str] = {
     "approvals": "approvals",
     "grants": "approvals",
     "audit": "audit",
+    # The settings file page writes tenant policies, conventions and targets.
+    "settings": "auth_tenancy",
 }
 
 

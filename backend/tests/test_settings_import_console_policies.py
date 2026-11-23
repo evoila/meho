@@ -154,7 +154,7 @@ async def test_token_import_that_loosens_a_policy_is_refused(
     detail = resp.json()["detail"]
     assert f"`{path}`" in detail
     assert "applies only for a person in the web console" in detail
-    assert "The web console cannot apply a settings file yet" in detail
+    assert "Apply it on the settings file page (/ui/settings)." in detail
     await _assert_nothing_written()
 
 
@@ -203,7 +203,7 @@ async def test_token_preview_names_the_change_and_writes_nothing(
     assert path.rsplit(".", 1)[1] in changed
     (warning,) = [w for w in body["warnings"] if f"`{path}`" in w]
     assert "only for a person in the web console" in warning
-    assert "The web console cannot apply a settings file yet" in warning
+    assert "apply the file on the settings file page (/ui/settings)" in warning
     await _assert_nothing_written()
 
 

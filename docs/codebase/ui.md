@@ -61,6 +61,7 @@ own page:
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
 | `/ui/checks`, `/ui/conventions`, `/ui/operations`, `/ui/connectors/registry` | the `meho_backplane.ui.routes` row of "Key types" below |
 | `/ui/event-sources` | no section yet (`ui/routes/event_source/`) |
+| `/ui/settings` | [`settings.md`](settings.md#the-settings-file-page-of-the-web-console) |
 
 ## List-surface detail-navigation convention (#2463)
 

@@ -19303,6 +19303,15 @@ type ClientInterface interface {
 	// UiSensorsListUiSensorsGet request
 	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiSettingsUiSettingsGet request
+	UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsApplyUiSettingsApplyPost request
+	UiSettingsApplyUiSettingsApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsPreviewUiSettingsPreviewPost request
+	UiSettingsPreviewUiSettingsPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiTenantPickerUiTenantGet request
 	UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -27245,6 +27254,42 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx conte
 
 func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsUiSettingsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsApplyUiSettingsApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsApplyUiSettingsApplyPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsPreviewUiSettingsPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsPreviewUiSettingsPreviewPostRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -53492,6 +53537,87 @@ func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiS
 	return req, nil
 }
 
+// NewUiSettingsUiSettingsGetRequest generates requests for UiSettingsUiSettingsGet
+func NewUiSettingsUiSettingsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsApplyUiSettingsApplyPostRequest generates requests for UiSettingsApplyUiSettingsApplyPost
+func NewUiSettingsApplyUiSettingsApplyPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/apply")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsPreviewUiSettingsPreviewPostRequest generates requests for UiSettingsPreviewUiSettingsPreviewPost
+func NewUiSettingsPreviewUiSettingsPreviewPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiTenantPickerUiTenantGetRequest generates requests for UiTenantPickerUiTenantGet
 func NewUiTenantPickerUiTenantGetRequest(server string, params *UiTenantPickerUiTenantGetParams) (*http.Request, error) {
 	var err error
@@ -56774,6 +56900,15 @@ type ClientWithResponsesInterface interface {
 
 	// UiSensorsListUiSensorsGetWithResponse request
 	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
+
+	// UiSettingsUiSettingsGetWithResponse request
+	UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error)
+
+	// UiSettingsApplyUiSettingsApplyPostWithResponse request
+	UiSettingsApplyUiSettingsApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error)
+
+	// UiSettingsPreviewUiSettingsPreviewPostWithResponse request
+	UiSettingsPreviewUiSettingsPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error)
 
 	// UiTenantPickerUiTenantGetWithResponse request
 	UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error)
@@ -66938,6 +67073,69 @@ func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiSettingsUiSettingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsUiSettingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsUiSettingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsApplyUiSettingsApplyPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsApplyUiSettingsApplyPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsApplyUiSettingsApplyPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsPreviewUiSettingsPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsPreviewUiSettingsPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsPreviewUiSettingsPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTenantPickerUiTenantGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -73207,6 +73405,33 @@ func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseUiSensorsListUiSensorsGetResponse(rsp)
+}
+
+// UiSettingsUiSettingsGetWithResponse request returning *UiSettingsUiSettingsGetResponse
+func (c *ClientWithResponses) UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error) {
+	rsp, err := c.UiSettingsUiSettingsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsUiSettingsGetResponse(rsp)
+}
+
+// UiSettingsApplyUiSettingsApplyPostWithResponse request returning *UiSettingsApplyUiSettingsApplyPostResponse
+func (c *ClientWithResponses) UiSettingsApplyUiSettingsApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
+	rsp, err := c.UiSettingsApplyUiSettingsApplyPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsApplyUiSettingsApplyPostResponse(rsp)
+}
+
+// UiSettingsPreviewUiSettingsPreviewPostWithResponse request returning *UiSettingsPreviewUiSettingsPreviewPostResponse
+func (c *ClientWithResponses) UiSettingsPreviewUiSettingsPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
+	rsp, err := c.UiSettingsPreviewUiSettingsPreviewPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsPreviewUiSettingsPreviewPostResponse(rsp)
 }
 
 // UiTenantPickerUiTenantGetWithResponse request returning *UiTenantPickerUiTenantGetResponse
@@ -86459,6 +86684,54 @@ func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListU
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsUiSettingsGetResponse parses an HTTP response from a UiSettingsUiSettingsGetWithResponse call
+func ParseUiSettingsUiSettingsGetResponse(rsp *http.Response) (*UiSettingsUiSettingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsUiSettingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsApplyUiSettingsApplyPostResponse parses an HTTP response from a UiSettingsApplyUiSettingsApplyPostWithResponse call
+func ParseUiSettingsApplyUiSettingsApplyPostResponse(rsp *http.Response) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsApplyUiSettingsApplyPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsPreviewUiSettingsPreviewPostResponse parses an HTTP response from a UiSettingsPreviewUiSettingsPreviewPostWithResponse call
+func ParseUiSettingsPreviewUiSettingsPreviewPostResponse(rsp *http.Response) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsPreviewUiSettingsPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

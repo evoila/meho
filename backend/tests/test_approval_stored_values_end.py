@@ -26,7 +26,6 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.agent.approval_wait import _lost_claim_envelope
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -340,7 +339,9 @@ async def test_an_approved_row_of_another_release_ends_with_its_clean_up(
     assert [d.status_code for d in decisions] == [410]
 
     # A MEHO that still runs the release of the request cannot start it.
-    monkeypatch.setattr(approval_queue_module, "running_release_id", lambda: "release-a")
+    monkeypatch.setattr(
+        "meho_backplane.operations.approval_queue.running_release_id", lambda: "release-a"
+    )
     assert await claim_resume(request_id) is False
     async with get_sessionmaker()() as s:
         assert await consume_remote_write_approval(s, row) is False

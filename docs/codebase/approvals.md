@@ -117,6 +117,47 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+**An approved request that nobody starts ends too.** The same sweep ends
+an `approved` request whose run nobody claimed (`resumed_at` is empty)
+within `APPROVAL_DEFAULT_TTL` after its decision
+(`expire_unclaimed_approved_requests` in
+`operations/approval_stored_values.py`). It moves to `expired` with the
+same decision audit row, and its `expires_at` becomes the end of the time
+it had to start (`decided_at + APPROVAL_DEFAULT_TTL`), so every surface
+shows the usual expired reason. `end_run_input` runs on it: the encrypted
+handoff row is deleted, each secret-named value of the stored params
+is replaced by the marker, and the parent of a step of a multi-step
+operation keeps only its op id (`resume_parent_without_inputs`). A claim of its run after that finds no
+`approved` row and is refused; an agent that still waits for it reads the
+usual expired answer (`approval_expired`). So a stored request keeps the
+values of its call at most `APPROVAL_DEFAULT_TTL` after the decision.
+
+**The start-up clean-up.** At every start, right after the release check
+below, `hide_values_of_requests_that_cannot_run` reads every request that
+is not `pending`, was never started (`resumed_at` is empty) and cannot
+run: a rejected, expired or withdrawn request, and an approved
+request of another release (an approval covers one exact release; without
+a release identity no approved request counts). Each one gets the
+`end_run_input` clean-up: its secret-named values and the param a
+connector hides become the marker, the parent of a step keeps only its
+op id, and its handoff row is deleted. This covers rows stored by an
+older release, for example a `k8s.apply` of a Secret whose manifest is
+still in `params`, or in the params of its parent. An approved request of
+another release also ends as `expired` in the same transaction, with one
+decision audit row and an `approval.expired` step event after the commit.
+The audit row and the request read the same reason: `release_changed`
+while its time to start had not run out, else `deadline_passed` (the audit
+row then has no `reason`). So during a rolling update a MEHO that still
+runs the older release cannot start a request whose inputs are gone: its
+claim finds no `approved` row, and the database refuses any write that
+sets `resumed_at` on a `rejected`, `expired` or `withdrawn` request (the
+CHECK `ck_approval_request_ended_not_started`, migration `0184`). A claim
+of an older release that read the row before the clean-up and writes after
+it fails there. It reads 500 rows per
+transaction, in the order of their id, writes only rows that change, and
+logs the counts (`approval_stored_values_cleaned`). A failure is logged and
+the start goes on.
+
 ## An approval covers one exact release (#5030)
 
 A person approves one exact release of MEHO. When MEHO is updated, every
@@ -149,7 +190,9 @@ the payload. A request already past its deadline expires as the TTL sweep
 would expire it, with no extra reason. This runs whether or not
 `APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
 TTL clean-up. A failure is logged and the start goes on; the check below
-still stops any old approval from running.
+still stops any old approval from running. Right after it, the start-up
+clean-up above ends every approved request of another release that was
+never started, with the same reason.
 
 **Before an approved run.** Both resume paths call
 `approval_queue.refuse_resume_if_release_changed()` before they run
@@ -203,6 +246,9 @@ not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
 release changed. The console modal shows such a request with the time
 the update ended it (`decided_at`), not the deadline it never reached.
+An expired request that was approved first keeps its reviewer. The
+console names that person as the one who approved it: the modal reads
+"Expired · approved by X" and the list row reads "approved by X".
 For a run MEHO refused before it ran, the console says why (MEHO was
 updated, the target changed, the target is gone, or the preview changed),
 that the operation did not run, and that the requester must ask again; it
@@ -370,7 +416,8 @@ Two kinds of rows carry a keyed hash of a call's params:
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
   - A credential write, and a `k8s.apply` whose manifest holds a Secret
-    (the param a connector declares with `declare_hidden_stored_param`),
+    or a secret-looking value (the param a connector declares with
+    `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
@@ -391,7 +438,8 @@ Two kinds of rows carry a keyed hash of a call's params:
     stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
-    expires (`end_run_input`), each secret-named value in that column (a
+    expires (`end_run_input`, also an approved request that nobody
+    started in time), each secret-named value in that column (a
     password or a licence key inside a deployment spec; the name rule of
     the broadcast scrub) is replaced by the marker `[REDACTED:param_name]`.
     The other fields keep their value. A row without such a field is not

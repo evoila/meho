@@ -425,7 +425,7 @@
         "retrievalEmbeddingModel": {
           "type": "string",
           "minLength": 1,
-          "description": "fastembed-supported model identifier (G0.4-T2 #259). Default `BAAI/bge-small-en-v1.5` (384-dim, English). Swapping to a model with different output dimensionality requires a re-embed-everything migration because `documents.embedding` is hard-pinned to `vector(384)` by migration 0003."
+          "description": "fastembed-supported model identifier (G0.4-T2 #259). Default `BAAI/bge-small-en-v1.5` (384-dim, English). The vector columns are `vector(384)`, so only a model with 384 dimensions fits. Every model change needs `python -m meho_backplane.retrieval.reembed` (see `docs/codebase/retrieval.md`, \"How to change the embedding model\")."
         },
         "retrievalModelCacheDir": {
           "type": "string",

@@ -45,15 +45,22 @@ value into a template. Use the theme. If the colour you need does not
 exist, that is a decision for the team, not something to route around in
 one page.
 
-**4. One light theme.** No dark mode, no second palette, no theme
-switcher.
+**4. The two evoila themes, light and dark, from meho-ui.** The console
+follows the computer's light or dark setting: `base.html` sets
+`data-theme="evoila-system"` through the shared page frame's `theme`
+block, and the five pages with their own `<html>` tag set it too. It is
+CSS only (an `@media (prefers-color-scheme: dark)` rule in meho-ui), so no
+script runs and a page never flashes the wrong theme. There is no theme
+switch yet; it comes with the shared top bar.
 
-**This is the target, not the current state.** The console ships both
-themes today: `base.html` sets `data-theme="meho-dark"` and
-`static/src/app/theme.js` switches between `meho-dark` and `meho-light`.
-Removing them is its own change. Until it lands, the rule binds *new*
-work — do not add a third theme, a new palette, or a second switcher, and
-do not write a style that only resolves in one of the two.
+- Define no theme here. The DaisyUI colours come from meho-ui.
+- Never write a colour that works in only one of the two themes. Use the
+  theme variables (`bg-base-100`, `text-base-content`, …), which have both.
+- The console's own colours (the topology graph, `--meho-graph-*` in
+  `styles.css`) have a value for each theme: `:root` for light,
+  `[data-theme="evoila-dark"]` and the dark `@media` rule for dark.
+  `topology-graph.js` reads them, because the graph draws on a canvas.
+- Check text and lines in both themes before a change goes in.
 
 ## Two things that cost an afternoon
 

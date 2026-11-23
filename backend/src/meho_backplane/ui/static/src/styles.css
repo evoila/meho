@@ -111,28 +111,70 @@
    DaisyUI. They stay here because the graph is a meho surface -- the
    other two apps have no topology -- so they are not shared tokens.
 
-   On :root, not a data-theme value: there is one theme now. The light
-   values are kept; the dark pair went with the theme that carried it.
+   The graph colours have a light and a dark value, like the brand: the
+   light values on :root, the dark ones for data-theme="evoila-dark" and,
+   inside the dark @media rule, for "evoila-system" (the console's
+   default, which follows the computer). topology-graph.js reads them
+   when it draws. The light values are the colours the script used to
+   hard-code, so the light graph looks as before. The dark ones are
+   lighter shades of the same colours, checked on the dark card
+   (#162037): node colours and lines at least 3:1, text at least 4.5:1.
    ════════════════════════════════════════════════════════════════════ */
 
 :root {
   --meho-glow:
     radial-gradient(ellipse 70% 38% at 50% -12%, oklch(89% 0.03 275 / 0.22), transparent 60%);
   --meho-grain-opacity: 0.012;
-  --meho-graph-target: #0d9468;
-  --meho-graph-vm: #0284c7;
-  --meho-graph-host: #b45309;
-  --meho-graph-cluster: #7c3aed;
-  --meho-graph-datastore: #a16207;
-  --meho-graph-network: #0e7490;
-  --meho-graph-node-fallback: #64748b;
-  --meho-graph-node-border: #cbd5e1;
-  --meho-graph-label: #334155;
+  --meho-graph-target: #0ea5e9;
+  --meho-graph-vm: #22c55e;
+  --meho-graph-host: #f97316;
+  --meho-graph-cluster: #a855f7;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #14b8a6;
+  --meho-graph-node-fallback: #6366f1;
+  --meho-graph-node-border: #1f2937;
+  --meho-graph-label: #1f2937;
   --meho-graph-edge: #94a3b8;
-  --meho-graph-edge-label: #64748b;
+  --meho-graph-edge-label: #475569;
   --meho-graph-label-bg: #f8fafc;
-  --meho-graph-selected: #4f46e5;
-  --meho-graph-highlight: #4f46e5;
+  --meho-graph-selected: #dc2626;
+  --meho-graph-highlight: #dc2626;
+}
+
+[data-theme="evoila-dark"] {
+  --meho-graph-target: #38bdf8;
+  --meho-graph-vm: #4ade80;
+  --meho-graph-host: #fb923c;
+  --meho-graph-cluster: #c084fc;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #2dd4bf;
+  --meho-graph-node-fallback: #818cf8;
+  --meho-graph-node-border: #0e1424;
+  --meho-graph-label: #c8cfdd;
+  --meho-graph-edge: #6b7da8;
+  --meho-graph-edge-label: #c8cfdd;
+  --meho-graph-label-bg: #162037;
+  --meho-graph-selected: #f46e6e;
+  --meho-graph-highlight: #f46e6e;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="evoila-system"] {
+    --meho-graph-target: #38bdf8;
+    --meho-graph-vm: #4ade80;
+    --meho-graph-host: #fb923c;
+    --meho-graph-cluster: #c084fc;
+    --meho-graph-datastore: #facc15;
+    --meho-graph-network: #2dd4bf;
+    --meho-graph-node-fallback: #818cf8;
+    --meho-graph-node-border: #0e1424;
+    --meho-graph-label: #c8cfdd;
+    --meho-graph-edge: #6b7da8;
+    --meho-graph-edge-label: #c8cfdd;
+    --meho-graph-label-bg: #162037;
+    --meho-graph-selected: #f46e6e;
+    --meho-graph-highlight: #f46e6e;
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════

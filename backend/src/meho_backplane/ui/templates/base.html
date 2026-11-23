@@ -123,6 +123,12 @@
 
 {% block page_title %}MEHO Operator Console{% endblock %}
 
+{#- Follow the computer's light or dark setting. ``evoila-system`` is
+   meho-ui's theme that is light by default and dark when the computer
+   asks for dark -- CSS only, so a page never flashes the wrong theme.
+   The frame's own default stays ``evoila`` (always light). -#}
+{% block theme %}evoila-system{% endblock %}
+
 {#- The frame renders ``head_scripts`` BEFORE ``head_assets``, which is
    the ordering this file used to own directly. The ``component_scripts``
    note inside says why it is load-bearing. -#}
@@ -174,6 +180,8 @@
 {% endblock %}
 
 {% block head_assets %}
+    {#- Tells the browser both themes exist before any stylesheet arrives. -#}
+    <meta name="color-scheme" content="light dark" />
     {% include "_head_assets.html" %}
 {% endblock %}
 

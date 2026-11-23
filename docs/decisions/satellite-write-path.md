@@ -1,8 +1,8 @@
 # Satellite write path is a scoped hybrid, not a per-customer install (decision)
 
 **Status:** decided — operator determination of record; governs the satellite write path
-**Shipped:** in 0.32.0.
-**Date:** 2026-08-29
+**Shipped:** in part. The parts of the write path (signed work items, the allowlist, the wrapped credential and the effect audit) are in the code. No approved change reaches a runner yet.
+**Date:** 2026-08-29 (changed 2026-11-18, see "Change on 18 November 2026")
 **Goal:** governed remote mutations — reachability prerequisite of the management-plane-lockdown Goal
 **Initiative:** [#2901](https://github.com/evoila/meho/issues/2901) — satellite write path, security-review-first design
 **Composes with:** [#3183](https://github.com/evoila/meho/issues/3183) (delete-shaped operations — mandatory-human-approval + preview-hash + blast-radius + dedicated safety tier)
@@ -196,3 +196,28 @@ off-net request/response traffic, that traffic must be captured under those
 does not replace, the store-and-forward **effect** audit (mechanism 4 above),
 which stays the permanent v0.1-spec §6 record; the flight recorder is only the
 short-lived request/response exhaust, never that record.
+
+## Change on 18 November 2026 — a site keeps its own passwords
+
+The owner decided that the passwords for a site's systems are kept in a secret
+store at that site. The runner reads them there. This replaces the part of
+mechanism 2 that says a runner gets a short-lived, response-wrapped Vault
+credential for each work item. The rest of this record stands.
+
+- **Reads.** The passwords for a site's systems are kept in a secret store at
+  that site. The first form is a folder of files. A Kubernetes Secret or a
+  local folder that only the runner can read is mounted for the runner. The
+  runner reads a password with a `local:<name>` reference.
+- **The centre knows only the name.** The target holds the reference name, never
+  the value. No password travels from the centre to a runner.
+- **A stolen runner reaches one site only.** It exposes that site's passwords
+  and nothing else. It cannot reach the central Vault or another site.
+- **Changes.** The site's secret store holds read passwords and change
+  passwords in separate entries. The runner opens a change password only for a
+  change that the centre approved and signed. The signed approval is the guard:
+  it states what is signed, for which target, for how long, and it is used once.
+  The password for an approved change at a site is decided before that work
+  starts. No change runs at a site until then.
+- **Status of the code.** The `local:<name>` reference and the runner's
+  read of the site folder are planned. They are not in the code yet. The
+  signed-item parts listed on line 4 are in the code.

@@ -50,14 +50,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, cast
 
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.principal_block_run import mark_step_refused
+from meho_backplane.auth.principal_block_run import mark_step_refused, step_refused_in_run
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -78,6 +78,7 @@ __all__ = [
     "is_principal_blocked",
     "list_blocked",
     "raise_if_step_login_blocked",
+    "refusal_of_step",
     "reset_block_cache",
     "unblock_principal",
 ]
@@ -231,27 +232,54 @@ async def first_blocked_step_login(
     return None
 
 
+async def refusal_of_step(
+    operator: Operator, *, only_in_steps: bool = False
+) -> PrincipalBlockedStepError | None:
+    """The refusal of a step or request about to be sent, or ``None`` when it may go.
+
+    An earlier refusal of the same run comes first: once a step or request
+    of a run was refused, no later one is sent, also when the list can be
+    read again. Otherwise the logins of the step decide
+    (:func:`first_blocked_step_login`, with *only_in_steps*). The run is
+    looked at once more after the list was read: a parallel step may have
+    been refused in that time. The refusal is noted for the running
+    operation, so the whole operation stops with it.
+    """
+    refusal = _earlier_refusal()
+    if refusal is None:
+        try:
+            blocked = await first_blocked_step_login(
+                operator.sub, operator.tenant_id, only_in_steps=only_in_steps
+            )
+        except PrincipalBlockUnavailableError:
+            refusal = PrincipalBlockedStepError(unavailable=True)
+        else:
+            refusal = (
+                PrincipalBlockedStepError(unavailable=False)
+                if blocked is not None
+                else _earlier_refusal()
+            )
+    if refusal is not None:
+        mark_step_refused(refusal)
+    return refusal
+
+
+def _earlier_refusal() -> PrincipalBlockedStepError | None:
+    return cast("PrincipalBlockedStepError | None", step_refused_in_run())
+
+
 async def raise_if_step_login_blocked(operator: Operator) -> None:
     """Stop a request a multi-step operation sends straight to the target.
 
     Called by the HTTP connector base before each request. Does nothing
     outside a multi-step operation or an approved run. Raises
-    :class:`PrincipalBlockedStepError` when a login of the step is blocked,
-    or when the list cannot be read. The refusal is noted for the running
-    operation, so the whole operation stops with it.
+    :class:`PrincipalBlockedStepError` when an earlier step of the run was
+    refused, when a login of the step is blocked, or when the list cannot be
+    read (:func:`refusal_of_step`).
     """
-    try:
-        blocked = await first_blocked_step_login(
-            operator.sub, operator.tenant_id, only_in_steps=True
-        )
-    except PrincipalBlockUnavailableError as exc:
-        refusal = PrincipalBlockedStepError(unavailable=True)
-        mark_step_refused(refusal)
-        raise refusal from exc
-    if blocked is not None:
+    refusal = await refusal_of_step(operator, only_in_steps=True)
+    if refusal is not None:
         _log.info("principal_block_step_request_refused", operator_sub=operator.sub)
-        refusal = PrincipalBlockedStepError(unavailable=False)
-        mark_step_refused(refusal)
         raise refusal
 
 

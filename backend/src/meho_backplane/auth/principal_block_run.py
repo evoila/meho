@@ -13,7 +13,8 @@ below the record of the operation.
 * :func:`mark_step_refused` notes the first step the block list refused. The
   whole operation then stops with that refusal
   (:func:`raise_if_step_was_refused`), also when its handler catches the
-  error of the step and goes on.
+  error of the step and goes on. Each later step or request reads it first
+  (:func:`step_refused_in_run`) and is not sent.
 
 Both marks also reach the records above, so the multi-step operation knows
 what its steps did.
@@ -31,6 +32,7 @@ __all__ = [
     "mark_step_refused",
     "raise_if_step_was_refused",
     "request_was_sent",
+    "step_refused_in_run",
     "tracking_run",
 ]
 
@@ -74,9 +76,13 @@ def mark_request_sent() -> None:
 
 
 def request_was_sent() -> bool:
-    """True when the running operation, or a step of it, sent a request."""
+    """True when the running operation, or a record above it, sent a request.
+
+    The records above count too: for a nested part, a step that the
+    multi-step operation sent before it is an earlier step of the same run.
+    """
     run = _run_var.get()
-    return run is not None and run.sent
+    return run is not None and any(each.sent for each in run.with_parents())
 
 
 def mark_step_refused(refusal: Exception) -> None:
@@ -93,3 +99,15 @@ def raise_if_step_was_refused() -> None:
     run = _run_var.get()
     if run is not None and run.refused is not None:
         raise run.refused
+
+
+def step_refused_in_run() -> Exception | None:
+    """The first refusal of the running operation or of a record above it, else ``None``.
+
+    The records above count too: a step of a nested or parallel part of the
+    same multi-step operation may be the one that was refused.
+    """
+    run = _run_var.get()
+    if run is None:
+        return None
+    return next((each.refused for each in run.with_parents() if each.refused is not None), None)

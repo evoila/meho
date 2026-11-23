@@ -75,6 +75,7 @@ __all__ = [
     "composite_resume_steps",
     "composite_step_journal",
     "current_step_journal",
+    "earlier_run_sent_a_request",
     "is_credential_read",
     "mark_child_cleared_by_person",
     "step_target_key",
@@ -320,6 +321,16 @@ def child_read_sent_again(op_id: str) -> bool:
     """
     journal = current_step_journal()
     return journal is not None and journal.sending_again == op_id
+
+
+def earlier_run_sent_a_request(op_id: str) -> bool:
+    """True when *op_id* is about to run again after an approval and had sent something.
+
+    The record of the run that waited: a step or a request of the multi-step
+    operation was sent before it waited.
+    """
+    resume = _resume_steps_var.get()
+    return resume is not None and resume.composite_op_id == op_id and resume.earlier_sent
 
 
 @contextmanager

@@ -507,6 +507,7 @@ from meho_backplane.operations.composite import (
 )
 from meho_backplane.operations.composite_steps import (
     child_read_sent_again,
+    earlier_run_sent_a_request,
     mark_child_cleared_by_person,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
@@ -4269,7 +4270,13 @@ async def dispatch(
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
                 )
-        blocked_result = await refuse_if_principal_blocked(op_id, operator.sub, operator.tenant_id)
+        blocked_result = await refuse_if_principal_blocked(
+            op_id,
+            operator.sub,
+            operator.tenant_id,
+            # After an approval: what the run that waited had sent.
+            earlier_sent=earlier_run_sent_a_request(op_id),
+        )
         if blocked_result is not None:
             _log.info("dispatch_refused_principal_blocked", op_id=op_id, operator_sub=operator.sub)
             return blocked_result

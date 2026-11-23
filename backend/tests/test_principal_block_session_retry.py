@@ -8,7 +8,8 @@ says that the login session ended, and the person is blocked (or the block
 list becomes unreadable) while that first request runs. The step is not sent
 again, and the answer is the refusal. Covered: both ways the dispatcher
 repeats a call, after the status 401 and after the connector's own
-``is_session_expired`` method.
+``is_session_expired`` method. The step is also not sent again when another
+request of the run was refused, after the list can be read again.
 """
 
 from __future__ import annotations
@@ -21,8 +22,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.principal_block import block_principal, reset_block_cache
+from meho_backplane.auth.principal_block import (
+    PrincipalBlockedStepError,
+    block_principal,
+    reset_block_cache,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -42,6 +48,8 @@ _EMBEDDING = [0.1] * 384
 sent: list[str] = []
 #: What happens while the first request runs (set by each test).
 during_first_request: list[Callable[[], Awaitable[None]]] = []
+#: What happens after the session ended and before the second try (set by each test).
+before_second_try: list[Callable[[], Awaitable[None]]] = []
 
 
 class _Status401Connector(HttpConnector):
@@ -57,7 +65,8 @@ class _Status401Connector(HttpConnector):
         return {}
 
     async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
-        return None
+        for hook in before_second_try:
+            await hook()
 
     async def _http_client(self, target: Any) -> httpx.AsyncClient:
         async def _answer(request: httpx.Request) -> httpx.Response:
@@ -107,6 +116,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_registry()
     sent.clear()
     during_first_request.clear()
+    before_second_try.clear()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
@@ -208,3 +218,27 @@ async def test_step_is_not_sent_again_when_the_block_list_cannot_be_read(
     assert len(sent) == 1
     assert result.status == "error", result
     assert result.extras["error_code"] == "principal_block_check_unavailable"
+
+
+@pytest.mark.parametrize("cls", _CONNECTORS)
+async def test_step_is_not_sent_again_after_another_request_of_the_run_was_refused(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, cls: type[_Status401Connector]
+) -> None:
+    original = principal_block._load_entries
+    target = _FakeTarget(name="target-01", host="target.test")
+
+    async def _refuse_one_request_then_recover() -> None:
+        await _make_unreadable(monkeypatch)()
+        with pytest.raises(PrincipalBlockedStepError):
+            await cls()._request_json(target, "GET", "/other", operator=_make_operator())
+        monkeypatch.setattr("meho_backplane.auth.principal_block._load_entries", original)
+        reset_block_cache()
+
+    before_second_try.append(_refuse_one_request_then_recover)
+
+    result = await _run(cls, session)
+
+    assert len(sent) == 1
+    assert result.status == "error", result
+    assert result.extras["error_code"] == "principal_block_check_unavailable"
+    assert result.extras["execution_outcome"] == "uncertain"

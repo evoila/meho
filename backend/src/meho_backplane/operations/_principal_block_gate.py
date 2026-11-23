@@ -37,10 +37,10 @@ from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     PrincipalBlockedStepError,
     PrincipalBlockUnavailableError,
-    first_blocked_step_login,
     is_principal_blocked,
+    refusal_of_step,
 )
-from meho_backplane.auth.principal_block_run import mark_step_refused, request_was_sent
+from meho_backplane.auth.principal_block_run import request_was_sent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 
@@ -96,7 +96,7 @@ async def refuse_if_principal_blocked(
     """Return a refusal when *sub* is blocked, else ``None``.
 
     *earlier_sent* is true when an earlier step of the same operation was
-    sent.
+    sent, also in the run before an approval.
     """
     try:
         blocked = await is_principal_blocked(sub, tenant_id)
@@ -106,22 +106,18 @@ async def refuse_if_principal_blocked(
 
 
 async def refuse_step_if_blocked(op_id: str, operator: Operator) -> OperationResult | None:
-    """Return a refusal when a login of this step is blocked, else ``None``.
+    """Return a refusal when this step must not be sent, else ``None``.
 
-    The logins are the step's *operator* and every bound login: the
-    operator of the multi-step operation, and on an approved run the
-    person who asked. The answer is about this step, which is not sent. The
-    refusal is noted for the multi-step operation, which then stops with it.
+    The step is refused when an earlier step or request of the run was
+    refused, when one of its logins is blocked, or when the list cannot be
+    read (:func:`~meho_backplane.auth.principal_block.refusal_of_step`). The
+    logins are the step's *operator* and every bound login: the operator of
+    the multi-step operation, and on an approved run the person who asked.
+    The refusal is noted for the multi-step operation, which then stops with
+    it.
     """
-    try:
-        blocked = await first_blocked_step_login(operator.sub, operator.tenant_id)
-    except PrincipalBlockUnavailableError:
-        mark_step_refused(PrincipalBlockedStepError(unavailable=True))
-        return _unavailable(op_id)
-    if blocked is None:
-        return None
-    mark_step_refused(PrincipalBlockedStepError(unavailable=False))
-    return _blocked(op_id)
+    refusal = await refusal_of_step(operator)
+    return None if refusal is None else refusal_for_blocked_step(op_id, refusal)
 
 
 def refusal_for_blocked_step(op_id: str, exc: PrincipalBlockedStepError) -> OperationResult:

@@ -14,6 +14,8 @@ connector base checks the block list before each such request. Covered:
 * ``gh.composite.branch_commit_files`` on the real GitHub connector: the
   person is blocked after the commit is created, and the branch move is
   never sent;
+* once a request is refused, no later request of the run is sent, also when
+  the handler catches the refusal and the list can be read again;
 * outside a multi-step operation the base sends the request without a
   block-list read (the top-level call checked the list already).
 """
@@ -30,6 +32,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     PrincipalBlockedStepError,
@@ -62,6 +65,8 @@ sent: list[str] = []
 after_first_request: list[Callable[[], Awaitable[None]]] = []
 #: What happens before the first request (set by each test).
 before_first_request: list[Callable[[], Awaitable[None]]] = []
+#: What happens after the handler caught a refusal (set by each test).
+after_refusal: list[Callable[[], Awaitable[None]]] = []
 
 
 class _DirectConnector(HttpConnector):
@@ -107,9 +112,15 @@ async def direct_requests_composite(operator: Operator, target: Any, params: dic
 
 
 async def catching_composite(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
-    """The same requests; every error is caught and the handler goes on."""
+    """The same requests; the handler catches the error and sends one more request."""
     try:
         await direct_requests_composite(operator, target, params)
+    except Exception:
+        for hook in after_refusal:
+            await hook()
+    connector = _DirectConnector()
+    try:
+        await connector._post_json(_TARGET, "/things/3", operator=operator, json={"n": 3})
     except Exception:
         return {"done": False}
     return {"done": True}
@@ -127,6 +138,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     sent.clear()
     after_first_request.clear()
     before_first_request.clear()
+    after_refusal.clear()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
@@ -135,6 +147,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     sent.clear()
     after_first_request.clear()
     before_first_request.clear()
+    after_refusal.clear()
 
 
 @pytest.fixture
@@ -170,6 +183,10 @@ async def _block_requester() -> None:
     await block_principal(_admin(), h.operator().sub, "left the team")
 
 
+async def _unblock_requester() -> None:
+    await principal_block.unblock_principal(_admin(), h.operator().sub)
+
+
 def _unreadable(monkeypatch: pytest.MonkeyPatch) -> Callable[[], Awaitable[None]]:
     async def _broken(_sessionmaker: Any) -> frozenset[tuple[str, str]]:
         raise RuntimeError("database down")
@@ -179,6 +196,16 @@ def _unreadable(monkeypatch: pytest.MonkeyPatch) -> Callable[[], Awaitable[None]
         reset_block_cache()
 
     return _break_now
+
+
+def _readable(monkeypatch: pytest.MonkeyPatch) -> Callable[[], Awaitable[None]]:
+    original = principal_block._load_entries
+
+    async def _restore_now() -> None:
+        monkeypatch.setattr("meho_backplane.auth.principal_block._load_entries", original)
+        reset_block_cache()
+
+    return _restore_now
 
 
 def _assert_part_may_have_run(result: OperationResult) -> None:
@@ -242,18 +269,27 @@ async def test_first_direct_request_refused_means_nothing_started(
     assert ("Try again" in str(result.error)) is (case == "unreadable")
 
 
+@pytest.mark.parametrize("case", ["blocked", "unreadable"])
 async def test_refused_direct_request_stops_a_handler_that_catches_errors(
-    session: AsyncSession, embedding: AsyncMock
+    session: AsyncSession, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     await h.register_child(embedding)
     await h.register_composite(session, _DIRECT_OP_ID, "catching_composite", module=_MODULE)
-    after_first_request.append(_block_requester)
+    if case == "blocked":
+        after_first_request.append(_block_requester)
+        after_refusal.append(_unblock_requester)
+    else:
+        # The list can be read again before the third request is tried.
+        after_refusal.append(_readable(monkeypatch))
+        after_first_request.append(_unreadable(monkeypatch))
 
     result = await h.run(_DIRECT_OP_ID)
 
     assert sent == ["POST /things"]
-    assert result.status == "denied", result
-    assert result.extras["error_code"] == "principal_blocked"
+    assert result.status == ("denied" if case == "blocked" else "error"), result
+    assert result.extras["error_code"] == (
+        "principal_blocked" if case == "blocked" else "principal_block_check_unavailable"
+    )
     _assert_part_may_have_run(result)
 
 

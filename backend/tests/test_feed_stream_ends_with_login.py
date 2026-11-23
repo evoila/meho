@@ -21,7 +21,7 @@ import contextlib
 import time
 import uuid
 import warnings
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -243,8 +243,12 @@ async def _seed_session(key: Any) -> uuid.UUID:
     return decrypted.id
 
 
-async def _revoke_then_announce(session_id: uuid.UUID) -> None:
-    await asyncio.sleep(0.5)
+async def _revoke_then_announce(session_id: uuid.UUID, first_frame_sent: asyncio.Event) -> None:
+    """Sign out and announce, once the stream has handed out its first frame."""
+    try:
+        await asyncio.wait_for(first_frame_sent.wait(), timeout=_END_TIMEOUT_S)
+    except TimeoutError:
+        pytest.fail("the stream never sent the announcement that was stored before the sign-out")
     async with get_sessionmaker()() as session, session.begin():
         await revoke_session(session, session_id)
     await seed_announcement(_TENANT, activity="sent after the sign-out")
@@ -259,10 +263,20 @@ async def test_console_stream_ends_after_the_session_is_revoked(
     key = _keypair()
     session_id = await _seed_session(key)
     await seed_announcement(_TENANT, activity="sent before the sign-out")
+    first_frame_sent = asyncio.Event()
+    real_frames = stream_module.announcement_feed_frames
+
+    async def _frames_that_report_the_first(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        async for frame in real_frames(*args, **kwargs):
+            if "sent before the sign-out" in frame:
+                first_frame_sent.set()
+            yield frame
+
+    monkeypatch.setattr(stream_module, "announcement_feed_frames", _frames_that_report_the_first)
 
     with respx.mock(assert_all_called=False) as router:
         mock_discovery_and_jwks(router, public_jwks(key))
-        revoke = asyncio.ensure_future(_revoke_then_announce(session_id))
+        revoke = asyncio.ensure_future(_revoke_then_announce(session_id, first_frame_sent))
         async with _client(_ui_app()) as client, asyncio.timeout(_END_TIMEOUT_S):
             client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
             response = await client.get("/ui/broadcast/stream")

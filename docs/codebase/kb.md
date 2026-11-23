@@ -1092,6 +1092,10 @@ until the entry is deleted.
    once its entry has passages, so no entry shows twice. The time
    window is checked in the same SQL, before the `LIMIT` (see
    [Search filters](#search-filters-5726)).
+   With the switch `KB_SEARCH_PLAIN_SENTENCES` on, a question that
+   no passage matches word for word, in the own tenant or in the shared
+   scope, gets a word search in all of them where a passage needs only one
+   of the first 32 different words of the question ([retrieval.md](./retrieval.md#any-word-fallback-for-the-knowledge-search-6784)).
 3. Unless `scope="tenant"`, add the hits of the shared scope
    (`add_shared_hits`, with the same filters and time window). With
    `scope="shared"` the own tenant is searched only for its `shared`
@@ -1220,6 +1224,17 @@ The answer:
   answer, `wiki` included. When the answer is too large, the
   lowest-ranked hits are left out first, so wiki hits go before store
   hits.
+- With `KB_WIKI_INTERLEAVE` on (setting `kb_wiki_interleave`, off by
+  default), `hits` takes the two lists in turns: store hit 1, wiki hit 1,
+  store hit 2, wiki hit 2, and so on; the rest of the longer list
+  follows (`mcp/tools/knowledge.py::_ordered_hits`). The two engines give
+  scores that cannot be compared, so turns are used and not a score
+  sort. The size limit still leaves out the last places first, now from
+  both lists. MEHO records as retrieved only the store hits that are in
+  the delivered part of `hits`. With the switch off, the order is as
+  described above. The REST answer does not change. The switch is
+  measured with the retrieval-eval runner (off, on, off) before anyone
+  asks to turn it on.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
   `wiki.hits`; `null` on every other call. `meho kb search` prints the
   wiki hits after the table, or the line that says why the wiki was not

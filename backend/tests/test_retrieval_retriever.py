@@ -594,3 +594,116 @@ async def test_retrieve_serialises_metadata_filters_with_sorted_keys() -> None:
 
     assert payloads[0] == payloads[1]
     assert payloads[0] == '{"a": 1, "b": 2, "c": 3}'
+
+
+# ---------------------------------------------------------------------------
+# KB_SEARCH_PLAIN_SENTENCES (#6784): when the second word search runs
+# ---------------------------------------------------------------------------
+
+
+def test_kb_search_plain_sentences_is_off_by_default_and_reads_the_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KB_SEARCH_PLAIN_SENTENCES", raising=False)
+    get_settings.cache_clear()
+    assert get_settings().kb_search_plain_sentences is False
+    monkeypatch.setenv("KB_SEARCH_PLAIN_SENTENCES", "true")
+    get_settings.cache_clear()
+    assert get_settings().kb_search_plain_sentences is True
+
+
+async def _word_search_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    switch_on: bool,
+    source: str | None,
+    first_rows: list[Any],
+    any_word: bool | None = None,
+) -> list[bool]:
+    """Run one retrieve with fakes; return the ``any_word`` value of each word search."""
+    monkeypatch.setenv("KB_SEARCH_PLAIN_SENTENCES", "true" if switch_on else "false")
+    get_settings.cache_clear()
+    calls: list[bool] = []
+
+    async def fake_bm25(*_args: Any, any_word: bool = False, **_kwargs: Any) -> list[Any]:
+        calls.append(any_word)
+        return first_rows if not any_word else [_row(uuid.uuid4(), 0.5)]
+
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.0] * 384
+    with (
+        patch("meho_backplane.retrieval.retriever._bm25_candidates", fake_bm25),
+        patch(
+            "meho_backplane.retrieval.retriever._cosine_candidates",
+            AsyncMock(return_value=[]),
+        ),
+        patch("meho_backplane.retrieval.retriever._hydrate_hits", AsyncMock(return_value=[])),
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=embedding,
+        ),
+    ):
+        await retrieve(
+            uuid.uuid4(),
+            "a long question",
+            source=source,
+            session=AsyncMock(),
+            all_principals=True,
+            any_word=any_word,
+        )
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("switch_on", "source", "first_rows", "expected"),
+    [
+        (True, "kb", [], [False, True]),
+        (True, "kb", [_row(uuid.uuid4(), 0.2)], [False]),
+        (False, "kb", [], [False]),
+        (True, "memory", [], [False]),
+        (True, None, [], [False]),
+        (True, "docs-sidecar", [], [False]),
+    ],
+)
+async def test_any_word_search_runs_only_for_a_kb_search_without_word_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    switch_on: bool,
+    source: str | None,
+    first_rows: list[Any],
+    expected: list[bool],
+) -> None:
+    calls = await _word_search_calls(
+        monkeypatch, switch_on=switch_on, source=source, first_rows=first_rows
+    )
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    ("switch_on", "any_word", "source", "first_rows", "expected"),
+    [
+        # The caller decided for the whole search: any word at once, one query.
+        (True, True, "kb", [], [True]),
+        (True, True, "kb", [_row(uuid.uuid4(), 0.2)], [True]),
+        # The caller decided: never any word, also when the call has no word hit.
+        (True, False, "kb", [], [False]),
+        # With the switch off or another source, the caller's answer changes nothing.
+        (False, True, "kb", [], [False]),
+        (True, True, "memory", [], [False]),
+    ],
+)
+async def test_caller_decision_any_word_overrides_the_single_call_rule(
+    monkeypatch: pytest.MonkeyPatch,
+    switch_on: bool,
+    any_word: bool,
+    source: str,
+    first_rows: list[Any],
+    expected: list[bool],
+) -> None:
+    calls = await _word_search_calls(
+        monkeypatch,
+        switch_on=switch_on,
+        source=source,
+        first_rows=first_rows,
+        any_word=any_word,
+    )
+    assert calls == expected

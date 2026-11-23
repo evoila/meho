@@ -891,10 +891,19 @@ name the `chunk_id` (#3915).
 **The service.** `resolve_readable_collection(session, operator, key)` runs
 the shared gate and folds an unknown, not-entitled or disabled collection
 into `DocsReadNotFoundError`. `read_docs(operator, read_handle, *, scope,
-collection, mode, before, after, cursor)` refuses a collection without read
-(the same error), then calls the backend with the hard filters the
-collection's scope gates would send on search (`forwarded_scope`): the handle
-is bound to the hit's search filters. A soft `scope` is never sent on a read.
+collection, mode, before, after, cursor, exact_scope)` refuses a collection
+without read (the same error), then calls the backend with the hard filters
+the collection's scope gates would send on search (`forwarded_scope`): the
+handle is bound to the hit's search filters. A soft `scope` is never sent on a
+read. The scope has `product` / `version` stripped, like on `search_docs`.
+A wiki hit of `search_knowledge` is searched with the caller's values
+unchanged (`docs/codebase/kb.md`), so the MCP and REST faces also pass
+`exact_scope = exact_read_scope(scope, product, version)`: the values with
+their spaces kept, or `None` when they have none at their ends. When the
+backend answers "not found" with the stripped values and `exact_scope` sends
+other filters, `read_docs` reads once more with them. A `search_docs` handle
+still reads on the first try. With `KB_WIKI_FILTERED_SEARCH` off,
+`exact_read_scope` returns `None`: a read makes one request, as before.
 The reply becomes a `DocsReadResult` (`mode, text, title, source_url,
 disclosure, reason, located, truncated, next, up`); `source_url` is
 `public_source_url(...)`: an `https` source, else the backend's

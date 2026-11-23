@@ -140,10 +140,7 @@ async def preview_changed_since_request(
     """
     if request.preview_hash is None:
         return False
-    from meho_backplane.operations._request_preview import (
-        compute_preview_hash,
-        preview_dispatch,
-    )
+    from meho_backplane.operations._request_preview import preview_dispatch
 
     envelope = await preview_dispatch(
         operator=operator,
@@ -154,4 +151,4 @@ async def preview_changed_since_request(
     )
     if envelope.get("status") != "ok":
         return True
-    return compute_preview_hash(envelope) != request.preview_hash
+    return envelope.get("preview_hash") != request.preview_hash

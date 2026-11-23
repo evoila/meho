@@ -376,7 +376,19 @@ Two kinds of rows carry a keyed hash of a call's params:
     plain copy, also not when the request is approved and never runs.
     Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
     call instead of letting it wait.
-  - For most operations they are stored in `approval_request.params`,
+  - A call that holds a secret value does the same, with one difference:
+    the row keeps a copy of the params in which each secret value is the
+    marker `[REDACTED:param_name]`, so the approval pages keep working. A
+    secret value is a value under a secret name, at any depth (the name
+    rule of the broadcast scrub, numbers too), or a value in a field that a
+    connector marked with `declare_secret_field(op_id, *path)`
+    (`op_classes.py`, exported by the connector kit). A marked field is for
+    free text that may hold a secret, such as a config text, a note or a
+    command line. The approved run reads the real params from the handoff,
+    once, and checks them against `params_hash`. A call with no secret value
+    is stored and runs as before.
+  - For other operations, and for rows stored by an older release, they are
+    stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
     expires (`end_run_input`), each secret-named value in that column (a
@@ -386,8 +398,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     rewritten. Migration `0132` did the same, once, for every row that was
     already decided. A re-run of a failed run
     (`POST /api/v1/approvals/{id}/rerun`) then needs the params sent
-    again, as for a credential write; the stored copy with markers never
-    runs (`_stored_call` treats it as not stored).
+    again, as for a credential write. Stored params run only when they
+    match `params_hash` (`_stored_params_can_run`), with a marker or
+    without one, so a stored copy with markers never runs.
     A marker the requester sent as a value is different (#6064). Example:
     an object read from MEHO and passed back unchanged, like the
     `expected_before` of a FortiGate interface update. Such params still

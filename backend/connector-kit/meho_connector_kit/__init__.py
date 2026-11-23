@@ -51,7 +51,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
-from meho_backplane.op_classes import declare_root_shell
+from meho_backplane.op_classes import declare_root_shell, declare_secret_field
 from meho_backplane.operations._preview import (
     PermissionPreflight,
     PreviewBuilder,
@@ -159,6 +159,7 @@ __all__ = [
     "VaultCredentialsReadError",
     "compute_audit_digest_hash",
     "declare_root_shell",
+    "declare_secret_field",
     "is_acceptable_auth_model",
     "is_system_operator",
     "load_param_secret_data",

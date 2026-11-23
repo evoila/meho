@@ -222,10 +222,11 @@ def _assert_hidden(params: dict[str, Any] | None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_waiting_request_keeps_the_values_its_run_needs() -> None:
+async def test_waiting_request_keeps_the_values_its_run_needs_in_the_one_time_store() -> None:
     request_id = await _park(_SPEC_PARAMS)
 
-    assert await _stored_params(request_id) == _SPEC_PARAMS
+    _assert_hidden(await _stored_params(request_id))
+    assert (await _load(request_id)).execution_handle is not None
 
 
 @pytest.mark.asyncio
@@ -341,7 +342,7 @@ async def test_pending_request_cannot_be_claimed_and_keeps_its_values() -> None:
     request_id = await _park(_SPEC_PARAMS)
 
     assert await claim_resume(request_id) is False
-    assert await _stored_params(request_id) == _SPEC_PARAMS
+    _assert_hidden(await _stored_params(request_id))
 
 
 @pytest.mark.asyncio
@@ -505,6 +506,11 @@ async def test_markers_meho_wrote_never_run_and_the_request_fails_with_a_reason(
     hidden["spec"]["vcenterSpec"] = {"rootPassword": _MARKER, "licenseKey": _MARKER}
     hidden["spec"]["hostSpecs"][0]["credentials"] = _MARKER
     await _set_stored_params(request_id, hidden)
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        row.execution_handle = None  # a row of an older release has no one-time store
+        await s.commit()
 
     result = await resume_dispatch_after_approval(
         operator=_reviewer(), request=await _load(request_id)

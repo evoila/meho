@@ -108,7 +108,6 @@ from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
     classify_op,
-    holds_hidden_param_values,
     scrub_secret_named_values,
 )
 from meho_backplane.connectors.schemas import OperationResult
@@ -119,7 +118,7 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
-from meho_backplane.op_classes import hidden_stored_param
+from meho_backplane.op_classes import hidden_stored_param, secret_field_paths
 from meho_backplane.operations._audit import (
     SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
@@ -2062,11 +2061,21 @@ async def create_pending_request(
     # manifest of a k8s.apply of a Secret), keep their params and the
     # parent's params only in the encrypted one-time handoff: the row never
     # holds them, also not when the request is approved and never runs.
+    # Without a valid handoff key such a call is refused (the dispatcher
+    # answers for ApprovalHandoffKeyError).
     if classify_op(op_id) == "credential_write" or (
         params is not None and hidden_stored_param(op_id, params) is not None
     ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
+        if resume_parent is not None:
+            stored_resume_parent = {"op_id": resume_parent["op_id"]}
+    elif params is not None and (hidden := params_with_secret_fields_hidden(params, op_id=op_id)):
+        # A call with a secret-named value, or a field its connector marked
+        # (declare_secret_field), keeps the real params only in the handoff.
+        # The row keeps the copy with a marker for each secret value.
+        handoff_payload = {"params": params, "resume_parent": resume_parent}
+        stored_params = hidden
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
     request = ApprovalRequest(
@@ -2720,7 +2729,9 @@ def params_with_secret_fields_hidden(
     *op_id* declared with
     :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
     replaced too, when its check flags the params (the manifest of a
-    ``k8s.apply`` that holds a Secret). The other fields keep their value,
+    ``k8s.apply`` that holds a Secret), and so is each field the operation
+    marked with :func:`~meho_backplane.op_classes.declare_secret_field`. The
+    other fields keep their value,
     as in the audit row's raw copy.
     """
     if params is None:
@@ -2730,9 +2741,25 @@ def params_with_secret_fields_hidden(
     if name is not None:
         hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
         found = True
+    for path in secret_field_paths(op_id, params):
+        hidden = _with_marker_at(hidden, path)
+        found = True
     if not found:
         return None
     return cast(dict[str, Any], hidden)
+
+
+def _with_marker_at(node: Any, path: tuple[str, ...]) -> Any:
+    """A copy of *node* with the value at *path* replaced by the marker.
+
+    A path that no longer leads to a field (an earlier step hid its parent)
+    changes nothing.
+    """
+    if not isinstance(node, dict) or path[0] not in node:
+        return node
+    if len(path) == 1:
+        return {**node, path[0]: HIDDEN_PARAM_MARKER}
+    return {**node, path[0]: _with_marker_at(node[path[0]], path[1:])}
 
 
 async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None:
@@ -3119,8 +3146,9 @@ def _stored_call(
 def _stored_params_can_run(request: ApprovalRequest) -> bool:
     """True when the params stored on *request* are still the ones the requester sent.
 
-    Stored params without a marker (``[REDACTED:param_name]``) can run.
-    With a marker, there are two cases (#6064):
+    Stored params can run only when they match the request's
+    ``params_hash``, with a marker or without one. With a marker, there are
+    two cases (#6064):
 
     * MEHO wrote it (:func:`claim_resume` or :func:`end_run_input`): the
       real secret value is gone, so the params no longer match the
@@ -3132,8 +3160,6 @@ def _stored_params_can_run(request: ApprovalRequest) -> bool:
     stored = cast(dict[str, Any] | None, request.params)
     if stored is None:
         return False
-    if not holds_hidden_param_values(stored):
-        return True
     return params_hash_matches(stored, request.params_hash)
 
 

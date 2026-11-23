@@ -10,6 +10,9 @@ planted parts (``rest``). For ``rest``, every planted part (secret or plain)
 and every hiding marker becomes one ``<hidden>`` token. So a change that only
 hides or shows a planted part keeps ``rest`` the same, and any other change
 of the answer does not.
+A plain part counts as shown only where it stands outside a hiding marker.
+So ``--[REDACTED:password]`` in place of ``--password <value>`` hides the
+label ``password`` too, and the judge sees that the label is gone.
 ``scripts/ci/redaction_compare.py`` writes these records to
 ``tests/snapshots/redaction_compare.jsonl`` and judges two such files
 against each other.
@@ -30,7 +33,7 @@ from meho_backplane.redaction.command_line import hide_command_text, hide_shell_
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.resolver import get_default_policy
-from tests.redaction_compare.inputs import CompareInput, secret_inputs
+from tests.redaction_compare.inputs import CompareInput, Part, secret_inputs
 
 _OP_ID = "compare.read"
 
@@ -75,6 +78,11 @@ def rest_text(text: str, parts: list[str]) -> str:
     return _HIDDEN_RUN.sub(_HIDDEN, _MARKER.sub(_HIDDEN, text))
 
 
+def _is_shown(part: Part, text: str, outside: str) -> bool:
+    """A secret counts as shown anywhere in *text*, a plain part only outside a marker."""
+    return part.value in (outside if part.pid.startswith("p") else text)
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -84,20 +92,24 @@ def _fresh(payload: Any) -> Any:
     return payload if isinstance(payload, str) else json.loads(json.dumps(payload))
 
 
+def record(item: CompareInput, path: str, text: str) -> dict[str, Any]:
+    """The record of *item* on *path* when the step answered *text*."""
+    outside = _MARKER.sub(_HIDDEN, text)
+    return {
+        "id": item.id,
+        "path": path,
+        "hidden": sorted(p.pid for p in item.parts if not _is_shown(p, text, outside)),
+        "shown": sorted(p.pid for p in item.parts if _is_shown(p, text, outside)),
+        "sha": _sha(text),
+        "rest": _sha(rest_text(text, [p.value for p in item.parts if p.value])),
+    }
+
+
 def records(items: list[CompareInput] | None = None) -> Iterator[dict[str, Any]]:
     """One record per input and step, sorted by id and step."""
     for item in items if items is not None else secret_inputs():
-        values = [p.value for p in item.parts if p.value]
         for path in sorted(item.paths):
-            text = answer_text(STEPS[path](_fresh(item.payload)))
-            yield {
-                "id": item.id,
-                "path": path,
-                "hidden": sorted(p.pid for p in item.parts if p.value not in text),
-                "shown": sorted(p.pid for p in item.parts if p.value in text),
-                "sha": _sha(text),
-                "rest": _sha(rest_text(text, values)),
-            }
+            yield record(item, path, answer_text(STEPS[path](_fresh(item.payload))))
 
 
 def snapshot_lines(items: list[CompareInput] | None = None) -> list[str]:

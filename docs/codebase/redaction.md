@@ -1021,7 +1021,11 @@ before a reviewer reads the pull request.
   one line for each input and step: the parts the step hides, the parts it
   shows, a hash of the whole answer (`sha`), and a hash of the answer
   without its planted parts (`rest`). For `rest`, each planted part
-  (secret or plain) and each hiding marker becomes one `<hidden>` token. A test checks that each
+  (secret or plain) and each hiding marker becomes one `<hidden>` token. A
+  plain part counts as shown only where it stands outside a hiding marker.
+  So `--[REDACTED:password]` in place of `--password <value>` hides the
+  label `password` too, and the job sees it as a plain part now hidden.
+  `--password [REDACTED:password]` hides only the value. A test checks that each
   planted part, labels too, stands in its input with the same spelling.
   `backend/tests/test_redaction_compare_snapshot.py` fails when the code's
   answers differ from it. The same file checks three properties on main: a

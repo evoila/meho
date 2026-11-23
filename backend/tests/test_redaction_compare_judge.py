@@ -16,6 +16,9 @@ from types import ModuleType
 
 import pytest
 
+from tests.redaction_compare.answers import record as answer_record
+from tests.redaction_compare.inputs import secret_inputs
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "redaction_compare.py"
 
 
@@ -280,3 +283,38 @@ def test_a_missing_base_approved_file_counts_as_empty(tmp_path: Path) -> None:
         tmp_path / "no-such-file.yaml",
     )
     assert code == 0
+
+
+def _flag_records(head_text: str) -> tuple[dict[str, object], dict[str, object]]:
+    """The base and head records of the real input ``flag.plain.password.bare`` on ``redact``."""
+    item = next(i for i in secret_inputs() if i.id == "flag.plain.password.bare")
+    label, secret, name = (p.value for p in item.parts)
+    base_text = json.dumps(item.payload)
+    assert base_text == json.dumps(f"tool --{label} {secret} --name {name}")
+    head = head_text.format(label=label, name=name)
+    return answer_record(item, "redact", base_text), answer_record(item, "redact", head)
+
+
+def test_a_flag_name_hidden_with_its_value_fails(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base, head = _flag_records('"tool --[REDACTED:{label}] --name {name}"')
+    assert _judge(tmp_path, base, head) == 1
+    assert "flag.plain.password.bare redact: hidden:p0" in capfd.readouterr().out
+
+
+def test_a_flag_name_hidden_with_its_value_passes_with_its_own_entry(tmp_path: Path) -> None:
+    base, head = _flag_records('"tool --[REDACTED:{label}] --name {name}"')
+    approved = """approved:
+  - id: flag.plain.password.bare
+    path: redact
+    part: p0
+    reason: the flag name is hidden with its value
+"""
+    assert _judge(tmp_path, base, head, approved) == 0
+
+
+def test_a_flag_value_hidden_alone_passes(tmp_path: Path) -> None:
+    base, head = _flag_records('"tool --{label} [REDACTED:{label}] --name {name}"')
+    assert head["hidden"] == ["s1"]
+    assert _judge(tmp_path, base, head) == 0

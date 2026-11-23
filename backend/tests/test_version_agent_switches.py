@@ -50,6 +50,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "kb_search_plain_sentences",
         "kb_search_word_hint",
         "kb_similar_check",
+        "kb_wiki_filtered_search",
         "kb_wiki_interleave",
         "keycloak_rights_change_cards",
         "knowledge_upkeep_enabled",

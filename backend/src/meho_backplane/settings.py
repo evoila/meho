@@ -1662,6 +1662,23 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    approval_same_call_reuse:
+        Off by default. When on, a call that must wait for approval gets the
+        request that already waits when the same login in the same tenant
+        already has one for the same call (same operation, connector, target,
+        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice,
+        the same kind of login, and the same people behind the login).
+        The answer has that request's id and ``approval_request_reused: true``.
+        The call writes its own ``approval.reuse`` audit row with the caller's
+        session, and the answer's ``audit_id`` is that row. It works with
+        no ``idempotency_key`` and with a different key. Only a waiting
+        request inside its deadline is reused. A call inside an agent run,
+        a step of a multi-step operation (one sent through
+        ``dispatch_child``, or one saved to restart after approval) and a
+        re-run for an earlier requester always get their own request, and
+        a direct call never gets the request of such a step.
+        When off, every such call makes a new request. Env
+        ``APPROVAL_SAME_CALL_REUSE``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2657,6 +2674,7 @@ class Settings(BaseModel):
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3902,6 +3920,9 @@ def get_settings() -> Settings:
         ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),
+        ),
+        approval_same_call_reuse=parse_bool_env(
+            os.environ.get("APPROVAL_SAME_CALL_REUSE"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

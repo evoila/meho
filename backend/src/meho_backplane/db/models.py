@@ -7581,6 +7581,12 @@ class ApprovalRequest(Base):
     session_from_client: Mapped[bool | None] = mapped_column(
         sa.Boolean(), nullable=True, default=None
     )
+    # True when a step of a multi-step operation made the request: a call
+    # that the operation sent through ``dispatch_child``. False for any other
+    # new request. NULL on a row made before migration 0183, when it was not
+    # known. With ``APPROVAL_SAME_CALL_REUSE`` on, a direct call gets only a
+    # request where this is False.
+    composite_step: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
     # The ``approval.request`` audit row written alongside this row (the
     # durable audit record of the parking call). Decision audit rows and
     # the resumed dispatch's audit row parent-link to it, stitching the
@@ -7774,6 +7780,39 @@ class ApprovalRequest(Base):
             name="ck_approval_request_outcome_check_reason",
         ),
     )
+
+
+class ApprovalRequestKey(Base):
+    """One more retry key that gets an approval request back.
+
+    With ``APPROVAL_SAME_CALL_REUSE`` on, a call with retry key B can get
+    the waiting request of the same call that was made with key A. That
+    request row holds only key A in ``idempotency_key``. This row keeps key
+    B, so a later retry with key B gets the same request, also after it was
+    approved. Read by the key lookup in
+    :mod:`meho_backplane.operations.approval_queue`. Added by migration
+    ``0183``.
+
+    Columns
+    -------
+
+    * ``approval_request_id`` -- the request the key gets back (no foreign
+      key, like the other approval side tables; MEHO never deletes an
+      approval request, and the lookup joins on it).
+    * ``idempotency_key`` -- the retry key.
+    * ``created_at`` -- when the key was linked.
+
+    The tenant and the login come from the request row, so a key never
+    matches the request of another tenant or another login.
+    """
+
+    __tablename__ = "approval_request_key"
+
+    approval_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("approval_request_key_key_idx", "idempotency_key"),)
 
 
 #: Where a passkey touch for an approval was started (#6214): the web

@@ -3957,17 +3957,19 @@ async def _handle_needs_approval(
             )
             await session.commit()
         reused = bool(getattr(request, "_reused", False))
+        # Record the add-on step events AFTER commit so a phantom event
+        # cannot outlive a failed transaction (the helper is fail-open). A
+        # late retry that expired its old request and got another waiting
+        # request still sends the old one's expiry event.
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await record_approval_step_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                audit_id=expired_request._audit_id,
+            )
         if not reused:
-            # Record the add-on step events AFTER commit so a phantom event
-            # cannot outlive a failed transaction (the helper is fail-open).
-            expired_request = getattr(request, "_expired_request", None)
-            if expired_request is not None:
-                await record_approval_step_event(
-                    tenant_id=operator.tenant_id,
-                    request=expired_request,
-                    decision="expired",
-                    audit_id=expired_request._audit_id,
-                )
             await record_approval_step_event(
                 tenant_id=operator.tenant_id,
                 request=request,
@@ -4014,7 +4016,9 @@ async def _handle_needs_approval(
         request.id,
         duration_ms,
         reused=reused,
-        audit_id=request.request_audit_id,
+        # A call that got the waiting request of the same call has its own
+        # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
+        audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
         already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )

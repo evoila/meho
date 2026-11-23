@@ -1599,30 +1599,57 @@ async def test_switch_off_read_docs_over_rest_reads_a_padded_value_once(
     read.assert_awaited_once()
 
 
-_LONGEST = "p" * 128
+#: Longer than the 128 characters ``read_docs`` takes with the switch off.
+_LONG = "p" * 129
+
+
+def _mcp_call(operator: Operator, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call *name* through ``/mcp``, so the tool's input schema is checked too."""
+
+    async def _fake_verify() -> Operator:
+        return operator
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            response = post_mcp(
+                client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+    body: dict[str, Any] = response.json()
+    return body
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
     [
-        pytest.param({"product": _LONGEST + " "}, id="padded-past-the-cap"),
-        pytest.param({"version": "v" * 129}, id="too-long"),
+        pytest.param({"product": _LONG}, id="product-129"),
+        pytest.param({"product": _LONG + " "}, id="padded"),
+        pytest.param({"version": "v" * 4000}, id="version-4000"),
+        pytest.param({"product": _LONG, "version": "v" * 300}, id="both"),
     ],
 )
-async def test_switch_on_a_value_read_docs_does_not_take_is_not_searched(
+async def test_switch_on_a_long_value_reaches_the_index_unchanged(
     monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
 ) -> None:
-    """A value longer than ``read_docs`` takes gives no wiki handle that cannot be read."""
     _switch(monkeypatch, on=True)
     await _seed_wiki_with(_EXACT_ON)
     response, corpus = await _search(_operator(), **arguments)
-    corpus.assert_not_called()
-    assert response["wiki"]["reason"] == "filtered"
+    assert response["wiki"]["searched"] is True
+    assert corpus.await_args is not None
+    assert corpus.await_args.kwargs["metadata_filters"] == arguments
 
 
 @pytest.mark.asyncio
-async def test_switch_on_a_too_long_value_is_not_searched_over_rest(
+async def test_switch_on_a_long_value_reaches_the_index_unchanged_over_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch(monkeypatch, on=True)
@@ -1634,31 +1661,70 @@ async def test_switch_on_a_too_long_value_is_not_searched_over_rest(
     ):
         found = _rest_client(_operator()).post(
             "/api/v1/retrieve",
-            json={
-                "query": "snapshot",
-                "source": "kb",
-                "metadata_filters": {"product": _LONGEST + " "},
-            },
+            json={"query": "snapshot", "source": "kb", "metadata_filters": {"product": _LONG}},
         )
     assert found.status_code == 200, found.text
-    corpus.assert_not_called()
-    assert found.json()["wiki"]["searched"] is False
+    assert found.json()["wiki"]["searched"] is True
+    assert corpus.await_args is not None
+    assert corpus.await_args.kwargs["metadata_filters"] == {"product": _LONG}
 
 
 @pytest.mark.asyncio
-async def test_switch_on_a_wiki_hit_of_the_longest_value_reads_over_mcp_and_rest(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("product", [_LONG, _LONG + " "], ids=["long", "long-padded"])
+async def test_switch_on_a_wiki_hit_of_a_long_value_reads_over_mcp_and_rest(
+    monkeypatch: pytest.MonkeyPatch, product: str
 ) -> None:
-    """At the cap, the handle reads through both faces with the value of its search."""
+    """The handle reads through both faces, the MCP schema included, with the search's value."""
     _switch(monkeypatch, on=True)
     await _seed_wiki_with(_EXACT_ON)
-    read = _index_bound_to({"product": _LONGEST})
-    response, _ = await _search(_operator(), read=read, product=_LONGEST)
+    read = _index_bound_to({"product": product})
+    response, _ = await _search(_operator(), read=read, product=product)
     handle = response["hits"][1]["read_handle"]
-    asked = {"collection": _WIKI, "read_handle": handle, "mode": "page", "product": _LONGEST}
+    asked = {"collection": _WIKI, "read_handle": handle, "mode": "page", "product": product}
     with patch(_READ_SEAM, new=read):
-        page = await _read_docs_handler(_operator(), asked)
+        mcp = _mcp_call(_operator(), "read_docs", asked)
         rest = _rest_client(_operator()).post("/api/v1/read_docs", json=asked)
-    assert _WIKI_CHUNK.content in page["text"]
+    assert mcp["result"]["isError"] is False, mcp
+    assert _WIKI_CHUNK.content in mcp["result"]["content"][0]["text"]
     assert rest.status_code == 200, rest.text
     assert rest.json()["text"] == _WIKI_CHUNK.content
+    assert {"product": product} in [call.kwargs["filters"] for call in read.await_args_list]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["product", "version"])
+async def test_switch_off_read_docs_keeps_the_128_character_limit(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """Off: a longer value is refused with the old error on both faces, before any read."""
+    _switch(monkeypatch, on=False)
+    await _seed_wiki_with(_EXACT_ON)
+    read = _page(_WIKI_CHUNK.content)
+    asked = {"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", field: _LONG}
+    with patch(_READ_SEAM, new=read):
+        mcp = _mcp_call(_operator(), "read_docs", asked)
+        rest = _rest_client(_operator()).post("/api/v1/read_docs", json=asked)
+        at_limit = _rest_client(_operator()).post(
+            "/api/v1/read_docs", json={**asked, field: _LONG[:128]}
+        )
+    assert mcp["error"]["code"] == -32602
+    assert mcp["error"]["message"] == (
+        f"tools/call 'read_docs': arguments failed inputSchema: {field}: at most 128 characters"
+    )
+    assert rest.status_code == 422
+    [error] = rest.json()["detail"]
+    assert error["type"] == "string_too_long"
+    assert error["loc"] == ["body", field]
+    assert error["ctx"] == {"max_length": 128}
+    assert error["msg"] == "String should have at most 128 characters"
+    assert at_limit.status_code == 200, at_limit.text
+    read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_switch_off_a_long_value_skips_the_wiki(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch(monkeypatch, on=False)
+    await _seed_wiki_with(_EXACT_ON)
+    response, corpus = await _search(_operator(), product=_LONG)
+    corpus.assert_not_called()
+    assert response["wiki"]["reason"] == "filtered"

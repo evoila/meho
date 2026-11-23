@@ -152,11 +152,6 @@ class KbWikiSearch(BaseModel):
     duplicate_count: int = 0
 
 
-# The longest product or version that read_docs takes (MCP schema and
-# POST /api/v1/read_docs). A wiki hit is read with the values of its search.
-_WIKI_FILTER_MAX_CHARS = 128
-
-
 class WikiExactFilters(BaseModel):
     """The ``product`` and ``version`` a knowledge search sends to the wiki's index."""
 
@@ -180,11 +175,11 @@ def wiki_exact_filters(
     every filter skips the wiki as before. With it on, the answer is a value
     only when the search has no time window, is not in the shared scope, has
     no ``kind``, and its filters are only ``product`` and/or ``version``,
-    each a string that is not blank and at most 128 characters long, the
-    longest value ``read_docs`` takes. Anything else gives ``None``. A value
-    is kept as the caller gave it, spaces included, so the index gets the
-    same string the knowledge store filters by, and ``read_docs`` reads its
-    hits with that same string.
+    each a string that is not blank. Anything else gives ``None``. A value is
+    kept as the caller gave it, of any length and spaces included, so the
+    index gets the same string the knowledge store filters by, and
+    ``read_docs`` reads its hits with that same string (with the switch on,
+    ``read_docs`` takes a value of any length).
     """
     if not get_settings().kb_wiki_filtered_search:
         return None
@@ -192,10 +187,7 @@ def wiki_exact_filters(
         return None
     if not set(filters) <= {"product", "version"}:
         return None
-    if not all(
-        isinstance(value, str) and value.strip() and len(value) <= _WIKI_FILTER_MAX_CHARS
-        for value in filters.values()
-    ):
+    if not all(isinstance(value, str) and value.strip() for value in filters.values()):
         return None
     product, version = filters.get("product"), filters.get("version")
     return WikiExactFilters(

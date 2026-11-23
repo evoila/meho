@@ -115,6 +115,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DOCS_SOURCE_NOT_FOUND",
     "READ_AROUND_MAX",
+    "READ_FILTER_MAX_CHARS",
     "READ_SEARCH_AGAIN",
     "DocsReadError",
     "DocsReadNotFoundError",
@@ -123,6 +124,7 @@ __all__ = [
     "DocsReadSearchAgainError",
     "exact_read_scope",
     "read_docs",
+    "read_filter_too_long",
     "resolve_readable_collection",
 ]
 
@@ -138,6 +140,21 @@ READ_SEARCH_AGAIN: Final[str] = (
 
 #: Most chunks ``around`` reads before or after the hit (the backend's limit).
 READ_AROUND_MAX: Final[int] = 3
+
+#: Longest ``product`` / ``version`` a read takes with
+#: ``KB_WIKI_FILTERED_SEARCH`` off. With it on there is no limit: a wiki hit
+#: of a knowledge search is read with the values of that search, and a
+#: knowledge search takes a value of any length.
+READ_FILTER_MAX_CHARS: Final[int] = 128
+
+
+def read_filter_too_long(value: object) -> bool:
+    """Return true when *value* is a ``product`` / ``version`` a read refuses."""
+    return (
+        isinstance(value, str)
+        and len(value) > READ_FILTER_MAX_CHARS
+        and not get_settings().kb_wiki_filtered_search
+    )
 
 
 class DocsReadError(Exception):

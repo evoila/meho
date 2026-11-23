@@ -4877,7 +4877,6 @@
             "type": "string"
           },
           "product": {
-            "maxLength": 128,
             "minLength": 1,
             "type": "string"
           },
@@ -4887,7 +4886,6 @@
             "type": "string"
           },
           "version": {
-            "maxLength": 128,
             "minLength": 1,
             "type": "string"
           }

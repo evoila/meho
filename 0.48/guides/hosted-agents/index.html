@@ -3890,6 +3890,14 @@ gets, and which connectors it may use. You pass it with <code>--toolset</code>.<
 <li>When the agent names a target that MEHO does not find, or a name
     that fits more than one target, the answer lists close target names.
     It lists only targets of connectors in the list.</li>
+<li>When every target that the exact-name step of the lookup finds is
+    outside the list, or every target that the alias step finds is
+    outside the list, MEHO answers "no target" (<code>no_target</code>) with no close
+    names.</li>
+<li>An answer never names a target outside the list, and never names its
+    product.</li>
+<li>The close target names of a "no target" answer leave out the targets
+    outside the list, so there can be fewer than five, or none.</li>
 <li><code>result_query</code> reads only results that were stored under the list.</li>
 <li>With the setting <code>AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST</code> on, an agent
     with a <code>connectors</code> list does not get <code>query_topology</code>. The setting is

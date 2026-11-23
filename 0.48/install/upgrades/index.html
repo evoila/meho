@@ -3924,6 +3924,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A hosted agent with a <code>connectors</code> list now gets these answers when it names a target. When every hit of the exact-name step, or every hit of the alias step, is outside the list, the answer is "no target" (<code>no_target</code>) with no close names. An answer never names a target outside the list, and never names its product. The close target names of a "no target" answer leave out the targets outside the list, so there can be fewer than five, or none.</td>
+<td>None. If such an agent needs a target that it does not see, add the target's connector to its <code>connectors</code> list.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A hosted agent with a <code>connectors</code> list now keeps to the list in more places. The list check runs before the wrong-connector check, so a refusal to such an agent names only the connectors in its list. Every result the agent stores keeps its list, and <code>result_query</code> reads only results stored under a list inside the agent's own. The fetch of an approved secret reveal is refused with <code>connector_not_allowed</code> when the request is for a connector, or a target of a connector, outside the list. With the new setting <code>AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST=true</code> (off by default), an agent with a list does not get <code>query_topology</code>. An agent without a list works as before.</td>
 <td>None for <code>query_topology</code>: the setting is off by default, so an agent with a list keeps it. If it reads a stored result that the person who started the run made, run the call again inside the agent run.</td>
 </tr>

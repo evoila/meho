@@ -238,7 +238,8 @@ The guard has two parts:
   (`check_runner_dispatch`) is part of the key and it never counts as
   that person. The vendor login stays shared: a new
   caller gets the cached token after their read, without a second login
-  (some vendors allow only one active session per user). A target change
+  (some vendors allow only one active session per user). A read counts for
+  the exact `secret_ref` the target held at the read. A target change
   (`invalidate_credentials`) forgets the readers of that target together
   with its entries. The synthesised system operator is never recorded, so
  it runs the loader every time; on a live Vault that read fails

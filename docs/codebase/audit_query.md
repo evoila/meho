@@ -427,7 +427,8 @@ There are three cases:
   place of a login the same call has already noted. A second caller always reads
   the secret once with their own login first (`SecretReaders`,
   `connectors/_shared/secret_readers.py`), so a row never names a caller who
-  did not read. A connector notes the kept login only when it takes the kept
+  did not read. A read counts for the exact secret reference the target held
+  at the read. A connector notes the kept login only when it takes the kept
   entry. An SSH connection that MEHO keeps open (`connectors/adapters/ssh.py`)
   keeps the login id of the store read made before it was opened, and a call
   that uses the open connection again names that login.

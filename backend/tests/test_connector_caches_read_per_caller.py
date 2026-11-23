@@ -13,7 +13,9 @@ cache, that a later caller does not get the cached entry for free:
 * a second caller who may read the secret gets the cached entry after one
   read of their own, with no second vendor login;
 * a caller who has read keeps using the cache without another read;
-* a target change forgets the readers of that target, and no other target.
+* a target change forgets the readers of that target, and no other target;
+* a read counts for the secret reference the target held at the read: a caller
+  who read another reference of the target reads the present one first.
 
 The cache is warmed by hand for the first person, so the tests need no
 vendor login and no HTTP mock. The Vault read is the only seam replaced:
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -193,10 +195,10 @@ def _microsoft_case(name: str, cls: type) -> _Case:
         name=name,
         secret=creds,
         make=lambda loader: cls(credentials_loader=loader),
-        warm=lambda c, t: c._credentials.__setitem__((*target_cache_key(t), _SECRET_REF), creds),
+        warm=lambda c, t: c._credentials.__setitem__((*target_cache_key(t), t.secret_ref), creds),
         call=lambda c, t, op: c._credentials_for(t, op),
         readers=lambda c: c._readers,
-        cached=lambda c, t: (*target_cache_key(t), _SECRET_REF) in c._credentials,
+        cached=lambda c, t: (*target_cache_key(t), t.secret_ref) in c._credentials,
     )
 
 
@@ -345,3 +347,25 @@ async def test_target_change_forgets_the_readers_of_that_target_only(case: _Case
     assert not case.cached(connector, target)
     assert case.cached(connector, other)
     assert vault.reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", CASES, ids=str)
+async def test_a_read_of_another_secret_reference_does_not_count(case: _Case) -> None:
+    """A caller who read another reference of the target reads the present one first."""
+    vault = _Vault(case.secret)
+    connector = case.make(vault.read)
+    target = _Target()
+    changed = replace(target, secret_ref="tenants/test/made-up-other")
+    case.warm(connector, changed)
+    # Bob's read of the target's first reference is recorded.
+    case.readers(connector).record(target, _person("bob"))
+
+    with pytest.raises(VaultRoleDeniedError):
+        await case.call(connector, changed, _person("bob"))
+
+    assert vault.reads == ["bob"]
+    assert case.cached(connector, changed)
+    # A caller whose read of the present reference passes gets the entry.
+    await case.call(connector, changed, _person("carol"))
+    assert vault.reads == ["bob", "carol"]

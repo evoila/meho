@@ -152,7 +152,7 @@ TRACE_BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not mask 
 _monotonic = time.monotonic
 
 _CredentialKey = tuple[str, str, str]
-_TokenKey = tuple[str, str, str, str, str]
+_TokenKey = tuple[str, str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -288,7 +288,10 @@ class AzureConnector(
         check_tenant_match(target, config, credentials)
         login = (credentials.tenant_id, credentials.client_id)
         scope = config.cloud.arm_scope if scope is None else scope
-        key: _TokenKey = (*target_cache_key(target), *login, scope)
+        # With the secret reference: a token is used only by a caller who read the
+        # secret it was made from.
+        ref = str(target.secret_ref or "")
+        key: _TokenKey = (*target_cache_key(target), ref, *login, scope)
         # ``has_read`` is asked last, only when a fresh token is there: a yes notes
         # the caller's kept login for the audit row.
         use_cache = _may_use_cache(operator)

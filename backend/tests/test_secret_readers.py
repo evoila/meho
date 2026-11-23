@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -289,3 +289,64 @@ def test_a_known_reader_of_a_kept_entry_takes_the_place_of_an_earlier_note() -> 
         record_secret_read_as("earlier-login-id")
         assert readers.has_read(target, alice)
         assert current_secret_read_as() == "alice-login-id"
+
+
+# ---------------------------------------------------------------------------
+# A read counts for one secret reference
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RefTarget(_Target):
+    secret_ref: str | None = "tenants/test/first"
+
+
+def test_a_read_counts_only_for_its_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    without = replace(first, secret_ref=None)
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(first, alice)
+
+    with track_secret_read_as():
+        assert not readers.has_read(second, alice)
+        assert not readers.has_read(without, alice)
+        assert current_secret_read_as() is None
+        assert readers.has_read(first, alice)
+        assert current_secret_read_as() == "alice-login-id"
+    assert readers.callers(first) == frozenset({("operator", "alice")})
+    assert readers.callers(second) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_ensure_read_reads_again_for_another_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    alice = _person("alice")
+    reads: list[str] = []
+
+    async def _read() -> None:
+        reads.append("read")
+
+    for target in (first, second, first, second):
+        await readers.ensure_read(target, alice, _read)
+
+    assert len(reads) == 2
+
+
+def test_forget_drops_the_readers_of_every_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    alice = _person("alice")
+    readers.record(first, alice)
+    readers.record(second, alice)
+
+    readers.forget(second)
+
+    assert not readers.has_read(first, alice)
+    assert not readers.has_read(second, alice)

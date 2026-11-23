@@ -24,6 +24,11 @@ person and reads the secret with its own login. The synthesised system
 operator (operator-less probes) is never recorded: it runs the loader
 every time, as before, and the loader fails closed on a live Vault.
 
+A read counts for the exact secret reference the target held at the read
+(``target.secret_ref``). When the target's reference changes, every caller
+reads the new secret once, also a caller whose read of the old reference
+ends after the change.
+
 The audit row of a call names the login under which the secret this call
 used was read from the store (``secret_read_as``, see
 :mod:`meho_backplane.auth.secret_read_as`). There are three cases:
@@ -87,6 +92,9 @@ __all__ = ["SecretReaders", "caller_id"]
 #: The kind of a caller: how it logs in to Vault.
 CallerKind = Literal["operator", "check-runner"]
 
+#: A caller, and the secret reference their read passed for.
+_ReadKey = tuple[str, tuple[CallerKind, str]]
+
 
 def caller_id(operator: Operator) -> tuple[CallerKind, str]:
     """Return ``(kind, sub)``: who *operator* is for a secret read.
@@ -100,20 +108,33 @@ def caller_id(operator: Operator) -> tuple[CallerKind, str]:
     return (kind, operator.sub)
 
 
+def _secret_ref(target: TenantScopedTargetLike) -> str:
+    """The target's secret reference; ``""`` for a target that has none."""
+    return str(getattr(target, "secret_ref", None) or "")
+
+
+def _read_key(target: TenantScopedTargetLike, operator: Operator) -> _ReadKey:
+    """Return the key of *operator*'s read: the target's secret reference and the caller."""
+    return (_secret_ref(target), caller_id(operator))
+
+
 class SecretReaders:
     """The callers who have read a target's secret in this process.
 
     Keyed on the tenant-unique target key
-    (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
-    and the caller (:func:`caller_id`: kind and ``sub``). For each caller it
-    keeps the login id that the caller's store read noted, or ``None``.
+    (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`),
+    the target's secret reference and the caller (:func:`caller_id`: kind and
+    ``sub``). For each read it keeps the login id that the caller's store read
+    noted, or ``None``.
     """
 
     def __init__(self) -> None:
-        self._callers: dict[tuple[str, str], dict[tuple[CallerKind, str], str | None]] = {}
+        self._callers: dict[tuple[str, str], dict[_ReadKey, str | None]] = {}
 
     def has_read(self, target: TenantScopedTargetLike, operator: Operator) -> bool:
         """Return whether *operator* has read the secret of *target* in this process.
+
+        Only a read of the target's present secret reference counts.
 
         Ask it last, only when a kept entry is there and is used on yes: on
         yes it notes the login that read the secret when it was kept, for the
@@ -126,10 +147,10 @@ class SecretReaders:
         if is_system_operator(operator):
             return False
         readers = self._callers.get(target_cache_key(target), {})
-        caller = caller_id(operator)
-        if caller not in readers:
+        key = _read_key(target, operator)
+        if key not in readers:
             return False
-        record_secret_read_as(readers[caller] or KEPT_LOGIN_READER_UNKNOWN)
+        record_secret_read_as(readers[key] or KEPT_LOGIN_READER_UNKNOWN)
         return True
 
     def record(self, target: TenantScopedTargetLike, operator: Operator) -> None:
@@ -142,7 +163,7 @@ class SecretReaders:
         if is_system_operator(operator):
             return
         readers = self._callers.setdefault(target_cache_key(target), {})
-        readers[caller_id(operator)] = current_secret_read_as()
+        readers[_read_key(target, operator)] = current_secret_read_as()
 
     async def ensure_read(
         self,
@@ -163,7 +184,7 @@ class SecretReaders:
         self.record(target, operator)
 
     def forget(self, target: TenantScopedTargetLike) -> None:
-        """Forget every reader of *target*; the next call of each one reads again."""
+        """Forget every reader of *target*, for every secret reference it had."""
         self._callers.pop(target_cache_key(target), None)
 
     def clear(self) -> None:
@@ -171,5 +192,7 @@ class SecretReaders:
         self._callers.clear()
 
     def callers(self, target: TenantScopedTargetLike) -> frozenset[tuple[CallerKind, str]]:
-        """The recorded callers of *target*, as ``(kind, sub)`` (read-only, for tests)."""
-        return frozenset(self._callers.get(target_cache_key(target), ()))
+        """Who read the present secret of *target*, as ``(kind, sub)`` (for tests)."""
+        ref = _secret_ref(target)
+        reads = self._callers.get(target_cache_key(target), ())
+        return frozenset(caller for read_ref, caller in reads if read_ref == ref)

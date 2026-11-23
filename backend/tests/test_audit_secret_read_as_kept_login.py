@@ -19,7 +19,9 @@ audit row still names the login under which the secret was read:
 * a call that read a secret and then uses a kept entry with no known reader
   keeps the login of its read (every kind of kept login);
 * Entra and Azure: a refused read of a changed secret reference names no
-  login, because the call used no kept entry.
+  login, because the call used no kept entry;
+* Entra and Azure: a read of the first secret reference that ends after the
+  reference changed does not count for the new one.
 """
 
 from __future__ import annotations
@@ -530,3 +532,59 @@ async def test_calls_that_wait_for_the_first_read_name_only_their_own_login(
     assert noted == ["alice", None, "carol", "alice"]
     # The second call of alice waited for her first read and took the kept entry.
     assert store.reads == ["alice", "bob", "carol"]
+
+
+_OTHER_CALLER_OP = "vault.demo.kept_login_other_caller"
+
+
+class _SlowFirstReference(_RefusesOtherReference):
+    """Reads the first reference only when told to; refuses alice the other one."""
+
+    def __init__(self, secret: Any) -> None:
+        super().__init__(secret)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def read(self, target: Any, operator: Operator) -> Any:
+        if operator.sub != "alice":
+            return await _Store.read(self, target, operator)
+        if target.secret_ref == _Target().secret_ref:
+            self.started.set()
+            await self.release.wait()
+        return await super().read(target, operator)
+
+
+@pytest.mark.parametrize("name", list(_MICROSOFT_HOSTS))
+@pytest.mark.asyncio
+async def test_a_read_that_ends_after_the_reference_changed_does_not_count_for_the_new_one(
+    name: str, monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    connector, store, target = _kept_login_connector(name, monkeypatch, _SlowFirstReference)
+    assert isinstance(store, _SlowFirstReference)
+    login = {"entra": entra_module, "azure": azure_module}[name].fetch_client_credentials_token
+    assert isinstance(login, AsyncMock)
+    _CONNECTOR["connector"] = connector
+    await _register(_OP, _use_login_handler, embedding)
+    await _register(_OTHER_CALLER_OP, _use_login_handler, embedding)
+    changed = replace(target, secret_ref="tenants/test/made-up-other")
+
+    first_call = asyncio.create_task(_call(_OP, target))
+    await asyncio.wait_for(store.started.wait(), timeout=10)
+    # The target changes while alice's read runs, and carol loads the new secret.
+    await connector.invalidate_credentials(target)
+    assert await _call(_OTHER_CALLER_OP, changed, "carol") == "ok"
+    store.release.set()
+    assert await first_call == "ok"
+    # Alice's call logged in with the secret she read, not with carol's token.
+    assert login.await_count == 2
+
+    # The store is asked for alice's read of the new secret, and refuses it.
+    assert await _call(_OP, changed) != "ok"
+    assert store.reads == ["carol", "alice", "alice"]
+    assert await _rows(_OP) == ["alice", None]
+
+    # Carol's kept entry stays in use.
+    assert await _call(_OTHER_CALLER_OP, changed, "carol") == "ok"
+    assert await _rows(_OTHER_CALLER_OP) == ["carol", "carol"]
+    assert store.reads == ["carol", "alice", "alice"]
+    assert login.await_count == 2

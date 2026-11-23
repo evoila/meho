@@ -15,6 +15,10 @@ login. `SecretReaders` keeps that check when the cache is warm:
   read of the target's secret passed once in this process.
 - The first caller's read fills the cache. Every later caller reads the
   secret once too, under their own login, and then uses the cached entry.
+- A read counts for the exact secret reference the target held at the
+  read. When the target's `secret_ref` changes, every caller reads the new
+  secret once, also a caller whose read of the old reference ends after the
+  change.
 - A refused read raises, and the caller is not recorded. So Vault's answer
   reaches every caller, also when the cache is warm.
 - The vendor still sees one login per credential. A new caller gets the
@@ -46,20 +50,22 @@ caller and target instead (see `docs/architecture/connector-auth.md`).
   `("operator", sub)`.
 - **`SecretReaders`** — the callers who have read a target's secret in
   this process. Keyed on the tenant-unique target key
-  (`target_cache_key`) and `caller_id`.
-  - `has_read(target, operator) -> bool` — whether the caller has read.
-    Always `False` for the system operator.
+  (`target_cache_key`), the target's `secret_ref` and `caller_id`.
+  - `has_read(target, operator) -> bool` — whether the caller has read
+    the target's present secret reference. Always `False` for the system
+    operator.
   - `record(target, operator)` — remember a passed read. Call it right
     after the loader returned. The system operator is not recorded.
   - `ensure_read(target, operator, read)` — run `read` (the connector's
     credential loader, bound to the target and the operator) once for a
     caller who has not read yet, then record them. The result of `read`
     is not needed: the cache already holds the entry.
-  - `forget(target)` — forget every reader of the target. Called from
-    `invalidate_credentials`, so a target change makes every caller read
-    the new secret.
+  - `forget(target)` — forget every reader of the target, for every secret
+    reference it had. Called from `invalidate_credentials`, so a target
+    change makes every caller read the new secret.
   - `clear()` — forget everything. Called from `aclose`.
-  - `callers(target)` — the recorded `(kind, sub)` pairs (for tests).
+  - `callers(target)` — the `(kind, sub)` pairs recorded for the target's
+    present secret reference (for tests).
 
 Every method is synchronous apart from `ensure_read`, and none of them
 awaits while it changes state, so a connector calls them under its own
@@ -116,7 +122,7 @@ login, and the target update route calls it after a target change
 | GitHub | `_installation_tokens`, `_pat_tokens` | target |
 | Keycloak | `_admin_tokens` | target |
 | Profiled (ingested) connectors | `_session_tokens` | credential |
-| Azure, Entra ID | `_credentials`, `_tokens` | target + secret / login + scope |
+| Azure, Entra ID | `_credentials`, `_tokens` | target + secret (tokens: also login + scope) |
 | FreeIPA | `_sessions` | credential |
 | phpIPAM | `_credentials`, `_tokens` | credential / target + secret |
 

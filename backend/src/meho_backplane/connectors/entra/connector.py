@@ -114,7 +114,7 @@ _BODY_WITHHELD: Final[str] = "<response body left out: MEHO could not filter it>
 _monotonic = time.monotonic
 
 _CredentialKey = tuple[str, str, str]
-_TokenKey = tuple[str, str, str, str, str]
+_TokenKey = tuple[str, str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -198,8 +198,11 @@ class EntraConnector(HttpConnector):
         credentials = await self._credentials_for(target, operator)
         check_tenant_match(target, config, credentials)
         scope = config.cloud.graph_scope
+        # With the secret reference: a token is used only by a caller who read the
+        # secret it was made from.
         key: _TokenKey = (
             *target_cache_key(target),
+            str(target.secret_ref or ""),
             credentials.tenant_id,
             credentials.client_id,
             scope,

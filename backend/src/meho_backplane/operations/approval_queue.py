@@ -1092,7 +1092,8 @@ class ApprovalExpiredReason(StrEnum):
 #: What the requester reads for each expiry reason (#5030), on every surface.
 EXPIRED_REASON_MESSAGES: Final[dict[ApprovalExpiredReason, str]] = {
     ApprovalExpiredReason.DEADLINE_PASSED: (
-        "The request waited too long without a decision. Ask again if the change is still needed."
+        "The time for this request ran out before the operation ran. "
+        "Ask again if the change is still needed."
     ),
     ApprovalExpiredReason.RELEASE_CHANGED: (
         "MEHO was updated while the request waited, and an approval covers "

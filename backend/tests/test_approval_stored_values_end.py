@@ -28,15 +28,19 @@ from sqlalchemy.exc import IntegrityError
 
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.agent.approval_wait import _lost_claim_envelope
+from meho_backplane.api.v1.approvals import _view
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog, Tenant
+from meho_backplane.mcp.tools._call_operation_status import read_own_request_over_mcp
+from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations import approval_stored_values
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_expiry import sweep_expired_approvals
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     ApprovalExpiredReason,
     approval_expired_reason,
     claim_resume,
@@ -270,6 +274,51 @@ async def test_a_started_approved_request_does_not_expire() -> None:
     assert await sweep_expired_approvals() == 0
     row = await _load(tenant_id, request_id)
     assert row.status == ApprovalRequestStatus.APPROVED.value
+
+
+_DEADLINE_TEXT = (
+    "The time for this request ran out before the operation ran. "
+    "Ask again if the change is still needed."
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [ApprovalRequestStatus.PENDING, ApprovalRequestStatus.APPROVED])
+async def test_an_expired_request_reads_one_true_sentence_on_rest_and_mcp(
+    monkeypatch: pytest.MonkeyPatch, status: ApprovalRequestStatus
+) -> None:
+    """A waiting request and an approved one that nobody started read the same text."""
+    monkeypatch.setenv("MCP_OWN_REQUEST_STATUS", "true")
+    get_settings.cache_clear()
+    tenant_id = await _tenant()
+    request_id = await _park(
+        tenant_id, _SPEC_OP, _SPEC_PARAMS, status=status, decided_ago=_past_ttl()
+    )
+    if status is ApprovalRequestStatus.PENDING:
+        async with get_sessionmaker()() as s:
+            await s.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(expires_at=datetime.now(UTC) - timedelta(minutes=1))
+            )
+            await s.commit()
+
+    assert await sweep_expired_approvals() == 1
+
+    row = await _load(tenant_id, request_id)
+    assert approval_expired_reason(row) is ApprovalExpiredReason.DEADLINE_PASSED
+    assert EXPIRED_REASON_MESSAGES[ApprovalExpiredReason.DEADLINE_PASSED] == _DEADLINE_TEXT
+    rest = _view(row, operator=_requester(tenant_id))
+    assert rest.expired_message == _DEADLINE_TEXT
+    assert _row_to_dict(row)["expired_message"] == _DEADLINE_TEXT
+    answer = await read_own_request_over_mcp(
+        _requester(tenant_id),
+        {"connector_id": "example-1.x", "op_id": _SPEC_OP, "approval_request_id": str(request_id)},
+    )
+    assert answer["status"] == "denied"
+    assert answer["extras"]["error_code"] == "approval_request_expired"
+    assert answer["error"] == f"approval_request_expired: {_DEADLINE_TEXT}"
+    assert "decision" not in answer["error"]
 
 
 # ---------------------------------------------------------------------------

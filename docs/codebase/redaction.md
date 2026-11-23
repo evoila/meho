@@ -1041,15 +1041,16 @@ before a reviewer reads the pull request.
   the value. A test checks that each planted part, labels too, stands in
   its input with the same spelling. The records are never committed.
 - **The CI job** "Secret hiding compared with the base branch" makes a
-  second checkout of the base commit and syncs one environment for the
-  base and one for the pull request. It builds the base records with the
-  base's own code and input set, and the pull request records with the
-  pull request's own code and input set. Both files stay in the job's
-  temporary folder. Then it runs the rule of
-  `scripts/ci/redaction_compare.py --judge` on the two record files. It
-  fails when a part that the base hides is now shown, when a plain part
-  that the base shows is now hidden, when the answer changed in another
-  way, or when an input of the base is missing from the pull request's
+  second checkout of the base commit and builds the base records there,
+  with the base's own code and input set. It builds the pull request
+  records with the pull request's own code and input set in a container
+  with no mounted folder: the files go in on stdin and the records come
+  out on stdout. So the pull request's code can write only its own
+  records. Both files stay in the job's temporary folder. Then it runs
+  the rule of `scripts/ci/redaction_compare.py --judge` on the two record
+  files. It fails when a part that the base hides is now shown, when a
+  plain part that the base shows is now hidden, when the answer changed in
+  another way, or when an input of the base is missing from the pull request's
   records. A secret part that the base showed and the pull request hides
   passes: that is the purpose of a fix. When a part is hidden or shown,
   the job still compares `rest`, so another change of the same answer
@@ -1069,11 +1070,14 @@ before a reviewer reads the pull request.
 - **The rules come from the base branch.** The job reads the rule script
   of the base commit with `git show` and runs the judge with
   `python3 -I`, so a pull request cannot weaken the check that judges it.
-  The approved file is the one of the pull request: it is the open list
-  that a reviewer reads. The job passes with "no compare on the base
-  branch yet" only when the base commit has no rule script. When it has
-  one, any failed step fails the job: the second checkout, either
-  environment sync, either record build, or the judge.
+  The approved file is the one that the pull request commits: it is the
+  open list that a reviewer reads. The job reads it, the base's approved
+  file and the rule script from git before any code of the pull request
+  runs. The job passes with "no compare on the base branch yet" only when
+  a git lookup of the base tree succeeds and finds no rule script. When
+  the lookup fails, or the base has the script, any failed step fails the
+  job: the lookup, the second checkout, either environment sync, either
+  record build, or the judge.
 
 ## Known issues / future work
 

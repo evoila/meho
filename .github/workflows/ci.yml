@@ -1500,10 +1500,18 @@ jobs:
     #
     # The rule script comes from the base commit (`git show`), so a pull
     # request cannot weaken the check that judges it. The judge runs with
-    # `python3 -I` and uses only the standard library.
+    # `python3 -I` and uses only the standard library. The rule script, the
+    # base's approved file and the pull request's committed approved file
+    # are read from git before any code of the pull request runs.
     #
-    # It passes with "no compare on the base branch yet" only when the base
-    # commit has no rule script. Otherwise any failed step fails the job.
+    # The pull request's code runs in a container with no mounted folder:
+    # its files go in on stdin and its records come out on stdout. So it can
+    # write only its own records, and never the rule script, the base
+    # records or the approved files that the judge reads.
+    #
+    # It passes with "no compare on the base branch yet" only when a git
+    # lookup of the base tree succeeds and finds no rule script. Otherwise
+    # any failed step fails the job.
     #
     # Non-required check. Only when the change touches backend/.
     needs: changes
@@ -1512,8 +1520,9 @@ jobs:
       needs.changes.outputs.backend_python == 'true'
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
-    # Two environment syncs (about 1 to 2 minutes each with the uv cache)
-    # and two record builds (seconds each); the cap is a hang backstop.
+    # One environment sync on the runner (with the uv cache), one image pull
+    # and one sync in the container (no cache), and two record builds
+    # (seconds each); the cap is a hang backstop.
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1536,34 +1545,58 @@ jobs:
 
       - name: Build and judge the records of the base and of the pull request
         shell: bash
+        env:
+          # The Python base image of backend/Dockerfile (same digest).
+          IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
         run: |
           set -euo pipefail
-          base=HEAD^1
+          base="$(git rev-parse --verify "HEAD^1^{commit}")"
+          head="$(git rev-parse --verify "HEAD^{commit}")"
           script=scripts/ci/redaction_compare.py
           approved=backend/tests/snapshots/redaction_compare_approved.yaml
-          if ! git cat-file -e "${base}:${script}" 2>/dev/null; then
+          # ls-tree fails when git cannot read the tree; an empty answer means no such file.
+          listed="$(git ls-tree --name-only "${base}" -- "${script}")"
+          if [ -z "${listed}" ]; then
             echo "no compare on the base branch yet"
             exit 0
           fi
           dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
           git show "${base}:${script}" > "${dir}/redaction_compare.py"
+          # The committed approved file of a commit; no file counts as empty.
+          committed_approved() {
+            local found
+            found="$(git ls-tree --name-only "$1" -- "${approved}")"
+            if [ -n "${found}" ]; then
+              git show "$1:${approved}" > "$2"
+            else
+              printf 'approved: []\n' > "$2"
+            fi
+          }
           # The base's approved entries are already merged: they approve
-          # nothing and are never stale. No base file counts as empty.
-          if git cat-file -e "${base}:${approved}" 2>/dev/null; then
-            git show "${base}:${approved}" > "${dir}/base-approved.yaml"
-          else
-            printf 'approved: []\n' > "${dir}/base-approved.yaml"
-          fi
+          # nothing and are never stale.
+          committed_approved "${base}" "${dir}/base-approved.yaml"
+          committed_approved "${head}" "${dir}/head-approved.yaml"
+          # The base: its own code and input set, on the runner.
           git worktree add --detach "${dir}/base" "${base}"
-          # Each side gets its own environment and runs its own code and
-          # input set, with the base's rule script.
           (cd "${dir}/base/backend" && uv sync --frozen \
             && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
-          (cd backend && uv sync --frozen \
-            && uv run python "${dir}/redaction_compare.py" --records "${dir}/head.jsonl")
+          # The pull request: its own code and input set, with the base's
+          # rule script, in a container with no mounts and no runner files.
+          stage="${dir}/head-input"
+          mkdir "${stage}"
+          git archive "${head}" backend | tar -x -C "${stage}"
+          cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
+          tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+            work="$(mktemp -d)"
+            tar -x -C "${work}"
+            cd "${work}/backend"
+            "${work}/uv" sync --frozen >&2
+            "${work}/uv" run python "${work}/redaction_compare.py" --records "${work}/head.jsonl" >&2
+            cat "${work}/head.jsonl"
+          ' > "${dir}/head.jsonl"
           python3 -I "${dir}/redaction_compare.py" \
             --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
-            --approved "${approved}" \
+            --approved "${dir}/head-approved.yaml" \
             --base-approved "${dir}/base-approved.yaml"
 
   connector-package-template:

@@ -3,14 +3,18 @@
 
 """The judge of the secret-hiding compare (``scripts/ci/redaction_compare.py``).
 
-Each test writes a base snapshot and a head snapshot by hand, with one
-record, and checks the exit code and what the judge prints.
+Each judge test writes a base snapshot and a head snapshot by hand, with
+one record, and checks the exit code and what the judge prints. One test runs
+the ``--records`` command from ``backend/`` and checks the file it writes.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -318,3 +322,26 @@ def test_a_flag_value_hidden_alone_passes(tmp_path: Path) -> None:
     base, head = _flag_records('"tool --{label} [REDACTED:{label}] --name {name}"')
     assert head["hidden"] == ["s1"]
     assert _judge(tmp_path, base, head) == 0
+
+
+def test_the_records_command_writes_one_record_per_input_and_step(tmp_path: Path) -> None:
+    target = tmp_path / "records.jsonl"
+    done = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--records", str(target)],
+        cwd=_SCRIPT.parents[2] / "backend",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    records = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    keys = [(r["id"], r["path"]) for r in records]
+    expected = sorted((item.id, path) for item in secret_inputs() for path in item.paths)
+    assert sorted(keys) == expected
+    assert len(set(keys)) == len(keys)
+    digest = re.compile(r"[0-9a-f]{64}")
+    for r in records:
+        assert set(r) == {"id", "path", "hidden", "shown", "sha", "rest"}
+        assert all(isinstance(part, str) for part in r["hidden"] + r["shown"])
+        assert digest.fullmatch(r["sha"]) and digest.fullmatch(r["rest"])
+    assert judge_module.differences(judge_module.load(target), judge_module.load(target)) == []

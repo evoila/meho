@@ -618,6 +618,7 @@ async def dispatch_composite(
     # the dispatcher imports ``_branches`` to run the branch, and the
     # audit-tree contextvar lives in ``_audit``; deferring to call time
     # mirrors ``get_dispatch_child`` / ``enforce_subop_policy``.
+    from meho_backplane.auth.principal_block import checking_logins_for_steps
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.composite import composite_dispatch_var
     from meho_backplane.operations.composite_steps import composite_step_journal
@@ -639,7 +640,12 @@ async def dispatch_composite(
     try:
         # The steps this run goes through, so a resume after an approval
         # does not send them again (``composite_steps``).
-        with composite_step_journal(op_id):
+        # Each request a step sends straight to the target checks the block
+        # list for this operator (``auth.principal_block``).
+        with (
+            composite_step_journal(op_id),
+            checking_logins_for_steps(operator.sub, operator.tenant_id),
+        ):
             return await handler(**call_kwargs)
     finally:
         composite_dispatch_var.reset(composite_token)

@@ -93,6 +93,7 @@ from httpx._decoders import SUPPORTED_DECODERS
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_step_login_blocked
 from meho_backplane.connectors._shared.cache_key import (
     DEFAULT_PORTS,
     effective_scheme,
@@ -1077,6 +1078,8 @@ class HttpConnector(Connector):
                 f"_request_json only accepts idempotent methods "
                 f"{sorted(_IDEMPOTENT_METHODS)}; got {method!r}"
             )
+        # Inside a multi-step operation each request checks the block list.
+        await raise_if_step_login_blocked(operator)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         if extra_headers:
@@ -1194,6 +1197,8 @@ class HttpConnector(Connector):
             )
         if json is not None and data is not None:
             raise ValueError("_post_json accepts json= or data=, not both")
+        # Inside a multi-step operation each request checks the block list.
+        await raise_if_step_login_blocked(operator)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         if extra_headers:

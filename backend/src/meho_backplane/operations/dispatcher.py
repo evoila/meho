@@ -308,6 +308,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -438,7 +439,11 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
-from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
+from meho_backplane.operations._principal_block_gate import (
+    refusal_for_blocked_step,
+    refuse_if_principal_blocked,
+    refuse_step_if_blocked,
+)
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
@@ -1778,6 +1783,20 @@ async def _run_branch_with_error_handling(
             target=target,
             params=params,
             audit_id=audit_id,
+        )
+    except PrincipalBlockedStepError as blocked_exc:
+        # A step sent straight to the target stopped before its request:
+        # a login of the step is blocked, or the list cannot be read.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            refusal_for_blocked_step(op_id, blocked_exc),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
         )
     except (ImportError, TypeError) as exc:
         duration_ms = _elapsed_ms(started)
@@ -4119,10 +4138,9 @@ async def dispatch(
     try:
         if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
             # A step of a multi-step operation: the person may be blocked
-            # since the operation started, so each step checks again.
-            blocked_step = await refuse_if_principal_blocked(
-                op_id, operator.sub, operator.tenant_id
-            )
+            # since the operation started, so each step checks again, with
+            # the person who asked when an approver runs it.
+            blocked_step = await refuse_step_if_blocked(op_id, operator)
             if blocked_step is not None:
                 _log.info(
                     "dispatch_step_refused_principal_blocked",

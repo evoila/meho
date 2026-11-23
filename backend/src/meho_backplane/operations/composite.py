@@ -103,7 +103,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
-from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
+from meho_backplane.operations._principal_block_gate import refuse_step_if_blocked
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
     STEP_DONE_NO_RESULT,
@@ -916,10 +916,10 @@ async def enforce_subop_policy(
 
     **A blocked person.** Before anything else, the seam reads the admin
     block list (:mod:`._principal_block_gate`). When the operator is blocked,
-    or the list cannot be read, it returns the refusal and the step is not
-    sent, also on a resume.
+    or on an approved run the person who asked, or the list cannot be read,
+    it returns the refusal and the step is not sent, also on a resume.
     """
-    blocked = await refuse_if_principal_blocked(op_id, operator.sub, operator.tenant_id)
+    blocked = await refuse_step_if_blocked(op_id, operator)
     if blocked is not None:
         return blocked
     journal = current_step_journal()
@@ -1013,10 +1013,11 @@ async def run_governed_subop(
     exception from *call* passes to the handler, and the step stays
     "started".
 
-    When the operator is blocked, or the block list cannot be read, the step
-    stops with the refusal and *call* is not awaited, also on a resume.
+    When the operator is blocked, or on an approved run the person who
+    asked, or the block list cannot be read, the step stops with the refusal
+    and *call* is not awaited, also on a resume.
     """
-    blocked = await refuse_if_principal_blocked(op_id, operator.sub, operator.tenant_id)
+    blocked = await refuse_step_if_blocked(op_id, operator)
     if blocked is not None:
         return SubopStep(stopped=blocked)
     journal = current_step_journal()

@@ -12,7 +12,10 @@ operation runs, between two steps. Covered:
 * a governed direct step (``run_governed_subop`` and
   ``enforce_subop_policy``) of a blocked person: its call is not made;
 * the same governed step when the block list cannot be read: refused with
-  ``principal_block_check_unavailable``.
+  ``principal_block_check_unavailable``;
+* an approver runs an approved multi-step operation, and the person who
+  asked is blocked between two steps: the next step (through
+  ``dispatch_child`` or a governed step) is refused and not sent.
 
 The dispatcher imports the handlers below by their module path.
 """
@@ -22,6 +25,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +41,7 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.composite import enforce_subop_policy, run_governed_subop
 from meho_backplane.settings import get_settings
 
@@ -49,6 +54,8 @@ _STEP_OP_ID = "vault.things.touch"
 _TWO_STEPS_OP_ID = "vault.composite.two_child_steps"
 _GOVERNED_OP_ID = "vault.composite.governed_step"
 _GATED_OP_ID = "vault.composite.gated_step"
+_WAIT_THEN_CHILD_OP_ID = "vault.composite.wait_then_child_steps"
+_WAIT_THEN_GOVERNED_OP_ID = "vault.composite.wait_then_governed_step"
 _DIRECT_STEP = "POST:/v1/sys/things"
 
 #: Every call that reached the target, in order.
@@ -116,6 +123,29 @@ async def gated_step_composite(operator: Operator, target: Any, params: dict[str
         return gated
     sent.append(_DIRECT_STEP)
     return {"ok": True}
+
+
+async def wait_then_child_steps_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """A step that waits for approval, then two steps through ``dispatch_child``."""
+    gated = await h.gate(operator, target, h.STEP_A)
+    if gated is not None:
+        return gated
+    return await two_child_steps_composite(operator, target, params, dispatch_child)
+
+
+async def wait_then_governed_step_composite(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """A step that waits for approval, one step through ``dispatch_child``, then a governed step."""
+    gated = await h.gate(operator, target, h.STEP_A)
+    if gated is not None:
+        return gated
+    first = await dispatch_child(connector_id=h.CONNECTOR_ID, op_id=_STEP_OP_ID, params={"n": 1})
+    if first.status != "ok":
+        return first
+    return await governed_step_composite(operator, target, params)
 
 
 @pytest.fixture(autouse=True)
@@ -256,3 +286,36 @@ async def test_governed_step_is_refused_when_the_block_list_cannot_be_read(
     assert sent == []
     assert result.status == "error", result
     assert result.extras["error_code"] == "principal_block_check_unavailable"
+
+
+async def _block_requester(_operator: Operator) -> None:
+    await block_principal(_admin(), h.operator().sub, "left the team")
+
+
+@pytest.mark.parametrize(
+    ("op_id", "handler"),
+    [
+        pytest.param(
+            _WAIT_THEN_CHILD_OP_ID, "wait_then_child_steps_composite", id="dispatch_child"
+        ),
+        pytest.param(
+            _WAIT_THEN_GOVERNED_OP_ID, "wait_then_governed_step_composite", id="run_governed_subop"
+        ),
+    ],
+)
+async def test_approver_run_stops_once_the_person_who_asked_is_blocked(
+    session: AsyncSession, embedding: AsyncMock, op_id: str, handler: str
+) -> None:
+    await _register(session, embedding, op_id, handler)
+    first = await h.run(op_id)
+    assert first.status == "awaiting_approval", first
+    request = await h.approve(UUID(first.extras["approval_request_id"]), sub="op-approver")
+    between_steps.append(_block_requester)
+
+    result = await resume_dispatch_after_approval(
+        operator=h.operator(sub="op-approver"), request=request, params=None
+    )
+
+    assert sent == [f"{_STEP_OP_ID}:1"]
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == "principal_blocked"

@@ -52,11 +52,20 @@ Where the list is checked:
 | `UISessionMiddleware` (`ui/auth/middleware.py`) | Every console request, not only the 300-second token check. 403 with the plain text above. |
 | `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. Each step of a multi-step operation that runs through `dispatch()` checks again before it is sent. A `denied` result, and the vendor gets no call. |
 | `enforce_subop_policy`, `run_governed_subop` (`operations/composite.py`) | Each governed direct step of a multi-step operation, also a step that is sent again on a resume. The step is refused before it is sent, and the operation returns the refusal. |
+| `HttpConnector._request_json`, `HttpConnector._post_json` (`connectors/adapters/http.py`) | Each request that a multi-step operation sends straight to the target through the connector's own session (for example the GitHub commit steps). The request is not sent; `dispatch()` returns the same refusal. Outside a multi-step operation and outside an approved run, this check does nothing: the top-level call checked the list already. |
 | `PrincipalBlockGate` (`agent/principal_block_gate.py`) | Every tool call and every model request of a hosted agent run and of its child runs (`invoke_agent`). The tool does not run, the model gets no further request, and the run ends failed with the refusal text. The audit row of the refused tool call has status 403 (503 when the list cannot be read). |
 | `invoke_agent` (`agent/invoke.py`) | A child run that is refused because its person is blocked ends failed with the refusal text, and its heartbeat stops. The refusal goes on to the parent run: the parent stops with no retry and ends failed with the same text. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
 A block made while a multi-step operation runs stops its next step.
+
+Each step checks its own operator and every login bound with
+`checking_logins_for_steps` (`auth/principal_block.py`): the operator of
+the multi-step operation, and on an approved run also the person who asked.
+So when an approver runs an approved multi-step operation and the person
+who asked is blocked between two steps, the next step is refused. This
+holds for a step through `dispatch()`, a governed direct step, and a
+request sent straight to the target.
 
 A new request of a blocked person is refused within 5 seconds. An open
 live stream is not cut at once:

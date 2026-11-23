@@ -650,19 +650,24 @@ async def _redispatch_approved(
     either runs on that catalog or is refused when the target's detected
     version no longer fits it.
     """
+    from meho_backplane.auth.principal_block import checking_logins_for_steps
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        with composite_resume_binding(
-            subop_op_id=request.op_id,
-            subop_params_hash=request.params_hash,
-            resume_parent=resume_parent,
-            requester=requester_of(request),
-            proposed_effect=request.proposed_effect,
-        ) as parent_call:
+        with (
+            # Each step of the run also checks the person who asked.
+            checking_logins_for_steps(request.principal_sub, request.tenant_id),
+            composite_resume_binding(
+                subop_op_id=request.op_id,
+                subop_params_hash=request.params_hash,
+                resume_parent=resume_parent,
+                requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
+            ) as parent_call,
+        ):
             if parent_call is None:
                 # ``target`` is cleared so the name is never looked up again;
                 # the target the row saved by id (or ``None`` for a

@@ -28,7 +28,12 @@ Where it is checked (all through :func:`is_principal_blocked`):
   A scheduled run acts as the agent's own login, so it is refused only
   when that login is blocked;
 * an approved call, which does not run while the person who asked is
-  blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`).
+  blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`);
+* each step of a multi-step operation, and each request a step sends
+  straight to the target (:func:`raise_if_step_login_blocked`). The logins
+  a step checks are its operator and every login bound with
+  :func:`checking_logins_for_steps`: the operator of the multi-step
+  operation, and on an approved run also the person who asked.
 
 The reader keeps the whole list in memory for a few seconds per process.
 When the list cannot be read, the check raises
@@ -40,6 +45,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -61,10 +69,14 @@ __all__ = [
     "BlockedPerson",
     "CannotBlockSelfError",
     "PrincipalBlockUnavailableError",
+    "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
     "block_principal",
+    "checking_logins_for_steps",
+    "first_blocked_step_login",
     "is_principal_blocked",
     "list_blocked",
+    "raise_if_step_login_blocked",
     "reset_block_cache",
     "unblock_principal",
 ]
@@ -85,6 +97,18 @@ REASON_MAX_LENGTH: Final[int] = 500
 
 class PrincipalBlockUnavailableError(Exception):
     """The block list could not be read, so MEHO cannot say if a login is blocked."""
+
+
+class PrincipalBlockedStepError(Exception):
+    """A step of a multi-step operation stopped before its request was sent.
+
+    ``unavailable`` is true when the block list could not be read, false
+    when a login of the step is blocked.
+    """
+
+    def __init__(self, *, unavailable: bool) -> None:
+        super().__init__("block list unreadable" if unavailable else PRINCIPAL_BLOCKED_MESSAGE)
+        self.unavailable = unavailable
 
 
 class CannotBlockSelfError(Exception):
@@ -162,6 +186,67 @@ async def is_principal_blocked(sub: str, tenant_id: uuid.UUID | None) -> bool:
     if (sub, BLOCK_SCOPE_ALL) in entries:
         return True
     return tenant_id is not None and (sub, str(tenant_id)) in entries
+
+
+#: The logins each step of the running multi-step operation checks, besides
+#: its own operator: ``(sub, tenant_id)`` pairs. Empty outside a multi-step
+#: operation and outside an approved run.
+_step_logins_var: ContextVar[tuple[tuple[str, uuid.UUID | None], ...]] = ContextVar(
+    "principal_block_step_logins", default=()
+)
+
+
+@contextmanager
+def checking_logins_for_steps(sub: str, tenant_id: uuid.UUID | None) -> Iterator[None]:
+    """Make every step and direct request in this block also check *sub*.
+
+    Bound for the body of a multi-step operation with its operator, and for
+    an approved run with the person who asked, so a block made while the
+    run goes on stops its next step, also when the approver runs it.
+    """
+    token = _step_logins_var.set((*_step_logins_var.get(), (sub, tenant_id)))
+    try:
+        yield
+    finally:
+        _step_logins_var.reset(token)
+
+
+async def first_blocked_step_login(
+    sub: str, tenant_id: uuid.UUID | None, *, only_in_steps: bool = False
+) -> str | None:
+    """The first blocked login of a step: *sub*, then each bound login.
+
+    Returns ``None`` when none is blocked. With *only_in_steps*, returns
+    ``None`` at once when no login is bound (not inside a multi-step
+    operation or an approved run). Raises
+    :class:`PrincipalBlockUnavailableError` when the list cannot be read.
+    """
+    bound = _step_logins_var.get()
+    if only_in_steps and not bound:
+        return None
+    for login, login_tenant in ((sub, tenant_id), *bound):
+        if await is_principal_blocked(login, login_tenant):
+            return login
+    return None
+
+
+async def raise_if_step_login_blocked(operator: Operator) -> None:
+    """Stop a request a multi-step operation sends straight to the target.
+
+    Called by the HTTP connector base before each request. Does nothing
+    outside a multi-step operation or an approved run. Raises
+    :class:`PrincipalBlockedStepError` when a login of the step is blocked,
+    or when the list cannot be read.
+    """
+    try:
+        blocked = await first_blocked_step_login(
+            operator.sub, operator.tenant_id, only_in_steps=True
+        )
+    except PrincipalBlockUnavailableError as exc:
+        raise PrincipalBlockedStepError(unavailable=True) from exc
+    if blocked is not None:
+        _log.info("principal_block_step_request_refused", operator_sub=operator.sub)
+        raise PrincipalBlockedStepError(unavailable=False)
 
 
 def _scope_of(operator: Operator) -> str:

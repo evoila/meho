@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0184_add_sensor_runner_name``.
+"""Tests for Alembic migration ``0184_add_approval_request_ended_not_started_check``.
 
-The migration adds the ``sensor.runner_name`` column and an index on
-``runner_check_results.received_at``. The tests check that ``upgrade`` adds
-both, that ``downgrade`` removes both, and that the pair round-trips. SQLite
-is the test driver.
+The migration adds the CHECK that keeps ``resumed_at`` empty on a request
+that is rejected, expired or withdrawn. The tests check that ``upgrade``
+adds it, that ``downgrade`` drops it, and that the pair round-trips.
+SQLite is the test driver.
 """
 
 from __future__ import annotations
@@ -22,14 +22,11 @@ from sqlalchemy import inspect
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.db.models import Sensor
 from meho_backplane.settings import get_settings
 
 _REVISION = "0184"
 _DOWN_REVISION = "0183"
-_TABLE = "sensor"
-_RESULTS_TABLE = "runner_check_results"
-_INDEX = "runner_check_results_received_at_idx"
+_CHECK = "ck_approval_request_ended_not_started"
 
 
 @pytest.fixture
@@ -57,42 +54,34 @@ def alembic_cfg(
         reset_engine_for_testing()
 
 
-def _schema(sync_url: str) -> tuple[set[str], set[str]]:
-    """Return ``(sensor columns, runner_check_results index names)``."""
+def _checks(sync_url: str) -> set[str]:
+    """Return the names of the CHECKs on ``approval_request``."""
     sync_eng = sa_create_engine(sync_url)
     try:
         with sync_eng.connect() as conn:
-            inspector = inspect(conn)
-            return (
-                {column["name"] for column in inspector.get_columns(_TABLE)},
-                {str(index["name"]) for index in inspector.get_indexes(_RESULTS_TABLE)},
-            )
+            found = inspect(conn).get_check_constraints("approval_request")
     finally:
         sync_eng.dispose()
+    return {str(check["name"]) for check in found}
 
 
-def test_upgrade_adds_the_column_and_the_index(
+def test_upgrade_adds_the_check(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
     copy_migrated_db(cfg, _REVISION)
-
-    columns, indexes = _schema(sync_url)
-    assert columns == set(Sensor.__table__.columns.keys())
-    assert "runner_name" in columns
-    assert _INDEX in indexes
+    assert _CHECK in _checks(sync_url)
+    assert "ck_approval_request_status" in _checks(sync_url)
 
 
-def test_downgrade_removes_the_column_and_the_index(
+def test_downgrade_drops_the_check(
     alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
 ) -> None:
     cfg, sync_url = alembic_cfg
     copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
-
-    columns, indexes = _schema(sync_url)
-    assert "runner_name" not in columns
-    assert _INDEX not in indexes
+    assert _CHECK not in _checks(sync_url)
+    assert "ck_approval_request_status" in _checks(sync_url)
 
 
 def test_upgrade_round_trips(
@@ -102,7 +91,4 @@ def test_upgrade_round_trips(
     copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
-
-    columns, indexes = _schema(sync_url)
-    assert "runner_name" in columns
-    assert _INDEX in indexes
+    assert _CHECK in _checks(sync_url)

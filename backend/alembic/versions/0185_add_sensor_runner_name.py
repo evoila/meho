@@ -3,8 +3,8 @@
 
 """Add ``sensor.runner_name`` and an index on ``runner_check_results.received_at``.
 
-Revision ID: 0184
-Revises: 0183
+Revision ID: 0185
+Revises: 0184
 Create Date: 2026-11-23
 
 ``sensor.runner_name`` names the runner that runs a check at a site. It is
@@ -26,8 +26,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0184"
-down_revision: str | None = "0183"
+revision: str = "0185"
+down_revision: str | None = "0184"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -101,10 +101,16 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import (
+    KEPT_LOGIN_READER_UNKNOWN,
+    current_secret_read_as,
+    record_secret_read_as,
+)
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
+    is_system_operator,
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vault_creds import (
@@ -459,6 +465,10 @@ class SshConnector(Connector):
         # part keeps one login per caller: a connection is handed back only
         # to the caller whose own Vault read opened it.
         self._connections: dict[PoolKey, tuple[asyncssh.SSHClientConnection, float]] = {}
+        # Per pool key: the login id that the Vault read before the connection
+        # was opened noted (``secret_read_as``). A reuse notes it again for the
+        # audit row of the call that uses the connection.
+        self._read_as: dict[PoolKey, str | None] = {}
         # Short-lived lock protecting only _connections and _connect_locks dicts.
         self._pool_lock = asyncio.Lock()
         # Per-key connect locks — SSH handshakes for distinct callers or
@@ -562,8 +572,7 @@ class SshConnector(Connector):
             conn, last_used = entry
             now = time.monotonic()
             if not conn.is_closed() and (now - last_used) <= _POOL_TTL_S:
-                self._connections[cache_key] = (conn, now)
-                return conn
+                return self._reuse(cache_key, conn, operator)
 
         # Get or create the per-target connect lock.
         async with self._pool_lock:
@@ -578,13 +587,13 @@ class SshConnector(Connector):
             if entry is not None:
                 conn, last_used = entry
                 if not conn.is_closed() and (now - last_used) <= _POOL_TTL_S:
-                    self._connections[cache_key] = (conn, now)
-                    return conn
+                    return self._reuse(cache_key, conn, operator)
                 # Evict closed or idle-expired entry.
                 if not conn.is_closed():
                     conn.close()
                     await conn.wait_closed()
                 del self._connections[cache_key]
+                self._read_as.pop(cache_key, None)
 
             if self._pool_generations.get(target_key, 0) != generation:
                 # The target changed while this call waited for the lock.
@@ -611,8 +620,27 @@ class SshConnector(Connector):
                 logger.info("ssh_login_dropped_target_changed", target=target.name)
                 raise SshTargetChangedError(target.name)
             self._connections[cache_key] = (conn, time.monotonic())
+            self._read_as[cache_key] = current_secret_read_as()
             logger.info("ssh_connected", target=target.name, host=target.host)
             return conn
+
+    def _reuse(
+        self,
+        cache_key: PoolKey,
+        conn: asyncssh.SSHClientConnection,
+        operator: Operator | None,
+    ) -> asyncssh.SSHClientConnection:
+        """Hand back a pooled connection and note who read its secret.
+
+        The call uses a login MEHO kept open, so the audit row names the login
+        that read the secret when the connection was opened, or
+        :data:`~meho_backplane.auth.secret_read_as.KEPT_LOGIN_READER_UNKNOWN`
+        when that is not known. The system caller notes nothing.
+        """
+        self._connections[cache_key] = (conn, time.monotonic())
+        if operator is not None and not is_system_operator(operator):
+            record_secret_read_as(self._read_as.get(cache_key) or KEPT_LOGIN_READER_UNKNOWN)
+        return conn
 
     async def _run_command(
         self,
@@ -705,6 +733,8 @@ class SshConnector(Connector):
                 for key in list(self._connections)
                 if key[:2] == target_key
             ]
+            for key in [key for key in self._read_as if key[:2] == target_key]:
+                del self._read_as[key]
             self._pool_generations[target_key] = self._pool_generations.get(target_key, 0) + 1
         for conn, _ in dropped:
             if not conn.is_closed():
@@ -716,6 +746,7 @@ class SshConnector(Connector):
         async with self._pool_lock:
             to_close = list(self._connections.values())
             self._connections.clear()
+            self._read_as.clear()
             self._connect_locks.clear()
             self._pool_generations.clear()
         for conn, _ in to_close:

@@ -11,7 +11,11 @@ audit row still names the login under which the secret was read:
   caller twice, two callers in turn, a kept entry whose reader is not
   known, and a call that uses no secret;
 * for every connector cache: a second call of the same caller takes the
-  kept path, makes no store read, and names the caller.
+  kept path, makes no store read, and names the caller;
+* phpIPAM: a refused store read after a failed login names no login, because
+  the call used no kept secret;
+* SSH: a call that reuses the caller's open connection names the login that
+  read the secret when the connection was opened.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -35,9 +39,13 @@ from meho_backplane.auth.secret_read_as import (
 )
 from meho_backplane.connectors._shared.cache_key import credential_cache_key, target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import CredentialsCache
+from meho_backplane.connectors.adapters import ssh as ssh_module
 from meho_backplane.connectors.freeipa.connector import FreeipaConnector, _FreeipaSession
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.github.session import GitHubPATCredentials
+from meho_backplane.connectors.linux.connector import LinuxSshConnector
+from meho_backplane.connectors.phpipam.connector import PhpipamConnector
+from meho_backplane.connectors.phpipam.session import PhpipamCredentials
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -49,6 +57,7 @@ from tests.test_connector_caches_read_per_caller import _Target as _CacheTarget
 
 _OP = "vault.demo.kept_login"
 _NO_SECRET_OP = "vault.demo.no_secret"
+_SSH_OP = "vault.demo.ssh_kept_connection"
 
 #: The connector the demo handler calls (typed handlers must be module-level).
 _CONNECTOR: dict[str, Any] = {}
@@ -96,6 +105,11 @@ async def _kept_login_handler(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
     await _CONNECTOR["connector"].auth_headers(target, operator)
+    return {}
+
+
+async def _ssh_handler(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    await _CONNECTOR["connector"]._connect(target, operator)
     return {}
 
 
@@ -279,3 +293,68 @@ def test_the_fixed_word_cannot_be_taken_for_a_login_id() -> None:
     assert not word.startswith(("agent:", "system:", "__"))
     with pytest.raises(ValueError):
         uuid.UUID(word)
+
+
+# ---------------------------------------------------------------------------
+# phpIPAM after a failed login, and the SSH connection pool
+# ---------------------------------------------------------------------------
+
+
+class _RefusedAfterFirstRead(_Store):
+    """A store read that passes once and is refused after that."""
+
+    async def read(self, target: Any, operator: Operator) -> Any:
+        if self.reads:
+            self.reads.append(operator.sub)
+            raise PermissionError("made-up refusal")
+        return await super().read(target, operator)
+
+
+@pytest.mark.asyncio
+async def test_phpipam_refused_read_after_a_failed_login_names_no_login(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    store = _RefusedAfterFirstRead(PhpipamCredentials(username="svc", password="made-up-password"))
+    connector = PhpipamConnector(credentials_loader=store.read)
+    monkeypatch.setattr(connector, "_login", AsyncMock(side_effect=RuntimeError("made-up")))
+    _CONNECTOR["connector"] = connector
+    await _register(_OP, _kept_login_handler, embedding)
+    target = _Target()
+    for _ in range(2):
+        result = await dispatch(
+            operator=_person("alice"), connector_id="vault-1.x", op_id=_OP, target=target, params={}
+        )
+        assert result.status != "ok"
+    # The first call's store read passed; the second call's was refused and
+    # it used no kept secret.
+    assert await _rows(_OP) == ["alice", None]
+    assert store.reads == ["alice", "alice"]
+
+
+@pytest.mark.asyncio
+async def test_ssh_reuse_of_an_open_connection_names_the_reader(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    store = _Store({"username": "svc", "password": "made-up", "known_hosts_insecure": True})
+    logins: list[MagicMock] = []
+
+    async def _dial(target: Any, auth_kwargs: dict[str, Any]) -> MagicMock:
+        login = MagicMock()
+        login.is_closed.return_value = False
+        logins.append(login)
+        return login
+
+    monkeypatch.setattr(ssh_module, "load_vault_secret_data", store.read)
+    monkeypatch.setattr(ssh_module, "_dial", _dial)
+    _CONNECTOR["connector"] = LinuxSshConnector()
+    await _register(_SSH_OP, _ssh_handler, embedding)
+    target = _Target()
+    subs = ["alice", "alice", "carol", "carol", "alice"]
+    for sub in subs:
+        result = await dispatch(
+            operator=_person(sub), connector_id="vault-1.x", op_id=_SSH_OP, target=target, params={}
+        )
+        assert result.status == "ok", result.error
+    assert await _rows(_SSH_OP) == subs
+    assert store.reads == ["alice", "carol"]
+    assert len(logins) == 2

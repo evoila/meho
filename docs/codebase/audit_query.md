@@ -426,7 +426,10 @@ There are three cases:
   never names the present caller in that case. A second caller always reads
   the secret once with their own login first (`SecretReaders`,
   `connectors/_shared/secret_readers.py`), so a row never names a caller who
-  did not read.
+  did not read. A connector notes the kept login only when it takes the kept
+  entry. An SSH connection that MEHO keeps open (`connectors/adapters/ssh.py`)
+  keeps the login id of the store read made before it was opened, and a call
+  that uses the open connection again names that login.
 - **The call used no secret.** The field is empty.
 
 The fixed texts cannot be taken for a login id: MEHO's own ids start with

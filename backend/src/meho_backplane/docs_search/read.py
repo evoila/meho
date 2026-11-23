@@ -64,6 +64,7 @@ caller's values unchanged (``meho_backplane.kb.wiki_search``), so its handle
 is bound to them. A face passes the unchanged values as ``exact_scope``
 (:func:`exact_read_scope`): when the backend refuses the handle with the
 stripped values, :func:`read_docs` tries once more with the unchanged ones.
+With ``KB_WIKI_FILTERED_SEARCH`` off there is no such second try.
 
 What is never logged
 ====================
@@ -100,6 +101,7 @@ from meho_backplane.docs_search.collection_access import (
     resolve_entitled_ready_collection,
 )
 from meho_backplane.docs_search.service import forwarded_scope
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -385,8 +387,12 @@ def exact_read_scope(
 
     ``None`` when they equal the stripped values in *scope*, so there is
     nothing else to try. A blank value counts as absent, as in
-    :func:`~meho_backplane.docs_search.build_docs_scope`.
+    :func:`~meho_backplane.docs_search.build_docs_scope`. Also ``None`` with
+    ``KB_WIKI_FILTERED_SEARCH`` off: only that switch makes wiki hits with
+    unchanged values, so a read then makes one request, as before.
     """
+    if not get_settings().kb_wiki_filtered_search:
+        return None
     exact_product = product if product and product.strip() else None
     exact_version = version if version and version.strip() else None
     if (exact_product, exact_version) == (scope.product, scope.version):

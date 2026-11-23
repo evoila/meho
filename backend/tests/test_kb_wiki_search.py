@@ -58,6 +58,7 @@ from meho_backplane.auth.corpus import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.docs_search import DOCS_SOURCE_NOT_FOUND
 from meho_backplane.instance_settings.schema import parse_settings_file
 from meho_backplane.kb.page_import import KbImportPage, KbImportRequest, import_pages
 from meho_backplane.kb.provenance import stamp_provenance
@@ -1560,3 +1561,104 @@ async def test_read_docs_does_not_read_again_without_padded_values() -> None:
             {"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", "version": "9.0"},
         )
     read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_switch_off_read_docs_over_mcp_reads_a_padded_value_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off: no second read with the unchanged values; the not-found answer is as before."""
+    _switch(monkeypatch, on=False)
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"version": "9.0 "})
+    with (
+        patch(_READ_SEAM, new=read),
+        pytest.raises(McpInvalidParamsError, match=DOCS_SOURCE_NOT_FOUND),
+    ):
+        await _read_docs_handler(
+            _operator(),
+            {"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", "version": "9.0 "},
+        )
+    read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_switch_off_read_docs_over_rest_reads_a_padded_value_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=False)
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"version": "9.0 "})
+    with patch(_READ_SEAM, new=read):
+        page = _rest_client(_operator()).post(
+            "/api/v1/read_docs",
+            json={"collection": _WIKI, "read_handle": _HANDLE, "mode": "page", "version": "9.0 "},
+        )
+    assert page.status_code == 404, page.text
+    assert DOCS_SOURCE_NOT_FOUND in page.text
+    read.assert_awaited_once()
+
+
+_LONGEST = "p" * 128
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"product": _LONGEST + " "}, id="padded-past-the-cap"),
+        pytest.param({"version": "v" * 129}, id="too-long"),
+    ],
+)
+async def test_switch_on_a_value_read_docs_does_not_take_is_not_searched(
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
+) -> None:
+    """A value longer than ``read_docs`` takes gives no wiki handle that cannot be read."""
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    response, corpus = await _search(_operator(), **arguments)
+    corpus.assert_not_called()
+    assert response["wiki"]["reason"] == "filtered"
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_too_long_value_is_not_searched_over_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    corpus = _corpus(_WIKI_CHUNK)
+    with (
+        patch(_REST_STORE_SEAM, new=AsyncMock(return_value=[_store_hit()])),
+        patch(_CORPUS_SEAM, new=corpus),
+    ):
+        found = _rest_client(_operator()).post(
+            "/api/v1/retrieve",
+            json={
+                "query": "snapshot",
+                "source": "kb",
+                "metadata_filters": {"product": _LONGEST + " "},
+            },
+        )
+    assert found.status_code == 200, found.text
+    corpus.assert_not_called()
+    assert found.json()["wiki"]["searched"] is False
+
+
+@pytest.mark.asyncio
+async def test_switch_on_a_wiki_hit_of_the_longest_value_reads_over_mcp_and_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the cap, the handle reads through both faces with the value of its search."""
+    _switch(monkeypatch, on=True)
+    await _seed_wiki_with(_EXACT_ON)
+    read = _index_bound_to({"product": _LONGEST})
+    response, _ = await _search(_operator(), read=read, product=_LONGEST)
+    handle = response["hits"][1]["read_handle"]
+    asked = {"collection": _WIKI, "read_handle": handle, "mode": "page", "product": _LONGEST}
+    with patch(_READ_SEAM, new=read):
+        page = await _read_docs_handler(_operator(), asked)
+        rest = _rest_client(_operator()).post("/api/v1/read_docs", json=asked)
+    assert _WIKI_CHUNK.content in page["text"]
+    assert rest.status_code == 200, rest.text
+    assert rest.json()["text"] == _WIKI_CHUNK.content

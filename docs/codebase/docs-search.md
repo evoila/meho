@@ -902,7 +902,8 @@ unchanged (`docs/codebase/kb.md`), so the MCP and REST faces also pass
 their spaces kept, or `None` when they have none at their ends. When the
 backend answers "not found" with the stripped values and `exact_scope` sends
 other filters, `read_docs` reads once more with them. A `search_docs` handle
-still reads on the first try.
+still reads on the first try. With `KB_WIKI_FILTERED_SEARCH` off,
+`exact_read_scope` returns `None`: a read makes one request, as before.
 The reply becomes a `DocsReadResult` (`mode, text, title, source_url,
 disclosure, reason, located, truncated, next, up`); `source_url` is
 `public_source_url(...)`: an `https` source, else the backend's

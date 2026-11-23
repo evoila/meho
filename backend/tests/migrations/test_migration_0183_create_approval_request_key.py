@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0182_create_approval_request_key``.
+"""Tests for Alembic migration ``0183_create_approval_request_key``.
 
 The migration adds the table that keeps more retry keys of one approval
 request. The tests check that ``upgrade`` creates it with the columns of the
@@ -25,8 +25,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import ApprovalRequestKey
 from meho_backplane.settings import get_settings
 
-_REVISION = "0182"
-_DOWN_REVISION = "0181"
+_REVISION = "0183"
+_DOWN_REVISION = "0182"
 _TABLE = "approval_request_key"
 
 
@@ -36,7 +36,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0182.db"
+    db_path = tmp_path / "migration_0183.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

@@ -9,7 +9,7 @@ of the same call. A step that a multi-step operation sends through
 step. So the step always makes its own request, and a direct call never gets
 the request of such a step. Both orders go through the real ``dispatch``
 path. A retry of the same step with the same key still gets its request back.
-A request made before migration 0182 has no mark (NULL): it may be a step
+A request made before migration 0183 has no mark (NULL): it may be a step
 that was already waiting, so a direct call never gets it either.
 """
 
@@ -228,7 +228,7 @@ async def test_a_retry_of_the_same_step_with_the_same_key_gets_its_request() -> 
 
 
 async def _clear_marks() -> None:
-    """Make every stored request look like one made before migration 0182."""
+    """Make every stored request look like one made before migration 0183."""
     async with get_sessionmaker()() as s:
         await s.execute(update(ApprovalRequest).values(composite_step=None))
         await s.commit()

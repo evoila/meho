@@ -7579,7 +7579,7 @@ class ApprovalRequest(Base):
     )
     # True when a step of a multi-step operation made the request: a call
     # that the operation sent through ``dispatch_child``. False for any other
-    # new request. NULL on a row made before migration 0182, when it was not
+    # new request. NULL on a row made before migration 0183, when it was not
     # known. With ``APPROVAL_SAME_CALL_REUSE`` on, a direct call gets only a
     # request where this is False.
     composite_step: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
@@ -7787,7 +7787,7 @@ class ApprovalRequestKey(Base):
     B, so a later retry with key B gets the same request, also after it was
     approved. Read by the key lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
-    ``0182``.
+    ``0183``.
 
     Columns
     -------

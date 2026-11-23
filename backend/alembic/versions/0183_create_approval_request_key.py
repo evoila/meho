@@ -3,8 +3,8 @@
 
 """Create ``approval_request_key`` and add ``approval_request.composite_step``.
 
-Revision ID: 0182
-Revises: 0181
+Revision ID: 0183
+Revises: 0182
 Create Date: 2026-11-22
 
 With ``APPROVAL_SAME_CALL_REUSE`` on, a call with retry key B can get the
@@ -32,8 +32,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0182"
-down_revision: str | None = "0181"
+revision: str = "0183"
+down_revision: str | None = "0182"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

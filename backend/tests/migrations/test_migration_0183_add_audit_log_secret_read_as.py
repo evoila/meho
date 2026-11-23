@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0182_add_audit_log_secret_read_as``.
+"""Tests for Alembic migration ``0183_add_audit_log_secret_read_as``.
 
 * The upgrade adds one nullable text column on ``audit_log``:
   ``secret_read_as``. Other columns stay as they are.
@@ -24,15 +24,15 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0182"
-_DOWN_REVISION = "0181"
+_REVISION = "0183"
+_DOWN_REVISION = "0182"
 _COLUMN = "secret_read_as"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0182.db"
+    db_path = tmp_path / "migration_0183.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
@@ -90,7 +90,7 @@ def test_upgrade_has_no_default_and_runs_no_update() -> None:
         Path(__file__).resolve().parents[2]
         / "alembic"
         / "versions"
-        / "0182_add_audit_log_secret_read_as.py"
+        / "0183_add_audit_log_secret_read_as.py"
     ).read_text(encoding="utf-8")
     assert "server_default" not in source
     assert "op.execute" not in source

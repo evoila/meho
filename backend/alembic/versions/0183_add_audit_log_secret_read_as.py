@@ -3,8 +3,8 @@
 
 """Add ``audit_log.secret_read_as``.
 
-Revision ID: 0182
-Revises: 0181
+Revision ID: 0183
+Revises: 0182
 Create Date: 2026-11-22
 
 One nullable ``Text`` column, with no default. It holds the id of the login
@@ -32,8 +32,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0182"
-down_revision: str | None = "0181"
+revision: str = "0183"
+down_revision: str | None = "0182"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

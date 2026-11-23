@@ -3,7 +3,7 @@
 
 """Tests for Alembic migration ``0182_add_audit_log_secret_read_as``.
 
-* The upgrade adds one nullable boolean column on ``approval_request``:
+* The upgrade adds one nullable text column on ``audit_log``:
   ``secret_read_as``. Other columns stay as they are.
 * The downgrade drops the column again.
 """

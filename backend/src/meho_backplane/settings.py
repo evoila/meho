@@ -744,8 +744,11 @@ class Settings(BaseModel):
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
     audit_secret_read_as:
         Show the field ``secret_read_as`` in every audit read (REST, CLI, MCP
-        and the web console): the id of the login that a secret store
-        accepted for the call. MEHO writes the column on every install. Default
+        and the web console): the login under which the secret the call used
+        was read from the store, in this call or in an earlier call of the
+        same caller (a login MEHO kept in memory names who read it, or
+        ``kept-login:reader-unknown``); empty when the call used no secret.
+        MEHO writes the column on every install. Default
         ``False``: no audit read shows the field. Env var
         ``AUDIT_SECRET_READ_AS``.
     audit_client_identity:

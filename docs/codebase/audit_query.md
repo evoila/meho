@@ -402,7 +402,7 @@ Field-to-source mapping:
 | `sandbox_mode` | `audit_log.sandbox_mode` — `true` when the instance ran in sandbox mode when it wrote the row (#4622, see [decisions/sandbox-mode.md](../decisions/sandbox-mode.md)). Rows from before the column existed read `false`. Every audit answer carries it (#5312), so a person can check the mark of a sandbox test with MEHO alone. Not a filter: one database has one mode. The CLI table shows no column for it; `--json` shows it. |
 | `actor_sub` | `audit_log.actor_sub` (#5773) — the agent that acted for the person in `principal_sub`, in an agent run the person started (`agent:<name>`). `None` when nobody acted for another login, for example a person's own call or an agent that runs on its own login. |
 | `actor_name` | The agent's name, read from `actor_sub` (the part after `agent:`). `None` when `actor_sub` is `None` or has another form. The CLI shows the actor in `audit show`, in the PRINCIPAL column of `audit query` (`<principal> via <actor>`) and at the end of each `audit replay` line. |
-| `secret_read_as` | `audit_log.secret_read_as` (migration `0182`) — the id (`sub`) of the login that a secret store accepted for the call. A direct call: the caller's own id. An approved call: the approver's id, because MEHO runs the approved call with the approver's login (the person who asked stays on the approval request). An agent that resumes its own call: the agent's login id. A hosted agent run that a person started: the person's id. A check runner call: the runner's own login id, not the sensor owner in `principal_sub`. Google Secret Manager: the caller's id with federation, and the fixed text `meho` when the store saw MEHO's own identity. `None` when the call read no secret. Never a token, a store path or a store address. One call has one value; a step inside a multi-step call has its own value and the parent row does not take it. MEHO writes the column on every install, but an answer carries the field only while `AUDIT_SECRET_READ_AS` is on (off by default). `meho audit show` prints it when present. |
+| `secret_read_as` | `audit_log.secret_read_as` (migration `0182`) — the id (`sub`) of a login. The field names the login under which the secret this call used was read from the store, in this call or in an earlier call of the same caller. Empty means: the call used no secret. A call that reads the secret itself names that login. A call that uses a login MEHO kept in memory names the login that read it when it was kept, or the fixed text `kept-login:reader-unknown`. A direct call: the caller's own id. An approved call: the approver's id, because MEHO runs the approved call with the approver's login (the person who asked stays on the approval request). An agent that resumes its own call: the agent's login id. A hosted agent run that a person started: the person's id. A check runner call: the runner's own login id, not the sensor owner in `principal_sub`, and the fixed text `check-runner` when the runner's token has no `sub`. Google Secret Manager: the caller's id with federation, and the fixed text `meho` when the store saw MEHO's own identity. `None` when the call used no secret. Never a token, a store path or a store address. One call has one value; a step inside a multi-step call has its own value and the parent row does not take it. MEHO writes the column on every install, but an answer carries the field only while `AUDIT_SECRET_READ_AS` is on (off by default). `meho audit show` prints it when present. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 | `stored_session_id` | Only in the answer of `GET /api/v1/audit/show/{audit_id}` (`AuditEntryDetail`, #4904); the list, query and replay answers and the MCP audit tools do not have the field. The stored agent session the row belongs to: a hosted run, an uploaded session whose MCP calls MEHO matched to this row's `agent_session_id`, or an uploaded session whose `meho` command wrote this CLI row. Sent only with the switch `AUDIT_SESSION_LINKS` on (off by default), to a person who may read sessions, for a row with a stored session; otherwise the answer has no such field. `meho audit show` prints it as `stored_session:`. See [session-store.md](session-store.md#links-from-audit-rows). |
 
@@ -412,6 +412,30 @@ agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
 automatic Broadcast event is published for a row; the row is the record.
 
 ### `secret_read_as`: whose login the secret store accepted
+
+The field names the login under which the secret this call used was read from the store, in this call or in an earlier call of the same caller. Empty means: the call used no secret.
+
+There are three cases:
+
+- **The call read the secret itself.** The field names the login of that
+  read.
+- **The call used a login that MEHO kept in memory.** A connector keeps a
+  target's login after the first store read. The field names the login that
+  read the secret when it was kept. When the kept entry does not know who
+  read it, the field holds the fixed text `kept-login:reader-unknown`. It
+  never names the present caller in that case. A second caller always reads
+  the secret once with their own login first (`SecretReaders`,
+  `connectors/_shared/secret_readers.py`), so a row never names a caller who
+  did not read.
+- **The call used no secret.** The field is empty.
+
+The fixed texts cannot be taken for a login id: MEHO's own ids start with
+`agent:`, `system:` or `__`, and the login server's ids are UUIDs. A check
+runner whose token has no `sub` is named `check-runner`, never the Sensor's
+owner. A read of a deleted latest version returns no secret data, so it names
+no login. The read of the sink secret for the approval card of `secret.move`
+names the caller when it returns a secret that is not deleted; the
+`approval.request` row of the call that waits for approval holds that value.
 
 Switch: `AUDIT_SECRET_READ_AS` (`Settings.audit_secret_read_as`), off by
 default. MEHO writes the column `audit_log.secret_read_as` on every

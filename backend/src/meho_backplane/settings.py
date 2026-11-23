@@ -2709,7 +2709,9 @@ class Settings(BaseModel):
     #: Word half of the knowledge search (#6784). ``False`` (default): a
     #: passage needs every word of the question, as before. ``True``: only
     #: when that finds no passage, a second word search keeps passages that
-    #: hold any word. The choice is made once for the whole knowledge search:
+    #: hold one of the first 32 different words of the question
+    #: (``ANY_WORD_MAX_WORDS`` in ``retrieval/retriever.py``). The choice
+    #: is made once for the whole knowledge search:
     #: if a passage of any searched tenant (own and shared) holds every word,
     #: no tenant uses the any-word search. Only ``source="kb"``; memory and
     #: operations search do not change. Set via ``KB_SEARCH_PLAIN_SENTENCES``.

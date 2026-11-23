@@ -372,7 +372,7 @@ switch. Code: `mcp/tools/_kb_word_hint.py`; tests:
 
 With `KB_SEARCH_PLAIN_SENTENCES` also on, a hit that holds only some
 question words has a word score, so `word_match` is `none` only when no
-passage holds any question word.
+passage holds one of the first 32 different words of the question.
 
 ### Agent search runner
 

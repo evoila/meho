@@ -1094,7 +1094,8 @@ until the entry is deleted.
    [Search filters](#search-filters-5726)).
    With the switch `KB_SEARCH_PLAIN_SENTENCES` on, a question that
    no passage matches word for word, in the own tenant or in the shared
-   scope, gets a word search where any word counts in all of them ([retrieval.md](./retrieval.md#any-word-fallback-for-the-knowledge-search-6784)).
+   scope, gets a word search in all of them where a passage needs only one
+   of the first 32 different words of the question ([retrieval.md](./retrieval.md#any-word-fallback-for-the-knowledge-search-6784)).
 3. Unless `scope="tenant"`, add the hits of the shared scope
    (`add_shared_hits`, with the same filters and time window). With
    `scope="shared"` the own tenant is searched only for its `shared`

@@ -50,10 +50,9 @@ it. So ``postgres.query`` adds three checks:
   ``SHOW ALL`` and a ``SHOW`` of a setting in
   :data:`CONNECTION_TEXT_SETTINGS`. The check holds for every login, also
   on a target that allows a superuser. Settings are read with the curated
-  ``postgres.settings``. It reads a connection text with the rules of libpq
-  and puts a fixed mark in place of each secret value; the rest of the value
-  stays. A text that libpq cannot read makes ``postgres.settings`` refuse
-  the call when it holds a secret name.
+  ``postgres.settings``. It shows a connection text whole or as one fixed
+  mark that names the setting, never in part, and it does not refuse the
+  call because of such a value.
 
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
@@ -247,7 +246,7 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
         "pg_stat_statements",
         "pg_stat_statements_info",
         # Server settings. A setting can hold a connection string with a
-        # password; postgres.settings hides that password.
+        # password; postgres.settings shows that value whole or as one mark.
         "pg_settings",
         "pg_file_settings",
         "pg_show_all_settings",
@@ -263,11 +262,10 @@ DENIED_RELATIONS: frozenset[str] = frozenset(
 )
 
 #: Settings (lower case) whose value is a connection text. ``postgres.query``
-#: refuses a ``SHOW`` of them. ``postgres.settings`` reads their value with
-#: the rules of libpq and puts a fixed mark in place of each secret value (see
-#: :data:`CONNECTION_TEXT_SECRET_KEYWORDS`). The rest of the value stays. A
-#: value that libpq cannot read makes ``postgres.settings`` refuse the call
-#: when it holds a secret name.
+#: refuses a ``SHOW`` of them. ``postgres.settings`` shows their value whole
+#: or as one fixed mark that names the setting, never in part (see
+#: :data:`CONNECTION_TEXT_SECRET_KEYWORDS`). It does not refuse the call
+#: because of such a value.
 CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
 
 #: The key words of a connection text whose value is a secret. Pinned to the

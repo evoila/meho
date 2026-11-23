@@ -79,7 +79,7 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **each secret value of a connection text is hidden**: a value of `primary_conninfo` is read with the rules of libpq, and the fixed mark `[REDACTED:param_name]` stands in place of each secret value (`password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, `scram_server_key`, and the password of an address); every other character stays; a value that libpq cannot read (also one with a parameter name that is not a libpq key word) makes `postgres.settings` refuse the call when it holds a secret, and stays as it is otherwise; in an address the values of hosts and ports decide nothing; `postgres.settings` also refuses the call, when the text holds a secret, for an address with a raw at sign after the user part and before the query part with a colon before it, an address with no user part that has a port that is not a whole number and an at sign after it, or an address whose user part holds a question mark before its colon; a call without `names` is never refused |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **a connection text is shown whole or as one fixed mark, never in part**: a value of `primary_conninfo` is shown whole only when it holds no at sign, percent sign, backslash or quote, none of the secret key words (`password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, `scram_server_key`) in any case, and no colon after the start word `postgresql://` or `postgres://`; else the mark that names the setting stands in place of the whole value; the call is not refused because of it |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
 | `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
@@ -196,24 +196,13 @@ role's rights. So the free-form op adds three checks:
    `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
    quotes or after a comment, under both readings of the first keyword. The
    refusal for settings names
-   `postgres.settings`. For every caller, it reads the value of such a setting
-   with the rules of libpq (the PostgreSQL pages "Connection Strings" and
-   "Parameter Key Words") and puts the fixed mark `[REDACTED:param_name]` in
-   place of each secret value: the value of `password`, `sslpassword`,
-   `oauth_client_secret`, `scram_client_key` and `scram_server_key` (any case) in the key word form and in the query part
-   of the address form, and the password of the address. In the address form,
-   white space is part of a value, as libpq reads it. Every other
-   character stays as the server sent it. A value that libpq cannot read
-   (also one with a parameter name that is not a libpq key word) makes
-   `postgres.settings` refuse the call when it holds a secret; the error
-   names the setting and holds no part of the value. In an address, the
-   values of hosts and ports decide nothing. `postgres.settings` also
-   refuses the call, when the text holds a secret, for an address with a
-   raw at sign after the user part and before the query part with a colon
-   before it, an address with no user part that has a port that is not a
-   whole number and an at sign after it, and an address whose user part
-   holds a question mark before its colon. Else the value stays as it is. A call without `names` is never
-   refused. The refusal for
+   `postgres.settings`. For every caller, it shows the value of such a
+   setting whole or as one fixed mark that names the setting, never in part,
+   and it does not refuse the call because of it. The value is shown whole
+   only when it holds no at sign, percent sign, backslash or quote, no word
+   of `CONNECTION_TEXT_SECRET_KEYWORDS` in any case (also inside a longer
+   word), and no colon after the start word `postgresql://` or
+   `postgres://`. The refusal for
    sessions names `postgres.activity`, which reads the same
    view without the `query` column. Views that show no secret value stay
    allowed: `pg_roles` and `pg_user` (the password is shown as stars),

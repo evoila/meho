@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``postgres.settings`` hides each secret value of a connection-text setting.
+"""``postgres.settings`` shows a connection text whole or as one fixed mark.
 
-The value of a setting from ``CONNECTION_TEXT_SETTINGS`` is read with the
-rules of libpq (the PostgreSQL pages "Connection Strings" and "Parameter Key
-Words"). The fixed hide mark stands in place of each secret value, in the key
-word form and in the address form. Every other character stays as the server
-sent it, so each test compares the whole result with the expected text. A
-text that libpq cannot read (also one with a name that is not a libpq key
-word) makes the call refused when it holds a secret name or an address
-password, and stays as it is otherwise.
+The value of a setting from ``CONNECTION_TEXT_SETTINGS`` is shown whole only
+when it holds no at sign, percent sign, backslash or quote, none of the
+secret key words in any case, and no colon after a start word of the address
+form. Else the whole value is the one mark that names the setting. No part of
+the value is shown, and the call is not refused because of it.
 
 Through ``dispatch``, for a person, an agent login and a service login, the
-made-up password is in none of the result or the error, the flight recorder
-trace, the event outbox (the activity feed) and the audit row. The plain
-setting keeps its value. A call without ``names`` is never refused.
+made-up password is in none of the result, the flight recorder trace, the
+event outbox (the activity feed) and the audit row. The plain setting keeps
+its value.
 """
 
 from __future__ import annotations
@@ -35,8 +32,8 @@ from meho_backplane.checks.runner import _run_evaluation, _SensorSnapshot
 from meho_backplane.connectors.postgres import PostgresConnector
 from meho_backplane.connectors.postgres import connector as connector_module
 from meho_backplane.connectors.postgres.queries import (
+    CONNECTION_TEXT_MARK,
     CURATED_SETTINGS,
-    PostgresSettingsRefusedError,
     fetch_settings,
 )
 from meho_backplane.connectors.postgres.query_guard import CONNECTION_TEXT_SETTINGS
@@ -46,7 +43,6 @@ from meho_backplane.db.models import AuditLog, DispatchTrace, DispatchTraceSpan,
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import reset_handler_cache
-from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
 from meho_backplane.settings import get_settings
 
 _CONNECTOR_ID = "postgres-wire-16"
@@ -54,9 +50,9 @@ _OP_ID = "postgres.settings"
 _SETTING = sorted(CONNECTION_TEXT_SETTINGS)[0]
 
 #: A made-up password. It must never show up in any output.
-_PASSWORD = "made-up-pw-0815-abcdef"  # trufflehog:ignore
-_VISIBLE_PART = "host=standby.example.test port=5432 user=replicator password="
-_CONNECTION_TEXT = _VISIBLE_PART + _PASSWORD
+_PASSWORD = "made-up-pw-" + "0815-abcdef"  # trufflehog:ignore
+_CONNECTION_TEXT = "host=standby.example.test port=5432 user=replicator password=" + _PASSWORD
+_MARK = CONNECTION_TEXT_MARK.format(setting=_SETTING)
 
 
 @pytest.fixture(autouse=True)
@@ -175,7 +171,7 @@ def _row_text(row: Any) -> str:
     ids=["person", "agent", "service"],
 )
 @pytest.mark.asyncio
-async def test_settings_put_the_hide_mark_in_place_of_a_connection_text(
+async def test_settings_put_one_mark_in_place_of_a_connection_text_for_every_login(
     monkeypatch: pytest.MonkeyPatch, tenant_id: UUID, kind: PrincipalKind
 ) -> None:
     monkeypatch.setattr(connector_module, "connect_read_only", AsyncMock(return_value=_Conn()))
@@ -190,8 +186,8 @@ async def test_settings_put_the_hide_mark_in_place_of_a_connection_text(
     assert _PASSWORD not in repr(result.model_dump())
     rows = {row["name"]: row for row in (result.result or {})["settings"]}
     hidden = rows[_SETTING]
-    expected = f"{_VISIBLE_PART}{SECRET_FIELD_MARKER}"
-    assert hidden["setting"] == hidden["boot_val"] == hidden["reset_val"] == expected
+    assert hidden["setting"] == hidden["boot_val"] == hidden["reset_val"] == _MARK
+    assert _SETTING in _MARK
     assert rows["work_mem"]["setting"] == "4096"
 
     traces = await _rows(DispatchTrace) + await _rows(DispatchTraceSpan)
@@ -226,232 +222,195 @@ class _ValueConn:
         return [_setting_row(_SETTING, self._value)]
 
 
-async def _hidden(value: str) -> str:
+async def _shown(value: str) -> str:
     result = await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
     row = result["settings"][0]
     assert row["setting"] == row["boot_val"] == row["reset_val"]
     return str(row["setting"])
 
 
-_M = SECRET_FIELD_MARKER
+#: Made-up password pieces, built at run time. No piece may show up.
+_P1 = "pw" + "-one-" + "4711"  # trufflehog:ignore
+_P2 = "pw" + "-two-" + "4712"  # trufflehog:ignore
+_P3 = "pw" + "-three-" + "4713"  # trufflehog:ignore
+_PIECES = (_P1, _P2, _P3, "0815", "4711", "4712", "4713")  # trufflehog:ignore
+_A = "postgresql://"
+_U = "repl"
+_H = "db.test"
+_D = "app"
+_NON_ENGLISH = "Grüße-Žiška-Привет-日本"
+_LONG = 10_000
 
-#: Key word form: (value, expected). Each id names the libpq rule it checks.
-_KEY_WORD_CASES = [
+#: Texts that get the one mark: each holds an at sign, a percent sign, a
+#: backslash, a quote, a secret key word, or a colon after an address start
+#: word.
+_MARKED_CASES = [
     pytest.param(
         "host=db.example.test password=pw-0815 port=5432",  # trufflehog:ignore
-        f"host=db.example.test password={_M} port=5432",  # trufflehog:ignore
         id="space-separates",
     ),
     pytest.param(
         "host=db.example.test\tpassword=pw-0815\tport=5432",  # trufflehog:ignore
-        f"host=db.example.test\tpassword={_M}\tport=5432",  # trufflehog:ignore
         id="tab-separates",
     ),
     pytest.param(
         "host=db.example.test\npassword=pw-0815\nport=5432",  # trufflehog:ignore
-        f"host=db.example.test\npassword={_M}\nport=5432",  # trufflehog:ignore
         id="line-end-separates",
     ),
     pytest.param(
         "host=db.example.test\rpassword=pw-0815\rport=5432",  # trufflehog:ignore
-        f"host=db.example.test\rpassword={_M}\rport=5432",  # trufflehog:ignore
         id="carriage-return-separates",
     ),
     pytest.param(
         "host=db.example.test\vpassword=pw-0815\vport=5432",  # trufflehog:ignore
-        f"host=db.example.test\vpassword={_M}\vport=5432",  # trufflehog:ignore
         id="vertical-tab-separates",
     ),
     pytest.param(
         "host=db.example.test\fpassword=pw-0815\fport=5432",  # trufflehog:ignore
-        f"host=db.example.test\fpassword={_M}\fport=5432",  # trufflehog:ignore
         id="form-feed-separates",
     ),
     pytest.param(
         "host=db.example.test password = pw-0815 port=5432",  # trufflehog:ignore
-        f"host=db.example.test password = {_M} port=5432",  # trufflehog:ignore
         id="spaces-around-equals",
     ),
     pytest.param(
         "password=  port=5432 host=db.example.test",  # trufflehog:ignore
-        f"password=  {_M} host=db.example.test",  # trufflehog:ignore
         id="spaces-after-equals-belong-to-the-separator",
     ),
     pytest.param(
         "password=pw\u00a00815 port=5432",  # trufflehog:ignore
-        f"password={_M} port=5432",  # trufflehog:ignore
         id="no-break-space-is-part-of-a-bare-value",
     ),
     pytest.param(
         "password=pw\x1f0815 port=5432",  # trufflehog:ignore
-        f"password={_M} port=5432",  # trufflehog:ignore
         id="unit-separator-is-part-of-a-bare-value",
     ),
     pytest.param(
         "application_name='walreceiver'password=pw-0815 port=5432",  # trufflehog:ignore
-        f"application_name='walreceiver'password={_M} port=5432",  # trufflehog:ignore
         id="name-right-after-a-closing-quote",
     ),
     pytest.param(
         "password=pw\\\n0815 port=5432",  # trufflehog:ignore
-        f"password={_M} port=5432",  # trufflehog:ignore
         id="backslash-before-a-line-end-in-a-bare-value",
     ),
     pytest.param(
         "password='pw\\\n0815' port=5432",  # trufflehog:ignore
-        f"password='{_M}' port=5432",  # trufflehog:ignore
         id="backslash-before-a-line-end-in-a-quoted-value",
     ),
     pytest.param(
         "password=pw\\ 0815 port=5432",  # trufflehog:ignore
-        f"password={_M} port=5432",  # trufflehog:ignore
         id="backslash-before-a-space-in-a-bare-value",
     ),
     pytest.param(
         "sslpassword = 'pw \\'q\\' 0815' port=5432",  # trufflehog:ignore
-        f"sslpassword = '{_M}' port=5432",  # trufflehog:ignore
         id="quoted-value-keeps-its-quotes",
     ),
     pytest.param(
         "PASSWORD=pw-0815 SslPassword=key-0815 port=5432",  # trufflehog:ignore
-        f"PASSWORD={_M} SslPassword={_M} port=5432",  # trufflehog:ignore
         id="upper-case-name",
     ),
     pytest.param(
-        "host=db.example.test oauth_client_secret=cs-0815 oauth_client_id=meho",
-        f"host=db.example.test oauth_client_secret={_M} oauth_client_id=meho",
+        "host=db.example.test oauth_client_secret=cs-0815"  # trufflehog:ignore
+        " oauth_client_id=meho",
         id="oauth-client-secret",
     ),
     pytest.param(
-        "host=db.example.test password='' port=5432",  # trufflehog:ignore
         "host=db.example.test password='' port=5432",  # trufflehog:ignore
         id="empty-quoted-secret-value",
     ),
     pytest.param(
         "host=db.example.test port=5432 password=",  # trufflehog:ignore
-        "host=db.example.test port=5432 password=",  # trufflehog:ignore
         id="empty-bare-secret-value",
     ),
     pytest.param(
-        "application_name='app password=pw-0815' host=db.example.test",  # trufflehog:ignore
         "application_name='app password=pw-0815' host=db.example.test",  # trufflehog:ignore
         id="quoted-value-of-another-name",
     ),
     pytest.param(
         "host=db.example.test sslnegotiation=direct password=pw-0815",  # trufflehog:ignore
-        f"host=db.example.test sslnegotiation=direct password={_M}",  # trufflehog:ignore
         id="postgresql-17-name-sslnegotiation",
     ),
     pytest.param(
-        "min_protocol_version=3.0 max_protocol_version=latest"
+        "min_protocol_version=3.0 max_protocol_version=latest"  # trufflehog:ignore
         " sslkeylogfile=keys.log password=pw-0815",  # trufflehog:ignore
-        "min_protocol_version=3.0 max_protocol_version=latest"
-        f" sslkeylogfile=keys.log password={_M}",  # trufflehog:ignore
         id="postgresql-18-names",
     ),
     pytest.param(
         "host=db.test scram_client_key=ck-0815 scram_server_key=sk-0815",  # trufflehog:ignore
-        f"host=db.test scram_client_key={_M} scram_server_key={_M}",
         id="postgresql-18-scram-keys",
     ),
-]
-
-#: Address form: (value, expected).
-_ADDRESS_CASES = [
     pytest.param(
         "postgresql://repl:pw-0815@db.test:5433/app?sslmode=require",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test:5433/app?sslmode=require",  # trufflehog:ignore
         id="postgresql-start-word-with-password",
     ),
     pytest.param(
         "postgres://repl:pw-0815@db.test/app",  # trufflehog:ignore
-        f"postgres://repl:{_M}@db.test/app",  # trufflehog:ignore
         id="postgres-start-word-with-password",
     ),
     pytest.param(
         "POSTGRESQL://repl:pw-0815@db.test/app",  # trufflehog:ignore
-        f"POSTGRESQL://repl:{_M}@db.test/app",  # trufflehog:ignore
         id="upper-case-start-word",
     ),
     pytest.param(
         "postgresql://repl:pw?0815@db.test/app",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test/app",  # trufflehog:ignore
         id="question-mark-inside-the-user-part",
     ),
     pytest.param(
         "postgresql://db.test/app?password=pw-0815&sslmode=require",  # trufflehog:ignore
-        f"postgresql://db.test/app?password={_M}&sslmode=require",  # trufflehog:ignore
         id="secret-parameter-first-after-the-question-mark",
     ),
     pytest.param(
         "postgresql://db.test/app?sslmode=require&pass%77ord=pw-0815",  # trufflehog:ignore
-        f"postgresql://db.test/app?sslmode=require&pass%77ord={_M}",
         id="percent-encoded-secret-name",
     ),
     pytest.param(
         "postgresql://db.test/app?password=pw#x-0815&sslmode=require",  # trufflehog:ignore
-        f"postgresql://db.test/app?password={_M}&sslmode=require",  # trufflehog:ignore
         id="hash-inside-a-secret-value",
     ),
     pytest.param(
         "postgresql://db.test/app?PASSWORD=pw-0815&SSLPassword=key-0815",  # trufflehog:ignore
-        f"postgresql://db.test/app?PASSWORD={_M}&SSLPassword={_M}",  # trufflehog:ignore
         id="upper-case-parameter-name",
     ),
     pytest.param(
-        "postgresql://db.test/app?oauth_client_secret=cs-0815",
-        f"postgresql://db.test/app?oauth_client_secret={_M}",
+        "postgresql://db.test/app?oauth_client_secret=cs-0815",  # trufflehog:ignore
         id="oauth-client-secret-parameter",
     ),
     pytest.param(
-        "postgresql://db.test/app?password=&sslmode=require",  # trufflehog:ignore
         "postgresql://db.test/app?password=&sslmode=require",  # trufflehog:ignore
         id="empty-secret-parameter-value",
     ),
     pytest.param(
         "postgresql://repl:pw 0815@db.test/app",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test/app",  # trufflehog:ignore
         id="space-in-the-address-password",
     ),
     pytest.param(
         "postgresql://repl:pw\t0815@db.test/app",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test/app",  # trufflehog:ignore
         id="tab-in-the-address-password",
     ),
     pytest.param(
         "postgresql://re\u00a0pl:pw\u00a00815@db.test/app",  # trufflehog:ignore
-        f"postgresql://re\u00a0pl:{_M}@db.test/app",  # trufflehog:ignore
         id="no-break-space-in-the-user-and-the-password",
     ),
     pytest.param(
         "postgresql://repl:pw-0815@db.test/app?application_name=wal receiver",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test/app?application_name=wal receiver",  # trufflehog:ignore
         id="space-in-a-parameter-value-of-an-address-with-a-password",
     ),
     pytest.param(
         "postgresql://db.test/a?application_name=wal rcv&password=pw-0815",  # trufflehog:ignore
-        f"postgresql://db.test/a?application_name=wal rcv&password={_M}",  # trufflehog:ignore
         id="space-in-a-parameter-value-before-a-secret-parameter",
     ),
     pytest.param(
         "postgresql://repl:pw-0815@db.test/app?sslnegotiation=direct",  # trufflehog:ignore
-        f"postgresql://repl:{_M}@db.test/app?sslnegotiation=direct",
         id="postgresql-17-parameter-sslnegotiation",
     ),
     pytest.param(
         "postgresql://db.test/app?sslnegotiation=direct&password=pw-0815",  # trufflehog:ignore
-        f"postgresql://db.test/app?sslnegotiation=direct&password={_M}",  # trufflehog:ignore
         id="postgresql-17-parameter-before-a-secret-parameter",
     ),
     pytest.param(
         "postgresql://db.test/a?scram_client_key=ck-1&scram_server_key=sk-1",  # trufflehog:ignore
-        f"postgresql://db.test/a?scram_client_key={_M}&scram_server_key={_M}",
         id="postgresql-18-scram-key-parameters",
     ),
-]
-
-#: Texts that libpq cannot read and that hold a secret: the call is refused.
-_REFUSED_CASES = [
     pytest.param(
         "host=db.example.test password='pw-0815",  # trufflehog:ignore
         id="unclosed-quote-with-a-secret-name",
@@ -465,7 +424,7 @@ _REFUSED_CASES = [
         id="empty-name-with-a-secret-name",
     ),
     pytest.param(
-        "application_name='password rotation",
+        "application_name='password rotation",  # trufflehog:ignore
         id="unclosed-quote-with-a-secret-name-in-a-value",
     ),
     pytest.param(
@@ -496,11 +455,6 @@ _REFUSED_CASES = [
         "postgresql://db.test:5432/app@repl:x",  # trufflehog:ignore
         id="address-with-an-at-sign-after-the-slash",
     ),
-]
-
-#: Addresses where MEHO cannot tell where the password ends: a raw at sign
-#: after the user part, with a colon before it. The call is refused.
-_HOST_OR_PORT_REFUSED_CASES = [
     pytest.param(
         "postgresql://repl:pw-08@15-xy@db.test/app",  # trufflehog:ignore
         id="second-at-sign-in-the-host",
@@ -517,252 +471,174 @@ _HOST_OR_PORT_REFUSED_CASES = [
         "postgresql://repl:pw-08@db.test@15-xy/app",  # trufflehog:ignore
         id="at-sign-after-the-host",
     ),
-]
-
-#: Addresses with a host or port libpq cannot use and no secret: they stay
-#: as they are. The values of hosts and ports decide nothing.
-_HOST_OR_PORT_KEPT_CASES = [
-    pytest.param("postgresql://db.test:primary/app", id="port-that-is-not-a-number"),
-    pytest.param("postgresql://repl@db@test/app", id="at-sign-in-the-host"),
-]
-
-#: Texts that libpq cannot read and that hold no secret: they stay as they are.
-_UNREADABLE_KEPT_CASES = [
-    pytest.param("host='db.example.test port=5432", id="unclosed-quote"),
-    pytest.param("host=db.example.test port", id="missing-equals"),
-    pytest.param("postgresql://db.test/app?sslmode=require&broken", id="parameter-without-equals"),
-    pytest.param("host=db.example.test unknownopt=1", id="unknown-key-word"),
-    pytest.param("postgresql://db.test/app?unknownopt=1", id="unknown-address-parameter"),
-]
-
-#: Texts with no secret part, in each form: they stay equal to the input.
-_NO_SECRET_CASES = [
     pytest.param(
-        "host=db.example.test port=5432 user=replicator application_name=walreceiver",
-        id="key-words",
+        "postgresql://db.test:primary/app",  # trufflehog:ignore
+        id="port-that-is-not-a-number",
     ),
     pytest.param(
-        "host = 'db.example.test' user='repl \\'x\\'' sslmode=require",
+        "postgresql://repl@db@test/app",  # trufflehog:ignore
+        id="at-sign-in-the-host",
+    ),
+    pytest.param(
+        "host='db.example.test port=5432",  # trufflehog:ignore
+        id="unclosed-quote",
+    ),
+    pytest.param(
+        "host = 'db.example.test' user='repl \\'x\\'' sslmode=require",  # trufflehog:ignore
         id="key-words-with-quotes",
     ),
     pytest.param(
-        "postgres://replicator@db.example.test:5432/postgres?sslmode=require",
+        "postgres://replicator@db.example.test:5432/postgres?sslmode=require",  # trufflehog:ignore
         id="address",
     ),
     pytest.param(
-        "postgresql://db.test/app?application_name=wal%20receiver#x",
+        "postgresql://db.test/app?application_name=wal%20receiver#x",  # trufflehog:ignore
         id="address-with-percent-codes",
-    ),
-    pytest.param(
-        "postgresql://db.example.test/my db?application_name=wal receiver",
-        id="address-with-white-space",
-    ),
-    pytest.param(
-        "postgresql://db.test/app?ssl=true",
-        id="address-with-ssl-true",
     ),
     pytest.param(
         "postgresql://[2001:db8::1?password=x]/app",  # trufflehog:ignore
         id="address-with-a-question-mark-inside-a-bracket-host",
     ),
-]
-
-
-#: Two made-up password pieces, built at run time. They must never show up in
-#: a refusal.
-_P1 = "pw" + "-one-" + "4711"  # trufflehog:ignore
-_P2 = "pw" + "-two-" + "4712"  # trufflehog:ignore
-_A = "postgresql://"
-_U = "repl"
-_H = "db.test"
-_D = "app"
-
-#: One row per connection form. The address form: the password of the user
-#: part and each secret parameter value become the mark.
-_FORM_MASKED_ROWS = [
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:5432/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:5432/{_D}",
         id="address-with-a-number-port",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}",
         id="address-with-no-port",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:/{_D}",
         id="address-with-an-empty-port",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:primary/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:primary/{_D}",
         id="address-port-not-a-number",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:primary/{_D}?port=5432",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:primary/{_D}?port=5432",
         id="address-port-not-a-number-replaced-by-a-port-parameter",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:primary/{_D}?port=",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:primary/{_D}?port=",
         id="address-port-not-a-number-replaced-by-an-empty-port-parameter",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}/{_D}?port=primary",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}?port=primary",
         id="port-parameter-not-a-number",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:5432/{_D}?port=primary",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:5432/{_D}?port=primary",
         id="number-address-port-and-a-port-parameter-not-a-number",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:%205432/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:%205432/{_D}",
         id="address-port-with-an-encoded-space",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:65536/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:65536/{_D}",
         id="address-port-out-of-range",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@a.test:5432,b.test:5433/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@a.test:5432,b.test:5433/{_D}",
         id="host-list-and-port-list",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@a.test%2Cb.test:5432%2C5433/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@a.test%2Cb.test:5432%2C5433/{_D}",
         id="encoded-host-list-and-encoded-port-list",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}:5432%2C5433/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}:5432%2C5433/{_D}",
         id="one-host-and-an-encoded-list-of-two-ports",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@a.test:5432,b.test:primary/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@a.test:5432,b.test:primary/{_D}",
         id="host-list-with-a-port-not-a-number",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}/{_D}?host=b.test",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}?host=b.test",
         id="host-parameter-replaces-the-host",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}/{_D}?hostaddr=127.0.0.1",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}?hostaddr=127.0.0.1",
         id="hostaddr-parameter",
     ),
     pytest.param(
         f"{_A}{_H}/{_D}?user={_U}&password={_P1}",  # trufflehog:ignore
-        f"{_A}{_H}/{_D}?user={_U}&password={_M}",
         id="password-parameter-only",
     ),
     pytest.param(
         f"{_A}{_U}:{_P2}@{_H}/{_D}?password={_P1}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}?password={_M}",
         id="address-password-and-password-parameter",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}%40{_P2}@{_H}/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}",
         id="encoded-at-sign-in-the-password",
     ),
     pytest.param(
         f"{_A}{_H}/{_D}?password={_P1}@{_P2}",  # trufflehog:ignore
-        f"{_A}{_H}/{_D}?password={_M}",
         id="raw-at-sign-in-a-password-parameter",
     ),
     pytest.param(
         f"{_A}{_H}:5432/{_D}?password={_P1}@{_P2}",  # trufflehog:ignore
-        f"{_A}{_H}:5432/{_D}?password={_M}",
         id="raw-at-sign-in-a-password-parameter-with-a-port",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@{_H}/{_D}?application_name=wal@rcv",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@{_H}/{_D}?application_name=wal@rcv",
         id="raw-at-sign-in-an-application-name",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@%40{_H}/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@%40{_H}/{_D}",
         id="encoded-at-sign-starts-the-host",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@db%40test/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@db%40test/{_D}",
         id="encoded-at-sign-inside-the-host",
     ),
     pytest.param(
         f"{_A}{_U}@{_H}/{_D}?pass%77ord={_P1}",  # trufflehog:ignore
-        f"{_A}{_U}@{_H}/{_D}?pass%77ord={_M}",
         id="encoded-password-parameter-name",
     ),
     pytest.param(
         f"{_A}{_U}:{_P1}@[::1]:5432/{_D}",  # trufflehog:ignore
-        f"{_A}{_U}:{_M}@[::1]:5432/{_D}",
         id="bracket-host-with-a-port",
     ),
     pytest.param(
         f"host={_H} port=5432 user={_U} password={_P1} dbname={_D}",  # trufflehog:ignore
-        f"host={_H} port=5432 user={_U} password={_M} dbname={_D}",
         id="key-word-plain",
     ),
     pytest.param(
         f"host={_H} port=primary user={_U} password={_P1}",  # trufflehog:ignore
-        f"host={_H} port=primary user={_U} password={_M}",
         id="key-word-port-not-a-number",
     ),
     pytest.param(
         f"host=a.test,b.test port=5432,5433 user={_U} password={_P1}",  # trufflehog:ignore
-        f"host=a.test,b.test port=5432,5433 user={_U} password={_M}",
         id="key-word-host-list-and-port-list",
     ),
     pytest.param(
         f"host=db@test hostaddr=127.0.0.1 user={_U} password={_P1}",  # trufflehog:ignore
-        f"host=db@test hostaddr=127.0.0.1 user={_U} password={_M}",
         id="key-word-at-sign-in-the-host-and-a-hostaddr",
     ),
     pytest.param(
         f"host={_H} password={_P1}@{_P2}",  # trufflehog:ignore
-        f"host={_H} password={_M}",
         id="key-word-at-sign-in-the-password",
     ),
     pytest.param(
         f"host={_H} password='{_P1} {_P2}'",  # trufflehog:ignore
-        f"host={_H} password='{_M}'",
         id="key-word-quoted-password-with-a-space",
     ),
     pytest.param(
         f"host={_H} port= user={_U} password={_P1}",  # trufflehog:ignore
-        f"host={_H} port= user={_U} password={_M}",
         id="key-word-nothing-after-the-equals-sign-of-port",
     ),
     pytest.param(
         f"host=a.test,b.test port=5432,primary user={_U} password={_P1}",  # trufflehog:ignore
-        f"host=a.test,b.test port=5432,primary user={_U} password={_M}",
         id="key-word-port-list-with-a-port-not-a-number",
     ),
-]
-
-#: One row per connection form that holds no secret: it stays as it is.
-_FORM_KEPT_ROWS = [
     pytest.param(
-        f"{_A}{_H}:5432/{_D}?application_name=wal@rcv",
+        f"{_A}{_H}:5432/{_D}?application_name=wal@rcv",  # trufflehog:ignore
         id="no-user-part-and-an-at-sign-in-a-parameter",
     ),
-]
-
-#: One row per connection form where MEHO cannot tell where a secret ends,
-#: or that libpq cannot read: the call is refused.
-_FORM_REFUSED_ROWS = [
     pytest.param(
         f"{_A}{_U}:{_P1}@{_P2}@{_H}/{_D}",  # trufflehog:ignore
         id="raw-at-sign-in-the-password",
@@ -824,7 +700,7 @@ _FORM_REFUSED_ROWS = [
         id="digits-then-raw-slash-in-the-password",
     ),
     pytest.param(
-        f"{_A}{_H}:5432/d:x@b",
+        f"{_A}{_H}:5432/d:x@b",  # trufflehog:ignore
         id="no-user-part-and-an-at-sign-in-the-database-name",
     ),
     pytest.param(
@@ -843,95 +719,102 @@ _FORM_REFUSED_ROWS = [
         f"host={_H} password={_P1} {_P2}",  # trufflehog:ignore
         id="key-word-raw-space-in-a-bare-password",
     ),
+    pytest.param(
+        f"{_A}{_H}:5432?user={_U}&password={_P1}@{_P2}",  # trufflehog:ignore
+        id="server-port-no-slash-at-sign-in-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}[::1]?password={_P1}@{_P2}",  # trufflehog:ignore
+        id="server-bracket-no-slash-at-sign-in-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}:5432?password={_P1}@{_P2}",  # trufflehog:ignore
+        id="empty-host-port-no-slash-at-sign-in-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}a.test,b.test:5432?password={_P1}@{_P2}",  # trufflehog:ignore
+        id="host-list-port-no-slash-at-sign-in-password-parameter",
+    ),
+    pytest.param(
+        f"{_A}{_H}:5432?port=5432&password={_P1}?{_P2}@{_P3}",  # trufflehog:ignore
+        id="port-parameter-then-password-with-question-mark-and-at-sign",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}@{_P2}?port=5@{_H}/{_D}",  # trufflehog:ignore
+        id="question-mark-key-word-and-at-sign-after-the-host",
+    ),
+    pytest.param(
+        f"host={_H} dbname={_A}{_U}:{_P1}@{_H}/{_D}",  # trufflehog:ignore
+        id="key-word-text-with-an-address-as-database-name",
+    ),
+    pytest.param(
+        f"{_A}{_U}:{_P1}/{_D}",  # trufflehog:ignore
+        id="password-where-the-port-goes",
+    ),
+    pytest.param(
+        f"{_A}{_H}:5432/{_D}",
+        id="plain-address-with-a-port-gets-the-mark",
+    ),
+    pytest.param(
+        f"host={_H} password={_P1}"
+        + "x" * (_LONG - len(f"host={_H} password={_P1}")),  # trufflehog:ignore
+        id="ten-thousand-characters-with-a-secret",
+    ),
+    pytest.param(
+        f"host={_H} application_name={_NON_ENGLISH} password={_P1}",  # trufflehog:ignore
+        id="non-english-letters-with-a-secret",
+    ),
+    pytest.param(
+        f"host={_H} application_name={_NON_ENGLISH}@x",
+        id="non-english-letters-with-an-at-sign",
+    ),
+]
+
+#: Texts that are shown whole, character for character.
+_WHOLE_CASES = [
+    pytest.param(f"host={_H} port=5432 user={_U} dbname={_D}", id="plain-key-word-text"),
+    pytest.param(f"{_A}{_H}/{_D}?sslmode=require", id="plain-address-with-no-port"),
+    pytest.param(
+        "host=db.example.test port=5432 user=replicator application_name=walreceiver",
+        id="key-words",
+    ),
+    pytest.param(
+        "postgresql://db.example.test/my db?application_name=wal receiver",
+        id="address-with-white-space",
+    ),
+    pytest.param("postgresql://db.test/app?ssl=true", id="address-with-ssl-true"),
+    pytest.param("host=db.example.test port", id="missing-equals"),
+    pytest.param("postgresql://db.test/app?sslmode=require&broken", id="parameter-without-equals"),
+    pytest.param("host=db.example.test unknownopt=1", id="unknown-key-word"),
+    pytest.param("postgresql://db.test/app?unknownopt=1", id="unknown-address-parameter"),
+    pytest.param("host=" + "a" * (_LONG - len("host=")), id="ten-thousand-characters"),
+    pytest.param(f"host={_H} application_name={_NON_ENGLISH}", id="non-english-letters"),
 ]
 
 
-@pytest.mark.parametrize(("value", "expected"), _FORM_MASKED_ROWS)
+@pytest.mark.parametrize("value", _MARKED_CASES)
 @pytest.mark.asyncio
-async def test_settings_hide_only_the_secret_of_each_connection_form(
-    value: str, expected: str
-) -> None:
-    assert await _hidden(value) == expected
+async def test_settings_put_one_mark_in_place_of_a_connection_text(value: str) -> None:
+    shown = await _shown(value)
+    assert shown == _MARK
+    for piece in _PIECES:
+        assert piece not in shown
 
 
-@pytest.mark.parametrize("value", _FORM_KEPT_ROWS)
+@pytest.mark.parametrize("value", _WHOLE_CASES)
 @pytest.mark.asyncio
-async def test_settings_keep_each_connection_form_with_no_secret(value: str) -> None:
-    assert await _hidden(value) == value
+async def test_settings_show_a_connection_text_with_no_secret_whole(value: str) -> None:
+    assert await _shown(value) == value
 
 
-@pytest.mark.parametrize("value", _FORM_REFUSED_ROWS)
-@pytest.mark.asyncio
-async def test_settings_refuse_each_connection_form_with_an_unclear_secret(value: str) -> None:
-    with pytest.raises(PostgresSettingsRefusedError) as refused:
-        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
-    message = str(refused.value)
-    assert _SETTING in message
-    assert _P1 not in message
-    assert _P2 not in message
-    assert "4711" not in message  # trufflehog:ignore
-
-
-@pytest.mark.parametrize(("value", "expected"), _KEY_WORD_CASES)
-@pytest.mark.asyncio
-async def test_settings_hide_each_secret_key_word_value(value: str, expected: str) -> None:
-    assert await _hidden(value) == expected
-
-
-@pytest.mark.parametrize(("value", "expected"), _ADDRESS_CASES)
-@pytest.mark.asyncio
-async def test_settings_hide_each_secret_value_of_an_address(value: str, expected: str) -> None:
-    assert await _hidden(value) == expected
-
-
-@pytest.mark.parametrize("value", _REFUSED_CASES)
-@pytest.mark.asyncio
-async def test_settings_hide_an_unreadable_text_whole_only_with_a_secret(value: str) -> None:
-    with pytest.raises(PostgresSettingsRefusedError) as refused:
-        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
-    message = str(refused.value)
-    assert _SETTING in message
-    assert "out of names" in message
-    assert "0815" not in message
-    assert "rotation" not in message
-
-
-@pytest.mark.parametrize("value", _HOST_OR_PORT_REFUSED_CASES)
-@pytest.mark.asyncio
-async def test_settings_refuse_an_address_with_a_host_or_port_libpq_cannot_use(
-    value: str,
-) -> None:
-    with pytest.raises(PostgresSettingsRefusedError) as refused:
-        await fetch_settings(_ValueConn(value), [_SETTING])  # type: ignore[arg-type]
-    message = str(refused.value)
-    assert _SETTING in message
-    assert "out of names" in message
-    assert "pw-" not in message
-    assert "15-xy" not in message
-
-
-@pytest.mark.parametrize("value", _HOST_OR_PORT_KEPT_CASES)
-@pytest.mark.asyncio
-async def test_settings_keep_an_address_with_a_host_or_port_libpq_cannot_use_without_a_secret(
-    value: str,
-) -> None:
-    assert await _hidden(value) == value
-
-
-@pytest.mark.parametrize("value", _UNREADABLE_KEPT_CASES)
-@pytest.mark.asyncio
-async def test_settings_keep_an_unreadable_text_without_a_secret(value: str) -> None:
-    assert await _hidden(value) == value
-
-
-@pytest.mark.parametrize("value", _NO_SECRET_CASES)
-@pytest.mark.asyncio
-async def test_settings_keep_a_connection_text_with_no_secret_part(value: str) -> None:
-    assert await _hidden(value) == value
+def test_the_long_cases_hold_ten_thousand_characters() -> None:
+    long_ids = {"ten-thousand-characters", "ten-thousand-characters-with-a-secret"}
+    long_values = [p.values[0] for p in [*_MARKED_CASES, *_WHOLE_CASES] if p.id in long_ids]
+    assert [len(value) for value in long_values] == [_LONG, _LONG]
 
 
 @pytest.mark.asyncio
-async def test_settings_hide_the_value_for_a_setting_name_in_upper_case() -> None:
+async def test_settings_put_the_mark_for_a_setting_name_in_upper_case() -> None:
     row = _setting_row(_SETTING.upper(), _CONNECTION_TEXT)
 
     class _UpperConn:
@@ -939,7 +822,7 @@ async def test_settings_hide_the_value_for_a_setting_name_in_upper_case() -> Non
             return [row]
 
     result = await fetch_settings(_UpperConn(), [_SETTING])  # type: ignore[arg-type]
-    assert result["settings"][0]["setting"] == f"{_VISIBLE_PART}{_M}"
+    assert result["settings"][0]["setting"] == _MARK
 
 
 #: A value of the setting that libpq cannot read and that holds the password.
@@ -960,40 +843,8 @@ class _UnreadableConn:
         return None
 
 
-@pytest.mark.parametrize(
-    "kind",
-    [PrincipalKind.USER, PrincipalKind.AGENT, PrincipalKind.SERVICE],
-    ids=["person", "agent", "service"],
-)
 @pytest.mark.asyncio
-async def test_settings_refuse_an_unreadable_text_with_a_secret_for_every_login(
-    monkeypatch: pytest.MonkeyPatch, tenant_id: UUID, kind: PrincipalKind
-) -> None:
-    monkeypatch.setattr(
-        connector_module, "connect_read_only", AsyncMock(return_value=_UnreadableConn())
-    )
-    result = await dispatch(
-        operator=_login(kind, tenant_id),
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_ID,
-        target=_Target(tenant_id),
-        params={"names": [_SETTING, "work_mem"]},
-    )
-    assert result.status != "ok"
-    assert result.error == "connector_error: PostgresSettingsRefusedError"
-    assert result.result is None
-    assert _PASSWORD not in repr(result.model_dump())
-
-    traces = await _rows(DispatchTrace) + await _rows(DispatchTraceSpan)
-    audit = await _rows(AuditLog)
-    assert traces
-    assert audit
-    for row in [*traces, *await _rows(EventOutbox), *audit]:
-        assert _PASSWORD not in _row_text(row), type(row).__name__
-
-
-@pytest.mark.asyncio
-async def test_settings_without_names_are_never_refused(
+async def test_settings_without_names_return_the_curated_list(
     monkeypatch: pytest.MonkeyPatch, tenant_id: UUID
 ) -> None:
     assert not CONNECTION_TEXT_SETTINGS & {name.lower() for name in CURATED_SETTINGS}
@@ -1013,7 +864,7 @@ async def test_settings_without_names_are_never_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_sensor_of_a_refused_setting_reads_unknown(
+async def test_a_sensor_of_a_connection_text_setting_reads_the_mark(
     monkeypatch: pytest.MonkeyPatch, tenant_id: UUID
 ) -> None:
     target = _Target(tenant_id)
@@ -1035,11 +886,11 @@ async def test_a_sensor_of_a_refused_setting_reads_unknown(
         params={"names": [_SETTING]},
         assertion={
             "select": {"path": "$.settings[0].setting"},
-            "compare": {"type": "equals", "value": "x"},
+            "compare": {"type": "equals", "value": _MARK},
         },
         identity_sub="__sensor__",
     )
     outcome = await _run_evaluation(snap)
-    assert outcome.state == "unknown"
-    assert outcome.evidence["dispatch_error"] == "connector_error: PostgresSettingsRefusedError"
+    assert outcome.state == "ok", outcome.evidence
+    assert outcome.value == _MARK
     assert _PASSWORD not in repr(outcome.evidence)

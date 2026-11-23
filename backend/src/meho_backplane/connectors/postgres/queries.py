@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import datetime as _dt
 import ipaddress
-import re
 import uuid
 from decimal import Decimal
 from typing import Any
-from urllib.parse import unquote
 
 import asyncpg
 
@@ -32,12 +30,10 @@ from meho_backplane.connectors.postgres.query_guard import (
     CONNECTION_TEXT_SECRET_KEYWORDS,
     CONNECTION_TEXT_SETTINGS,
 )
-from meho_backplane.redaction.command_line import _URL_PASSWORD
-from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER
 
 __all__ = [
+    "CONNECTION_TEXT_MARK",
     "CURATED_SETTINGS",
-    "PostgresSettingsRefusedError",
     "fetch_activity",
     "fetch_databases",
     "fetch_fingerprint",
@@ -328,348 +324,38 @@ _SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
 #: any case.
 _ADDRESS_PREFIXES: tuple[str, ...] = ("postgresql://", "postgres://")
 
-#: The white space of the key word form: C ``isspace`` in the C locale.
-_ASCII_SPACE = frozenset(" \t\n\r\v\f")
+#: Characters that make MEHO show a connection text as the mark: an at sign,
+#: a percent sign, a backslash and both quotes.
+_MARK_CHARACTERS = frozenset("@%\\'\"")
 
-#: A percent sign that libpq cannot decode: not followed by two hex digits,
-#: or the forbidden ``%00``.
-_BROKEN_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})|%00")
-
-#: A port of the address form that libpq reads as a number (``strtol`` with
-#: white space around it).
-_PORT_NUMBER = re.compile(r"[ \t\n\r\v\f]*[+-]?[0-9]+[ \t\n\r\v\f]*")
-
-#: The parameter key words libpq reads, pinned to the pages "Parameter Key
-#: Words" of PostgreSQL 15 to 18, the releases this connector supports
-#: (https://www.postgresql.org/docs/18/libpq-connect.html#LIBPQ-PARAMKEYWORDS
-#: and the same page of 15, 16 and 17). A name of any of these releases counts,
-#: so a text that a server of one supported release accepts is read on all of
-#: them. libpq refuses a text with any other name.
-_LIBPQ_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "host",
-        "hostaddr",
-        "port",
-        "dbname",
-        "user",
-        "password",
-        "passfile",
-        "require_auth",
-        "channel_binding",
-        "connect_timeout",
-        "client_encoding",
-        "options",
-        "application_name",
-        "fallback_application_name",
-        "keepalives",
-        "keepalives_idle",
-        "keepalives_interval",
-        "keepalives_count",
-        "tcp_user_timeout",
-        "replication",
-        "gssencmode",
-        "sslmode",
-        "requiressl",
-        "sslnegotiation",
-        "sslcompression",
-        "sslcert",
-        "sslkey",
-        "sslkeylogfile",
-        "sslpassword",
-        "sslcertmode",
-        "sslrootcert",
-        "sslcrl",
-        "sslcrldir",
-        "sslsni",
-        "requirepeer",
-        "ssl_min_protocol_version",
-        "ssl_max_protocol_version",
-        "min_protocol_version",
-        "max_protocol_version",
-        "krbsrvname",
-        "gsslib",
-        "gssdelegation",
-        "scram_client_key",
-        "scram_server_key",
-        "service",
-        "target_session_attrs",
-        "load_balance_hosts",
-        "oauth_issuer",
-        "oauth_client_id",
-        "oauth_client_secret",
-        "oauth_scope",
-    }
+#: The one fixed mark that stands in place of a whole connection text.
+#: ``{setting}`` is the name of the setting.
+CONNECTION_TEXT_MARK = (
+    "[hidden: the value of the setting '{setting}' holds a secret; read it on the server]"
 )
 
-#: One span ``(start, end)`` of a connection text.
-_Span = tuple[int, int]
 
+def _connection_text_needs_mark(text: str) -> bool:
+    """Whether MEHO shows a connection text as the mark, not whole.
 
-class PostgresSettingsRefusedError(ValueError):
-    """``postgres.settings`` refused the call for a setting it cannot hide.
-
-    Subclasses :class:`ValueError` so the dispatcher's ``connector_error``
-    branch renders the message verbatim. The message holds no part of the
-    value.
+    This is no parse. It looks only at a few characters and words: an at
+    sign, a percent sign, a backslash or a quote; one of
+    :data:`CONNECTION_TEXT_SECRET_KEYWORDS` anywhere in the text, in any case;
+    or a start word of the address form followed by a colon.
     """
-
-
-def _is_secret_name(name: str) -> bool:
-    return name.lower() in CONNECTION_TEXT_SECRET_KEYWORDS
-
-
-def _is_libpq_name(name: str) -> bool:
-    return name.lower() in _LIBPQ_KEYWORDS
-
-
-def _skip_space(text: str, i: int) -> int:
-    while i < len(text) and text[i] in _ASCII_SPACE:
-        i += 1
-    return i
-
-
-def _read_value(text: str, i: int) -> tuple[int, int, int] | None:
-    """Read one value of the key word form that starts at *i*, as libpq does.
-
-    Returns ``(start, end, next)``: the span of the value (between the quotes
-    for a quoted value) and the index after it. A backslash takes the next
-    character, whatever it is. Returns ``None`` for an unclosed quote.
-    """
-    n = len(text)
-    quoted = i < n and text[i] == "'"
-    start = i + 1 if quoted else i
-    i = start
-    while i < n and (text[i] != "'" if quoted else text[i] not in _ASCII_SPACE):
-        i += 2 if text[i] == "\\" else 1
-    if quoted:
-        return None if i >= n else (start, i, i + 1)
-    return start, min(i, n), min(i, n)
-
-
-def _keyword_secret_spans(text: str) -> list[_Span] | None:
-    """The spans of the secret values of a key word form text, as libpq reads it.
-
-    Follows ``conninfo_parse`` of libpq: only ASCII white space separates;
-    spaces may stand around ``=``; a name may follow the closing quote of the
-    value before it directly; a backslash takes the next character, whatever
-    it is, in a bare value and in a quoted one. The span of a quoted value is
-    the text between its quotes. Returns ``None`` when libpq cannot read the
-    text (a name with no ``=``, an empty name, a name that is not a libpq
-    key word, an unclosed quote).
-    """
-    spans: list[_Span] = []
-    i, n = _skip_space(text, 0), len(text)
-    while i < n:
-        name_start = i
-        while i < n and text[i] != "=" and text[i] not in _ASCII_SPACE:
-            i += 1
-        name = text[name_start:i]
-        i = _skip_space(text, i)
-        if not _is_libpq_name(name) or i >= n or text[i] != "=":
-            return None
-        value = _read_value(text, _skip_space(text, i + 1))
-        if value is None:
-            return None
-        start, end, i = value
-        if _is_secret_name(name) and end > start:
-            spans.append((start, end))
-        i = _skip_space(text, i)
-    return spans
-
-
-def _address_password_span(text: str, i: int) -> tuple[_Span | None, int]:
-    """Read the user part of an address that starts at *i*, as libpq does.
-
-    libpq looks for the first ``@`` or ``/``. Only an ``@`` found first ends a
-    user part; its password runs from the first ``:`` to that ``@``. Returns
-    the span of a non-empty password (or ``None``) and the index after the
-    user part.
-    """
-    stop = i
-    while stop < len(text) and text[stop] not in "@/":
-        stop += 1
-    if stop >= len(text) or text[stop] != "@":
-        return None, i
-    colon = text.find(":", i, stop)
-    span = (colon + 1, stop) if colon != -1 and stop > colon + 1 else None
-    return span, stop + 1
-
-
-def _address_hosts(text: str, i: int) -> tuple[int, list[str]] | None:
-    """Read the host part of an address that starts at *i*, as libpq does.
-
-    Hosts are split by ``,``. A host that starts with ``[`` runs to the next
-    ``]``, so a ``?`` inside it does not count; any other host runs to the
-    next ``:``, ``/``, ``?`` or ``,``. A port follows a ``:`` and runs to the
-    next ``/``, ``?`` or ``,``. Returns the index of the ``?`` that starts the
-    query part (``len(text)`` when there is none) and each port as written.
-    Returns ``None`` when libpq cannot read the host part (an unclosed ``[``,
-    an empty ``[]``, or a ``]`` followed by another character than ``:``,
-    ``/``, ``?``, ``,`` or the end). The values of hosts and ports decide
-    nothing here: libpq checks them only when it connects.
-    """
-    n = len(text)
-    ports: list[str] = []
-    while True:
-        if i < n and text[i] == "[":
-            close = text.find("]", i + 1)
-            if close in (-1, i + 1) or text[close + 1 : close + 2] not in ("", ":", "/", "?", ","):
-                return None
-            i = close + 1
-        else:
-            while i < n and text[i] not in ":/?,":
-                i += 1
-        if i < n and text[i] == ":":
-            start = i = i + 1
-            while i < n and text[i] not in "/?,":
-                i += 1
-            ports.append(text[start:i])
-        if i < n and text[i] == ",":
-            i += 1
-            continue
-        question = text.find("?", i)
-        return (n if question == -1 else question), ports
-
-
-def _password_end_unclear(
-    text: str, start: int, host_start: int, question: int, ports: list[str]
-) -> bool:
-    """Whether MEHO cannot tell where the password of an address ends.
-
-    Only the place of raw characters counts, never the values of hosts and
-    ports. That is so when one of these holds:
-
-    - a raw ``@`` comes after the user part (or after the start word, when
-      there is no user part) and before the query part, with a raw ``:``
-      between the start word and that ``@``;
-    - there is no user part, a raw ``@`` comes after the start word, and a
-      port, after percent decoding and split at ``,``, has an entry that is
-      not empty and not a whole number;
-    - the user part holds a raw ``?`` with no raw ``:`` before it.
-    """
-    at = text.rfind("@", host_start, question)
-    if at != -1 and ":" in text[start:at]:
+    if _MARK_CHARACTERS.intersection(text):
         return True
-    if host_start == start:
-        return "@" in text[start:] and any(
-            entry and not _PORT_NUMBER.fullmatch(entry)
-            for port in ports
-            for entry in unquote(port).split(",")
-        )
-    user = text[start : host_start - 1]
-    mark = user.find("?")
-    return mark != -1 and ":" not in user[:mark]
-
-
-def _address_secret_spans(text: str) -> list[_Span] | None:
-    """The spans of the secret values of an address form text, as libpq reads it.
-
-    Follows ``conninfo_uri_parse_options`` of libpq, on the raw characters
-    before any percent decoding: the password of the user part and the whole
-    value of each query parameter whose name, after percent decoding, is a
-    secret name. A query parameter runs to the next ``&``. White space is
-    part of a value. Returns ``None`` when libpq cannot read the text (a
-    broken percent code, a broken ``[`` host, a query parameter without
-    exactly one ``=``, a parameter name that is not a libpq key word after
-    percent decoding; libpq also takes ``ssl=true``), and when MEHO cannot
-    tell where the password ends (:func:`_password_end_unclear`). The values
-    of hosts and ports decide nothing.
-    """
-    if _BROKEN_PERCENT.search(text):
-        return None
-    start = text.index("://") + 3
-    password, host_start = _address_password_span(text, start)
-    spans: list[_Span] = [] if password is None else [password]
-    hosts = _address_hosts(text, host_start)
-    if hosts is None:
-        return None
-    question, ports = hosts
-    i, n = question + 1, len(text)
-    while i < n:
-        amp = text.find("&", i)
-        end = n if amp == -1 else amp
-        name, equals, value = text[i:end].partition("=")
-        decoded = unquote(name)
-        if not equals or "=" in value:
-            return None
-        if not _is_libpq_name(decoded) and (decoded.lower(), value) != ("ssl", "true"):
-            return None
-        if value and _is_secret_name(decoded):
-            spans.append((end - len(value), end))
-        i = end + 1
-    if _password_end_unclear(text, start, host_start, question, ports):
-        return None
-    return spans
-
-
-def _holds_secret_shape(text: str) -> bool:
-    """Whether a text that MEHO cannot hide holds a secret.
-
-    That is one of :data:`CONNECTION_TEXT_SECRET_KEYWORDS` in any case, also
-    percent-encoded. In the address form it is also a raw ``:`` after the
-    start word with a raw ``@`` anywhere after it. In the key word form it is
-    also an embedded address with a password.
-    """
-    lowered = unquote(text).lower()
-    if any(name in lowered for name in CONNECTION_TEXT_SECRET_KEYWORDS):
+    lowered = text.lower()
+    if any(word in lowered for word in CONNECTION_TEXT_SECRET_KEYWORDS):
         return True
-    if text.lower().startswith(_ADDRESS_PREFIXES):
-        colon = text.find(":", text.index("://") + 3)
-        return colon != -1 and "@" in text[colon + 1 :]
-    return bool(_URL_PASSWORD.search(text))
-
-
-def _connection_text_secret_spans(text: str) -> list[_Span] | None:
-    """The spans of the secret values of a connection text, read like libpq.
-
-    The address form (the text starts with ``postgresql://`` or
-    ``postgres://``, in any case) and the key word form follow the PostgreSQL
-    pages "Connection Strings" and "Parameter Key Words"
-    (https://www.postgresql.org/docs/18/libpq-connect.html). The value of
-    each name in
-    :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SECRET_KEYWORDS`
-    (any case) is a secret. Returns ``None`` when libpq cannot read the text.
-    """
-    if text.lower().startswith(_ADDRESS_PREFIXES):
-        return _address_secret_spans(text)
-    return _keyword_secret_spans(text)
-
-
-def _hide_connection_secrets(setting: str, text: str) -> str:
-    """Put the hide mark in place of each secret value of one connection text.
-
-    Every other character stays as the server sent it. A text that libpq
-    cannot read, or an address where MEHO cannot tell where the password
-    ends, stays as it is when it holds no secret. When it holds one, the call
-    is refused with :class:`PostgresSettingsRefusedError`. In the address
-    form the values of hosts and ports decide nothing. MEHO cannot tell where
-    the password ends when a raw ``@`` comes after the user part and before
-    the query part with a ``:`` before it, when an address with no user part
-    has a port that is not a whole number and an ``@`` after the start word,
-    or when the user part holds a ``?`` before its ``:``.
-    """
-    spans = _connection_text_secret_spans(text)
-    if spans is None:
-        if _holds_secret_shape(text):
-            raise PostgresSettingsRefusedError(
-                f"postgres.settings refused the call: the value of the setting "
-                f"'{setting}' is a connection text that libpq cannot read, and it "
-                f"holds a secret. Fix the value of '{setting}' on the server, or "
-                f"leave '{setting}' out of names."
-            )
-        return text
-    parts: list[str] = []
-    last = 0
-    for start, end in spans:
-        parts.append(text[last:start])
-        parts.append(SECRET_FIELD_MARKER)
-        last = end
-    parts.append(text[last:])
-    return "".join(parts)
+    for prefix in _ADDRESS_PREFIXES:
+        if lowered.startswith(prefix):
+            return ":" in text[len(prefix) :]
+    return False
 
 
 def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
-    """Hide the secret values of a setting in :data:`CONNECTION_TEXT_SETTINGS`.
+    """Show a setting in :data:`CONNECTION_TEXT_SETTINGS` whole or as the mark.
 
     An empty value and a null value stay as they are.
     """
@@ -678,8 +364,8 @@ def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
         return row
     for column in _SETTING_VALUE_COLUMNS:
         value = row.get(column)
-        if isinstance(value, str) and value:
-            row[column] = _hide_connection_secrets(setting, value)
+        if isinstance(value, str) and value and _connection_text_needs_mark(value):
+            row[column] = CONNECTION_TEXT_MARK.format(setting=setting)
     return row
 
 
@@ -688,20 +374,11 @@ async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> d
 
     The value of a setting in
     :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
-    is read with the rules of libpq, for every caller. The fixed hide mark
-    stands in place of each secret value (``password``, ``sslpassword``,
-    ``oauth_client_secret``, ``scram_client_key``, ``scram_server_key`` and
-    the password of an address); every other
-    character stays. A value that libpq cannot read, or an address where MEHO
-    cannot tell where the password ends, stays as it is when it holds no
-    secret. When it holds one, the call is refused with
-    :class:`PostgresSettingsRefusedError`. In the address form the values of
-    hosts and ports decide nothing. MEHO cannot tell where the password ends
-    when a raw at sign comes after the user part and before the query part
-    with a colon before it, when an address with no user part has a port
-    that is not a whole number and an at sign after the start word, or when
-    the user part holds a question mark before its colon. The curated list
-    holds no such setting, so a call without *names* is never refused.
+    is shown whole, or as one fixed mark (:data:`CONNECTION_TEXT_MARK`) that
+    names the setting, for every caller. No part of it is shown. It is shown
+    whole only when it holds no at sign, percent sign, backslash or quote,
+    none of the secret key words in any case, and no colon after a start word
+    of the address form. The call is not refused because of such a value.
     """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)

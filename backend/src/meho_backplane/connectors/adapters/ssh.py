@@ -46,9 +46,13 @@ system-initiated calls cannot read per-target vendor credentials
 :func:`_pool_key`: the tenant-unique target key, the caller's kind
 (:func:`_caller_kind`: a person or machine login, a call without a
 token, the check runner, or the system caller for ``operator=None``) and
-the caller's ``operator.sub``. So every caller logs in once, after their
-own Vault read of the target's secret, and reuses only the connection
-they opened. Callers of different kinds never share one login, also when
+the caller's ``operator.sub``, and the target's ``secret_ref``, host and
+port. So every caller logs in once, after their own Vault read of the
+target's secret, and reuses only the connection they opened with the
+target's current login and address. A call that started before a change
+of the target may still open a connection with the old values; that
+connection sits under the old values and no call with the new values
+gets it. Callers of different kinds never share one login, also when
 they carry the same ``sub``: the check runner runs a Sensor under its
 creator's ``sub`` with the runner's own token and Vault role, and a
 runbook verification runs under the assigned person's ``sub`` with no
@@ -124,7 +128,7 @@ type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
 
-type PoolKey = tuple[str, str, str, str]
+type PoolKey = tuple[str, str, str, str, str, str, str]
 
 
 def _caller_kind(operator: Operator | None) -> str:
@@ -149,15 +153,28 @@ def _caller_kind(operator: Operator | None) -> str:
 
 
 def _pool_key(target: Target, operator: Operator | None) -> PoolKey:
-    """Return the pool key ``(tenant_id, id, caller kind, sub)`` for *target*.
+    """Return the pool key of *target* for this caller.
 
-    The first two parts are :func:`target_cache_key`. The caller kind
-    (:func:`_caller_kind`) and the ``sub`` name the caller, so two callers
-    to one target hold two logins, each opened after their own Vault read.
+    The key is ``(tenant_id, id, caller kind, sub, secret_ref, host,
+    port)``. The first two parts are :func:`target_cache_key`. The caller
+    kind (:func:`_caller_kind`) and the ``sub`` name the caller, so two
+    callers to one target hold two logins, each opened after their own
+    Vault read. The last three parts are the target values the connection
+    is opened with. A call that still holds the target as it was before a
+    change files its connection under the old values, so a call with the
+    new values never gets that connection and logs in with the new login.
     """
     tenant_id, target_id = target_cache_key(target)
     sub = operator.sub if operator is not None else SYSTEM_OPERATOR_SUB
-    return (tenant_id, target_id, _caller_kind(operator), sub)
+    return (
+        tenant_id,
+        target_id,
+        _caller_kind(operator),
+        sub,
+        str(getattr(target, "secret_ref", None) or ""),
+        str(getattr(target, "host", None) or ""),
+        str(getattr(target, "port", None) or 22),
+    )
 
 
 class SshHostKeyUnpinnedError(ValueError):
@@ -452,12 +469,14 @@ class SshConnector(Connector):
     """
 
     def __init__(self) -> None:
-        # Maps the pool key ``(tenant_id, id, caller kind, sub)``
-        # (``_pool_key``) → (SSHClientConnection, last_used monotonic
-        # timestamp). The tenant-unique ``(tenant_id, id)`` part keeps two
-        # tenants' same-named targets apart (evoila/meho#1682). The caller
-        # part keeps one login per caller: a connection is handed back only
-        # to the caller whose own Vault read opened it.
+        # Maps the pool key ``(tenant_id, id, caller kind, sub, secret_ref,
+        # host, port)`` (``_pool_key``) → (SSHClientConnection, last_used
+        # monotonic timestamp). The tenant-unique ``(tenant_id, id)`` part
+        # keeps two tenants' same-named targets apart (evoila/meho#1682). The
+        # caller part keeps one login per caller: a connection is handed back
+        # only to the caller whose own Vault read opened it. The target values
+        # part hands a connection back only to a call with the same secret
+        # reference, host and port it was opened with.
         self._connections: dict[PoolKey, tuple[asyncssh.SSHClientConnection, float]] = {}
         # Short-lived lock protecting only _connections and _connect_locks dicts.
         self._pool_lock = asyncio.Lock()

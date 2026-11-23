@@ -171,7 +171,7 @@ async def test_an_expired_code_is_refused(client: TestClient, tmp_path: Any) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["", "nodot", "zz.abc", f"{uuid.uuid4().hex}.wrong"])
+@pytest.mark.parametrize("bad", ["", "nodot", "zz.abc", "0123456789abcdef0123456789abcdef.wrong"])
 async def test_a_wrong_code_is_refused(client: TestClient, tmp_path: Any, bad: str) -> None:
     await _register(client, "site-d")
     resp = client.post(_ENROLL, json={"enrollment_code": bad or "x", "public_key": _jwk(tmp_path)})

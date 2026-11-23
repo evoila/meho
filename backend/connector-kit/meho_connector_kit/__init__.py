@@ -28,6 +28,13 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import TenantScopedTargetLike
 from meho_backplane.connectors._shared.cache_key import target_cache_key as _target_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.file_sources import (
+    FileSource,
+    FileSourceError,
+    file_sources_from_hosts,
+    file_sources_from_map,
+    resolve_file_source,
+)
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -145,6 +152,8 @@ __all__ = [
     "ConnectorUpstreamError",
     "CredentialsReadError",
     "EmbeddingService",
+    "FileSource",
+    "FileSourceError",
     "FingerprintResult",
     "HttpConnector",
     "OperationResult",
@@ -159,6 +168,8 @@ __all__ = [
     "VaultCredentialsReadError",
     "compute_audit_digest_hash",
     "declare_root_shell",
+    "file_sources_from_hosts",
+    "file_sources_from_map",
     "is_acceptable_auth_model",
     "is_system_operator",
     "load_param_secret_data",
@@ -170,6 +181,7 @@ __all__ = [
     "register_retired_operations",
     "register_typed_op_registrar",
     "register_typed_operation",
+    "resolve_file_source",
     "strip_credential_value",
     "synthesise_system_operator",
     "target_cache_key",

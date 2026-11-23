@@ -88,7 +88,11 @@ def _unresolved(host: str) -> list[str] | None:
 
 
 def screen_dial_addresses(
-    host: str, port: int | None = None, *, use_embedded_port: bool = True
+    host: str,
+    port: int | None = None,
+    *,
+    use_embedded_port: bool = True,
+    allow_private: bool = False,
 ) -> list[str] | None:
     """Check *host* at connect time and return the addresses to dial.
 
@@ -103,8 +107,13 @@ def screen_dial_addresses(
     entry written with a port matches only that port. A port embedded in
     *host* wins, unless *use_embedded_port* is false: then *port* is the
     port that is checked (a driver that dials only the checked address).
+
+    *allow_private* lets private addresses pass. Only the file source helper
+    sets it, and only for a source that says ``private_network_allowed``.
     """
-    addresses = screen_and_resolve(host, port, use_embedded_port=use_embedded_port)
+    addresses = screen_and_resolve(
+        host, port, use_embedded_port=use_embedded_port, allow_private=allow_private
+    )
     if addresses:
         return addresses
     candidate = host.strip()

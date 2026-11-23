@@ -227,6 +227,12 @@ impact — action likely required") and
 `deploy/values-examples/values-rdc-example.yaml` for a populated
 private-range example.
 
+## Named file sources
+
+`screen_and_resolve` and `screen_dial_addresses` take `allow_private`
+(default false). Only the file source helper sets it, for a source that
+says `private_network_allowed`. See [file-sources.md](file-sources.md).
+
 ## References
 
 - Socket-boundary pinning: binds the SSRF destination check to the

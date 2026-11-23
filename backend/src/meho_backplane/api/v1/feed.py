@@ -213,9 +213,13 @@ async def _read_until_end[T](liveness: StreamLiveness, read: Awaitable[T]) -> T:
     """Await *read*, but stop it at ``liveness.ends_at``.
 
     A Valkey or database call that hangs does not keep the stream open
-    past the end of its login: the read is cancelled at ``ends_at`` and
-    :class:`_StreamEndedError` is raised. A read error once ``ends_at``
-    has passed raises :class:`_StreamEndedError` too.
+    past the end of its login: the stream stops waiting at ``ends_at``
+    and :class:`_StreamEndedError` is raised. A Valkey call is cancelled
+    there. A database read of the archive runs on in its own task for at
+    most ``LEFT_READ_LIMIT_SECONDS`` (``broadcast/read_to_end.py``); then
+    it is stopped and its connection is closed, not given back to the
+    pool. A read error once ``ends_at`` has passed raises
+    :class:`_StreamEndedError` too.
     """
     timeout = asyncio.timeout(liveness.seconds_left())
     try:

@@ -7,7 +7,8 @@ With a ``connectors`` list on the agent's toolset:
 
 * ``list_targets`` shows only the targets whose connector is in the list. A
   target that picks no single connector is left out;
-* the near-match targets of a ``no_target`` answer and the hits of an
+* a name of a target outside the list answers ``no_target``, and the
+  near-match targets of a ``no_target`` answer and the hits of an
   ``ambiguous_target`` answer name only targets of connectors in the list.
   The target resolver builds both, so every tool that looks a target up by
   name gives the same answer;
@@ -253,16 +254,16 @@ async def test_resolver_answers_name_only_targets_in_the_list() -> None:
         )
     with connector_limit(frozenset()):
         assert await _error_matches("lab-") == ("no_target", [])
-        assert await _error_matches("shared") == ("ambiguous_target", [])
+        assert await _error_matches("shared") == ("no_target", [])
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("targets")
-async def test_resolver_finds_a_target_outside_the_list_by_its_exact_name() -> None:
-    """The lookup does not change: the dispatcher refuses such a target later."""
+async def test_resolver_answers_no_target_for_the_exact_name_of_a_target_outside_the_list() -> None:
     with connector_limit(_ONLY_FENCE):
-        async with get_sessionmaker()() as session:
-            found = await resolve_target(session, _PERSON.tenant_id, "lab-other-a")
+        assert await _error_matches("lab-other-a") == ("no_target", [])
+    async with get_sessionmaker()() as session:
+        found = await resolve_target(session, _PERSON.tenant_id, "lab-other-a")
     assert found.name == "lab-other-a"
 
 

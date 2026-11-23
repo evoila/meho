@@ -1635,6 +1635,16 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_own_request_status:
+        Off by default. When on, ``call_operation`` on MCP takes an
+        ``approval_request_id`` of the caller's own approval request and
+        answers with the state of that request (waiting, approved and
+        running, the stored result, or why it did not run). It runs nothing
+        and makes no new request
+        (:mod:`meho_backplane.mcp.tools._call_operation_status`). When off,
+        the tool has no text about this and refuses the input. The
+        measurement that must come before it goes on is tracked in
+        evoila/meho#6803. Env ``MCP_OWN_REQUEST_STATUS``.
     mcp_approval_exit_code:
         Off by default. When on, the ``resume_outcome`` of an approval on the
         MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
@@ -2625,6 +2635,7 @@ class Settings(BaseModel):
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -3851,6 +3862,9 @@ def get_settings() -> Settings:
         ),
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
+        ),
+        mcp_own_request_status=parse_bool_env(
+            os.environ.get("MCP_OWN_REQUEST_STATUS"),
         ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),

@@ -395,6 +395,9 @@ async def test_only_a_person_with_tenant_admin_blocks_and_unblocks(
     for response in (blocked, unblocked, listed):
         assert response.status_code == 403, response.text
         assert response.json()["detail"].startswith(detail)
+        if principal_kind == "service":
+            assert "Use the CLI" in response.json()["detail"]
+            assert "console" not in response.json()["detail"]
     assert await _rows(_BLOCKED) == []
 
 

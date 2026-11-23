@@ -49,7 +49,9 @@ __all__ = ["router"]
 router = APIRouter(prefix="/api/v1/principals/blocked", tags=["principals"])
 
 _SUB_MAX_LENGTH: Final[int] = 255
-_PEOPLE_ONLY: Final[str] = "only a person can block or unblock a login. Use the console or the CLI."
+_PEOPLE_ONLY: Final[str] = (
+    "only a person can block or unblock a login. Use the CLI (meho principal) or the REST API."
+)
 
 
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))

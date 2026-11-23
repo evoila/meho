@@ -122,8 +122,8 @@ import structlog
 
 from meho_backplane.auth.secret_read_as import (
     MEHO_OWN_IDENTITY,
+    record_caller_secret_read,
     record_secret_read_as,
-    token_subject,
 )
 from meho_backplane.connectors._shared.credential_backend import (
     CredentialsReadError,
@@ -581,11 +581,10 @@ class GcpSecretManagerBackend:
 
         # The store saw the caller's login on the federated path, and MEHO's own
         # identity on the direct path.
-        record_secret_read_as(
-            token_subject(operator.raw_jwt, operator.sub)
-            if active_wif is not None
-            else MEHO_OWN_IDENTITY
-        )
+        if active_wif is not None:
+            record_caller_secret_read(operator)
+        else:
+            record_secret_read_as(MEHO_OWN_IDENTITY)
         secret_data = _decode_payload(
             payload_bytes,
             field=field,

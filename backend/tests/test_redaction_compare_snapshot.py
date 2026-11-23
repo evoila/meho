@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 
+from tests._time_limits import check_time_limit
 from tests.redaction_compare.answers import STEPS, answer_text, rest_text, snapshot_lines
 from tests.redaction_compare.inputs import CompareInput, plain_inputs, secret_inputs
 
@@ -179,9 +180,12 @@ def _shortest_of_three(path: str, payload: Any) -> float:
     [(name, build, path) for name, build, paths in _SHAPES for path in paths],
     ids=lambda value: value if isinstance(value, str) else "",
 )
+@pytest.mark.slow_runner_tolerant
 def test_time_grows_in_a_straight_line(shape: str, build: Callable[[int], Any], path: str) -> None:
     small = _shortest_of_three(path, build(_SMALL))
     large = _shortest_of_three(path, build(_LARGE))
-    assert large / small < _MAX_RATIO, (
-        f"{shape} on {path}: {small:.4f}s at {_SMALL}, {large:.4f}s at {_LARGE}"
+    check_time_limit(
+        large / small,
+        _MAX_RATIO,
+        f"{shape} on {path}: {small:.4f}s at {_SMALL}, {large:.4f}s at {_LARGE}",
     )

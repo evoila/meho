@@ -2311,6 +2311,73 @@ def test_expired_request_names_its_reviewer_as_the_approver(reviewed_by: str | N
         assert f"\u00b7 by {reviewed_by}" not in row_text
 
 
+def _shown_text(markup: str) -> str:
+    """Return the text as a browser shows it: tags go, white space folds to one space."""
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", "", markup)).split())
+
+
+@pytest.mark.parametrize(
+    ("status_value", "reviewed_by", "banner_phrase", "row_phrase"),
+    [
+        (
+            ApprovalRequestStatus.APPROVED.value,
+            _REVIEWER_SUB,
+            f"Approved by {_REVIEWER_SUB}",
+            f"\u00b7 by {_REVIEWER_SUB}",
+        ),
+        (
+            ApprovalRequestStatus.REJECTED.value,
+            _REVIEWER_SUB,
+            f"Rejected by {_REVIEWER_SUB}",
+            f"\u00b7 by {_REVIEWER_SUB}",
+        ),
+        (
+            ApprovalRequestStatus.EXPIRED.value,
+            _REVIEWER_SUB,
+            f"Expired \u00b7 approved by {_REVIEWER_SUB}",
+            f"\u00b7 approved by {_REVIEWER_SUB}",
+        ),
+        (ApprovalRequestStatus.EXPIRED.value, None, "Expired", None),
+    ],
+)
+def test_closed_request_words_keep_their_spaces(
+    status_value: str,
+    reviewed_by: str | None,
+    banner_phrase: str,
+    row_phrase: str | None,
+) -> None:
+    """The banner and the list row of a closed request read as full phrases in a browser."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="closed.op",
+        status_value=status_value,
+        reviewed_by=reviewed_by,
+        decided_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            modal = client.get(f"/ui/approvals/{rid}")
+            row = client.get(f"/ui/approvals/{rid}/row", headers=_HX_HEADERS)
+
+    assert modal.status_code == 200, modal.text
+    assert row.status_code == 200, row.text
+    banner = re.search(r'<h4 class="font-semibold">(.*?)</h4>', modal.text, re.S)
+    assert banner is not None
+    assert _shown_text(banner.group(1)) == banner_phrase
+    row_text = _shown_text(row.text)
+    if row_phrase is None:
+        assert "approved by" not in row_text
+        assert "· by" not in row_text
+    else:
+        assert row_phrase in row_text
+
+
 def _seed_withdrawn(op_id: str = "withdrawn.op") -> uuid.UUID:
     return _seed_request(
         tenant_id=_TENANT_A,

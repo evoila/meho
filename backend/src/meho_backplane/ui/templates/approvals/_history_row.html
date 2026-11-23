@@ -119,8 +119,8 @@
       {% else %}
         {% if req.reviewer %}
           <span aria-hidden="true">&middot;</span>
-          {#- An expired request keeps the person who approved it; MEHO
-              ended it, not that person. -#}
+          {# An expired request keeps the person who approved it; MEHO
+             ended it, not that person. #}
           <span>{% if req.status == "expired" %}approved by{% else %}by{% endif %} {{ subject(req.reviewer) }}</span>
         {% endif %}
         {% if req.decided_at %}

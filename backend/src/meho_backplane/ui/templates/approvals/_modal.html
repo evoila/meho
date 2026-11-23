@@ -245,8 +245,8 @@
         <div>
           <h4 class="font-semibold">
             {{ decision_verb }}
-            {#- An expired request with a reviewer was approved and then not
-                started in time: the reviewer approved it, MEHO ended it. -#}
+            {# An expired request with a reviewer was approved and then not
+               started in time: the reviewer approved it, MEHO ended it. #}
             {% if request.reviewer %}{% if request.status == "expired" %}<span data-testid="approval-expired-approved-by">&middot; approved by {{ subject(request.reviewer) }}</span>{% else %}by {{ subject(request.reviewer) }}{% endif %}{% endif %}
           </h4>
           {% if decision_ts %}

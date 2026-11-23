@@ -828,6 +828,18 @@ _FORM_REFUSED_ROWS = [
         id="no-user-part-and-an-at-sign-in-the-database-name",
     ),
     pytest.param(
+        f"{_A}{_H}/x@y:{_P1}@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-and-colon-after-a-slash-with-no-user-part",
+    ),
+    pytest.param(
+        f"{_A}{_H}/x@y:{_P1}@{_H}",  # trufflehog:ignore
+        id="raw-at-sign-and-colon-after-a-slash-with-no-user-part-or-database",
+    ),
+    pytest.param(
+        f"{_A}{_U}@{_H}/x@y:{_P1}@{_H}/{_D}",  # trufflehog:ignore
+        id="raw-at-sign-and-colon-after-a-slash-in-a-user-part-with-no-colon",
+    ),
+    pytest.param(
         f"host={_H} password={_P1} {_P2}",  # trufflehog:ignore
         id="key-word-raw-space-in-a-bare-password",
     ),

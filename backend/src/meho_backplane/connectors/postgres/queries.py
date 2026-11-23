@@ -547,7 +547,7 @@ def _password_end_unclear(
       not empty and not a whole number;
     - the user part holds a raw ``?`` with no raw ``:`` before it.
     """
-    at = text.find("@", host_start, question)
+    at = text.rfind("@", host_start, question)
     if at != -1 and ":" in text[start:at]:
         return True
     if host_start == start:

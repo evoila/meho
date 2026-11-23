@@ -144,10 +144,16 @@ op id, and its handoff row is deleted. This covers rows stored by an
 older release, for example a `k8s.apply` of a Secret whose manifest is
 still in `params`, or in the params of its parent. An approved request of
 another release also ends as `expired` in the same transaction, with one
-decision audit row (reason `release_changed`) and an `approval.expired`
-step event after the commit. So during a rolling update a MEHO that still
+decision audit row and an `approval.expired` step event after the commit.
+The audit row and the request read the same reason: `release_changed`
+while its time to start had not run out, else `deadline_passed` (the audit
+row then has no `reason`). So during a rolling update a MEHO that still
 runs the older release cannot start a request whose inputs are gone: its
-claim finds no `approved` row. It reads 500 rows per
+claim finds no `approved` row, and the database refuses any write that
+sets `resumed_at` on a `rejected`, `expired` or `withdrawn` request (the
+CHECK `ck_approval_request_ended_not_started`, migration `0182`). A claim
+of an older release that read the row before the clean-up and writes after
+it fails there. It reads 500 rows per
 transaction, in the order of their id, writes only rows that change, and
 logs the counts (`approval_stored_values_cleaned`). A failure is logged and
 the start goes on.

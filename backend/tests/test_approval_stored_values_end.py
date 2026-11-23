@@ -23,7 +23,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.dispatcher as dispatcher_module
@@ -346,6 +347,88 @@ async def test_an_approved_row_of_another_release_ends_with_its_clean_up(
     after = await _load(tenant_id, request_id)
     assert after.resumed_at is None
     assert after.resume_parent == {"op_id": "example.deploy"}
+
+
+async def _decisions(tenant_id: uuid.UUID) -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        rows = await s.scalars(
+            select(AuditLog).where(
+                AuditLog.path == "approval.decision", AuditLog.tenant_id == tenant_id
+            )
+        )
+        return list(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_claim_of_an_older_release_after_the_clean_up_commit_is_refused(
+    running_release: str,
+) -> None:
+    """The claim an older release writes: it checks only that ``resumed_at`` is empty."""
+    tenant_id = await _tenant()
+    request_id = await _park(tenant_id, _SPEC_OP, _SPEC_PARAMS, release_id="release-a")
+
+    # The older release reads the approved row first ...
+    seen = await _load(tenant_id, request_id)
+    assert seen.status == ApprovalRequestStatus.APPROVED.value
+
+    # ... the start-up clean-up of the new release ends it and commits ...
+    await hide_values_of_requests_that_cannot_run()
+    assert (await _load(tenant_id, request_id)).status == ApprovalRequestStatus.EXPIRED.value
+
+    # ... and then the older release writes its claim.
+    async with get_sessionmaker()() as s:
+        with pytest.raises(IntegrityError):
+            await s.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == seen.id, ApprovalRequest.resumed_at.is_(None))
+                .values(resumed_at=datetime.now(UTC))
+                .execution_options(synchronize_session=False)
+            )
+            await s.flush()
+        await s.rollback()
+
+    after = await _load(tenant_id, request_id)
+    assert after.status == ApprovalRequestStatus.EXPIRED.value
+    assert after.resumed_at is None
+
+
+@pytest.mark.asyncio
+async def test_an_overdue_approval_of_another_release_ends_with_one_reason(
+    running_release: str,
+) -> None:
+    tenant_id = await _tenant()
+    request_id = await _park(
+        tenant_id,
+        _SPEC_OP,
+        _SPEC_PARAMS,
+        decided_ago=_past_ttl(),
+        release_id="release-a",
+    )
+
+    count = await hide_values_of_requests_that_cannot_run()
+
+    row = await _load(tenant_id, request_id)
+    assert count.approvals_ended == 1
+    assert row.status == ApprovalRequestStatus.EXPIRED.value
+    assert approval_expired_reason(row) is ApprovalExpiredReason.DEADLINE_PASSED
+    decisions = await _decisions(tenant_id)
+    assert [d.status_code for d in decisions] == [410]
+    assert "reason" not in decisions[0].payload
+
+
+@pytest.mark.asyncio
+async def test_an_approval_of_another_release_in_its_time_ends_as_release_changed(
+    running_release: str,
+) -> None:
+    tenant_id = await _tenant()
+    request_id = await _park(tenant_id, _SPEC_OP, _SPEC_PARAMS, release_id="release-a")
+
+    await hide_values_of_requests_that_cannot_run()
+
+    row = await _load(tenant_id, request_id)
+    assert approval_expired_reason(row) is ApprovalExpiredReason.RELEASE_CHANGED
+    decisions = await _decisions(tenant_id)
+    assert [d.payload["reason"] for d in decisions] == ["release_changed"]
 
 
 async def _store_a_parent_the_old_way(

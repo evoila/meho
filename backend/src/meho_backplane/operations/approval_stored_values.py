@@ -39,6 +39,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalExpiredReason,
     _as_utc,
     _check_reviewer_role,
+    _deadline_has_passed,
     _expire_request,
     _now,
     _resolve_default_ttl,
@@ -157,23 +158,31 @@ async def _end_approval(
     """End an approved request of another release as ``expired``, with its audit row.
 
     Its time to start becomes the end of the TTL after its decision, as in
-    :func:`expire_unclaimed_approved_requests`, so a request that ends here
-    before that time reads with the reason ``release_changed``.
+    :func:`expire_unclaimed_approved_requests`. A request that ends here
+    before that time reads with the reason ``release_changed``, in its
+    audit row too. A request whose time already ran out reads with the
+    reason ``deadline_passed`` everywhere, as
+    :func:`~meho_backplane.operations.approval_queue.expire_older_release_requests`
+    does for a waiting request.
     """
     default_ttl = _resolve_default_ttl()
+    cutoff = _now()
     if request.decided_at is not None:
         request.expires_at = _as_utc(request.decided_at) + default_ttl
+    extra_payload: dict[str, Any] | None = None
+    if not _deadline_has_passed(request, cutoff, default_ttl):
+        extra_payload = {
+            "reason": ApprovalExpiredReason.RELEASE_CHANGED.value,
+            "request_release": request.release_id,
+            "running_release": running_release,
+        }
     await _expire_request(
         session,
         request,
         operator=expiry_operator(request.tenant_id),
-        cutoff=_now(),
+        cutoff=cutoff,
         default_ttl=default_ttl,
-        extra_payload={
-            "reason": ApprovalExpiredReason.RELEASE_CHANGED.value,
-            "request_release": request.release_id,
-            "running_release": running_release,
-        },
+        extra_payload=extra_payload,
     )
 
 
@@ -239,9 +248,11 @@ async def hide_values_of_requests_that_cannot_run(
 
     An approved request of another release also ends as ``expired`` in the
     transaction that removes its inputs, with one decision audit row
-    (reason ``release_changed``) and an ``approval.expired`` step event
-    after the commit. So a MEHO that still runs the older release during a
-    rolling update cannot start it any more.
+    and an ``approval.expired`` step event after the commit. So a MEHO that
+    still runs the older release during a rolling update cannot start it
+    any more: the CHECK ``ck_approval_request_ended_not_started`` refuses
+    a ``resumed_at`` on an ended request, also for a claim that read the
+    row before this commit.
     """
     running_release = running_release_id()
     clause = _cannot_run_clause(running_release)

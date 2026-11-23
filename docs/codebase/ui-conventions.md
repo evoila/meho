@@ -60,7 +60,16 @@ switch yet; it comes with the shared top bar.
   `styles.css`) have a value for each theme: `:root` for light,
   `[data-theme="evoila-dark"]` and the dark `@media` rule for dark.
   `topology-graph.js` reads them, because the graph draws on a canvas.
+- Code blocks get their highlighting colours from `ui/code_theme.py`, a
+  light and a dark set. Do not embed a pygments style of your own.
 - Check text and lines in both themes before a change goes in.
+- **Muted text is a solid colour, never faded.** Use `text-muted`
+  (descriptions, nav, table cells) or `text-subtle` (metadata, hashes,
+  labels), not `opacity-*` or `text-base-content/<n>`: faded text falls
+  below 4.5:1 on the light theme. Leave icons as they are. Inside a solid
+  alert, badge, button or `bg-<colour>` fill both classes inherit that
+  surface's own text colour. `tests/test_ui_text_contrast.py` enforces
+  this.
 
 ## Two things that cost an afternoon
 

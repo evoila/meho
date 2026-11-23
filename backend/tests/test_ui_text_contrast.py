@@ -158,3 +158,33 @@ def test_the_dark_blocks_agree() -> None:
     system = _block(css, '  [data-theme="evoila-system"]')
     for key in _TEXT_TOKENS:
         assert dark[f"meho-{key}"] == system[f"meho-{key}"], key
+
+
+# ------------------------------------------------- text on solid surfaces
+
+
+def _daisy(theme: str) -> dict[str, str]:
+    css = (brand_css_dir() / "evoila-daisyui.css").read_text(encoding="utf-8")
+    selector = '[data-theme="evoila-system"]' if theme == "light" else '[data-theme="evoila-dark"]'
+    return {k: v.strip() for k, v in _block(css, selector).items()}
+
+
+def test_text_tokens_inherit_inside_solid_alerts_and_fills() -> None:
+    """A text-muted hint in a solid red alert must not be grey-on-red: the
+    alert's own *-content colour is the readable one, so the tokens inherit."""
+    styles = (static_src_dir() / "styles.css").read_text(encoding="utf-8")
+    rule = styles.split(":is(.alert-info, .alert-success, .alert-warning, .alert-error)", 1)
+    assert len(rule) == 2, "the solid-surface inherit rule is missing"
+    body = rule[1].split("\n}\n", 1)[0]
+    assert "& :is(.text-muted, .text-subtle, .text-success, .text-warning, .text-error)" in body
+    assert "color: inherit;" in body
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("kind", ["info", "success", "warning", "error"])
+def test_alert_text_reads_on_its_alert(theme: str, kind: str) -> None:
+    """What the inherit rule falls back to: the alert's content colour on
+    the alert's fill, as the approval error message and its hint show."""
+    daisy = _daisy(theme)
+    fill, text = daisy[f"color-{kind}"], daisy[f"color-{kind}-content"]
+    assert _ratio(text, fill) >= 4.5, f"{kind}-content {text} on {fill}"

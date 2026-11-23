@@ -252,12 +252,13 @@ body::after {
  */
 @layer base {
   h1, h2, h3, h4 {
-    color: var(--evoila-headline);
+    /* The offline page does not load the brand tokens; fall back to body text. */
+    color: var(--evoila-headline, var(--color-base-content));
   }
 
-  :is(.alert, .badge, .btn, [class*="bg-primary"], [class*="bg-secondary"],
-      [class*="bg-accent"], [class*="bg-neutral"], [class*="bg-info"],
-      [class*="bg-success"], [class*="bg-warning"], [class*="bg-error"])
+  :is(.alert, .badge, .btn, [class~="bg-primary"], [class~="bg-secondary"],
+      [class~="bg-accent"], [class~="bg-neutral"], [class~="bg-info"],
+      [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"])
     :is(h1, h2, h3, h4) {
     color: inherit;
   }
@@ -290,6 +291,26 @@ body::after {
 .text-error,
 .badge-soft.badge-error {
   color: var(--meho-error-text);
+}
+
+/*
+ * On a solid coloured surface -- a solid alert, a solid badge, a button,
+ * a bg-<colour> fill -- the readable text colour is that surface's
+ * *-content value, which the surface sets. The text tokens above are for
+ * the page and cards; on red or amber they would be grey-on-red. So
+ * inside these surfaces they inherit. Soft and outline alerts sit on a
+ * light tint, where the tokens read, so they are left out; ~= matches
+ * whole class names, so tints like bg-error/10 are left out too.
+ */
+:is(.alert-info, .alert-success, .alert-warning, .alert-error):not(.alert-soft, .alert-outline, .alert-dash),
+:is(.badge-primary, .badge-secondary, .badge-accent, .badge-neutral, .badge-info, .badge-success,
+    .badge-warning, .badge-error):not(.badge-soft, .badge-outline, .badge-ghost, .badge-dash),
+.btn:not(.btn-ghost, .btn-link, .btn-outline, .btn-soft, .btn-dash),
+:is([class~="bg-primary"], [class~="bg-secondary"], [class~="bg-accent"], [class~="bg-neutral"],
+    [class~="bg-info"], [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"]) {
+  & :is(.text-muted, .text-subtle, .text-success, .text-warning, .text-error) {
+    color: inherit;
+  }
 }
 
 /*

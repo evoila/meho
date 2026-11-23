@@ -84,6 +84,8 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from meho_backplane.ui.code_theme import code_css
+
 __all__ = ["pygments_css", "render_markdown"]
 
 _lock = threading.Lock()
@@ -107,9 +109,12 @@ _LANG_PATTERN_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_+\-.]+$")
 #: with DaisyUI's own ``.highlight`` utility class.
 _FORMATTER = HtmlFormatter(nowrap=True, cssclass="memory-code")
 
-#: Cached CSS for the current pygments style. Generated once at module
-#: load; safe to embed in a ``<style>`` block on the detail page.
-_PYGMENTS_CSS: str = _FORMATTER.get_style_defs(".memory-code")
+#: Cached CSS for ``.memory-code`` blocks: the block on ``base-200`` with
+#: ``base-content`` text, and token colours for the light and the dark
+#: theme (:mod:`meho_backplane.ui.code_theme`). It used to be pygments'
+#: own defaults, whose fixed ``#f8f8f8`` background left plain code as
+#: light text on near-white in dark mode.
+_PYGMENTS_CSS: str = code_css(".memory-code")
 
 
 def _highlight_code(code: str, lang: str, attrs: str) -> str:

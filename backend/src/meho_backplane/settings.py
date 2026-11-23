@@ -1646,7 +1646,8 @@ class Settings(BaseModel):
         Off by default. When on, a call that must wait for approval gets the
         request that already waits when the same login in the same tenant
         already has one for the same call (same operation, connector, target,
-        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice).
+        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice,
+        and the same people behind the login).
         The answer has that request's id and ``approval_request_reused: true``.
         The call writes its own ``approval.reuse`` audit row with the caller's
         session, and the answer's ``audit_id`` is that row. It works with

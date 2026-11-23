@@ -45,7 +45,7 @@ import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
@@ -58,6 +58,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     IdempotencyKeyConflictError,
     ResumeRequester,
+    SelfApprovalForbiddenError,
     approval_result_state,
     approve_request,
     create_pending_request,
@@ -994,6 +995,65 @@ async def test_a_call_in_an_agent_run_or_a_multi_step_step_parks_again() -> None
     step = await _park_same_call(resume_parent={"op_id": "composite.op", "params": {}})
     assert len({first.id, in_run.id, step.id}) == 3
     assert await _approval_row_count() == 3
+
+
+def _person_behind(sub: str) -> list[dict[str, Any]]:
+    return [{"sub": sub, "name": None, "why": "agent_owner"}]
+
+
+async def _park_machine_call(
+    monkeypatch: pytest.MonkeyPatch, people_behind: list[dict[str, Any]]
+) -> ApprovalRequest:
+    """Park the same call of one agent login, with *people_behind* behind it."""
+
+    async def _find(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return people_behind
+
+    monkeypatch.setattr(approval_queue_module, "find_people_behind", _find)
+    operator = _operator(sub="agent-login", principal_kind=PrincipalKind.AGENT)
+    call_params = {"name": "web-01"}
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=operator,
+            connector_id="gh-rest-3",
+            op_id="POST:/vms",
+            target=None,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            proposed_effect={"safety_level": "caution"},
+        )
+        await s.commit()
+    return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_other_people_behind_the_login_gets_its_own_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = await _park_machine_call(monkeypatch, _person_behind("person-a"))
+    second = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s, second.id, operator=_operator(sub="person-b"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_the_same_people_behind_the_login_gets_the_waiting_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = await _park_machine_call(monkeypatch, _person_behind("Person-A"))
+    second = await _park_machine_call(monkeypatch, _person_behind("person-a"))
+
+    assert second.id == first.id
+    assert getattr(second, "_reused", False) is True
+    assert await _approval_row_count() == 1
 
 
 @pytest.mark.asyncio

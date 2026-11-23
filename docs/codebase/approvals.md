@@ -2788,6 +2788,12 @@ of this is the same:
   request of another person;
 - `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
   `work_ref` and the `reveal_secret` choice.
+- the people behind the login (`people_behind`, compared by the set of
+  `sub` values, casefolded). The self-approval check reads only the list
+  stored on the request, and the people behind an agent, service or
+  runner login can change between two calls. So a call whose people
+  behind differ gets its own request with its own list. A person's own
+  call has no people behind on either side.
 
 The answer has the same `approval_request_id` and
 `extras.approval_request_reused: true`. No new request row is made, and no

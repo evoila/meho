@@ -188,6 +188,7 @@ from meho_backplane.operations.grant_approval import (
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
+    behind_subs,
     find_people_behind,
     is_person_behind,
     people_behind_unknown,
@@ -1262,6 +1263,20 @@ def _same_call_reuse_applies(
     return get_settings().approval_same_call_reuse
 
 
+async def _own_people_behind(
+    session: AsyncSession, operator: Operator
+) -> list[dict[str, Any]] | None:
+    """The people behind the caller's own login (``None`` for a person)."""
+    return await find_people_behind(
+        session,
+        tenant_id=operator.tenant_id,
+        sub=operator.sub,
+        client_id=operator.client_id,
+        kind=operator.principal_kind.value,
+        runner_id=operator.runner_id,
+    )
+
+
 async def _find_same_call_pending_request(
     session: AsyncSession,
     *,
@@ -1273,6 +1288,7 @@ async def _find_same_call_pending_request(
     params: dict[str, Any],
     preview_hash: str | None,
     reveal_secret: bool,
+    people_behind: list[dict[str, Any]] | None,
 ) -> ApprovalRequest | None:
     """Return the waiting request of this login for the same call, or ``None``.
 
@@ -1287,8 +1303,11 @@ async def _find_same_call_pending_request(
     never counts either. The match
     is the same as for a retry key: same operation, connector, target, params,
     ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
-    choice.
+    choice and the same people behind the login (*people_behind*, compared
+    by casefolded ``sub``): the self-approval check reads only the list
+    stored on the request.
     """
+    own_people = behind_subs(people_behind)
     stmt = (
         select(ApprovalRequest)
         .where(
@@ -1316,6 +1335,7 @@ async def _find_same_call_pending_request(
             and existing.preview_hash == preview_hash
             and existing.work_ref == work_ref_var.get()
             and bool(existing.reveal_secret) == reveal_secret
+            and behind_subs(existing.people_behind) == own_people
             and not _is_overdue_pending(existing)
         ):
             return existing
@@ -1948,7 +1968,11 @@ async def create_pending_request(
         if live is not None:
             return _reuse(live)
 
+    own_people_behind: list[dict[str, Any]] | None = None
+    own_people_known = False
     if _same_call_reuse_applies(run_id, resume_parent, requester):
+        own_people_behind = await _own_people_behind(session, operator)
+        own_people_known = True
         same_call = await _find_same_call_pending_request(
             session,
             tenant_id=operator.tenant_id,
@@ -1959,6 +1983,7 @@ async def create_pending_request(
             params=params,
             preview_hash=preview_hash,
             reveal_secret=reveal_secret,
+            people_behind=own_people_behind,
         )
         if same_call is not None:
             reused = _reuse(same_call)
@@ -2002,13 +2027,8 @@ async def create_pending_request(
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
         principal_kind = operator.principal_kind.value
-        people_behind = await find_people_behind(
-            session,
-            tenant_id=operator.tenant_id,
-            sub=operator.sub,
-            client_id=operator.client_id,
-            kind=principal_kind,
-            runner_id=operator.runner_id,
+        people_behind = (
+            own_people_behind if own_people_known else await _own_people_behind(session, operator)
         )
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the

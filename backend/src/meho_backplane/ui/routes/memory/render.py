@@ -177,11 +177,17 @@ def render_markdown(body: str) -> Markup:
     return Markup(rendered)
 
 
-def pygments_css() -> str:
+def pygments_css() -> Markup:
     """Return the pre-generated pygments CSS for the ``.memory-code`` class.
 
     Embedded as a ``<style>`` block on the entry-detail page so the
     syntax-highlight span colours render without a separate stylesheet
     round-trip. Cached at module load; safe to call on every request.
+
+    Returned as :class:`~markupsafe.Markup` so autoescaping keeps the
+    quotes in the dark-theme selectors (``[data-theme="evoila-dark"]``).
+    Escaped to ``&#34;`` inside ``<style>``, the selectors match nothing
+    and dark pages keep the light token colours. The CSS is built only
+    from pygments' bundled styles and fixed selectors, so it is safe.
     """
-    return _PYGMENTS_CSS
+    return Markup(_PYGMENTS_CSS)

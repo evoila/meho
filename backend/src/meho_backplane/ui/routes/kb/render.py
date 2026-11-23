@@ -145,7 +145,7 @@ def render_markdown(body: str) -> Markup:
     return Markup(html)
 
 
-def pygments_css() -> str:
+def pygments_css() -> Markup:
     """Return the CSS token-colour rules for the ``kb-code`` formatter.
 
     Callers inject this into a ``<style>`` block in the entry-detail
@@ -154,5 +154,11 @@ def pygments_css() -> str:
     :mod:`meho_backplane.ui.code_theme`). The string is pure CSS (no
     ``<style>`` wrapper) so callers can compose it with other inline
     styles as needed.
+
+    Returned as :class:`~markupsafe.Markup` so autoescaping keeps the
+    quotes in the dark-theme selectors (``[data-theme="evoila-dark"]``).
+    Escaped to ``&#34;`` inside ``<style>``, the selectors match nothing
+    and dark pages keep the light token colours. The CSS is built only
+    from pygments' bundled styles and fixed selectors, so it is safe.
     """
-    return _PYGMENTS_CSS
+    return Markup(_PYGMENTS_CSS)

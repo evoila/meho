@@ -71,6 +71,16 @@ switch yet; it comes with the shared top bar.
   surface's own text colour. `tests/test_ui_text_contrast.py` enforces
   this.
 
+The same view in both themes, from #6823. The topology page is the real
+template, `topology-graph.js` and the built CSS, with 15 sample nodes and
+one selected. The second pair shows highlighted code in a knowledge and a
+memory entry, and the text of a solid error and warning alert.
+
+| Light | Dark |
+|---|---|
+| ![Topology graph, light theme](ui-screenshots/topology-light.png) | ![Topology graph, dark theme](ui-screenshots/topology-dark.png) |
+| ![Code blocks and alerts, light theme](ui-screenshots/code-light.png) | ![Code blocks and alerts, dark theme](ui-screenshots/code-dark.png) |
+
 ## Two things that cost an afternoon
 
 ### The dev server can serve new templates against old Python

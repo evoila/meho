@@ -12,6 +12,10 @@ under the lock once the winner commits. It must look the key up again and
 return the winner's replacement, not the expired row it read first: the
 client would otherwise hold an id that can no longer be approved.
 
+A third race is two retries whose key a request of other people behind
+the login holds. Each gets its own request beside the holder; the holder
+row is locked first, so the two end with one new request.
+
 The second race is a late retry against an approve. The approve locks the
 row before the deadline and commits while the retry waits for the lock.
 The retry's locked re-read misses, and its next key lookup must refresh the
@@ -40,7 +44,12 @@ from sqlalchemy import func, select
 import meho_backplane.operations.approval_queue as approval_queue_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestKey,
+    ApprovalRequestStatus,
+    AuditLog,
+)
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import approve_request, create_pending_request
 from tests._people_behind_helpers import give_known_person
@@ -242,3 +251,75 @@ async def test_late_retry_that_waits_on_an_approval_gets_the_approved_row(
     decisions = await _audit_rows("approval.decision", original.id)
     assert [d.payload.get("decision") for d in decisions] == ["approved"]
     assert len(await _audit_rows("approval.request", original.id)) == 1
+
+
+@_skip_no_docker
+async def test_two_retries_beside_a_holder_of_other_people_get_one_request(
+    pg_engine: None,  # noqa: F811 — fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent retries with new people behind the login end with one new request.
+
+    The key is held by a request asked with person-a behind the login. Both
+    retries run with person-b behind it, so neither may get that request.
+    A barrier after the first key lookup makes both miss before either
+    inserts. Both inserts hit the unique index, both lock the holder row,
+    and the second one, once it gets the lock, finds the first one's new
+    request through its linked key.
+    """
+    behind = {"subs": ["person-a"]}
+
+    async def _people(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [{"sub": sub, "name": None, "why": "agent_owner"} for sub in behind["subs"]]
+
+    monkeypatch.setattr(approval_queue_module, "find_people_behind", _people)
+    holder = await _submit()
+    behind["subs"] = ["person-b"]
+
+    barrier = asyncio.Barrier(2)
+    real_find = approval_queue_module._find_idempotent_request
+    lookups = {"n": 0}
+
+    async def _find_then_wait_for_the_other(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        found = await real_find(*args, **kwargs)
+        lookups["n"] += 1
+        if lookups["n"] <= 2:
+            await barrier.wait()
+        return found
+
+    monkeypatch.setattr(
+        approval_queue_module, "_find_idempotent_request", _find_then_wait_for_the_other
+    )
+
+    one, two = await asyncio.wait_for(asyncio.gather(_submit(), _submit()), timeout=20)
+
+    assert one.id == two.id
+    assert one.id != holder.id
+    assert sorted(getattr(r, "_reused", False) for r in (one, two)) == [False, True]
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalRequest).where(ApprovalRequest.tenant_id == _TENANT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {row.id: row.idempotency_key for row in rows} == {holder.id: _KEY, one.id: None}
+        links = (
+            (
+                await session.execute(
+                    select(ApprovalRequestKey).where(
+                        ApprovalRequestKey.approval_request_id.in_([holder.id, one.id])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [(link.approval_request_id, link.idempotency_key) for link in links] == [
+            (one.id, _KEY)
+        ]
+    assert len(await _audit_rows("approval.request", one.id)) == 1

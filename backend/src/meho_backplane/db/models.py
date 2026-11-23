@@ -7785,7 +7785,10 @@ class ApprovalRequestKey(Base):
     the waiting request of the same call that was made with key A. That
     request row holds only key A in ``idempotency_key``. This row keeps key
     B, so a later retry with key B gets the same request, also after it was
-    approved. Read by the key lookup in
+    approved. A call that gets its own request while a request of another
+    kind of login, other people behind the login or another choice to reveal
+    secret values holds its key keeps that key here too. Read by the key
+    lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
     ``0183``.
 

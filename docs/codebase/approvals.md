@@ -2740,6 +2740,17 @@ for approval.
   `extras.approval_request_id` and `extras.approval_request_reused: true`.
   No new row, no new `approval.request` audit row, no second
   `approval.pending` event. The first row's audit record stands.
+- **Asked the same way.** A request counts for the key only when it was
+  asked the same way as this call (`_Asker` in `approval_queue.py`): the
+  same kind of login (`principal_kind`), the same people behind the login
+  (`people_behind`, compared by the set of `sub` values, casefolded: the
+  compare of the self-approval rule, `behind_subs`) and the same
+  `reveal_secret` choice. A request asked another way is not returned, and
+  the call gets its own request, which waits for a person. The first
+  request stays as it is. The new request cannot keep the key in its own
+  column while the first one holds it there (the unique index below), so
+  MEHO keeps the key for it in `approval_request_key`. A later retry asked
+  the same way as the new request gets the new request back.
 - **Same key, different call.** "Identical" means the same `op_id`,
   `connector_id`, target, `params_hash`, `preview_hash`, and `work_ref`. If
   any of them differs, the call is refused with `status="denied"` and
@@ -2769,9 +2780,10 @@ for approval.
   `approval_request_reused`. After commit the dispatcher publishes
   `approval.expired` for the old request and `approval.pending` for the
   new one.
-- **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
-  requesters, or two runs with different `work_ref` values, never share one
-  request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
+- **Who can match.** The key is scoped to `(tenant_id, principal_sub)` and
+  to the way the call was asked (see "Asked the same way"). Two requesters,
+  two logins with one `principal_sub` but other people behind them, or two
+  runs with different `work_ref` values, never share one request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
   a call with no key makes a new request every time. With it on, see
   "The same call without the same key" below.
 
@@ -2789,6 +2801,8 @@ of this is the same:
 - `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
   `work_ref` and the `reveal_secret` choice.
 - the kind of login (`principal_kind`: `user`, `agent`, `service` or `runner`).
+  The kind, the people behind the login and the `reveal_secret` choice are
+  the same compare as for a retry key (`_Asker`).
   The approval checks read the kind stored on the request. So a call of
   the same login with another kind gets its own request with its own
   kind.
@@ -2854,7 +2868,13 @@ idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
 ('pending', 'approved')`, makes sure two racing calls cannot both insert.
 The losing insert runs in a savepoint (`_insert_idempotent_request`). When
 the index refuses it, the savepoint rolls back and the winner's row is
-returned the same way as a normal retry.
+returned the same way as a normal retry. When the index refuses it
+because a request asked another way holds the key, MEHO locks that
+holder row (`_lock_key_holder`, `SELECT ... FOR UPDATE`), looks the key up
+again, and only then stores the new request with the key in
+`approval_request_key`. So two such calls at the same moment end with one
+new request: the second one waits for the lock and then finds the first
+one's request through the linked key.
 
 Two late retries can also race to expire the same overdue request. Only one
 gets the row lock. When the other's locked re-read finds no `pending` row,
@@ -2867,8 +2887,9 @@ first. That second lookup refreshes the row the session already holds
 retry waits for the lock: the row is now `approved`, and the retry returns
 it. With the cached `pending` state it would try to expire the row again,
 miss again, and never return.
-`tests/integration/test_approval_idempotent_retry_pg.py` runs both races
-(two late retries; a late retry against an approve) on a real Postgres.
+`tests/integration/test_approval_idempotent_retry_pg.py` runs these races
+(two late retries; a late retry against an approve; two retries beside a
+holder asked another way) on a real Postgres.
 
 **What does not change.** The lookup runs inside `create_pending_request`,
 after every park gate in `_handle_needs_approval`. So a retry still goes

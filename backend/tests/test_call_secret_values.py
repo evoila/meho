@@ -522,3 +522,30 @@ async def test_an_answer_with_no_secret_value_is_the_same(
         params={"password": _SECRET},
     )
     assert result.result == answer
+
+
+async def test_a_mapping_under_a_secret_name_is_walked_by_its_keys(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _ = await _run(
+        session,
+        monkeypatch,
+        op_id=_WRITE_OP,
+        behave=lambda: {"stored_path": "labs/gen-user", "note": f"saved {_SECRET}"},
+        params={"generate_password": {"path": "labs/gen-user", "password": _SECRET}},
+    )
+    assert result.status == "ok"
+    assert result.result == {"stored_path": "labs/gen-user", "note": f"saved {CALL_SECRET_MARKER}"}
+
+
+def test_only_scalars_under_a_secret_name_are_known_values() -> None:
+    params = {
+        "generate_password": {"path": "labs/gen-user"},
+        "secrets": ["list-secret-1", "list-secret-2"],
+        "client_secret": {"value": "inner-plain"},
+        "wrapper": {"password": "inner-secret-3"},
+    }
+    values = set(collect_param_secret_values(params))
+    assert "labs/gen-user" not in values
+    assert "inner-plain" not in values
+    assert {"list-secret-1", "list-secret-2", "inner-secret-3"} <= values

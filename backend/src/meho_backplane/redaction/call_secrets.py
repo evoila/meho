@@ -209,36 +209,40 @@ def scrub_call_secrets_tree(node: Any) -> Any:
     return scope.scrub_tree(node) if scope else node
 
 
-def _leaves(node: Any) -> Iterable[str]:
+def _scalar(node: Any) -> str | None:
     if isinstance(node, bool) or node is None:
-        return
+        return None
     if isinstance(node, str):
-        yield node
-    elif isinstance(node, int | float):
-        yield str(node)
-    elif isinstance(node, Mapping):
-        for value in node.values():
-            yield from _leaves(value)
-    elif isinstance(node, list | tuple):
-        for item in node:
-            yield from _leaves(item)
+        return node
+    if isinstance(node, int | float):
+        return str(node)
+    return None
 
 
 def collect_param_secret_values(
     node: Any, *, marked_names: frozenset[str] = frozenset()
 ) -> Iterable[str]:
-    """Yield the leaf values under a secret name, or under a name in *marked_names*."""
+    """Yield the values under a secret name, or under a name in *marked_names*.
+
+    Under a secret name, a scalar or a list of scalars is a known value. A
+    mapping under any name is walked, and the name rule applies to its keys.
+    """
     from meho_backplane.broadcast.events import is_secret_param_name
 
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            if str(key) in marked_names or is_secret_param_name(str(key)):
-                yield from _leaves(value)
-            else:
-                yield from collect_param_secret_values(value, marked_names=marked_names)
-    elif isinstance(node, list | tuple):
-        for item in node:
-            yield from collect_param_secret_values(item, marked_names=marked_names)
+    def walk(node: Any, secret: bool) -> Iterable[str]:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                name = str(key)
+                yield from walk(value, name in marked_names or is_secret_param_name(name))
+        elif isinstance(node, list | tuple):
+            for item in node:
+                yield from walk(item, secret)
+        elif secret:
+            text = _scalar(node)
+            if text is not None:
+                yield text
+
+    yield from walk(node, False)
 
 
 def marked_secret_names(schema: Any) -> frozenset[str]:

@@ -1258,6 +1258,12 @@ The answer:
   described above. The REST answer does not change. The switch is
   measured with the retrieval-eval runner (off, on, off) before anyone
   asks to turn it on.
+- The tool text follows the same switch
+  (`mcp/tools/_kb_wiki_order_text.py`). With it on, the description of
+  `search_knowledge` (full and short) says "store hits and knowledge repo
+  hits in turns (each list best first)" in place of "best first", and the
+  cut text says "hits at the end of the list were left out". With it off,
+  both texts are unchanged.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
   `wiki.hits`; `null` on every other call. `meho kb search` prints the
   wiki hits after the table, or the line that says why the wiki was not

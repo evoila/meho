@@ -29,6 +29,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     PrincipalBlockedStepError,
@@ -36,6 +37,7 @@ from meho_backplane.auth.principal_block import (
     checking_logins_for_steps,
     reset_block_cache,
 )
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.github.composites._git import branch_commit_files_composite
 from meho_backplane.connectors.github.connector import GitHubRestConnector
@@ -58,6 +60,8 @@ _NEW_COMMIT_SHA = "e" * 40
 sent: list[str] = []
 #: What happens after the first request (set by each test).
 after_first_request: list[Callable[[], Awaitable[None]]] = []
+#: What happens before the first request (set by each test).
+before_first_request: list[Callable[[], Awaitable[None]]] = []
 
 
 class _DirectConnector(HttpConnector):
@@ -93,10 +97,21 @@ _TARGET = SimpleNamespace(name="t", host="target.test", port=443)
 async def direct_requests_composite(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
     """Two requests through the connector's own session, the hook between them."""
     connector = _DirectConnector()
+    for hook in before_first_request:
+        await hook()
     await connector._post_json(_TARGET, "/things", operator=operator, json={"n": 1})
     for hook in after_first_request:
         await hook()
     await connector._post_json(_TARGET, "/things/2", operator=operator, json={"n": 2})
+    return {"done": True}
+
+
+async def catching_composite(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    """The same requests; every error is caught and the handler goes on."""
+    try:
+        await direct_requests_composite(operator, target, params)
+    except Exception:
+        return {"done": False}
     return {"done": True}
 
 
@@ -111,6 +126,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_registry()
     sent.clear()
     after_first_request.clear()
+    before_first_request.clear()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
@@ -118,6 +134,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_registry()
     sent.clear()
     after_first_request.clear()
+    before_first_request.clear()
 
 
 @pytest.fixture
@@ -164,6 +181,15 @@ def _unreadable(monkeypatch: pytest.MonkeyPatch) -> Callable[[], Awaitable[None]
     return _break_now
 
 
+def _assert_part_may_have_run(result: OperationResult) -> None:
+    """The answer after an earlier request was sent."""
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    assert "A part of the operation may have run." in str(result.error)
+    assert "did not run" not in str(result.error)
+    assert "try again" not in str(result.error).lower()
+
+
 async def test_direct_request_of_a_blocked_person_is_not_sent(
     session: AsyncSession, embedding: AsyncMock
 ) -> None:
@@ -176,6 +202,59 @@ async def test_direct_request_of_a_blocked_person_is_not_sent(
     assert sent == ["POST /things"]
     assert result.status == "denied", result
     assert result.extras["error_code"] == "principal_blocked"
+    _assert_part_may_have_run(result)
+
+
+async def test_audit_row_of_a_refused_direct_request_says_denied(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    await h.register_child(embedding)
+    await h.register_composite(session, _DIRECT_OP_ID, "direct_requests_composite", module=_MODULE)
+    after_first_request.append(_block_requester)
+
+    result = await h.run(_DIRECT_OP_ID)
+
+    (row,) = await h.rows(_DIRECT_OP_ID)
+    assert row.id == result.audit_id
+    assert row.payload["result_status"] == "denied"
+    assert row.status_code == 403
+    assert row.payload["error"]["error_code"] == "principal_blocked"
+    async with get_sessionmaker()() as fresh:
+        found = await query_audit(
+            AuditQueryFilters(result_status="denied"), tenant_id=h.TENANT_ID, session=fresh
+        )
+    assert [entry.id for entry in found.rows] == [row.id]
+
+
+@pytest.mark.parametrize("case", ["blocked", "unreadable"])
+async def test_first_direct_request_refused_means_nothing_started(
+    session: AsyncSession, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    await h.register_child(embedding)
+    await h.register_composite(session, _DIRECT_OP_ID, "direct_requests_composite", module=_MODULE)
+    before_first_request.append(_block_requester if case == "blocked" else _unreadable(monkeypatch))
+
+    result = await h.run(_DIRECT_OP_ID)
+
+    assert sent == []
+    assert result.status == ("denied" if case == "blocked" else "error"), result
+    assert result.extras["execution_outcome"] == "not_started"
+    assert ("Try again" in str(result.error)) is (case == "unreadable")
+
+
+async def test_refused_direct_request_stops_a_handler_that_catches_errors(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    await h.register_child(embedding)
+    await h.register_composite(session, _DIRECT_OP_ID, "catching_composite", module=_MODULE)
+    after_first_request.append(_block_requester)
+
+    result = await h.run(_DIRECT_OP_ID)
+
+    assert sent == ["POST /things"]
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == "principal_blocked"
+    _assert_part_may_have_run(result)
 
 
 async def test_direct_request_is_refused_when_the_block_list_cannot_be_read(
@@ -190,6 +269,7 @@ async def test_direct_request_is_refused_when_the_block_list_cannot_be_read(
     assert sent == ["POST /things"]
     assert result.status == "error", result
     assert result.extras["error_code"] == "principal_block_check_unavailable"
+    _assert_part_may_have_run(result)
 
 
 async def test_request_outside_a_multi_step_operation_reads_no_block_list(

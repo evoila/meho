@@ -94,6 +94,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import raise_if_step_login_blocked
+from meho_backplane.auth.principal_block_run import mark_request_sent
 from meho_backplane.connectors._shared.cache_key import (
     DEFAULT_PORTS,
     effective_scheme,
@@ -466,6 +467,11 @@ class _WireCappedStream(httpx.AsyncByteStream):
         await self._inner.aclose()
 
 
+async def _note_request_sent(_request: httpx.Request) -> None:
+    """Request hook of every connector client: the running operation sends a request."""
+    mark_request_sent()
+
+
 async def _read_capped_json_response(
     client: httpx.AsyncClient,
     method: str,
@@ -523,6 +529,7 @@ async def _read_capped_json_response(
     ``raise_for_status``, and ``json_payload_or_empty`` — sees a response
     byte-identical to the non-streamed path.
     """
+    mark_request_sent()
     async with client.stream(
         method,
         path,
@@ -918,6 +925,9 @@ class HttpConnector(Connector):
             # login body to an attacker-controlled ``Location``
             # (open-redirect SSRF).
             transport=transport,
+            # A refusal by the block list after this request says that a
+            # part of the operation may have run.
+            event_hooks={"request": [_note_request_sent]},
         )
 
     async def _ephemeral_http_client(self, target: Target) -> httpx.AsyncClient:

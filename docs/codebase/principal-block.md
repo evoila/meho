@@ -31,6 +31,8 @@ The text names no admin and no reason.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
+- `meho_backplane/auth/principal_block_run.py`: what one running operation
+  sent, and the step the block list refused in it.
 - `meho_backplane/agent/principal_block_gate.py`: the check for hosted
   agent runs (`PrincipalBlockGate`).
 - CLI: `cli/internal/cmd/principal/`.
@@ -57,7 +59,30 @@ Where the list is checked:
 | `invoke_agent` (`agent/invoke.py`) | A child run that is refused because its person is blocked ends failed with the refusal text, and its heartbeat stops. The refusal goes on to the parent run: the parent stops with no retry and ends failed with the same text. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
-A block made while a multi-step operation runs stops its next step.
+A block made while a multi-step operation runs stops its next step, and
+the whole operation with it. The operation answers with the refusal, also
+when its handler catches the error of the step. An inventory read
+(`linux.migration.inventory` and the others) stores no inventory then. No
+further step starts. A list that cannot be read stops the operation the
+same way.
+
+The answer says what was sent (`execution_outcome`):
+
+- `not_started`: nothing was sent. When the list cannot be read, the text
+  says "Try again."
+- `uncertain`: an earlier step or request of the same operation was sent,
+  also in the run before an approval. The text says that a part of the
+  operation may have run, and not to run it again before the target is
+  checked. A request counts as sent when the HTTP connector base sends it.
+  A step on another kind of connector (SSH, a vendor library) counts from
+  its start.
+
+When a target session ends and the dispatcher sends a step again, a refusal
+before the second try is the same answer as on the first try.
+
+The audit row of the stopped operation has the status `denied` (403) with
+the code `principal_blocked`. When the list cannot be read it has the status
+`error`.
 
 Each step checks its own operator and every login bound with
 `checking_logins_for_steps` (`auth/principal_block.py`): the operator of

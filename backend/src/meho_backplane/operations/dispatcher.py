@@ -309,6 +309,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.auth.principal_block_run import (
+    mark_request_sent,
+    raise_if_step_was_refused,
+    tracking_run,
+)
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -856,6 +861,36 @@ async def _run_source_kind_branch(
     params: dict[str, Any],
     audit_id: uuid.UUID,
 ) -> Any:
+    """Run the operation's branch; a step the block list refused stops it.
+
+    Raises that refusal (:exc:`PrincipalBlockedStepError`) also when the
+    handler caught the error of the step and went on or failed another way.
+    """
+    try:
+        raw = await _run_source_kind_handler(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except Exception:
+        raise_if_step_was_refused()
+        raise
+    raise_if_step_was_refused()
+    return raw
+
+
+async def _run_source_kind_handler(
+    *,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    audit_id: uuid.UUID,
+) -> Any:
     """Execute the descriptor's source_kind branch and return the raw response.
 
     Composite branches additionally bind the
@@ -869,6 +904,10 @@ async def _run_source_kind_branch(
     extended the bind to the direct seam so its parked children are no
     longer orphaned).
     """
+    if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
+        # Only the HTTP connector base notes each request it sends. Any other
+        # client (SSH, a vendor library) counts as sent from its start.
+        mark_request_sent()
     if descriptor.source_kind == "ingested":
         assert connector_instance is not None  # resolver miss handled by caller
         return await dispatch_ingested(
@@ -1023,7 +1062,11 @@ async def _execute_and_audit(
     try:
         # A multi-step run keeps a log of its steps, so its error result is
         # stored as uncertain when a step ended uncertain (_composite_steps).
-        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+        with (
+            track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
+            # What this operation sent, and the step the block list refused.
+            tracking_run(is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL),
+        ):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
                 connector_id=connector_id,
@@ -1787,18 +1830,18 @@ async def _run_branch_with_error_handling(
             audit_id=audit_id,
         )
     except PrincipalBlockedStepError as blocked_exc:
-        # A step sent straight to the target stopped before its request:
-        # a login of the step is blocked, or the list cannot be read.
-        duration_ms = _elapsed_ms(started)
-        return await _audit_error_and_return(
-            refusal_for_blocked_step(op_id, blocked_exc),
+        # A step or a request was not sent: a login of the step is blocked,
+        # or the list cannot be read.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            duration_ms=duration_ms,
+            started=started,
         )
     except (ImportError, TypeError) as exc:
         duration_ms = _elapsed_ms(started)
@@ -2308,6 +2351,38 @@ async def _audit_returned_result(
     return raw.model_copy(update={"audit_id": receipt})
 
 
+async def _audit_blocked_step_and_return(
+    blocked_exc: PrincipalBlockedStepError,
+    *,
+    op_id: str,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    started: float,
+) -> OperationResult:
+    """Write the audit row of an operation the block list stopped, and return its answer.
+
+    The row has the status the caller gets: ``denied`` (403) with the code
+    ``principal_blocked`` for a blocked login, ``error`` when the list cannot
+    be read.
+    """
+    refusal = refusal_for_blocked_step(op_id, blocked_exc)
+    audited: OperationResult = await _audit_returned_result(
+        refusal.model_copy(update={"duration_ms": _elapsed_ms(started)}),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        started=started,
+    )
+    return audited
+
+
 async def _audit_error_and_return(
     result: OperationResult,
     *,
@@ -2695,6 +2770,20 @@ async def _retry_after_expired_session_answer(
             params=params,
             audit_id=audit_id,
         )
+    except PrincipalBlockedStepError as blocked_exc:
+        # The person was blocked before the repeat: the same answer as on the
+        # first try.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)
         if session_expired_by_hook(connector_instance, retry_exc.response):
@@ -2799,6 +2888,20 @@ async def _retry_after_session_invalidation(
             target=target,
             params=params,
             audit_id=audit_id,
+        )
+    except PrincipalBlockedStepError as blocked_exc:
+        # The person was blocked before the repeat: the same answer as on the
+        # first try.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
         )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)

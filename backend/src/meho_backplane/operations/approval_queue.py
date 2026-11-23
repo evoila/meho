@@ -2071,7 +2071,9 @@ async def create_pending_request(
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
-            stored_resume_parent = {"op_id": resume_parent["op_id"]}
+            stored_resume_parent = {
+                key: resume_parent[key] for key in ("op_id", "request_sent") if key in resume_parent
+            }
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -3215,7 +3217,11 @@ async def refuse_resume_if_asker_blocked(
     waiter (:mod:`meho_backplane.agent.approval_wait`).
     """
     refusal = await refuse_if_principal_blocked(
-        request.op_id, request.principal_sub, request.tenant_id
+        request.op_id,
+        request.principal_sub,
+        request.tenant_id,
+        # The multi-step operation sent a step before it waited.
+        earlier_sent=(request.resume_parent or {}).get("request_sent") is True,
     )
     if refusal is None:
         return None
@@ -3644,7 +3650,11 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+        with composite_resume_steps(
+            parent_op_id,
+            resume_parent.get("steps"),
+            earlier_sent=resume_parent.get("request_sent") is True,
+        ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)

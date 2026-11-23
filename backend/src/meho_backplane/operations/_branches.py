@@ -619,6 +619,7 @@ async def dispatch_composite(
     # audit-tree contextvar lives in ``_audit``; deferring to call time
     # mirrors ``get_dispatch_child`` / ``enforce_subop_policy``.
     from meho_backplane.auth.principal_block import checking_logins_for_steps
+    from meho_backplane.auth.principal_block_run import mark_request_sent
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.composite import composite_dispatch_var
     from meho_backplane.operations.composite_steps import composite_step_journal
@@ -633,6 +634,14 @@ async def dispatch_composite(
         call_kwargs["dispatch_child"] = dispatch_child
     if "connector" in param_names:
         call_kwargs["connector"] = connector_instance
+    if (
+        ("connector" in param_names or inspect.ismethod(handler))
+        and connector_instance is not None
+        and not hasattr(connector_instance, "_request_json")
+    ):
+        # The handler can call the target with a client that does not note
+        # each request (SSH, a vendor library): it counts as sent.
+        mark_request_sent()
     audit_token = parent_audit_id_var.set(audit_id)
     # Bind this composite's identity for approval-resume of a parked sub-op
     # (#3351; see the ``composite_dispatch_var`` docstring).
@@ -643,9 +652,11 @@ async def dispatch_composite(
         # Each request a step sends straight to the target checks the block
         # list for this operator (``auth.principal_block``).
         with (
-            composite_step_journal(op_id),
+            composite_step_journal(op_id) as journal,
             checking_logins_for_steps(operator.sub, operator.tenant_id),
         ):
+            if journal.earlier_sent:
+                mark_request_sent()
             return await handler(**call_kwargs)
     finally:
         composite_dispatch_var.reset(composite_token)

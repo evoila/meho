@@ -241,6 +241,7 @@ async def test_second_step_through_dispatch_is_refused_once_the_person_is_blocke
     assert sent == [f"{_STEP_OP_ID}:1"]
     assert result.status == "denied", result
     assert result.extras["error_code"] == "principal_blocked"
+    assert result.extras["execution_outcome"] == "uncertain"
 
 
 @pytest.mark.parametrize(
@@ -262,6 +263,7 @@ async def test_governed_step_of_a_blocked_person_is_not_sent(
     assert isinstance(result, OperationResult)
     assert result.status == "denied", result
     assert result.extras["error_code"] == "principal_blocked"
+    assert result.extras["execution_outcome"] == "not_started"
 
 
 @pytest.mark.parametrize(
@@ -286,6 +288,7 @@ async def test_governed_step_is_refused_when_the_block_list_cannot_be_read(
     assert sent == []
     assert result.status == "error", result
     assert result.extras["error_code"] == "principal_block_check_unavailable"
+    assert result.extras["execution_outcome"] == "not_started"
 
 
 async def _block_requester(_operator: Operator) -> None:
@@ -319,3 +322,47 @@ async def test_approver_run_stops_once_the_person_who_asked_is_blocked(
     assert sent == [f"{_STEP_OP_ID}:1"]
     assert result.status == "denied", result
     assert result.extras["error_code"] == "principal_blocked"
+    assert result.extras["execution_outcome"] == "uncertain"
+
+
+@pytest.mark.parametrize(
+    ("op_id", "handler", "outcome"),
+    [
+        pytest.param(h.WAIT_OP_ID, "step_waits_composite", "uncertain", id="after-a-step"),
+        pytest.param(
+            _WAIT_THEN_CHILD_OP_ID,
+            "wait_then_child_steps_composite",
+            "not_started",
+            id="at-the-first-step",
+        ),
+    ],
+)
+@pytest.mark.parametrize("case", ["blocked", "unreadable"])
+async def test_approved_run_refused_after_a_wait_says_if_a_step_was_sent(
+    session: AsyncSession,
+    embedding: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    handler: str,
+    outcome: str,
+    case: str,
+) -> None:
+    await _register(session, embedding, _TWO_STEPS_OP_ID, "two_child_steps_composite")
+    module = h.__name__ if op_id == h.WAIT_OP_ID else _MODULE
+    await h.register_composite(session, op_id, handler, module=module)
+    first = await h.run(op_id)
+    assert first.status == "awaiting_approval", first
+    request = await h.approve(UUID(first.extras["approval_request_id"]), sub="op-approver")
+    if case == "blocked":
+        await _block_requester(h.operator())
+    else:
+        await _unreadable(monkeypatch)(h.operator())
+
+    result = await resume_dispatch_after_approval(
+        operator=h.operator(sub="op-approver"), request=request, params=None
+    )
+
+    assert sent == []
+    assert result.status == ("denied" if case == "blocked" else "error"), result
+    assert result.extras["execution_outcome"] == outcome
+    assert ("Try again" in str(result.error)) is (case == "unreadable" and outcome == "not_started")

@@ -102,6 +102,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block_run import (
+    mark_request_sent,
+    raise_if_step_was_refused,
+    request_was_sent,
+)
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations._principal_block_gate import refuse_step_if_blocked
 from meho_backplane.operations.composite_steps import (
@@ -499,6 +504,8 @@ def get_dispatch_child(
         params: dict[str, Any],
         target: Any = None,
     ) -> OperationResult:
+        # After a step was refused by the block list, no further step starts.
+        raise_if_step_was_refused()
         attempted_depth = _check_composite_depth(
             parent_op_id=parent_op_id,
             child_op_id=op_id,
@@ -541,6 +548,8 @@ def get_dispatch_child(
                 journal.finish(
                     entry, result.model_dump(mode="json"), ended_well=_child_ended_well(result)
                 )
+            # A step the block list refused stops the whole operation.
+            raise_if_step_was_refused()
             return result
         finally:
             if journal is not None:
@@ -718,7 +727,8 @@ def _resume_parent_for_current_composite(
     the steps this run of the composite went through, with their results
     (:class:`~meho_backplane.operations.composite_steps.StepJournal`), so the
     re-entry does not send them again; the key is left out when there are
-    none. ``None`` when no composite is on the stack, so the park keeps the
+    none. ``request_sent: true`` says that this run sent a step or a request
+    before the wait. ``None`` when no composite is on the stack, so the park keeps the
     unchanged generic re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
@@ -735,6 +745,8 @@ def _resume_parent_for_current_composite(
         steps = journal.stored()
         if steps:
             resume_parent["steps"] = steps
+    if request_was_sent():
+        resume_parent["request_sent"] = True
     return resume_parent
 
 
@@ -939,6 +951,7 @@ async def enforce_subop_policy(
         )
         if refused is None:
             journal.start(connector_id, op_id, target, params, may_send_again=True)
+            mark_request_sent()
         return refused
     gated = await _gate_subop(
         operator=operator,
@@ -957,6 +970,7 @@ async def enforce_subop_policy(
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
         )
+    mark_request_sent()
     return None
 
 
@@ -1058,6 +1072,7 @@ async def run_governed_subop(
         if journal is not None
         else None
     )
+    mark_request_sent()
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)

@@ -57,6 +57,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block_run import mark_step_refused
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -236,17 +237,22 @@ async def raise_if_step_login_blocked(operator: Operator) -> None:
     Called by the HTTP connector base before each request. Does nothing
     outside a multi-step operation or an approved run. Raises
     :class:`PrincipalBlockedStepError` when a login of the step is blocked,
-    or when the list cannot be read.
+    or when the list cannot be read. The refusal is noted for the running
+    operation, so the whole operation stops with it.
     """
     try:
         blocked = await first_blocked_step_login(
             operator.sub, operator.tenant_id, only_in_steps=True
         )
     except PrincipalBlockUnavailableError as exc:
-        raise PrincipalBlockedStepError(unavailable=True) from exc
+        refusal = PrincipalBlockedStepError(unavailable=True)
+        mark_step_refused(refusal)
+        raise refusal from exc
     if blocked is not None:
         _log.info("principal_block_step_request_refused", operator_sub=operator.sub)
-        raise PrincipalBlockedStepError(unavailable=False)
+        refusal = PrincipalBlockedStepError(unavailable=False)
+        mark_step_refused(refusal)
+        raise refusal
 
 
 def _scope_of(operator: Operator) -> str:

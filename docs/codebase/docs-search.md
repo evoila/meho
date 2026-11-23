@@ -904,11 +904,6 @@ backend answers "not found" with the stripped values and `exact_scope` sends
 other filters, `read_docs` reads once more with them. A `search_docs` handle
 still reads on the first try. With `KB_WIKI_FILTERED_SEARCH` off,
 `exact_read_scope` returns `None`: a read makes one request, as before.
-`product` and `version` have no length limit in the MCP schema or the REST
-body: a knowledge search takes a value of any length, and its wiki hit is
-read with that value. With `KB_WIKI_FILTERED_SEARCH` off, both faces still
-refuse a value longer than 128 characters with the same error as before
-(`read_filter_too_long`).
 The reply becomes a `DocsReadResult` (`mode, text, title, source_url,
 disclosure, reason, located, truncated, next, up`); `source_url` is
 `public_source_url(...)`: an `https` source, else the backend's

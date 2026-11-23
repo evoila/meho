@@ -43,8 +43,7 @@ from typing import Annotated, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from pydantic_core import PydanticCustomError
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.corpus import CorpusUnavailable
@@ -64,11 +63,7 @@ from meho_backplane.docs_search import (
     read_docs,
     resolve_readable_collection,
 )
-from meho_backplane.docs_search.read import (
-    READ_AROUND_MAX,
-    READ_FILTER_MAX_CHARS,
-    read_filter_too_long,
-)
+from meho_backplane.docs_search.read import READ_AROUND_MAX
 
 __all__ = ["ReadDocsRequest", "router"]
 
@@ -118,28 +113,14 @@ class ReadDocsRequest(BaseModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=_MAX_READ_TOKEN)
     product: str | None = Field(
         default=None,
+        max_length=128,
         description=_SCOPE_FIELD_HELP.format(field="product"),
     )
     version: str | None = Field(
         default=None,
+        max_length=128,
         description=_SCOPE_FIELD_HELP.format(field="version"),
     )
-
-    @field_validator("product", "version")
-    @classmethod
-    def _not_too_long(cls, value: str | None) -> str | None:
-        """Keep the old length limit with ``KB_WIKI_FILTERED_SEARCH`` off.
-
-        With it on there is none: a wiki hit of a knowledge search is read
-        with the values of that search, which may be longer.
-        """
-        if read_filter_too_long(value):
-            raise PydanticCustomError(
-                "string_too_long",
-                "String should have at most {max_length} characters",
-                {"max_length": READ_FILTER_MAX_CHARS},
-            )
-        return value
 
 
 @router.post(

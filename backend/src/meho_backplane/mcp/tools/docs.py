@@ -132,12 +132,7 @@ from meho_backplane.docs_search import (
     search_docs_fanout,
 )
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM, answer_docs_question
-from meho_backplane.docs_search.read import (
-    DOCS_SOURCE_NOT_FOUND,
-    READ_AROUND_MAX,
-    READ_FILTER_MAX_CHARS,
-    read_filter_too_long,
-)
+from meho_backplane.docs_search.read import DOCS_SOURCE_NOT_FOUND, READ_AROUND_MAX
 from meho_backplane.docs_search.target_scope import TargetDeniedError, apply_target_default
 from meho_backplane.mcp.registry import (
     READ_ONLY,
@@ -796,21 +791,6 @@ register_mcp_tool(
 )
 
 
-def _refuse_too_long_read_filter(arguments: dict[str, Any]) -> None:
-    """Keep the old ``product`` / ``version`` limit with ``KB_WIKI_FILTERED_SEARCH`` off.
-
-    The schema has no limit on these two: a wiki hit of a knowledge search is
-    read with the value of that search. With the switch off, the old limit and
-    its schema error text stay.
-    """
-    for field in ("product", "version"):
-        if read_filter_too_long(arguments.get(field)):
-            raise McpInvalidParamsError(
-                "tools/call 'read_docs': arguments failed inputSchema: "
-                f"{field}: at most {READ_FILTER_MAX_CHARS} characters"
-            )
-
-
 async def _read_docs_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -840,7 +820,6 @@ async def _read_docs_handler(
     feed (``broadcast_omit_args`` on the registration).
     """
     structlog.contextvars.bind_contextvars(audit_op_id=_READ_OP_ID)
-    _refuse_too_long_read_filter(arguments)
     scope = _build_scope_or_invalid_params("read_docs", arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
     read_handle: str = arguments["read_handle"]
@@ -971,6 +950,7 @@ register_mcp_tool(
                 "product": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": 128,
                     "description": (
                         "OPTIONAL: the `product` you searched with. Needed only "
                         "on a collection that applies scope filters; otherwise "
@@ -985,6 +965,7 @@ register_mcp_tool(
                 "version": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": 128,
                     "description": (
                         "OPTIONAL: the `version` you searched with. Needed only "
                         "on a collection that applies scope filters; otherwise "

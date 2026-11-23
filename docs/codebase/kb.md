@@ -1184,7 +1184,8 @@ query and `limit`:
    default) makes one exception, decided by
    `kb/wiki_search.py::wiki_exact_filters` for both paths: a search
    whose only filters are `product` and/or `version` (each a non-blank
-   string of any length; named filters, or the same keys in `filters` /
+   string of at most 128 characters, the longest value `read_docs`
+   takes, so each wiki hit can be read; named filters, or the same keys in `filters` /
    `metadata_filters`), with no time window, not `scope="shared"` and
    no `kind`, still searches the wiki. `search_wiki` then sends
    `product` and `version` exactly as given, with any spaces at their

@@ -43,7 +43,8 @@ system-initiated calls cannot read per-target vendor credentials
 **Connection pool, one login per caller and target.** Each
 :class:`SshConnector` instance keeps a pool of live
 ``asyncssh.SSHClientConnection`` objects keyed on
-:func:`_pool_key`: the tenant-unique target key, the caller's kind
+:func:`_pool_key`: the tenant-unique target key, the target's secret
+reference, the caller's kind
 (:func:`_caller_kind`: a person or machine login, a call without a
 token, the check runner, or the system caller for ``operator=None``) and
 the caller's ``operator.sub``. So every caller logs in once, after their
@@ -106,7 +107,7 @@ from meho_backplane.auth.secret_read_as import (
     current_secret_read_as,
     record_secret_read_as,
 )
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_cache_key, target_secret_cache_key
 from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
@@ -130,7 +131,7 @@ type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
 
-type PoolKey = tuple[str, str, str, str]
+type PoolKey = tuple[str, str, str, str, str]
 
 
 def _caller_kind(operator: Operator | None) -> str:
@@ -155,15 +156,16 @@ def _caller_kind(operator: Operator | None) -> str:
 
 
 def _pool_key(target: Target, operator: Operator | None) -> PoolKey:
-    """Return the pool key ``(tenant_id, id, caller kind, sub)`` for *target*.
+    """Return the pool key ``(tenant_id, id, secret_ref, caller kind, sub)`` for *target*.
 
-    The first two parts are :func:`target_cache_key`. The caller kind
-    (:func:`_caller_kind`) and the ``sub`` name the caller, so two callers
-    to one target hold two logins, each opened after their own Vault read.
+    The first three parts are :func:`target_secret_cache_key`, so a call
+    uses only a connection opened with the secret reference its own target
+    names. The caller kind (:func:`_caller_kind`) and the ``sub`` name the
+    caller, so two callers to one target hold two logins, each opened after
+    their own Vault read.
     """
-    tenant_id, target_id = target_cache_key(target)
     sub = operator.sub if operator is not None else SYSTEM_OPERATOR_SUB
-    return (tenant_id, target_id, _caller_kind(operator), sub)
+    return (*target_secret_cache_key(target), _caller_kind(operator), sub)
 
 
 class SshHostKeyUnpinnedError(ValueError):
@@ -458,7 +460,7 @@ class SshConnector(Connector):
     """
 
     def __init__(self) -> None:
-        # Maps the pool key ``(tenant_id, id, caller kind, sub)``
+        # Maps the pool key ``(tenant_id, id, secret_ref, caller kind, sub)``
         # (``_pool_key``) → (SSHClientConnection, last_used monotonic
         # timestamp). The tenant-unique ``(tenant_id, id)`` part keeps two
         # tenants' same-named targets apart (evoila/meho#1682). The caller

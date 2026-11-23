@@ -90,6 +90,12 @@ items:
     metadata: {{name: a}}
     stringData: {{client_secret: {_PW}}}
 """
+_BINARY_DATA_WITH_A_SECRET_NAME = """
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: web-files, namespace: apps}
+binaryData: {api_token: bWFkZS11cC12YWx1ZQ==}
+"""
 _ENV_FROM_A_REFERENCE = """
 apiVersion: apps/v1
 kind: Deployment
@@ -123,6 +129,7 @@ data: {mode: fast, url: "https://db.invalid/app"}
 _SECRET_LOOKING = {
     "config-map-secret-name": _CONFIG_MAP_WITH_A_SECRET_NAME,
     "env-secret-shape": _ENV_WITH_A_SECRET_SHAPE,
+    "binary-data-secret-name": _BINARY_DATA_WITH_A_SECRET_NAME,
 }
 
 
@@ -162,8 +169,17 @@ def _person() -> Operator:
         _STRING_DATA_IN_A_LIST,
         _PLAIN_CONFIG_MAP + "---\n" + _CONFIG_MAP_WITH_A_SECRET_NAME,
         _ENV_AT_THE_TOP,
+        _BINARY_DATA_WITH_A_SECRET_NAME,
     ],
-    ids=["data-key", "env-shape", "env-name", "list-item", "second-document", "env-at-the-top"],
+    ids=[
+        "data-key",
+        "env-shape",
+        "env-name",
+        "list-item",
+        "second-document",
+        "env-at-the-top",
+        "binary-data-key",
+    ],
 )
 def test_a_manifest_with_a_secret_looking_value_counts(manifest: str) -> None:
     assert manifest_holds_credential({"manifest": manifest}) is True

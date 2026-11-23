@@ -166,7 +166,7 @@ def _is_credential_kind(doc: Mapping[str, Any]) -> bool:
 
 
 #: The fields of an object whose keys name the values they hold.
-_NAMED_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData")
+_NAMED_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData", "binaryData")
 
 
 def _is_secret_shaped(value: Any) -> bool:
@@ -192,14 +192,14 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
 class _SecretValueCheck:
     """A check for one manifest: True when an object holds a secret-looking value.
 
-    An object holds one when a key of its ``data`` or ``stringData`` has a
-    secret name (the name rule of
+    An object holds one when a key of its ``data``, ``stringData`` or
+    ``binaryData`` has a secret name (the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
     an ``env`` entry at any depth, the object itself included, has a secret
     name and a value, or when a text at any depth has a secret shape
     (:func:`~meho_backplane.redaction.command_line.hide_in_text`). Each value
     of the manifest is read once, and the names of each ``data``,
-    ``stringData`` and ``env`` value are read once, also when YAML aliases
+    ``stringData``, ``binaryData`` and ``env`` value are read once, also when YAML aliases
     name them many times. The ``items`` of a list object are read as objects
     of their own.
     """

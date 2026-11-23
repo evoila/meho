@@ -73,7 +73,7 @@ handoff of the run, as a credential write does. Such a call needs
 `APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
 (`manifest_holds_credential` in `op_classes.py`) when:
 
-- a key of its `data` or `stringData` has a secret name (the name rule of
+- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
   `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
   example a ConfigMap;
 - an `env` entry at any depth (the object itself, the containers and init
@@ -84,7 +84,7 @@ handoff of the run, as a credential write does. Such a call needs
   token with a known vendor prefix).
 
 The check reads each value of the manifest once, and the names of each
-`data`, `stringData` and `env` value once, also when YAML aliases name
+`data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
 them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
 holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is

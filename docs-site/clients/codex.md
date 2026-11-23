@@ -9,12 +9,11 @@ extension read the same config file, so you set it up once.
 Codex must run on a machine **on the internal network / VPN**. MEHO is
 internal-only, and nothing is exposed to the internet.
 
-!!! note "Status: not yet tested end to end"
+!!! note "Tested end to end"
 
-    This page is written from the Codex documentation and from how the
-    `meho-mcp` login client is set up. A live test with a Codex login is
-    still open. Steps marked **Check** below are things to confirm on your
-    first connection. If one of them fails, please report it.
+    Tested on 2026-11-23 with Codex CLI 0.171.0 on macOS and MEHO 0.48.0:
+    the login, a long-lasting login, reads, a change that waits for
+    approval, and a customer CA file.
 
 ## Before you start
 
@@ -75,25 +74,19 @@ codex mcp login meho
 Codex opens a browser. Sign in with your normal MEHO account. When the
 browser says the login is done, go back to Codex.
 
-**Check:** the login finishes without an error such as `invalid_redirect_uri`
-or `client not found`. See
-[troubleshooting](troubleshooting.md) if it does not.
+If the login stops with an error such as `invalid_redirect_uri` or
+`client not found`, see [troubleshooting](troubleshooting.md).
 
 ## How long the login lasts
 
-MEHO advertises two scopes to clients: `mcp:read` and `mcp:execute`. Codex
-asks for the scopes that MEHO advertises. The `meho-mcp` client can also
-give a long-lasting login, but only when the client asks for the
-`offline_access` scope. The Claude clients ask for it. See
+Codex asks for `mcp:read`, `mcp:execute` and `offline_access`. With
+`offline_access`, the login server gives Codex a long-lasting login. Each
+MEHO call renews it. So you log in again only after a long time without
+using MEHO: 48 hours with the recommended realm setting. See
 [How long an MCP login lasts](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
 
-**Check:** whether Codex asks for `offline_access`. Log in, wait 30
-minutes without using MEHO, then call a MEHO tool again.
-
-- The call works: the login renews itself.
-- Codex asks you to log in again: Codex did not get a long-lasting login.
-  Run `codex mcp login meho` again, and tell your MEHO team, so that the
-  gap can be fixed.
+If Codex asks you to log in again sooner, run `codex mcp login meho`, and
+tell your MEHO team.
 
 ## Customer certificates
 
@@ -105,6 +98,10 @@ as a fallback:
 export CODEX_CA_CERTIFICATE="$HOME/internal-ca.pem"
 codex mcp login meho
 ```
+
+Codex adds this file to the CAs that the system already trusts. It does
+not replace them. If the file is missing or holds no certificate, Codex
+stops with an error that names the file.
 
 Set the variable in the shell that starts Codex. Get the root CA file from
 the person who deployed MEHO, and check its fingerprint before you trust
@@ -129,8 +126,22 @@ waits until a second person approves it in the operator console or the
 CLI. An agent cannot approve its own work. The tool-approval settings
 inside Codex do not replace this.
 
-**Check:** run one change of risk level `caution` or higher on a test
-target. It should wait. After a person approves it, it should run.
+When a change waits, Codex gets the status `awaiting_approval` and a
+request id. Give that id to the person who approves.
+
+Codex also asks you itself before each `call_operation`, because that
+tool can change things. In the Codex window, allow the call. In a run
+without a person, such as `codex exec`, Codex blocks the call with "MCP
+tool call requires approval, but approval policy is never". To let
+`call_operation` through there, set its approval mode in
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.meho.tools.call_operation]
+approval_mode = "approve"
+```
+
+MEHO's own approval rules still apply to every call that comes through.
 
 ## If the direct login does not work
 

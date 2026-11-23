@@ -1550,7 +1550,7 @@ jobs:
           IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
         run: |
           set -euo pipefail
-          base="$(git rev-parse --verify "HEAD^{commit}")"
+          base="$(git rev-parse --verify "HEAD^1^{commit}")"
           head="$(git rev-parse --verify "HEAD^{commit}")"
           script=scripts/ci/redaction_compare.py
           approved=backend/tests/snapshots/redaction_compare_approved.yaml

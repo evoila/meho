@@ -26,6 +26,7 @@ Checks that:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from meho_backplane.db.models import Document, EmbeddingState, EndpointDescripto
 from meho_backplane.kb import revisions
 from meho_backplane.kb.revisions import delete_entry_rows, write_entry
 from meho_backplane.kb.schemas import KB_PASSAGE_SOURCE, KB_SOURCE
+from meho_backplane.operations.embed import build_embedding_text
 from meho_backplane.retrieval.embedding_state import (
     check_embedding_model_at_start,
     embedding_model_probe,
@@ -207,6 +209,51 @@ async def test_every_vector_is_embedded_again_and_the_record_shows_the_new_model
     # Every operation gets the new vector, also the one that had none.
     assert after["ops"] == [("with-vector", 0.7), ("without-vector", 0.7)]
     assert after["state"] == (NEW_MODEL, 384)
+    assert lines[-1].endswith("Restart MEHO to clear the start warning.")
+
+
+def _vector_of(text: str) -> list[float]:
+    """A vector that differs for each text: 384 bytes of SHA-256 chains, each / 256."""
+    data = b""
+    block = text.encode()
+    while len(data) < 384:
+        block = hashlib.sha256(block).digest()
+        data += block
+    return [byte / 256 for byte in data[:384]]
+
+
+@pytest.mark.asyncio
+async def test_an_operation_with_an_admin_description_is_embedded_with_that_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row_id = await _seed_endpoint("described", OLD_VECTOR)
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(EndpointDescriptor)
+            .where(EndpointDescriptor.id == row_id)
+            .values(custom_description="Admin text about the made-up thing.")
+        )
+        await session.commit()
+    _use_model(monkeypatch, NEW_MODEL)
+    service = fake_embedding_service()
+    service.encode.side_effect = lambda texts: [_vector_of(text) for text in texts]
+
+    await reembed_all(service=service, say=lambda _line: None)
+
+    expected = _vector_of(
+        build_embedding_text(
+            summary="Summary of described.",
+            description="Does a made-up thing.",
+            custom_description="Admin text about the made-up thing.",
+            tags=["alpha", "beta"],
+        )
+    )
+    async with get_sessionmaker()() as session:
+        stored = await session.scalar(
+            select(EndpointDescriptor.embedding).where(EndpointDescriptor.id == row_id)
+        )
+    assert stored is not None
+    assert [round(x, 6) for x in stored] == [round(x, 6) for x in expected]
 
 
 @pytest.mark.asyncio
@@ -561,6 +608,7 @@ async def test_dry_run_writes_nothing_and_prints_the_counts(
     assert await _snapshot() == before
     assert (counts.documents, counts.kb_entries, counts.endpoints) == (2, 1, 2)
     assert "would embed: 2 documents, 1 knowledge entries, 2 operations" in lines[-1]
+    assert not any("Restart MEHO" in line for line in lines)
 
 
 @pytest.mark.asyncio

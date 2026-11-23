@@ -322,6 +322,7 @@ async def reembed_all(
     say(
         f"{'would embed' if dry_run else 'embedded'}: {counts.documents} documents, "
         f"{counts.kb_entries} knowledge entries, {counts.endpoints} operations"
+        + ("" if dry_run else ". Restart MEHO to clear the start warning.")
     )
     return counts
 

@@ -21,9 +21,14 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
    prevents it under normal conditions), raise :exc:`AmbiguousTargetError`.
 
 A hosted agent with a ``connectors`` list sees only the targets of those
-connectors in both answers: the near-misses of :exc:`TargetNotFoundError`
-and the hits of :exc:`AmbiguousTargetError` leave out every other target
-(:func:`_summaries_the_caller_may_see`). The lookup itself does not change.
+connectors (:func:`_rows_the_caller_may_see`):
+
+* when the hits of step 1 or step 2 are all outside the list, the answer is
+  :exc:`TargetNotFoundError` with no close names;
+* the hits of :exc:`AmbiguousTargetError` and the near-misses of
+  :exc:`TargetNotFoundError` name only targets inside the list.
+
+Without a list every answer is the one described above.
 
 Every clause filters ``deleted_at IS NULL`` so soft-deleted targets
 (G0.14-T4 #1145) are invisible to the resolver. The DELETE handler
@@ -120,8 +125,8 @@ class AmbiguousTargetError(HTTPException):
         )
 
 
-async def _summaries_the_caller_may_see(rows: list[TargetORM]) -> list[TargetSummary]:
-    """Project the *rows* an error answer may name.
+async def _rows_the_caller_may_see(rows: list[TargetORM]) -> list[TargetORM]:
+    """The *rows* the caller may see, in their order.
 
     A hosted agent with a ``connectors`` list may see only the targets of
     those connectors. Outside such a run every row is kept.
@@ -129,12 +134,55 @@ async def _summaries_the_caller_may_see(rows: list[TargetORM]) -> list[TargetSum
     # Imported here: the operations package imports this module.
     from meho_backplane.operations._target_connector_limit import targets_within_limit
 
-    return [project_target_to_summary(t) for t in await targets_within_limit(rows)]
+    return await targets_within_limit(rows)
 
 
-# code-quality-allow: function-size — linear three-phase resolver (exact →
-# alias → near-miss); each phase consumes the prior's None result and the
-# trailing bind needs the resolved row, so a split forces sentinel returns.
+async def _not_found(session: AsyncSession, tenant_id: UUID, query: str) -> TargetNotFoundError:
+    """The ``no_target`` error for *query*, with the near-misses the caller may see."""
+    near = await _near_misses(session, tenant_id, query)
+    summaries = [project_target_to_summary(t) for t in await _rows_the_caller_may_see(near)]
+    _log.info(
+        "target_not_found",
+        tenant_id=str(tenant_id),
+        query=query,
+        near_misses=[s.name for s in summaries],
+    )
+    return TargetNotFoundError(query, summaries)
+
+
+async def _pick_one(
+    tenant_id: UUID,
+    query: str,
+    hits: list[TargetORM],
+    *,
+    event: str,
+) -> TargetORM | None:
+    """The one row of *hits*, or ``None`` when *hits* is empty.
+
+    More than one hit is :exc:`AmbiguousTargetError`, which names only the
+    hits the caller may see. A hosted agent with a ``connectors`` list sees
+    only the targets of those connectors: when it may see none of the hits,
+    the answer is :exc:`TargetNotFoundError` with no close names. Without a
+    list every hit counts.
+    """
+    if not hits:
+        return None
+    visible = await _rows_the_caller_may_see(hits)
+    if not visible:
+        _log.info("target_not_found", tenant_id=str(tenant_id), query=query, near_misses=[])
+        raise TargetNotFoundError(query, [])
+    if len(hits) == 1:
+        return hits[0]
+    summaries = [project_target_to_summary(t) for t in visible]
+    _log.warning(
+        event,
+        tenant_id=str(tenant_id),
+        query=query,
+        matches=[s.name for s in summaries],
+    )
+    raise AmbiguousTargetError(query, summaries)
+
+
 async def resolve_target(
     session: AsyncSession,
     tenant_id: UUID,
@@ -164,11 +212,11 @@ async def resolve_target(
         The matching :class:`~meho_backplane.db.models.Target` ORM row.
 
     Raises:
-        TargetNotFoundError: No target matches *query* in *tenant_id*.
+        TargetNotFoundError: No target matches *query* in *tenant_id*, or
+            a hosted agent's ``connectors`` list leaves out every hit of
+            the step that found hits.
         AmbiguousTargetError: Multiple targets match *query* (alias collision).
     """
-    target: TargetORM | None = None
-
     # Step 1: exact name match.
     # Use limit(2) instead of scalar_one_or_none() so data-drift duplicates
     # (unique index violation repaired mid-flight, or a restored backup with
@@ -185,46 +233,16 @@ async def resolve_target(
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
-    if len(exact_hits) == 1:
-        target = exact_hits[0]
-    elif len(exact_hits) > 1:
-        summaries = await _summaries_the_caller_may_see(exact_hits)
-        _log.warning(
-            "ambiguous_exact_name",
-            tenant_id=str(tenant_id),
-            query=query,
-            matches=[s.name for s in summaries],
-        )
-        raise AmbiguousTargetError(query, summaries)
-    else:
-        target = None
+    target = await _pick_one(tenant_id, query, exact_hits, event="ambiguous_exact_name")
 
     if target is None:
         # Step 2: alias match — dialect-aware.
         alias_hits = await _alias_match(session, tenant_id, query)
-        if len(alias_hits) == 1:
-            target = alias_hits[0]
-        elif len(alias_hits) > 1:
-            summaries = await _summaries_the_caller_may_see(alias_hits)
-            _log.warning(
-                "ambiguous_target",
-                tenant_id=str(tenant_id),
-                query=query,
-                matches=[s.name for s in summaries],
-            )
-            raise AmbiguousTargetError(query, summaries)
+        target = await _pick_one(tenant_id, query, alias_hits, event="ambiguous_target")
 
     if target is None:
         # Step 3: near-miss for 404 detail.
-        near = await _near_misses(session, tenant_id, query)
-        summaries = await _summaries_the_caller_may_see(near)
-        _log.info(
-            "target_not_found",
-            tenant_id=str(tenant_id),
-            query=query,
-            near_misses=[s.name for s in summaries],
-        )
-        raise TargetNotFoundError(query, summaries)
+        raise await _not_found(session, tenant_id, query)
 
     # Single exit point — bind target_id for AuditMiddleware (G0.3-T4) and
     # target_name for the MCP outer-wrapper row's payload (G0.15-T3 #1212).

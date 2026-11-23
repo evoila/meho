@@ -234,18 +234,43 @@ async def _search_knowledge_handler(
         stored=[(hit.tenant_id, hit.slug, hit.metadata) for hit in hits],
         filtered=bool(filters) or time_window is not None or scope == "shared",
     )
-    payloads = [_hit_payload(hit) for hit in hits]
-    if wiki is not None:
-        payloads.extend(_wiki_hit_payload(chunk) for chunk in wiki.hits)
+    ordered = _ordered_hits(
+        hits,
+        [_wiki_hit_payload(chunk) for chunk in wiki.hits] if wiki is not None else [],
+        interleave=get_settings().kb_wiki_interleave,
+    )
     extra: dict[str, Any] = {"wiki": _wiki_status_payload(wiki)} if wiki is not None else {}
     response = _bounded_search_response(
-        payloads,
+        [payload for payload, _ in ordered],
         get_settings().result_complete_response_wire_max_bytes,
         extra={**extra, **word_hint_extra(hits)},
     )
-    delivered = hits[: len(response["hits"])]
+    delivered = [hit for _, hit in ordered[: len(response["hits"])] if hit is not None]
     await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
     return response
+
+
+def _ordered_hits(
+    store: list[KbEntrySearchHit], wiki: list[dict[str, Any]], *, interleave: bool
+) -> list[tuple[dict[str, Any], KbEntrySearchHit | None]]:
+    """Put the store hits and the wiki hits in one list, each with its store hit.
+
+    The store hit is ``None`` for a wiki hit. With *interleave* off, the
+    store hits come first and the wiki hits follow. With it on, the two
+    lists take turns (store 1, wiki 1, store 2, ...) and the rest of the
+    longer list follows (``KB_WIKI_INTERLEAVE``). The size limit leaves out
+    the last places first, and the caller records only the store hits that
+    are in the delivered part.
+    """
+    stored = [(_hit_payload(hit), hit) for hit in store]
+    wikis: list[tuple[dict[str, Any], KbEntrySearchHit | None]] = [(item, None) for item in wiki]
+    if not interleave:
+        return [*stored, *wikis]
+    turns: list[tuple[dict[str, Any], KbEntrySearchHit | None]] = []
+    for position in range(max(len(stored), len(wikis))):
+        turns.extend(stored[position : position + 1])
+        turns.extend(wikis[position : position + 1])
+    return turns
 
 
 def _hit_payload(hit: KbEntrySearchHit) -> dict[str, Any]:

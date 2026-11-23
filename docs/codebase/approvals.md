@@ -2753,7 +2753,8 @@ for approval.
   The answer keeps its `status` and `extras`, but its text is
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
-  secret value. A retry of a waiting request keeps the text
+  secret value. An approved request gets no rights note ("needs a second
+  admin"), even for a change of rights in a tenant with one admin. A retry of a waiting request keeps the text
   "requires approval before execution".
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few

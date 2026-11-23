@@ -1287,12 +1287,13 @@ def result_awaiting_approval(
     example that no other admin of the tenant could approve a change of
     rights (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
     is added to ``error`` and kept in ``extras["approval_note"]``; the key is
-    absent without a note.
+    absent without a note, and also when *already_approved* is ``True``
+    (an approved request needs no more approval, so the note would be false).
 
     *already_approved* is ``True`` when a retry with the same key got back a
     request that a person already approved. Only the ``error`` text changes:
-    it says only that the request is already approved. ``status`` and every
-    ``extras`` key stay the same.
+    it says only that the request is already approved, and *note* is dropped.
+    ``status`` and the other ``extras`` keys stay the same.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1303,7 +1304,7 @@ def result_awaiting_approval(
     error = f"awaiting_approval: {op_id!r} requires approval before execution"
     if already_approved:
         error = f"awaiting_approval: the approval request {approval_request_id} is already approved"
-    if note:
+    if note and not already_approved:
         extras["approval_note"] = note
         error = f"{error}. {note}"
     return OperationResult(

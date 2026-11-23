@@ -50,7 +50,7 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import dispatch, grant_approval, reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var, policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
 from meho_backplane.operations._validate import compute_params_hash
@@ -1318,6 +1318,121 @@ async def test_retry_of_an_approved_request_says_it_is_approved(embedding: list[
     )
     assert await _approval_row_count() == 1
     assert connector.calls == []
+
+
+def _only_admin_is_requester(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the test op a change of rights in a tenant whose only admin is the requester."""
+    from meho_backplane.auth import tenant_admins
+
+    async def _read(*_args: object) -> frozenset[str] | None:
+        return frozenset({"op-requester"})
+
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_OP_ID})
+    monkeypatch.setattr(tenant_admins, "_read", _read)
+
+
+@pytest.mark.asyncio
+async def test_retry_of_an_approved_rights_change_has_no_second_admin_note(
+    monkeypatch: pytest.MonkeyPatch, embedding: list[float]
+) -> None:
+    """One admin, change of rights: waiting has the note, approved has only the true text."""
+    _only_admin_is_requester(monkeypatch)
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    request_id = first["extras"]["approval_request_id"]
+    assert first["extras"]["approval_note"]
+    assert "second admin" in first["error"]
+
+    approver = _operator(sub="op-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
+    )
+    async with get_sessionmaker()() as s:
+        await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
+        await s.commit()
+
+    retry = await call_operation(requester, bound)
+    assert retry["status"] == "awaiting_approval", retry
+    assert retry["extras"]["approval_request_id"] == request_id
+    assert "approval_note" not in retry["extras"]
+    assert retry["error"] == (
+        f"awaiting_approval: the approval request {request_id} is already approved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_of_an_approved_request_whose_run_failed_says_it_is_approved(
+    monkeypatch: pytest.MonkeyPatch, embedding: list[float]
+) -> None:
+    """The approved run failed: the retry gets the same request, no new row, no new run."""
+    connector = _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    request_id = first["extras"]["approval_request_id"]
+
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
+        await s.commit()
+
+    async def _failed_run(
+        _operator: Any, _arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        return {"status": "error", "op_id": _OP_ID, "error": "upstream 500"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _failed_run)
+    await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments=args,
+        awaiting_envelope={"op_id": _OP_ID, "extras": {}},
+        approval_request_id=uuid.UUID(request_id),
+    )
+
+    retry = await call_operation(requester, bound)
+    assert retry["status"] == "awaiting_approval", retry
+    assert retry["extras"]["approval_request_id"] == request_id
+    assert retry["extras"]["approval_request_reused"] is True
+    assert retry["error"] == (
+        f"awaiting_approval: the approval request {request_id} is already approved"
+    )
+    assert await _approval_row_count() == 1
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_waiting_rights_change_keeps_the_second_admin_note(
+    monkeypatch: pytest.MonkeyPatch, embedding: list[float]
+) -> None:
+    _only_admin_is_requester(monkeypatch)
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    retry = await call_operation(requester, bound)
+    assert retry["extras"]["approval_request_reused"] is True
+    assert retry["extras"]["approval_note"] == first["extras"]["approval_note"]
+    assert "second admin" in retry["error"]
+    assert await _approval_row_count() == 1
 
 
 #: The reads of the secret value, made by :func:`_counting_read`.

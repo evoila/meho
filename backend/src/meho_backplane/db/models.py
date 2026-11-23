@@ -7769,7 +7769,7 @@ class ApprovalRequest(Base):
             _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
             name="ck_approval_request_outcome_check_reason",
         ),
-        # Matches migration 0182: a request that ended without a run is
+        # Matches migration 0183: a request that ended without a run is
         # never started, under any release.
         sa.CheckConstraint(
             "status NOT IN ('rejected', 'expired', 'withdrawn') OR resumed_at IS NULL",

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0182_add_approval_request_ended_not_started_check``.
+"""Tests for Alembic migration ``0183_add_approval_request_ended_not_started_check``.
 
 The migration adds the CHECK that keeps ``resumed_at`` empty on a request
 that is rejected, expired or withdrawn. The tests check that ``upgrade``
@@ -24,8 +24,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0182"
-_DOWN_REVISION = "0181"
+_REVISION = "0183"
+_DOWN_REVISION = "0182"
 _CHECK = "ck_approval_request_ended_not_started"
 
 
@@ -35,7 +35,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0182.db"
+    db_path = tmp_path / "migration_0183.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

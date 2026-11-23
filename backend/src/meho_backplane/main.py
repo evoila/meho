@@ -620,9 +620,11 @@ async def _run_lifespan_startup() -> None:
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
     # Warn when the stored vectors come from another model than the set one.
-    # The readiness check is added only then, so a matching model leaves
-    # the health answer (and so meho_status) as it was.
-    if await check_embedding_model_at_start():
+    # The readiness check is added only then, and only with the switch
+    # EMBEDDING_MODEL_HEALTH_CHECK on, so by default the health answer (and
+    # so meho_status) stays as it was.
+    model_differs = await check_embedding_model_at_start()
+    if model_differs and get_settings().embedding_model_health_check:
         register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.

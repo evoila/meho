@@ -10,9 +10,10 @@ keeps starting: stored vectors from another model make searches worse, but
 they do not break MEHO. ``python -m meho_backplane.retrieval.reembed``
 embeds every stored vector again and then calls :func:`write_embedding_state`.
 
-On a mismatch the start also adds the readiness check ``embedding_model``
-(:func:`embedding_model_probe`), which names both models and never fails
-the readiness. When the models match, no check is added, so the health
+On a mismatch, and only when the switch ``EMBEDDING_MODEL_HEALTH_CHECK`` is
+on (off by default), the start also adds the readiness check
+``embedding_model`` (:func:`embedding_model_probe`), which names both models
+and never fails the readiness. Otherwise no check is added, so the health
 answer (``/ready`` and the ``meho_status`` tool) stays as it was.
 """
 

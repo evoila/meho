@@ -246,6 +246,9 @@ not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
 release changed. The console modal shows such a request with the time
 the update ended it (`decided_at`), not the deadline it never reached.
+An expired request that was approved first keeps its reviewer. The
+console names that person as the one who approved it: the modal reads
+"Expired · approved by X" and the list row reads "approved by X".
 For a run MEHO refused before it ran, the console says why (MEHO was
 updated, the target changed, the target is gone, or the preview changed),
 that the operation did not run, and that the requester must ask again; it

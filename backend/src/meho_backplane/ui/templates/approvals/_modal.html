@@ -31,8 +31,10 @@
   Decided rows render read-only (#1827)
     When the request has already been decided (``status != "pending"``) the
     modal shows a decision banner ("Approved by X at T" / "Rejected by X at
-    T" / "Expired at T" / "Withdrawn by the sender at T", with the reason)
-    and the Approve/Deny actions are NOT rendered --
+    T" / "Expired at T" / "Withdrawn by the sender at T", with the reason).
+    An expired request that was approved first names its reviewer as the
+    one who approved it ("Expired · approved by X"), not as the one who
+    ended it. The Approve/Deny actions are NOT rendered --
     there is nothing to act on. Only a pending row offers the decision
     forms. This is what lets the history view's "View" button reuse the
     same modal for a closed request. An expired row has a null ``decided_at``
@@ -243,7 +245,9 @@
         <div>
           <h4 class="font-semibold">
             {{ decision_verb }}
-            {% if request.reviewer %}by {{ subject(request.reviewer) }}{% endif %}
+            {#- An expired request with a reviewer was approved and then not
+                started in time: the reviewer approved it, MEHO ended it. -#}
+            {% if request.reviewer %}{% if request.status == "expired" %}<span data-testid="approval-expired-approved-by">&middot; approved by {{ subject(request.reviewer) }}</span>{% else %}by {{ subject(request.reviewer) }}{% endif %}{% endif %}
           </h4>
           {% if decision_ts %}
             <p class="text-sm opacity-90">

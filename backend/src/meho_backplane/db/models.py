@@ -7793,7 +7793,7 @@ class ApprovalRequestKey(Base):
     B, so a later retry with key B gets the same request, also after it was
     approved. Read by the key lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
-    ``0184``.
+    ``0183``.
 
     Columns
     -------

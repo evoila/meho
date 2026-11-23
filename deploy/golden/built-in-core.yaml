@@ -2568,7 +2568,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 7cb98999d944fcf901ae2e53d0f97a62b80399e9ff5df1e2e15575985ea6e03d
+        checksum/config: a8bb29b55b43a1d3a99b42a9d3b31de7236acfb8790deb7a5874e3e6b57038c4
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.

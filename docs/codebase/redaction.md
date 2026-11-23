@@ -409,6 +409,45 @@ scanned: they hold made-up secret shapes on purpose. The check runs in the
 required unit test job, and its own tests prove that it fails on a planted
 capture.
 
+## Secret values of a call, hidden by value
+
+A vendor system can repeat a secret value of the request in its answer, most
+often in an error text. The key-name walk and the Tier-1 shapes find a secret
+by its name or its form. `redaction/call_secrets.py` knows the value itself.
+
+A call has a set of known secret values. The dispatcher opens the set when
+the call starts (`bind_call_secrets`) and closes it when the call ends. A step
+of a multi-step operation starts with the values of its parent. The set holds:
+
+* the values of the params under a secret name, at any depth, and under a
+  property that the operation's parameter schema marks as secret (`writeOnly`
+  or `format: password`);
+* the values MEHO reads from the secret store for the call: the secret-named
+  fields of the target's secret (`_resolve_and_load` in
+  `connectors/_shared/vault_creds.py`). A user name is not one of them.
+
+Every place where vendor text leaves the connector layer replaces each known
+value with `[REDACTED:call_secret]`:
+
+| Place | Where |
+| --- | --- |
+| The answer and the audit row of a success | `_apply_redaction_middleware` (the raw copy and the redacted copy) |
+| The error text, `extras` (with `upstream_message`) and `result` of an error | `redact_error_result` |
+| The request and response bodies and headers of a stored trace | `redact_span` |
+
+A value is found in the forms a vendor may send back: as it is, JSON-escaped
+(once and twice, with and without `\/` and `\u` escapes), percent-encoded
+(`%20` and `+`, upper and lower case), and as base64 of the whole value
+(standard and URL-safe, with and without padding). Where two values overlap,
+or one is a part of the other, the matching spans are merged first, so no
+part of either value stays. A value shorter than four characters is not
+known: it would hide parts of ordinary words.
+
+Cost: a call with no known value does no work at all. Otherwise each string
+of the answer is searched once with one pattern, and only a string with a hit
+is rewritten. Only strings are searched; a number or a key is not. There is
+no size cut.
+
 ## Action semantics
 
 | Action | Replacement |

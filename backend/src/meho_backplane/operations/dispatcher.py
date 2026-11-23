@@ -551,6 +551,13 @@ from meho_backplane.redaction import (
     apply_connector_boundary_redaction,
     manifest_to_audit_payload,
 )
+from meho_backplane.redaction.call_secrets import (
+    bind_call_secrets,
+    collect_param_secret_values,
+    marked_secret_names,
+    reset_call_secrets,
+    scrub_call_secrets_tree,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.keycloak_realm_warnings import target_warnings
 
@@ -2901,6 +2908,12 @@ def _apply_redaction_middleware(
         )
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
+    redaction = redaction.model_copy(
+        update={
+            "raw": scrub_call_secrets_tree(redaction.raw),
+            "redacted": scrub_call_secrets_tree(redaction.redacted),
+        }
+    )
     if classify_op(op_id) != "credential_mint":
         return redaction
     # An op that makes a new credential returns it to the caller, but the
@@ -4426,6 +4439,14 @@ async def _dispatch_now(
     # as ``policy_decision_var`` so a composite parent's value is restored
     # after a child dispatch rebinds it.
     _reveal_token = reveal_secret_var.set(reveal_secret if (secret_read or reveal_secret) else None)
+    # The secret values of this call (the params under a secret name or a
+    # field the schema marks as secret). A value the vendor repeats in its
+    # answer is replaced by value; the store reads of the call add to the set.
+    _call_secrets_token = bind_call_secrets(
+        collect_param_secret_values(
+            params, marked_names=marked_secret_names(descriptor.parameter_schema)
+        )
+    )
     # #3980: a person approved this run, so the internal steps of a
     # multi-step operation go ahead under that approval
     # (``composite.enforce_subop_policy``). A child dispatch inherits it and
@@ -4812,6 +4833,7 @@ async def _dispatch_now(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        reset_call_secrets(_call_secrets_token)
         if _approved_run_token is not None:
             approved_run_var.reset(_approved_run_token)
         restore_audit_extras(_audit_extras)

@@ -100,6 +100,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.credential_backend import (
     WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
@@ -114,6 +115,7 @@ from meho_backplane.connectors._shared.gsm_creds import (
     gsm_project_of,
     is_gsm_project_allowed,
 )
+from meho_backplane.redaction.call_secrets import note_call_secrets
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -694,6 +696,12 @@ async def _resolve_and_load(
         raise TargetSecretForbiddenError(target_name=target.name, secret_ref=ref) from exc
     except requests.exceptions.RequestException as exc:
         raise TargetSecretReadFailedError(target_name=target.name, cause=exc) from exc
+    # The call now knows these values: a vendor text that repeats one is hidden by value.
+    note_call_secrets(
+        str(value)
+        for name, value in secret_data.items()
+        if is_secret_param_name(str(name)) and isinstance(value, str | int | float)
+    )
     return store_ref, secret_data
 
 

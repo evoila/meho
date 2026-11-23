@@ -50,6 +50,7 @@ from meho_backplane.operations._errors import (
     UPSTREAM_SAID,
     VAULT_SAID,
 )
+from meho_backplane.redaction.call_secrets import scrub_call_secrets_tree
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 from meho_backplane.redaction.policy import RedactionPolicy
@@ -166,9 +167,9 @@ def redact_error_result(result: OperationResult) -> OperationResult:
     """
     try:
         policy = get_default_policy()
-        error = redact_error_payload(result.error, policy)
-        extras = redact_error_payload(dict(result.extras), policy)
-        payload = redact_error_payload(result.result, policy)
+        error = scrub_call_secrets_tree(redact_error_payload(result.error, policy))
+        extras = scrub_call_secrets_tree(redact_error_payload(dict(result.extras), policy))
+        payload = scrub_call_secrets_tree(redact_error_payload(result.result, policy))
     except Exception:  # fail-closed: never send an error result that may hold a secret
         kept = {key: result.extras[key] for key in ("error_code",) if key in result.extras}
         return result.model_copy(

@@ -2063,19 +2063,20 @@ async def create_pending_request(
     # holds them, also not when the request is approved and never runs.
     # Without a valid handoff key such a call is refused (the dispatcher
     # answers for ApprovalHandoffKeyError).
-    if classify_op(op_id) == "credential_write" or (
+    keep_no_params = classify_op(op_id) == "credential_write" or (
         params is not None and hidden_stored_param(op_id, params) is not None
-    ):
+    )
+    # A call with a secret-named value, or a field its connector marked
+    # (declare_secret_field), keeps the real params only in the handoff.
+    # The row keeps the copy with a marker for each secret value.
+    hidden = (
+        params_with_secret_fields_hidden(params, op_id=op_id)
+        if not keep_no_params and params is not None
+        else None
+    )
+    if keep_no_params or hidden:
         handoff_payload = {"params": params, "resume_parent": resume_parent}
-        stored_params = None
-        if resume_parent is not None:
-            stored_resume_parent = {"op_id": resume_parent["op_id"]}
-    elif params is not None and (hidden := params_with_secret_fields_hidden(params, op_id=op_id)):
-        # A call with a secret-named value, or a field its connector marked
-        # (declare_secret_field), keeps the real params only in the handoff.
-        # The row keeps the copy with a marker for each secret value.
-        handoff_payload = {"params": params, "resume_parent": resume_parent}
-        stored_params = hidden
+        stored_params = None if keep_no_params else hidden
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
     request = ApprovalRequest(
@@ -3158,7 +3159,7 @@ def _stored_params_can_run(request: ApprovalRequest) -> bool:
       still match ``params_hash``. They run as sent.
     """
     stored = cast(dict[str, Any] | None, request.params)
-    if stored is None:
+    if stored is None or not isinstance(request.params_hash, str):
         return False
     return params_hash_matches(stored, request.params_hash)
 

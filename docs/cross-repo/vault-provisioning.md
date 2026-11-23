@@ -862,31 +862,36 @@ and in which order.
 
 ## Verification
 
-Run the login from an address in `token_bound_cidrs` (for example,
-from a MEHO pod), with the operator's Keycloak identity or a
-service-account JWT bound to the same role. The role refuses a login
-from any other address.
+Commands 1 to 4 read Vault's configuration. Run them with a Vault
+administrator login: the policies of this guide do not grant these reads.
+Run command 5 with the operator's login: log in with the operator's
+Keycloak identity or a service-account JWT bound to the same role, from an
+address in `token_bound_cidrs` (for example, from a MEHO pod). The role
+refuses a login from any other address. A working operator login also
+shows that the address binding covers that address.
 
 ```bash
 # 1. JWT auth method exists with correct discovery URL
-#    (auth/jwt/ — the dedicated mount, NOT auth/oidc/)
+#    (auth/jwt/ — the dedicated mount, NOT auth/oidc/). Administrator login.
 vault read -format=json auth/jwt/config \
-  | jq '{oidc_discovery_url, default_role}'
+  | jq '.data | {oidc_discovery_url, default_role}'
 
-# 2. Role exists with correct audience binding
+# 2. Role exists with correct audience binding. Administrator login.
 vault read -format=json auth/jwt/role/meho-mcp \
-  | jq '{bound_audiences, user_claim, role_type, policies, token_bound_cidrs, token_ttl}'
+  | jq '.data | {bound_audiences, user_claim, role_type, policies, token_bound_cidrs, token_ttl}'
 # Expect: token_bound_cidrs covers MEHO's addresses, token_ttl is 300.
 
-# 3. Policy grants read on the health test secret (surface 5)
+# 3. Policy grants read on the health test secret (surface 5).
+#    Administrator login.
 vault policy read meho-mcp
 
-# 4. KV mount is v2 at the expected prefix
+# 4. KV mount is v2 at the expected prefix. Administrator login.
 vault secrets list -format=json \
   | jq '."secret/" | {type, options}'
 # Expect: type="kv", options.version="2"
 
-# 5. Federation-proof fixture exists
+# 5. Federation-proof fixture exists and the operator login reads it.
+#    Operator login.
 vault kv get -format=json secret/meho/test/federation \
   | jq '.data.metadata.version'
 # Expect: a positive integer (the KV-v2 version number).

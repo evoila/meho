@@ -13,8 +13,10 @@ holds only key A. This table keeps key B, so a later retry with key B gets
 the same request, also after it was approved.
 
 ``approval_request.composite_step`` marks a request that a step of a
-multi-step operation made (a call sent through ``dispatch_child``). A direct
-call never gets such a request through the same-call lookup.
+multi-step operation made (a call sent through ``dispatch_child``). Every new
+request stores true or false. Older rows keep NULL, because a step that was
+already waiting is not known. The same-call lookup gives a direct call only a
+request marked false, so it never gets a marked or an older request.
 ``docs/codebase/approvals.md``.
 
 Reversibility

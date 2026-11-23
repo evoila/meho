@@ -1281,8 +1281,10 @@ async def _find_same_call_pending_request(
     Only a ``pending`` request inside its deadline counts: an approved one
     may have run, and an overdue one can no longer be approved. Nothing is
     expired here. A request of an agent run or of a step of a multi-step
-    operation (``resume_parent`` or ``composite_step`` set) never counts:
-    approving it runs that run or that step, not this direct call. The match
+    operation (``resume_parent`` set, or ``composite_step`` not false) never
+    counts: approving it runs that run or that step, not this direct call. A
+    request made before migration 0182 has ``composite_step`` NULL, so it
+    never counts either. The match
     is the same as for a retry key: same operation, connector, target, params,
     ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
     choice.
@@ -1308,7 +1310,8 @@ async def _find_same_call_pending_request(
         # instead of SQL NULL for a direct call.
         if (
             existing.resume_parent is None
-            and not existing.composite_step
+            # NULL is a request made before migration 0182: it may be a step.
+            and existing.composite_step is False
             and params_hash_matches(params, existing.params_hash)
             and existing.preview_hash == preview_hash
             and existing.work_ref == work_ref_var.get()
@@ -2078,7 +2081,7 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
-        composite_step=True if _is_composite_step() else None,
+        composite_step=_is_composite_step(),
         allowed_connectors=stored_connector_limit(),
         **_policy_rule_fields(),
     )

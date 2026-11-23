@@ -2808,10 +2808,14 @@ keeps no tenant or login: they come from the request row.
   top level).
 - Only a stored direct request is reused. A stored request of an agent run
   (`run_id` set) or of a step of a multi-step operation (`resume_parent`
-  set, or `composite_step` true) is never returned to a direct call:
-  approving it would run that run or that step, not the direct call. A
-  step sent through `dispatch_child` marks its request with
-  `composite_step` (migration `0182`; NULL on older rows reads as false).
+  set, or `composite_step` not false) is never returned to a direct call:
+  approving it would run that run or that step, not the direct call. Every
+  new request stores `composite_step` (migration `0182`): true for a step
+  sent through `dispatch_child`, false for any other call. A request made
+  before the migration keeps NULL, because it may be a step that was
+  already waiting. The lookup returns only a request marked false, so such
+  an older request is never returned to another call. Its retry with the
+  same key still gets it back.
 - A retry with the same key still gets its request back, also for a step.
 - A late retry with key A can expire its overdue request A and then get a
   waiting request B of the same call. The answer is B with

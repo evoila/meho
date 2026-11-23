@@ -9,6 +9,8 @@ of the same call. A step that a multi-step operation sends through
 step. So the step always makes its own request, and a direct call never gets
 the request of such a step. Both orders go through the real ``dispatch``
 path. A retry of the same step with the same key still gets its request back.
+A request made before migration 0182 has no mark (NULL): it may be a step
+that was already waiting, so a direct call never gets it either.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import meho_backplane.operations.approval_queue as approval_queue_module
 from meho_backplane.connectors import OperationResult
@@ -33,7 +35,6 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
 )
 from meho_backplane.operations._validate import compute_params_hash
-from meho_backplane.operations.approval_queue import create_pending_request
 from meho_backplane.operations.composite import composite_depth_var
 from meho_backplane.settings import get_settings
 from tests.test_operations_composite import (
@@ -170,7 +171,7 @@ async def test_a_step_after_a_waiting_direct_call_gets_its_own_request(
     assert "approval_request_reused" not in step.extras
     rows = await _requests()
     assert [row.id for row in rows] == [direct_id, step_id]
-    assert [bool(row.composite_step) for row in rows] == [False, True]
+    assert [row.composite_step for row in rows] == [False, True]
     assert recorded == [("pending", direct_id), ("pending", step_id)]
 
 
@@ -198,7 +199,7 @@ async def _park_step_with_key(key: str) -> ApprovalRequest:
     depth_token = composite_depth_var.set(1)
     try:
         async with get_sessionmaker()() as s:
-            request = await create_pending_request(
+            request = await approval_queue_module.create_pending_request(
                 s,
                 operator=_make_operator(),
                 connector_id=_CONNECTOR_ID,
@@ -223,4 +224,42 @@ async def test_a_retry_of_the_same_step_with_the_same_key_gets_its_request() -> 
     assert retry.id == first.id
     assert getattr(retry, "_reused", False) is True
     assert first.composite_step is True
+    assert len(await _requests()) == 1
+
+
+async def _clear_marks() -> None:
+    """Make every stored request look like one made before migration 0182."""
+    async with get_sessionmaker()() as s:
+        await s.execute(update(ApprovalRequest).values(composite_step=None))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_direct_call_after_a_step_waiting_since_before_the_upgrade_gets_its_own_request(
+    recorded: list[tuple[str, uuid.UUID]],
+) -> None:
+    await _register_ops()
+    target = _FakeTarget(product="vault")
+
+    step = await _multi_step(target)
+    await _clear_marks()
+    direct = await _direct(target)
+
+    assert direct.status == "awaiting_approval", direct.error
+    step_id = uuid.UUID(step.extras["approval_request_id"])
+    direct_id = uuid.UUID(direct.extras["approval_request_id"])
+    assert direct_id != step_id
+    assert "approval_request_reused" not in direct.extras
+    assert [row.composite_step for row in await _requests()] == [None, False]
+    assert recorded == [("pending", step_id), ("pending", direct_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_a_step_waiting_since_before_the_upgrade_gets_its_request() -> None:
+    first = await _park_step_with_key("old-step-key")
+    await _clear_marks()
+    retry = await _park_step_with_key("old-step-key")
+
+    assert retry.id == first.id
+    assert getattr(retry, "_reused", False) is True
     assert len(await _requests()) == 1

@@ -7558,9 +7558,10 @@ class ApprovalRequest(Base):
         sa.Boolean(), nullable=True, default=None
     )
     # True when a step of a multi-step operation made the request: a call
-    # that the operation sent through ``dispatch_child``. With
-    # ``APPROVAL_SAME_CALL_REUSE`` on, a direct call never gets such a
-    # request. NULL on older rows reads as False. Added by migration 0182.
+    # that the operation sent through ``dispatch_child``. False for any other
+    # new request. NULL on a row made before migration 0182, when it was not
+    # known. With ``APPROVAL_SAME_CALL_REUSE`` on, a direct call gets only a
+    # request where this is False.
     composite_step: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
     # The ``approval.request`` audit row written alongside this row (the
     # durable audit record of the parking call). Decision audit rows and

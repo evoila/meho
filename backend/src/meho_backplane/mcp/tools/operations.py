@@ -71,6 +71,11 @@ from meho_backplane.mcp.tools._call_operation_reveal import (
     fetch_reveal_over_mcp,
     reveal_fetch_for_settings,
 )
+from meho_backplane.mcp.tools._call_operation_status import (
+    is_approved_reveal,
+    read_own_request_over_mcp,
+    status_for_settings,
+)
 from meho_backplane.mcp.tools._group_operations import (
     GROUP_INPUT_PROPERTY,
     GROUP_NOTE_OUTPUT_PROPERTY,
@@ -247,11 +252,18 @@ async def _call_operation_handler(
     (:mod:`meho_backplane.operation_picks`). With ``MCP_REVEAL_FETCH`` on,
     ``approval_request_id`` fetches the value of the caller's approved
     secret reveal instead (:mod:`._call_operation_reveal`); it writes no
-    call record. A reveal call cannot run in the background:
+    call record. With ``MCP_OWN_REQUEST_STATUS`` on, any other
+    ``approval_request_id`` reads the state of the caller's own request
+    (:mod:`._call_operation_status`); nothing runs. A reveal call cannot run in the background:
     ``reveal_secret: true`` with ``async: true`` is refused
     (``reveal_secret_with_async``).
     """
     if APPROVAL_REQUEST_ID in arguments:
+        settings = get_settings()
+        if settings.mcp_own_request_status and not (
+            settings.mcp_reveal_fetch and await is_approved_reveal(operator, arguments)
+        ):
+            return await read_own_request_over_mcp(operator, arguments)
         return await fetch_reveal_over_mcp(operator, arguments)
     call_arguments = dict(arguments)
     _clean_work_ref_argument(call_arguments)
@@ -784,10 +796,13 @@ _call_operation_short_text = with_short_text(CALL_OPERATION_SHORT, then=recall_s
 def _call_operation_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
     """``call_operation`` as shown under the current settings.
 
-    The fetch text of ``MCP_REVEAL_FETCH`` is added last, so the short text
-    of ``MCP_SHORT_TOOL_TEXTS`` does not replace it.
+    The fetch text of ``MCP_REVEAL_FETCH`` and the status text of
+    ``MCP_OWN_REQUEST_STATUS`` are added last, so the short text of
+    ``MCP_SHORT_TOOL_TEXTS`` does not replace them.
     """
-    return reveal_fetch_for_settings(_call_operation_short_text(definition, operator))
+    return status_for_settings(
+        reveal_fetch_for_settings(_call_operation_short_text(definition, operator))
+    )
 
 
 register_mcp_tool(

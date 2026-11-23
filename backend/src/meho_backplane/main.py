@@ -260,6 +260,10 @@ from meho_backplane.request_usage.retention import (
     stop_request_usage_retention_sweeper,
 )
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.embedding_state import (
+    check_embedding_model_at_start,
+    embedding_model_probe,
+)
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.session_store.config import load_config as load_session_store_config
@@ -616,6 +620,13 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Warn when the stored vectors come from another model than the set one.
+    # The readiness check is added only then, and only with the switch
+    # EMBEDDING_MODEL_HEALTH_CHECK on, so by default the health answer (and
+    # so meho_status) stays as it was.
+    model_differs = await check_embedding_model_at_start()
+    if model_differs and get_settings().embedding_model_health_check:
+        register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()

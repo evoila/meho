@@ -333,7 +333,12 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
-from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
@@ -444,10 +449,7 @@ from meho_backplane.operations._principal_block_gate import (
     refuse_if_principal_blocked,
     refuse_step_if_blocked,
 )
-from meho_backplane.operations._request_preview import (
-    compute_preview_hash,
-    preview_dispatch,
-)
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprint_value,
@@ -3645,7 +3647,7 @@ async def _destructive_binding_refusal(
             "for this (connector_id, op_id, target, params)",
             duration_ms,
         )
-    if compute_preview_hash(authoritative) != preview_hash:
+    if authoritative.get("preview_hash") != preview_hash:
         return result_preview_hash_mismatch(op_id, duration_ms)
 
     # Requirement 3: the mandatory blast-radius statement.
@@ -3974,17 +3976,19 @@ async def _handle_needs_approval(
             )
             await session.commit()
         reused = bool(getattr(request, "_reused", False))
+        # Record the add-on step events AFTER commit so a phantom event
+        # cannot outlive a failed transaction (the helper is fail-open). A
+        # late retry that expired its old request and got another waiting
+        # request still sends the old one's expiry event.
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await record_approval_step_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                audit_id=expired_request._audit_id,
+            )
         if not reused:
-            # Record the add-on step events AFTER commit so a phantom event
-            # cannot outlive a failed transaction (the helper is fail-open).
-            expired_request = getattr(request, "_expired_request", None)
-            if expired_request is not None:
-                await record_approval_step_event(
-                    tenant_id=operator.tenant_id,
-                    request=expired_request,
-                    decision="expired",
-                    audit_id=expired_request._audit_id,
-                )
             await record_approval_step_event(
                 tenant_id=operator.tenant_id,
                 request=request,
@@ -4031,8 +4035,11 @@ async def _handle_needs_approval(
         request.id,
         duration_ms,
         reused=reused,
-        audit_id=request.request_audit_id,
+        # A call that got the waiting request of the same call has its own
+        # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
+        audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
+        already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )
 
 

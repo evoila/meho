@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0182_add_principal_block``.
+"""Tests for Alembic migration ``0184_add_principal_block``.
 
 * The upgrade adds the ``principal_block`` table. Its key is ``(sub, scope)``.
 * The downgrade drops the table again.
@@ -22,15 +22,15 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0182"
-_DOWN_REVISION = "0181"
+_REVISION = "0184"
+_DOWN_REVISION = "0183"
 _TABLE = "principal_block"
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0182.db"
+    db_path = tmp_path / "migration_0184.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

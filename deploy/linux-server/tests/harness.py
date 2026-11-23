@@ -57,9 +57,8 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 TENANT_ID = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 INSTALL_DATE = "2026-10-23T12:00:00Z"
 ADMIN_LOGIN_VALUE = "fake-admin-login-7f3a"
-APPROVER_LOGIN_VALUE = "fake-approver-login-9c1d"
 UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
-SECRET_VALUES = (ADMIN_LOGIN_VALUE, APPROVER_LOGIN_VALUE, UNSEAL_KEY)
+SECRET_VALUES = (ADMIN_LOGIN_VALUE, UNSEAL_KEY)
 
 # RKE2's kernel settings file for the CIS profile, as RKE2 v1.37.1 ships it,
 # and the place where its tarball installer puts it.
@@ -214,27 +213,14 @@ KUBECTL_STUB = textwrap.dedent("""\
     esac
     """)
 
-# The download's meho command answers "meho status --first-start" as the test
-# says, and logs the CA file it was given in SSL_CERT_FILE.
+# The download's meho command. Its calls go to calls.log, like every stub.
 MEHO_CLI_STUB = textwrap.dedent("""\
     # fake meho CLI {version}
-    printf 'meho-env SSL_CERT_FILE=%s\\n' "${{SSL_CERT_FILE:-}}" >> "$MEHO_FAKE/calls.log"
-    cat "$MEHO_FAKE/meho_first_start_out"
-    cat "$MEHO_FAKE/meho_first_start_err" >&2
-    exit "$(cat "$MEHO_FAKE/meho_first_start_rc")"
+    exit 0
     """)
 
 # The CA of the console certificate, as kubectl prints it decoded. Made up.
 CONSOLE_CA = "-----BEGIN CERTIFICATE-----\nMIIBfakeConsoleCA\n-----END CERTIFICATE-----\n"
-
-# What "meho status --first-start" prints for a green list.
-FIRST_START_GREEN = (
-    "GREEN   dns           meho.example.com points at this MEHO.\n"
-    "GREEN   certificate   The certificate of meho.example.com is valid for 820 more days.\n"
-    "GREEN   network       meho.example.com points at a private address.\n"
-    "GREEN   clock         The clock is within 60 seconds of Keycloak and PostgreSQL.\n"
-    "GREEN   reachability  No systems are in the settings yet.\n"
-)
 
 # Like RKE2's installer, the stub puts RKE2's kernel settings file for the
 # CIS profile into the share folder of RKE2.
@@ -302,17 +288,12 @@ DEFAULT_ANSWERS = {
     "kube_secret_first_login": (
         f"admin_password={ADMIN_LOGIN_VALUE}\n"
         "admin_username=admin\n"
-        f"approver_password={APPROVER_LOGIN_VALUE}\n"
-        "approver_username=approver\n"
     ),
     "kube_secret_first_login_rc": "0",
     "kube_secret_unseal": f"{UNSEAL_KEY}\n",
     "kube_secret_unseal_rc": "0",
     "kube_secret_tls": CONSOLE_CA,
     "kube_secret_tls_rc": "0",
-    "meho_first_start_out": FIRST_START_GREEN,
-    "meho_first_start_err": "",
-    "meho_first_start_rc": "0",
     "rke2_installer_rc": "0",
     "rke2_share_dir": RKE2_SHARE_DIR,
     "rke2_cis_sysctl": RKE2_CIS_SYSCTL,

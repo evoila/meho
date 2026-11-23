@@ -62,12 +62,26 @@ can grow without a migration — the T2 design constraint):
   registers no tools.
 * ``connectors`` — an optional allow-list of ``connector_id`` values the
   agent may reach through ``call_operation`` (and inspect through
-  ``preview_operation``). ``meho_connector_list`` shows only these
+  ``preview_operation``, ``list_operation_groups`` and
+  ``search_operations``). ``meho_connector_list`` shows only these
   connectors, so the agent finds the ones it may use (#4233). Omitted /
   ``null`` means "no connector-level restriction beyond what dispatch
   already enforces" (the tenant boundary + per-op RBAC still apply). An
   empty list forbids every connector — ``call_operation`` is registered
-  but every dispatch is rejected before it reaches the dispatcher.
+  but every dispatch is rejected before it reaches the dispatcher. The
+  list is bound around every tool call
+  (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`):
+  the dispatcher checks the connector each target picks, every stored
+  result keeps the list, ``result_query`` reads only results stored
+  under a list inside the agent's own, and ``list_targets`` and the
+  near-match targets of a ``no_target`` or ``ambiguous_target`` answer
+  name only targets of connectors in the list. Memory, knowledge and the
+  broadcast stay shared: the list does not limit them. With the
+  ``agent_topology_off_with_connector_list`` setting on (off by default),
+  ``query_topology`` is not registered for an agent with a list
+  (``outside_connector_list``): the topology links objects of every
+  connector. A refusal names no
+  connector outside the list.
 
 Unknown keys in the spec are ignored (forward-compat): a future spec field
 must not break an older runtime.
@@ -97,8 +111,11 @@ author can tell them from the ``agent_toolset_resolved`` log line:
   a newer tool). Nothing can be registered for it.
 * **disabled** — the tool exists, but this run does not get it: the spec's
   ``meta_tools`` list leaves it out (``not_in_allow_list``), the run's role
-  is below the tool's floor (``role_below_floor``), or the tenant lacks the
-  tool's capability (``capability_missing``).
+  is below the tool's floor (``role_below_floor``), the tenant lacks the
+  tool's capability (``capability_missing``), or the spec has a
+  ``connectors`` list, the tool cannot keep to it and the
+  ``agent_topology_off_with_connector_list`` setting is on
+  (``outside_connector_list``).
 
 A disabled tool is still not registered, so the model never sees it.
 
@@ -206,11 +223,27 @@ _log = structlog.get_logger(__name__)
 #: check and the schema stay in lock-step.
 _CONNECTOR_ID_ARG = "connector_id"
 
-#: Meta-tools that name a connector to run (or preview) an operation on. The
-#: spec's ``connectors`` allow-list is checked for these before the handler
-#: runs, so ``preview_operation`` cannot look at a connector the agent may
-#: not call.
-_CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset({"call_operation", "preview_operation"})
+#: Meta-tools that name a connector in ``connector_id``: to run or preview an
+#: operation on it, or to list or search its operations. The spec's
+#: ``connectors`` allow-list is checked for these before the handler runs, so
+#: the agent cannot look at a connector it may not call.
+_CONNECTOR_SCOPED_TOOLS: frozenset[str] = frozenset(
+    {"call_operation", "preview_operation", "list_operation_groups", "search_operations"}
+)
+
+#: Meta-tools an agent with a ``connectors`` list does not get when the
+#: ``agent_topology_off_with_connector_list`` setting is on: their answers
+#: cannot be kept to the connectors of the list.
+_NOT_WITH_CONNECTOR_LIST: frozenset[str] = frozenset({"query_topology"})
+
+
+def _outside_connector_list(tool_name: str, allowed_connectors: frozenset[str] | None) -> bool:
+    """Return whether a run with *allowed_connectors* does not get *tool_name*."""
+    return (
+        allowed_connectors is not None
+        and tool_name in _NOT_WITH_CONNECTOR_LIST
+        and get_settings().agent_topology_off_with_connector_list
+    )
 
 
 def _with_argument_check(*specs: MetaToolSpec) -> tuple[MetaToolSpec, ...]:
@@ -598,9 +631,8 @@ def _refuse_disallowed_connector(
         tenant_id=str(operator.tenant_id),
     )
     raise ToolRefusedRetry(
-        f"connector_id {connector_id!r} is not in this agent's "
-        f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
-        f"an allowed connector or stop.",
+        f"The connector_id is not in this agent's allowed connectors "
+        f"{sorted(allowed_connectors)!r}. Pick an allowed connector or stop.",
         reason_code=CONNECTOR_NOT_ALLOWED,
         reason=f"{tool_name}: the connector is not in this agent's allowed connectors",
     )
@@ -661,14 +693,16 @@ def _make_meta_tool(
     not admit; the re-check makes sure a tool call can never run under an
     identity the floor refuses (#3737).
 
-    For ``call_operation`` and ``preview_operation`` with a connector
-    allow-list, the wrapper performs a pre-dispatch connector check and
-    raises :class:`ModelRetry` — an agent-reasonable structured error, not a
+    For ``call_operation``, ``preview_operation``, ``list_operation_groups``
+    and ``search_operations`` with a connector allow-list, the wrapper
+    checks the ``connector_id`` before the handler runs and raises
+    :class:`ModelRetry` — an agent-reasonable structured error, not a
     crash — when the requested connector is outside the spec's
-    ``connectors`` list. It also binds the list for the dispatcher
-    (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`),
-    which refuses a target whose connector is outside the list with
-    ``connector_not_allowed``.
+    ``connectors`` list. With a list, every tool binds it
+    (:func:`~meho_backplane.operations._target_connector_limit.connector_limit`):
+    the dispatcher refuses a target whose connector is outside the list
+    with ``connector_not_allowed``, every stored result keeps the list, and
+    ``result_query`` reads only results stored under a list inside it.
 
     An unknown or not-yet-ingested ``connector_id`` from the handler goes
     back to the model as a failed tool result (#4232), so the model can pick
@@ -705,9 +739,10 @@ def _make_meta_tool(
             )
         call_arguments = dict(arguments)
         # The dispatcher checks the connector the target picks against the
-        # same list, for the call, its preview and the steps it runs.
-        limit = connector_limit(allowed_connectors) if is_connector_scoped else nullcontext()
-        with limit:
+        # same list, for the call, its preview and the steps it runs. A
+        # stored result keeps the list, and a read of one checks it.
+        bind = is_connector_scoped or allowed_connectors is not None
+        with connector_limit(allowed_connectors) if bind else nullcontext():
             with connector_errors_reach_model():
                 # A search or call writes its record; other tools do not.
                 result = await recorded_meta_tool(
@@ -738,7 +773,9 @@ def _make_meta_tool(
 
 
 #: Why a catalog tool was not registered for a run.
-DisabledReason = Literal["not_in_allow_list", "role_below_floor", "capability_missing"]
+DisabledReason = Literal[
+    "not_in_allow_list", "role_below_floor", "capability_missing", "outside_connector_list"
+]
 
 
 @dataclass(frozen=True)
@@ -780,9 +817,10 @@ def resolve_agent_toolset(
     register it).
 
     The spec's ``connectors`` allow-list (when present) is threaded into the
-    ``call_operation`` and ``preview_operation`` tools so a request to a
-    connector outside the list is rejected with a structured,
-    agent-reasonable error before it reaches the dispatcher.
+    ``call_operation``, ``preview_operation``, ``list_operation_groups`` and
+    ``search_operations`` tools so a request to a connector outside the list
+    is rejected with a structured, agent-reasonable error before it reaches
+    the handler.
 
     Args:
         toolset: the definition's toolset spec (``AgentDefinition.toolset``),
@@ -835,6 +873,9 @@ def resolve_agent_toolset(
             continue
         if not capability_satisfied(operator, meta.required_capability):
             disabled[meta.name] = "capability_missing"
+            continue
+        if _outside_connector_list(meta.name, allowed_connectors):
+            disabled[meta.name] = "outside_connector_list"
             continue
         tools.append(_make_meta_tool(meta, allowed_connectors=allowed_connectors))
 

@@ -43,6 +43,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import approve_request, create_pending_request
+from tests._people_behind_helpers import give_known_person
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
 # fixture) points the process sessionmaker at the testcontainer and seeds
@@ -105,6 +106,7 @@ async def _submit(*, expires_at: datetime | None = None) -> ApprovalRequest:
             params_hash=compute_params_hash(_PARAMS),
             expires_at=expires_at,
             idempotency_key=_KEY,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request
@@ -188,6 +190,7 @@ async def test_late_retry_that_waits_on_an_approval_gets_the_approved_row(
     again. That lookup must refresh the row to ``approved`` and return it
     as a reuse: one row, one approve decision, no expiry.
     """
+    await give_known_person(_requester())
     original = await _submit(expires_at=datetime.now(UTC) + timedelta(hours=1))
     assert original.expires_at is not None
     late: datetime = original.expires_at + timedelta(seconds=1)

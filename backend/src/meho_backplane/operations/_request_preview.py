@@ -85,7 +85,10 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unqualified_target_version,
 )
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
+    get_or_create_connector_instance,
+)
 from meho_backplane.operations._ingested_owner import (
     INGESTED_OPS_NOT_ACCEPTED,
     accepts_ingested_operations,
@@ -97,7 +100,11 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
-from meho_backplane.operations._preview import _SENSITIVE_CLASSES, has_preview_builder
+from meho_backplane.operations._preview import (
+    _SENSITIVE_CLASSES,
+    _scrub_secret_param_keys,
+    has_preview_builder,
+)
 from meho_backplane.operations._preview_steps import (
     agent_step_refusal,
     preview_step_verdict,
@@ -109,12 +116,15 @@ from meho_backplane.operations._target_version_range import version_range_previe
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     _is_mutating,
+    compute_params_hash,
     params_errors,
     policy_gate,
     validate_params,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.preview_needs_switch import preview_needs_switch
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 from meho_backplane.policy.stamp import take_rule
 from meho_backplane.redaction import apply_connector_boundary_redaction
@@ -151,7 +161,7 @@ _PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
 PARAMS_DIGEST_KEY: Final[str] = "params_digest"
 
 
-def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
+def compute_preview_hash(envelope: Mapping[str, Any], *, params_digest: str | None = None) -> str:
     """Return a stable SHA-256 hex over a preview's canonicalised resolved envelope.
 
     The preview-result-hash binding for the ``destructive`` tier (#3197,
@@ -164,6 +174,9 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     param-swap between preview and the governed call. A synthetic preview
     also carries :data:`PARAMS_DIGEST_KEY`; it joins the projection when
     present, so a value the safe view hides still changes the hash.
+    ``params_digest`` is the same kind of digest kept out of the envelope:
+    an ingested credential write masks its secret values, so the digest of
+    its literal query and body joins the hash, but not the answer.
 
     Canonicalisation matches the params hashes in
     :mod:`meho_backplane.operations._validate`
@@ -173,6 +186,8 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     source = {key: envelope.get(key) for key in _PREVIEW_HASH_KEYS}
     if PARAMS_DIGEST_KEY in envelope:
         source[PARAMS_DIGEST_KEY] = envelope[PARAMS_DIGEST_KEY]
+    elif params_digest is not None:
+        source[PARAMS_DIGEST_KEY] = params_digest
     canonical = json.dumps(source, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -283,8 +298,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
 
     The last two rules hold only while the ``PREVIEW_TYPED_WRITES`` switch
     is on. Off (the default), a typed op previews as before: when it is
-    destructive, or when it carries ``requires_approval`` and is not a
-    credential-class op.
+    destructive, or when it carries ``requires_approval``, is not a
+    credential-class op and is not listed in
+    :mod:`~meho_backplane.operations.preview_needs_switch`.
     """
     if descriptor.source_kind == "ingested":
         return True
@@ -292,7 +308,9 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
         return True
     if not get_settings().preview_typed_writes:
         return (
-            descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            descriptor.requires_approval
+            and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+            and not preview_needs_switch(descriptor.op_id)
         )
     if classify_op(descriptor.op_id) in _SENSITIVE_CLASSES:
         return has_preview_builder(descriptor.op_id)
@@ -364,7 +382,7 @@ async def _resolve_descriptor(
     when the target's connector cannot run the op (#5948); like
     ``dispatch``, this comes right after the target check, so it is never
     hidden by the catalog choice or by the op's check before the wait for
-    approval. Right after it comes the ``connector_not_allowed`` envelope
+    approval. Right before it comes the ``connector_not_allowed`` envelope
     of a hosted agent whose connector list does not hold the target's
     connector (:mod:`._target_connector_limit`). Returns the ``denied``
     envelope when the target's connector is outside the session's MCP
@@ -439,16 +457,16 @@ async def _target_check_envelope(
     *, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> dict[str, Any] | None:
     """The first refusal of the target checks, in the order ``dispatch`` runs them."""
-    mismatch = mismatch_preview_envelope(
-        descriptor=descriptor, connector_id=connector_id, target=target
-    )
-    if mismatch is not None:
-        return mismatch
     not_allowed = await not_allowed_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
     if not_allowed is not None:
         return not_allowed
+    mismatch = mismatch_preview_envelope(
+        descriptor=descriptor, connector_id=connector_id, target=target
+    )
+    if mismatch is not None:
+        return mismatch
     return version_range_preview_envelope(
         descriptor=descriptor, connector_id=connector_id, target=target
     )
@@ -536,7 +554,7 @@ def _validate_params_envelope(
     """Dispatch Step 3: the ``invalid_params`` / ``invalid_op_schema`` envelope, or ``None``."""
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_for_checks(descriptor), params)
     except InvalidOpSchemaError as exc:
         return _invalid_op_schema_envelope(
             op_id=op_id,
@@ -757,9 +775,16 @@ def _redact_request_body(
     A body field the redactor masks in a real response is masked here too --
     no new raw-secret surface. A ``None`` body (no requestBody) round-trips
     to ``None`` without touching the engine.
+
+    For a credential write (``classify_op`` gives ``credential_write``) each
+    value under a secret name is first replaced by the fixed mark
+    (:func:`~meho_backplane.operations._preview._scrub_secret_param_keys`),
+    the same name rule and the same mark the echo of a waiting call uses.
     """
     if body is None:
         return None
+    if classify_op(op_id) == "credential_write":
+        body = _scrub_secret_param_keys(body)
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     redaction = apply_connector_boundary_redaction(
         body,
@@ -814,6 +839,8 @@ async def _build_ingested_preview(
             "extras": {"error_code": INGESTED_OPS_NOT_ACCEPTED},
         }
     connector_instance = get_or_create_connector_instance(cls)
+    if target is not None:
+        await forget_target_if_changed(target)
 
     # The literal request, resolved through the SAME code path
     # ``dispatch_ingested`` sends through -- no drift.
@@ -884,6 +911,15 @@ def _ok_ingested_envelope(
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
+    # A credential write shows its query inputs with the same mark as its
+    # body. The keyed digest of the literal query and body keeps the hash
+    # bound to each hidden value; it goes into the hash, not the answer.
+    credential_write = classify_op(op_id) == "credential_write"
+    query = request.query
+    if query and credential_write:
+        query = _redact_request_body(
+            query, connector_id=connector_id, operator=operator, op_id=op_id
+        )
     _log.info(
         "preview_dispatch",
         connector_id=connector_id,
@@ -900,10 +936,15 @@ def _ok_ingested_envelope(
         "source_kind": descriptor.source_kind,
         "method": request.method,
         "resolved_path": request.path,
-        "query": request.query,
+        "query": query,
         "redacted_body": redacted_body,
     }
-    envelope["preview_hash"] = compute_preview_hash(envelope)
+    digest = (
+        compute_params_hash({"query": request.query, "body": request.body})
+        if credential_write
+        else None
+    )
+    envelope["preview_hash"] = compute_preview_hash(envelope, params_digest=digest)
     return envelope
 
 

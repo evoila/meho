@@ -9,6 +9,10 @@ state is one JSON file, $MEHO_FAKE/cluster.json:
 
 - "objects": the Secrets of namespace meho by name, each with its "type",
   its "labels" and its "data", decoded;
+- "configmaps": the ConfigMaps of namespace meho by name, each the decoded
+  values of its "binaryData" and "data", as "kubectl apply" leaves them;
+- "deployment_restarts": how many times "rollout restart
+  deployment/meho" ran;
 - "openbao": the one OpenBao pod: its "uid", whether it is "sealed", the
   unseal "key" that opens it, whether its server "answers" at all, and
   "boot_status_calls": how many "bao status" calls a new pod answers with
@@ -17,7 +21,8 @@ state is one JSON file, $MEHO_FAKE/cluster.json:
   pod that is shutting down does. "boot_unsealed": the new pod is unsealed
   at once, as when someone else unseals it. "stops_after_unseal": the server
   stops answering after an unseal call;
-- "fail": the calls that fail: "patch", "delete", "create" and "restart";
+- "fail": the calls that fail: "patch", "delete", "create", "apply" and
+  "restart" (of OpenBao's StatefulSet and of the meho Deployment);
 - "down": true when RKE2 does not answer at all;
 - "key_inputs": every call that got the unseal key on standard input.
 
@@ -154,7 +159,32 @@ def _create(state: State, words: list[str], stdin: str) -> int:
     return 0
 
 
+def _apply(state: State, words: list[str], stdin: str) -> int:
+    """``kubectl apply -f -`` of one ConfigMap: makes it, or replaces its data."""
+    if words[1:] != ["-f", "-"]:
+        return _error("the fake kubectl applies only from standard input")
+    if "apply" in state["fail"]:
+        return _error(f"Internal error occurred: the object {stdin.strip()} was not saved")
+    manifest = json.loads(stdin)
+    if manifest["kind"] != "ConfigMap":
+        return _error(f"the fake kubectl applies only a ConfigMap, not a {manifest['kind']}")
+    name = manifest["metadata"]["name"]
+    values = dict(manifest.get("data", {}))
+    for field, value in manifest.get("binaryData", {}).items():
+        values[field] = base64.b64decode(value, validate=True).decode()
+    verb = "configured" if name in state["configmaps"] else "created"
+    state["configmaps"][name] = values
+    print(f"configmap/{name} {verb}")
+    return 0
+
+
 def _rollout(state: State, words: list[str]) -> int:
+    if words[1:] == ["restart", "deployment/meho"]:
+        if "restart" in state["fail"]:
+            return _error("Internal error occurred: the Deployment was not changed")
+        state["deployment_restarts"] += 1
+        print("deployment.apps/meho restarted")
+        return 0
     if words[1:] != ["restart", "statefulset/meho-vault"]:
         return _error(f"the fake kubectl does not know: rollout {' '.join(words[1:])}")
     if "restart" in state["fail"]:
@@ -221,7 +251,7 @@ def main(argv: list[str]) -> int:
         print("The connection to the server was refused", file=sys.stderr)
         return 1
     verb = words[0] if words else ""
-    reads_stdin = verb in ("patch", "create") or (verb == "exec" and "-i" in words)
+    reads_stdin = verb in ("patch", "create", "apply") or (verb == "exec" and "-i" in words)
     stdin = sys.stdin.read() if reads_stdin else ""
     if state["openbao"]["key"] in stdin:
         state["key_inputs"].append(" ".join(words))
@@ -234,6 +264,8 @@ def main(argv: list[str]) -> int:
             rc = _delete(state, words)
         case "create":
             rc = _create(state, words, stdin)
+        case "apply":
+            rc = _apply(state, words, stdin)
         case "rollout":
             rc = _rollout(state, words)
         case "exec":

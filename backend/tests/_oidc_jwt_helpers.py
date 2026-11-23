@@ -117,12 +117,9 @@ def mint_token(
     ``principal_kind="runner"`` + ``runner_id="<uuid>"`` to mint a
     satellite-runner token.
 
-    ``approver`` populates the ``approver`` JWT claim the backend's
-    ``_extract_approver`` reads onto ``Operator.approver`` (#3243) — the
-    approve-only capability. ``None`` omits the claim so every existing
-    call site is unchanged; pass ``approver=True`` alongside
-    ``tenant_role="read_only"`` to mint a dedicated approver principal that
-    can decide approvals but cannot dispatch.
+    ``approver`` populates the ``approver`` JWT claim. MEHO does not read
+    it, so ``Operator.approver`` stays off: pass ``approver=True`` to check
+    that the claim gives no right. ``None`` omits the claim.
 
     ``fresh_sign_in`` adds ``auth_time`` (now), a new random ``sid``,
     ``azp`` = the approval client (``meho-cli-approve``) and ``acr`` ``"1"``:

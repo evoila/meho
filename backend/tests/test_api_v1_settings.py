@@ -276,7 +276,7 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     assert doc["apiVersion"] == "meho.evoila.com/v1"
     assert doc["kind"] == "Settings"
     assert set(doc["metadata"]) == {"exportedAt", "exportedFrom"}
-    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0175"
+    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0183"
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
@@ -520,22 +520,6 @@ def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> N
         resp = _import(client, _token(key), content, preview=True)
     assert resp.status_code == 200, resp.text
     assert resp.json()["diff"]["policies"]["changed"][0]["key"] == "announce_gate_enabled"
-
-
-@pytest.mark.asyncio
-async def test_import_turns_on_run_approval_target_kinds(client: TestClient) -> None:
-    """The settings file turns on target kinds in run approvals (#4126)."""
-    content = (
-        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
-    )
-    key = make_rsa_keypair("kid-run-approval-kinds")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = _import(client, _token(key), content)
-    assert resp.status_code == 200, resp.text
-    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
-    assert tenant.run_approval_target_kinds_enabled is True
 
 
 @pytest.mark.asyncio

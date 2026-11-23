@@ -384,6 +384,8 @@ class Settings(BaseModel):
         role (``docs/decisions/login-role-groups.md``). Default: the
         five groups ``MEHO-Readers``, ``MEHO-Operators``,
         ``MEHO-SA-Operators``, ``MEHO-Admins`` and ``MEHO-Approvers``.
+        MEHO reads the old group ``MEHO-SA-Operators`` as Operators and
+        ``MEHO-Approvers`` as Readers.
         A person must be in exactly one of them: in two, Keycloak copies
         ``tenant_role`` from whichever group it finds first, so the role
         is unpredictable. ``verify_jwt`` reads the token's ``groups``
@@ -479,35 +481,21 @@ class Settings(BaseModel):
         the source stays **fail-closed**: a malformed ``realm_access``
         shape or an absent role resolves to ``False``.
     jwt_approver_claim_name:
-        Name of the JWT claim that carries the approve-only ``approver``
-        capability flag (a JSON boolean) added by #3243. Default
-        ``approver``. The flag is orthogonal to
-        :class:`~meho_backplane.auth.operator.TenantRole`; it admits a
-        principal to the approvals plane (list / show / approve / reject /
-        decide) **without** granting ``call_operation`` dispatch, so a
-        dedicated approver can be provisioned as ``read_only`` role + this
-        flag. The claim is **optional** and **fail-closed** — tokens that
-        carry no claim (or a malformed value) resolve to ``False``, so
-        every existing token is unaffected unless a realm explicitly
-        grants the claim. Override only when the realm exposes the flag
-        under a different attribute.
+        Name of the JWT claim ``approver`` (default). MEHO does not read
+        this claim in any token form: it gives no approval right. MEHO
+        keeps the ``approver`` flag in the code; no role gives it today,
+        and roles that customers define come later. The setting stays
+        until the old group names are removed.
     jwt_self_approver_group:
-        Name of the login group whose members may approve their own
-        changes (#3327, the rules of #3325). Default
-        ``MEHO-SA-Operators``, the group the shipped login setup creates
-        (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
-        :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
-        the token's ``groups`` claim names this group (a leading ``/``
-        and upper or lower case do not count). This is used only
-        when the token has no ``meho_tenants`` claim; with that claim, the
-        current tenant's ``SA-Operators`` entry decides. Off when the
-        group is missing; a machine login never gets the flag. Change it
-        only together with ``JWT_ROLE_GROUPS``, when the site renamed the
-        groups. A blank value keeps the default. With
-        ``POLICY_APPROVER_ROUTING`` on, this group is also a shipped
-        binding of a tenant without stored bindings: by its top-level
-        full path it gets the kind ``SA-Operators``
-        (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
+        Name of the old login group ``MEHO-SA-Operators`` (default). MEHO
+        reads that group as Operators: it gives no self-approval. A token
+        without a ``meho_tenants`` claim that names this group may still
+        approve where a routing entry names the old kind ``SA-Operators``.
+        The setting stays until the old group names are removed. A blank
+        value keeps the default. With ``POLICY_APPROVER_ROUTING`` on, this
+        group is also a shipped binding of a tenant without stored
+        bindings: by its top-level full path it gets the kind
+        ``Operators`` (:func:`~meho_backplane.policy.bindings.shipped_bindings`).
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -575,12 +563,13 @@ class Settings(BaseModel):
         384-dim, Apache-2.0, English-optimised, matches v0.1-spec
         L391's chosen model. Operators on non-English tenancies can
         swap via ``RETRIEVAL_EMBEDDING_MODEL`` to another fastembed-
-        supported identifier; **changing the output dimensionality
-        requires a re-embed-everything migration** because the
-        ``documents.embedding`` column is hard-pinned to
-        ``vector(384)`` by migration ``0003``. Swap to a same-
-        dimension model (e.g. a multilingual 384-dim variant) is
-        zero-migration.
+        supported identifier. The ``documents.embedding`` column is
+        hard-pinned to ``vector(384)`` by migration ``0003``, so only a
+        model with 384 dimensions fits. **A model change also needs
+        ``python -m meho_backplane.retrieval.reembed``**: stored vectors
+        stay from the old model until it has run, and until then
+        searches compare new question vectors with old vectors. MEHO
+        logs ``embedding_model_mismatch`` at start while they differ.
     retrieval_model_cache_dir:
         Filesystem path fastembed reads ONNX weights from. Default
         :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`
@@ -682,6 +671,13 @@ class Settings(BaseModel):
         running as a cheap heartbeat; ``enabled=False`` skips starting the
         loop entirely (no audit-row noise, no log line). Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    feed_stream_max_seconds:
+        Longest time, in seconds, one ``GET /api/v1/feed`` stream stays
+        open. The stream ends when its token expires (``exp`` plus
+        ``keycloak_jwt_leeway_seconds``), and after this time at the
+        latest, also for a token that lasts longer. The client then opens
+        a new stream with a fresh token and ``Last-Event-Id``, so it
+        misses no announcement. Default 3600 (one hour).
     checks_evidence_retention_days:
         Maximum age (in days) of ``sensor_results`` per-tick evidence rows
         the #2756 retention prune task preserves. Rows whose
@@ -1018,6 +1014,17 @@ class Settings(BaseModel):
         (unset) keeps the chassis-only deploys booting; any ``/ui/auth/*``
         request with the default surfaces an actionable error rather than
         silently misusing one of the other client ids.
+    ui_keycloak_approve_client_id:
+        OAuth ``client_id`` of the console's approval sign-in client
+        (#6282). Default ``meho-web-approve``. A confidential client with
+        the same secret as :attr:`ui_keycloak_client_id`, bound to the
+        approval sign-in flow ``meho approval sign-in level``. The console
+        uses it only for the new sign-in before an approve; the normal
+        console login keeps :attr:`ui_keycloak_client_id`. Only its tokens
+        carry the approval level into a console approve. Empty means the
+        console has no approval sign-in: ``auto`` then only records the
+        level, and an explicit ``required`` refuses every approve. Env var
+        ``UI_KEYCLOAK_APPROVE_CLIENT_ID``.
     ui_keycloak_client_secret:
         Client secret of the confidential ``meho-web`` Keycloak client.
         Initiative #337, Task #865. Sourced from Vault in production
@@ -1301,8 +1308,8 @@ class Settings(BaseModel):
         this off, nothing in an install changes. Env ``SPACES_ENABLED``.
     approval_allow_self_approval:
         Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
-        Default ``False`` (fail-closed): a person who is not a
-        MEHO-SA-Operator may not approve their own request — requester !=
+        Default ``False`` (fail-closed): a person who is not an
+        Admin may not approve their own request — requester !=
         approver is enforced in
         :func:`~meho_backplane.operations.approval_queue.approve_request`,
         so a compromised or careless single account cannot both ask for
@@ -1314,7 +1321,7 @@ class Settings(BaseModel):
         single-operator answer — enabling it posture-wide re-opens, for
         every ``safe`` and ``caution`` op, the single-account
         request+grant hole #1401 closed. A single operator belongs in the
-        MEHO-SA-Operators group instead (#3325); see the "Single-operator
+        MEHO-Admins group instead; see the "Single-operator
         tenants" section of ``docs/codebase/approvals.md``. Reject is
         always allowed regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
@@ -1362,7 +1369,11 @@ class Settings(BaseModel):
         check of the approval sign-in (``approvals.sign_in`` in
         ``/api/v1/health``) shows for sure that the realm does not give the
         level, else ``required``, also when the check failed. Any other value
-        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``.
+        stops the start. Set via ``APPROVAL_SIGN_IN_LEVEL``. The console
+        uses the same setting for its own approval sign-in (#6282); ``auto``
+        there reads the binding of :attr:`ui_keycloak_approve_client_id`
+        (``approvals.web_sign_in`` in ``/api/v1/health``), and only records
+        when that setting is empty.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1558,6 +1569,13 @@ class Settings(BaseModel):
         session without the scope does not list it, and a call answers
         with the same message as for the other admin tools. This saves
         its text in every session that has no use for the tool.
+    agent_topology_off_with_connector_list:
+        Off by default. When on, a hosted agent whose definition has a
+        ``connectors`` list does not get ``query_topology`` (disabled
+        reason ``outside_connector_list``): the topology links objects of
+        every connector. When off, such an agent gets ``query_topology``
+        when its definition asks for it. Env
+        ``AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST``.
     team_knowledge_recall:
         Off by default. When on, MEHO shows what the team knows without a
         search (:mod:`meho_backplane.recall`): ``preview_operation`` and
@@ -1566,6 +1584,23 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    kb_wiki_filtered_search:
+        Off by default. When on, a knowledge search whose only filters are
+        ``product`` and/or ``version`` still searches the tenant's wiki
+        (:func:`meho_backplane.kb.wiki_search.wiki_exact_filters`), and
+        sends them to its index as exact filters. It does so only when the
+        wiki's collection has ``scope_filters`` on; else the wiki is still
+        not searched and the answer says ``filtered``. Any other filter, a
+        time window or scope ``shared`` skips the wiki as before. When off,
+        every filter skips the wiki. It stays off until a measurement shows
+        it helps. Env ``KB_WIKI_FILTERED_SEARCH``.
+    kb_wiki_interleave:
+        Off by default. When on, ``search_knowledge`` lists the store hits
+        and the knowledge repo hits in turns (store 1, knowledge repo 1,
+        store 2, ...), so the knowledge repo's hits are not always last
+        and cut first when the answer is too large. When off, the store
+        hits come first. It stays off until a before-and-after
+        measurement shows it helps. Env ``KB_WIKI_INTERLEAVE``.
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
@@ -1601,6 +1636,16 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_own_request_status:
+        Off by default. When on, ``call_operation`` on MCP takes an
+        ``approval_request_id`` of the caller's own approval request and
+        answers with the state of that request (waiting, approved and
+        running, the stored result, or why it did not run). It runs nothing
+        and makes no new request
+        (:mod:`meho_backplane.mcp.tools._call_operation_status`). When off,
+        the tool has no text about this and refuses the input. The
+        measurement that must come before it goes on is tracked in
+        evoila/meho#6803. Env ``MCP_OWN_REQUEST_STATUS``.
     mcp_approval_exit_code:
         Off by default. When on, the ``resume_outcome`` of an approval on the
         MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
@@ -1608,6 +1653,32 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    approval_same_call_reuse:
+        Off by default. When on, a call that must wait for approval gets the
+        request that already waits when the same login in the same tenant
+        already has one for the same call (same operation, connector, target,
+        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice,
+        the same kind of login, and the same people behind the login).
+        The answer has that request's id and ``approval_request_reused: true``.
+        The call writes its own ``approval.reuse`` audit row with the caller's
+        session, and the answer's ``audit_id`` is that row. It works with
+        no ``idempotency_key`` and with a different key. Only a waiting
+        request inside its deadline is reused. A call inside an agent run,
+        a step of a multi-step operation (one sent through
+        ``dispatch_child``, or one saved to restart after approval) and a
+        re-run for an earlier requester always get their own request, and
+        a direct call never gets the request of such a step.
+        When off, every such call makes a new request. Env
+        ``APPROVAL_SAME_CALL_REUSE``.
+    audit_session_links:
+        Off by default. When on, an upload of an agent session links its
+        MCP calls and ``meho`` commands to their audit rows. Then
+        ``GET /api/v1/audit/show/{id}``, ``meho audit show`` and the
+        console's audit drawer name the stored session of a row, the session
+        read lists its MCP sessions, and the upload audit row counts the new
+        links. When off, MEHO stores no new link and these answers are the
+        same as before. It stays off until model tests show it helps. Env
+        ``AUDIT_SESSION_LINKS``.
     policy_classification:
         Off by default. When on, each connector, operation group and
         operation can carry a category, labels and an "always wait" mark,
@@ -1705,6 +1776,13 @@ class Settings(BaseModel):
     #: the pod never starts.
     test_fail_start_after_registration: bool = False
     backplane_url: str = ""
+    #: A PEM file with the CA of the console certificate, which the
+    #: first-start list trusts in addition to the system trust bundle when
+    #: it connects to ``backplane_url`` (#6698). Form 2 sets
+    #: ``CONSOLE_CA_FILE`` to the ConfigMap that ``meho-host certificate``
+    #: writes (``values-single-node.yaml``). Empty (the default): only the
+    #: system trust bundle.
+    console_ca_file: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
@@ -1825,6 +1903,15 @@ class Settings(BaseModel):
     # written as before, and a dry run lists no entries. It stays off until
     # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
     kb_similar_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on, `search_knowledge` tells the agent to search
+    # with a few key words, and its answer has `word_match` (some / none).
+    # Set via ``KB_SEARCH_WORD_HINT``.
+    kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on and the stored vectors come from another model
+    # than ``RETRIEVAL_EMBEDDING_MODEL``, the start adds the readiness check
+    # ``embedding_model`` (seen in ``/ready`` and ``meho_status``). The start
+    # warning is logged either way. Set via ``EMBEDDING_MODEL_HEALTH_CHECK``.
+    embedding_model_health_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1957,6 +2044,8 @@ class Settings(BaseModel):
     broadcast_announcement_retention_days: int = Field(default=90, ge=0, le=3650)
     broadcast_announcement_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     broadcast_announcement_prune_enabled: bool = True
+    # Longest life of one ``GET /api/v1/feed`` stream (see the docstring).
+    feed_stream_max_seconds: int = Field(default=3600, gt=0)
     # Checks per-tick evidence retention (#2756, Initiative #2780) -- the
     # sensor_results history table + its retention sweeper. Same mould as the
     # broadcast-announcement knobs above, with ONE deliberate divergence: here
@@ -2032,7 +2121,7 @@ class Settings(BaseModel):
     # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine, audited
     # break-glass; every self-approval still writes its decision audit
     # row, so the use is forensically visible. NOT the single-operator
-    # answer -- a single operator belongs in MEHO-SA-Operators (#3325);
+    # answer -- a single operator belongs in MEHO-Admins;
     # see docs/codebase/approvals.md "Single-operator tenants".
     approval_allow_self_approval: bool = False
     # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
@@ -2204,6 +2293,7 @@ class Settings(BaseModel):
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""
     ui_keycloak_client_id: str = ""
+    ui_keycloak_approve_client_id: str = "meho-web-approve"
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
     # Dedicated custody key for encrypted credential-write approval handoffs.
@@ -2557,14 +2647,22 @@ class Settings(BaseModel):
     operation_contract_guidance: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_require_session_id: bool = False
     mcp_topology_off_default_list: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    agent_topology_off_with_connector_list: bool = Field(
+        default=False, json_schema_extra=AGENT_FACING
+    )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_filtered_search: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
     policy_approver_routing: bool = False
     #: Absolute URL of the external vendor-document corpus search
@@ -2643,6 +2741,16 @@ class Settings(BaseModel):
     #: evaluation and the model tests show it helps. Set via
     #: ``SEARCH_PLAIN_SENTENCES``.
     search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Word half of the knowledge search (#6784). ``False`` (default): a
+    #: passage needs every word of the question, as before. ``True``: only
+    #: when that finds no passage, a second word search keeps passages that
+    #: hold one of the first 32 different words of the question
+    #: (``ANY_WORD_MAX_WORDS`` in ``retrieval/retriever.py``). The choice
+    #: is made once for the whole knowledge search:
+    #: if a passage of any searched tenant (own and shared) holds every word,
+    #: no tenant uses the any-word search. Only ``source="kb"``; memory and
+    #: operations search do not change. Set via ``KB_SEARCH_PLAIN_SENTENCES``.
+    kb_search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Stricter ``matched`` outcome of ``search_operations`` (#6014), behind
     #: a switch that is off by default. When on, a search answers
     #: ``ambiguous`` if another hit is closer in meaning than the top hit.
@@ -2722,6 +2830,12 @@ class Settings(BaseModel):
     #: them. Off: the same answers and tool texts as before. Set via
     #: ``SEARCH_HIT_CALL_HINTS``.
     search_hit_call_hints: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: File parameters on operations, behind a switch that is off by default.
+    #: A parameter whose schema has ``x-meho-switch: "file_ref_params"`` is
+    #: left out of every place that shows the schema, and a call that gives
+    #: it is refused like any unknown parameter, until this is on. See
+    #: ``operations/switch_params.py``. Set via ``FILE_REF_PARAMS``.
+    file_ref_params: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -3250,6 +3364,7 @@ def get_settings() -> Settings:
             os.environ.get("MEHO_TEST_FAIL_START_AFTER_REGISTRATION"),
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
+        console_ca_file=os.environ.get("CONSOLE_CA_FILE", "").strip(),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
         # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
         # and the configmap renders it blank for a `gsm` deploy — both
@@ -3304,6 +3419,8 @@ def get_settings() -> Settings:
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
+        kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
+        embedding_model_health_check=parse_bool_env(os.environ.get("EMBEDDING_MODEL_HEALTH_CHECK")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3380,6 +3497,7 @@ def get_settings() -> Settings:
         broadcast_announcement_prune_enabled=parse_bool_env(
             os.environ.get("BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED", "true"),
         ),
+        feed_stream_max_seconds=int(os.environ.get("FEED_STREAM_MAX_SECONDS", "3600")),
         checks_evidence_retention_days=int(
             os.environ.get("CHECKS_EVIDENCE_RETENTION_DAYS", "7"),
         ),
@@ -3605,6 +3723,9 @@ def get_settings() -> Settings:
         satellite_write_verify_key=os.environ.get("SATELLITE_WRITE_VERIFY_KEY", "").strip(),
         satellite_write_allowlist=os.environ.get("SATELLITE_WRITE_ALLOWLIST", "").strip(),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
+        ui_keycloak_approve_client_id=os.environ.get(
+            "UI_KEYCLOAK_APPROVE_CLIENT_ID", "meho-web-approve"
+        ).strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
         approval_handoff_encryption_key=os.environ.get(
@@ -3756,8 +3877,17 @@ def get_settings() -> Settings:
         mcp_topology_off_default_list=parse_bool_env(
             os.environ.get("MCP_TOPOLOGY_OFF_DEFAULT_LIST"),
         ),
+        agent_topology_off_with_connector_list=parse_bool_env(
+            os.environ.get("AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST"),
+        ),
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
+        ),
+        kb_wiki_filtered_search=parse_bool_env(
+            os.environ.get("KB_WIKI_FILTERED_SEARCH"),
+        ),
+        kb_wiki_interleave=parse_bool_env(
+            os.environ.get("KB_WIKI_INTERLEAVE"),
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
@@ -3774,11 +3904,20 @@ def get_settings() -> Settings:
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
         ),
+        mcp_own_request_status=parse_bool_env(
+            os.environ.get("MCP_OWN_REQUEST_STATUS"),
+        ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),
         ),
+        approval_same_call_reuse=parse_bool_env(
+            os.environ.get("APPROVAL_SAME_CALL_REUSE"),
+        ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
+        ),
+        audit_session_links=parse_bool_env(
+            os.environ.get("AUDIT_SESSION_LINKS"),
         ),
         policy_engine_shadow=parse_bool_env(
             os.environ.get("POLICY_ENGINE_SHADOW"),
@@ -3807,6 +3946,9 @@ def get_settings() -> Settings:
         ),
         search_plain_sentences=parse_bool_env(
             os.environ.get("SEARCH_PLAIN_SENTENCES"),
+        ),
+        kb_search_plain_sentences=parse_bool_env(
+            os.environ.get("KB_SEARCH_PLAIN_SENTENCES"),
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),
@@ -3838,6 +3980,7 @@ def get_settings() -> Settings:
         search_hit_call_hints=parse_bool_env(
             os.environ.get("SEARCH_HIT_CALL_HINTS"),
         ),
+        file_ref_params=parse_bool_env(os.environ.get("FILE_REF_PARAMS")),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),

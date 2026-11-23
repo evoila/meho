@@ -32,7 +32,7 @@ classifications:
     risk: dangerous
 routing:
   - match: {category: "<category-a>"}
-    approvers: [SA-Operators, Admins]
+    approvers: [Operators, Admins]
   - match: {connector: "<connector-id-pattern>", risk: destructive}
     approvers: [Admins]
 ```
@@ -57,7 +57,10 @@ routing:
 - Each `routing` entry has a `match` (at least one of `category`,
   `connector`, `risk`; `connector` is a pattern, the other two are exact)
   and `approvers`: one to five of the login group kinds `Readers`,
-  `Operators`, `SA-Operators`, `Admins`, `Approvers`. The order counts:
+  `Operators`, `Admins`; the old kinds `SA-Operators` and `Approvers`
+  stay as written and match only the members of that old login group
+  (`Operator.old_group`, read from the token), never the whole new role.
+  The order counts:
   in each file, the first entry that fits a waiting change wins. Two
   entries with the same `match` are a mistake. Routing only narrows who
   may approve; see [approvals.md](approvals.md), "Approver routing".
@@ -145,7 +148,7 @@ is one sentence that names the entry:
   kind of the entry may approve ("A LEVEL change in category CAT can wait,
   but no role may approve it. It would wait until it expires."). An entry
   without `risk` is checked on all four risk levels. Readers never
-  approve; Operators and Approvers approve only `safe` and `caution`
+  approve; Operators approve only `safe` and `caution`
   changes of other people.
 - **Routing and the role floor** (`policy/validate.py`,
   `_routing_floor_mistakes`): only Admins approve an operation that needs
@@ -179,19 +182,18 @@ Example. The install's file:
 ```yaml
 routing:
   - match: {category: network}
-    approvers: [SA-Operators, Admins]
+    approvers: [Admins]
 ```
 
 A tenant's file may say `approvers: [Admins]` for `category: network`
-(narrower), or `approvers: [SA-Operators, Admins]` (the same). The import
-refuses `approvers: [Operators, SA-Operators, Admins]` (an added group),
-`approvers: [Approvers]` (another group), and `match: {risk: caution}`
-with every group (it would take the network changes away from the
-install's routing). The sentence names the category and the install's
-groups: "`routing[0]` lets MEHO-Operators approve changes with category
-`network`, but the install's routing (`install:routing[0]`) lets only
-MEHO-SA-Operators or MEHO-Admins approve them. A tenant can only narrow
-the install's routing: name only these groups, or fewer."
+(the same). The import refuses `approvers: [Operators, Admins]` (an added
+group), `approvers: [Operators]` (another group), and
+`match: {risk: caution}` with every group (it would take the network
+changes away from the install's routing). The sentence names the category
+and the install's groups: "`routing[0]` lets MEHO-Operators approve
+changes with category `network`, but the install's routing
+(`install:routing[0]`) lets only MEHO-Admins approve them. A tenant can
+only narrow the install's routing: name only these groups, or fewer."
 
 **A tenant that moves an operation to another category.** A tenant may
 give an operation another category for its own rules: by its file, by the
@@ -378,8 +380,10 @@ it.
   typed operation `policy.apply` (`connectors/policy/apply.py`, connector
   `policy-registry-1.x`) through the dispatcher. It is `dangerous`, waits
   for a person to approve each call, needs the `tenant_admin` role, and
-  carries the rights-change mark: the importer can never approve it;
-  another admin must ([approvals.md](approvals.md)). The params are the
+  carries the rights-change mark: an admin approves it with a click in the
+  web console, and may be the importer ([approvals.md](approvals.md)). An
+  admin's own call in the web console runs at once. The REST import route
+  is a token call, so it waits. The params are the
   scope, the file, its SHA-256 and `based_on`. The approval card shows the
   plan (a preview builder) and who asked (a permission preflight).
 - Only a person asks for an import, and only a platform admin asks for
@@ -399,10 +403,12 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
-- Only the admin who approved runs the import. A run by the login that
-  asked for it (for example its re-run of a failed request,
-  `POST /api/v1/approvals/{id}/rerun`) writes nothing and says: "A policy
-  import runs only from a second admin's approval. Run the import again."
+- A run without an approval, or a run by the login that asked for it (for
+  example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
+  writes only for an admin in the web console. Any other such run writes
+  nothing and says: "A policy import runs at once only for an admin in the
+  web console. Any other import waits until an admin approves it in the web
+  console. Run the import again."
 - The import **replaces the whole policy** of its scope in `tenant_policy`:
   an entry that is not in the file is removed. This also removes entries
   that `policy.classify` wrote. The category and labels on single
@@ -456,7 +462,7 @@ Code: `backend/src/meho_backplane/api/v1/policy.py`,
 
 `backend/tests/test_policy_document.py` (parser, floors, plan, apply,
 versions), `backend/tests/test_policy_bindings.py` (bindings), `backend/tests/test_api_v1_policy.py` (routes, waiting import,
-approval by a second admin),
+approval by an admin in the web console, an admin's import in the console),
 `backend/tests/test_policy_small_team_parity.py` (the "small team" file:
 round trip and no change over every operation),
 `backend/tests/migrations/test_migration_0163_add_policy_revision.py`,

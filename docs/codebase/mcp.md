@@ -1786,7 +1786,7 @@ registration at all.
 The map + remediation strings live in `mcp/human_only.py`; the
 registry-absence + wire-behaviour + static re-add guards are in
 `tests/test_mcp_human_only_surface.py`. The approval groups
-(MEHO-SA-Operators, MEHO-Admins, MEHO-Approvers, #3325) decide only
+(MEHO-Operators, MEHO-Admins and the old groups read as those roles) decide only
 *which people* may approve on REST, the command line and the web
 interface; they never open an MCP path.
 
@@ -2090,6 +2090,47 @@ the off state.
 * `get_tool` returns the registered tool. The hosted-run tools are built
   from it once, when the process starts, so they keep the full text.
 
+A parameter of an operation can wait behind a switch. Its schema carries
+`x-meho-switch: "<switch name>"` (`SWITCH_MARKER` in the connector kit;
+`operations/switch_params.py`). The keyword goes on a property schema,
+at any depth, or on a shared schema that a property links to with a
+local `$ref` (`$defs`, `definitions`, `components.schemas`). MEHO
+knows one switch name today: `file_ref_params`, the setting
+`FILE_REF_PARAMS` (off by default, listed by `GET /version`).
+
+| Switch (off by default) | Where | With the switch off |
+| --- | --- | --- |
+| `FILE_REF_PARAMS` | `search_operations` (`required_params`), the exact-op contract, `preview_operation`, the operation read of REST, the console and the CLI | The marked parameter is left out of the shown schema: out of every `required` and `dependentRequired` list of the same object (also in `allOf`, `anyOf`, `oneOf`, `then`, `else` and a branch it links to), out of `example`, `examples` and `default` values at any depth (also map values from `additionalProperties` or `patternProperties`, and list items), and a shared schema only it used is dropped. Examples in `llm_instructions` (`examples`, `example_call`) that name it, and its `parameter_hints` entry, are not shown. A call that gives it is refused as `invalid_params`, before it can wait for approval, so no approval request is stored. The answer is the one of an unknown parameter, and no error text names a hidden parameter: an object with `additionalProperties: false` leaves it out of the check schema, any other object gets the schema `false` for it (in the object and in each branch of it). No rule requires it. An `anyOf` or `oneOf` branch that requires it matches no object, but still matches other values such as `null`, so a call without it gets the same answer as without the keyword. The hash of a call that does not give it is the same. |
+
+* The stored schema is not changed. MEHO leaves the parameter out when it
+  reads the operation row for the caller (`apply_effective_policy` and
+  the operation read by id). The row keeps the schema for the call check
+  in `parameter_check_schema` (not a column).
+* A keyword that names another switch, or a keyword that is not on a
+  property (for example on `items`, `additionalProperties` or a
+  `patternProperties` schema), stops the operation from registering, for
+  typed, multi-step and ingested operations
+  (`operations/switch_registration.py`).
+* The keyword under `if`, `then`, `else` or `not` also stops the
+  operation from registering. So does a schema with the keyword that
+  links in a way MEHO does not follow: `$anchor`, `$dynamicRef`, an
+  `$id` below the root, or a `$ref` that is not a plain `#/` pointer
+  (for example one with `%` escapes).
+* These checks read every shared schema (`$defs`, `definitions`,
+  `components.schemas`, also below the root) and every
+  `patternProperties` or `dependentSchemas` schema, also when its name
+  is a keyword such as `default`, `examples`, `enum` or `const`.
+* With the switch on, the parameter shows and is accepted as usual.
+* No new MCP tool and no new field.
+
+Measurement before the switch goes on by default: run the benchmark job
+list on the same build with the switch off and on, with the same models.
+Record the pass rate of a small model and of Claude, and the size of an
+operation read. Turn it on only if the small model does not get worse,
+Claude does not get worse, and the answers grow by less than 10%. Then
+run once on the sandbox through the agent surface. A later pull request
+turns the switch on and links the numbers.
+
 Three switches take text away while they are off:
 
 | Switch (off by default) | Tool | With the switch off |
@@ -2107,7 +2148,7 @@ resolved has two more fields (#6045):
   `null` when the evaluator failed.
 * `approvers`: the login groups that may approve the call when
   `policy_verdict` is `needs-approval` (for example
-  `["MEHO-SA-Operators", "MEHO-Admins"]`), else `[]`. `null` when the
+  `["MEHO-Admins"]`), else `[]`. `null` when the
   stored routing is not valid: the preview still answers.
 
 No new MCP tool: the default working surface stays the same. The person
@@ -2132,6 +2173,19 @@ default). With it on, `call_operation` has the input
 text, so both switches can be on. With it off, the tool is the registered
 one and a call that sends the input is refused with `-32602`. See "Getting
 an approved secret value on MCP" below.
+
+A fifth switch, `MCP_OWN_REQUEST_STATUS` (off by default), adds the same
+input for another use: reading the state of the caller's own approval
+request. When both switches are on, the input has one text that covers
+both. See "Reading the state of your own approval request" below.
+
+A sixth switch changes an answer: `APPROVAL_SAME_CALL_REUSE` (off by
+default). With it on, a call that must wait for approval gets the request
+that already waits, when the same login in the same tenant sent the same
+call. The answer has that request's `approval_request_id` and
+`approval_request_reused: true`, with no key or with a different key. No
+tool and no input changes. See
+[approvals.md](approvals.md#the-same-call-without-the-same-key-approval_same_call_reuse-off-by-default).
 
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
@@ -2170,6 +2224,56 @@ call_operation(connector_id, op_id, approval_request_id)
   the command line (`meho secret read --approval <id> --field <name>`), in
   the console ("Show value") or with `POST /api/v1/approvals/{id}/reveal`.
 - Tests: `tests/test_mcp_reveal_fetch.py`.
+
+## Reading the state of your own approval request (`MCP_OWN_REQUEST_STATUS`, off by default)
+
+A call that waits for approval answers `awaiting_approval` with
+`extras.approval_request_id`. On the default tool list there is no other way
+to follow that request: `meho_approvals_get` needs the operator role and
+`mcp:admin`. With the switch on, the caller sends:
+
+```
+call_operation(connector_id, op_id, approval_request_id)
+```
+
+The caller needs the request id. It learns only the state of a request of its own login.
+"Own" means the same login. So an agent that acts for a person reads that person's requests.
+The read checks no agent grant.
+
+- The code is in `mcp/tools/_call_operation_status.py`. The handler hands
+  the call over when it has `approval_request_id`. The call runs nothing,
+  makes no new request and writes no call record.
+- With `MCP_REVEAL_FETCH` also on, an approved secret reveal of the caller
+  still goes to the value fetch above. Every other request goes here.
+- Only `connector_id`, `op_id` and `approval_request_id` may be sent
+  (`-32602`, `own_request_status_extra_inputs`). `connector_id` and `op_id`
+  must be the ones of the request (`request_wrong_operation`). Both checks
+  run before anything is read.
+- A request of another login, of another tenant and an unknown id all get
+  `approval_request_not_found`, word for word.
+- Each read writes one `approval.result` audit row, as
+  `GET /api/v1/approvals/{id}/result` does
+  (`approval_queue.read_approval_result`).
+- The answer by state: waiting gives the same `awaiting_approval` answer as
+  the first call; approved and not finished gives `status: "pending"` with
+  `extras.result_state` (`not_started` or `started`); approved and run gives
+  the stored result with `extras.result_state` added; rejected, expired and
+  withdrawn give `status: "denied"` with `extras.error_code` of
+  `approval_request_rejected`, `approval_request_expired` or
+  `approval_request_withdrawn`, and a sentence that says to ask again.
+- The stored result goes through the response size limit, with the added
+  fields and the data notice counted (see "Response wire ceiling"). An `ok`
+  answer over the limit keeps its status and `audit_id`. `delivery` is
+  `partial` or `unavailable`, and the added `extras` fields are left out,
+  as for a check of a background call.
+- A hosted agent with a bound connector list gets `connector_not_allowed`
+  for a request outside the list. This check runs before the
+  `request_wrong_operation` check, so the answer names no connector
+  outside the list, also when `connector_id` or `op_id` is wrong.
+- With the switch off, the input and its text are not in the tool. The
+  measurement before it goes on by default is
+  [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).
+- Tests: `tests/test_mcp_call_operation_own_request_status.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

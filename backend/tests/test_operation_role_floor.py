@@ -69,6 +69,7 @@ from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.operations.role_floors import role_floor_denial, role_floor_for
 from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000f1")
 _PRODUCT = "exampleproduct"
@@ -189,6 +190,7 @@ async def _decision_audit_rows() -> list[AuditLog]:
 
 
 async def _park_for_approval(requester: Operator) -> uuid.UUID:
+    await give_known_person(requester)
     parked = await _register(requester)
     assert parked.status == "awaiting_approval", parked
     return uuid.UUID(parked.extras["approval_request_id"])
@@ -285,15 +287,14 @@ async def test_the_preview_says_denied_for_a_person_below_the_floor(
     assert await _target_rows() == []
 
 
-async def test_a_tenant_admin_runs_at_once(_registered_ops: None) -> None:
-    # In the web interface; with a token the call waits for approval (#3980).
+async def test_a_tenant_admin_in_the_web_interface_waits_too(_registered_ops: None) -> None:
+    # Making a target always waits for a person; only the console form writes at once.
     admin = _person(TenantRole.TENANT_ADMIN).model_copy(update={"web_session": True})
     result = await _register(admin)
 
-    assert result.status == "ok", result
-    (row,) = await _target_rows()
-    assert row.name == "new-system"
-    assert await _approval_rows() == []
+    assert result.status == "awaiting_approval", result
+    assert len(await _approval_rows()) == 1
+    assert await _target_rows() == []
 
 
 async def test_a_tenant_admin_with_a_token_waits_for_approval(_registered_ops: None) -> None:

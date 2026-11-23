@@ -1217,12 +1217,10 @@ secret-broker:
     - llm_instructions
     - examples
 targets-registry:
-  # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.
   targets.register:
     - summary
     - llm_instructions
     - examples
-    - requires_approval
 tempo-api:
   tempo.get:
     - summary

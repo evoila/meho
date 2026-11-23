@@ -31,8 +31,10 @@ Route inventory
   a duplicate active grant. Role: ``operator`` + human principal; a delete
   grant (sandbox mode with ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on)
   needs ``tenant_admin``, and so does a grant for an op with a role floor
-  (``targets.register``, the ``topology.*`` writes): 403
-  ``role_floor_required``.
+  (the ``topology.*`` writes): 403 ``role_floor_required``. A grant for
+  ``targets.register`` or ``targets.update`` is refused: a person approves
+  each call of these ops (422; 403 ``role_floor_required`` below
+  ``tenant_admin``).
 * ``DELETE /api/v1/service-principals/grants/{grant_id}`` — revoke
   (soft-delete). Query: optional ``reason``, stored on the grant row and
   on the audit row. 204 on success; 404 when absent / already revoked /
@@ -174,8 +176,10 @@ async def create_grant(
     console; an ``operator`` without ``tenant_admin`` gets 403
     ``grants_require_tenant_admin``. A grant lets the service principal run
     the op with no approval, so the caller needs the op's role floor
-    (``targets.register`` and the ``topology.*`` writes need
-    ``tenant_admin``); below it the answer is 403 ``role_floor_required``.
+    (the ``topology.*`` writes need ``tenant_admin``); below it the answer
+    is 403 ``role_floor_required``. A grant for ``targets.register`` or
+    ``targets.update`` is refused, because a person approves each call of
+    these ops: 422, or 403 ``role_floor_required`` below ``tenant_admin``.
     Audited via the audit middleware; the
     payload's ``created_via`` is ``api``.
     """

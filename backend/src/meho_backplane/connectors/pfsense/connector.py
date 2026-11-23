@@ -855,6 +855,24 @@ class PfSenseConnector(SshConnector):
 
         return await _pfsense_user_list(self, target, params, operator)
 
+    async def config_history(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.config.history`` (#4989).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_history.pfsense_config_history`.
+        Secrets are removed before any diff leaves the handler.
+        """
+        from meho_backplane.connectors.pfsense.ops_config_history import (
+            pfsense_config_history as _pfsense_config_history,
+        )
+
+        return await _pfsense_config_history(self, target, params, operator)
+
     async def user_disable(
         self,
         target: Target,

@@ -58,6 +58,43 @@ was closed as not planned).
    error after streaming began is one `event: feed_error` frame. A
    heartbeat comment follows 30 seconds without output.
 
+   **A stream ends when its login ends.** `/api/v1/feed` ends the
+   stream at the token's `exp` plus the JWT leeway, and after
+   `FEED_STREAM_MAX_SECONDS` (default 3600) at the latest. At this end
+   the stream stops waiting for an archive read that is still running:
+   a slow Valkey call is cancelled, and a read error after the end
+   sends no `feed_error` frame. A database read is not stopped in the
+   middle of a statement at this end: each archive read runs in its own
+   task with its own session (`broadcast/read_to_end.py`), ends there
+   and closes its session. A cancel in the middle of a statement is not
+   safe on SQLite: the connection keeps its lock, and the next write
+   fails with "database is locked". A read whose caller stopped waiting
+   (the stream ended, the client left, or the console history page,
+   the MCP tenant feed or the MCP watch tool was cancelled) runs on for
+   at most 30 seconds (`LEFT_READ_LIMIT_SECONDS`). After that it is
+   stopped in steps, each with a wait of at most 5 seconds
+   (`STOP_WAIT_SECONDS`): first the running statement is interrupted
+   in the SQLite driver, so the read ends with a database error and
+   cleans up normally; then the read task is cancelled (this is what
+   stops a PostgreSQL read); last, the connection is closed at once,
+   without waiting for the read. So the stop always ends within about
+   10 seconds. A stopped read's database connection is closed, not
+   given back to the pool. MEHO logs `broadcast_archive_read_left` when
+   a read is left, and `broadcast_archive_read_left_ended` or
+   `broadcast_archive_read_stopped` (with `read_ended`: did the read
+   end, or was only its connection closed) when it ends or is stopped. The
+   lines carry no announcement content. The stream never holds a
+   database session while it waits: each archive read opens a short
+   session and closes it before the wait.
+   `/ui/broadcast/stream` checks its session again (the same check as
+   `require_ui_operator`) at most every
+   `UI_SESSION_READ_REVALIDATION_SECONDS`, before a frame, a heartbeat
+   or a wait; a signed-out, revoked or expired session, or a lost
+   role, ends it. The client reconnects with a fresh login and
+   `Last-Event-Id`, so it misses no announcement: `meho status --watch`
+   and `meho broadcast watch` renew the token once on a 401, and the
+   browser's `EventSource` reconnects by itself.
+
    **Row identifier semantics.** Every reader returns `event_id` (the
    announcement's UUID, equal to the `agent_announcement` row's PK).
    Readers de-duplicate by `event_id`.
@@ -306,6 +343,9 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
     → resolve_agent_admission(operator)  (auth/agent_admission.py, #3736)
       → not a trusted agent → AgentIdentityRequiredError
            → MCP -32602, error.data.code = "agent_identity_required" (REST 403)
+    → announcement_text_problem(activity, target, targets, scope)  (broadcast/agent_events.py)
+      → a C0 or C1 control character or DEL (also a line break or a tab)
+           → MCP -32602 / REST 422, "<field>: must not contain control characters"
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}

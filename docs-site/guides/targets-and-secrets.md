@@ -1,15 +1,15 @@
 # Register targets and secrets
 
-A **target** is one system MEHO operates against — a Kubernetes API
+A **[target](../reference/words.md#target)** is one system MEHO operates against — a Kubernetes API
 server, a vCenter, a Vault, a firewall. Registration gives the
 backplane three things: the coordinates to reach the system (`host`,
-`port`, TLS trust), the `product` token that selects which connector
+`port`, TLS trust), the `product` token that selects which [connector](../reference/words.md#connector)
 serves it, and a `secret_ref` — a *reference* into your credential
 store. MEHO never stores the credential itself; it resolves the
 reference at dispatch time, under an identity your store can audit.
 
 Until at least one target is registered and its probe is green, an
-agent session can discover operations but cannot act on anything —
+agent session can discover [operations](../reference/words.md#operation) but cannot act on anything —
 which is why this is the first guide.
 
 !!! note "Prerequisites and roles"
@@ -36,8 +36,10 @@ Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
 role. It registers a target with the `targets.register` operation,
 changes one with `targets.update` and removes one with `targets.remove`
-(connector `targets-registry-1.x`). MEHO checks them against the
-approval rules.
+(connector `targets-registry-1.x`). Each new target and each change waits
+for a person's [approval](../reference/words.md#approval): no standing
+grant, run approval or agent grant covers it. The approval card shows the
+target's values, also its `extras`.
 
 **The CLI and REST wait for approval.** A change made with your login
 token (`meho targets add`, `update`, `delete`, `import`, or a script on
@@ -47,13 +49,13 @@ id and exits 0; approving the request makes the change. Find it with
 make in the operator console runs at once.
 
 **Register targets on the operator surfaces above.** Registration is an
-operator-trust decision. For agents, the default MCP tools only read
+operator-trust decision. For agents, the default [MCP](../reference/words.md#mcp) tools only read
 targets (`list_targets`). A session that asked for the `mcp:admin`
 scope also has `meho_targets_register` and `meho_targets_update`
 (tenant_admin only). Through `call_operation`, the connector
 `targets-registry-1.x` offers `targets.register`, `targets.update`,
-`targets.remove` and `targets.probe`; an agent's register and every update
-wait for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
+`targets.remove` and `targets.probe`; every register and every update
+waits for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`
@@ -98,7 +100,7 @@ Mapping rules the importer applies:
   `extras` JSON column, and the importer prints a warning for each one.
   To carry your own annotations without the warning, put them under an
   `extras:` block.
-- **`fingerprint` is server-managed** and dropped with a warning; the
+- **[`fingerprint`](../reference/words.md#detected-product-and-version) is server-managed** and dropped with a warning; the
   probe verb is its only writer.
 - `verify_tls: false` and `tls_ca_pin` are mutually exclusive (422):
   pin the CA *or* disable verification, never both.
@@ -272,7 +274,7 @@ store it points at is decided by your deploy's credential backend
 
 The `secret_ref` is the **logical KV-v2 path relative to the `secret`
 mount** — never include the mount or the `/data/` segment. The
-canonical, enforced layout is per-tenant:
+canonical, enforced layout is per-[tenant](../reference/words.md#tenant):
 
 ```
 tenants/<tenant-id>/<target-name>
@@ -368,7 +370,7 @@ what it means:
   secret. A shared secret does not weaken them, and it does not make a
   change wait less. It does mean that an approved change on one target
   runs with an account that the other targets also use.
-- **Audit.** MEHO writes one audit row for each call. The row names the
+- **Audit.** MEHO writes one [audit row](../reference/words.md#audit-record) for each call. The row names the
   target and the person (or agent) who made the call, also when targets
   share a secret. The vendor sees only the one account, so the vendor's
   own log cannot tell the targets apart. Use one secret for each target
@@ -463,7 +465,7 @@ Any change to how MEHO reaches or logs in to a target (for example
 logs in with the new values.
 
 The MEHO server that gets the update drops its login at once. Any
-other backplane server, and any satellite runner, drops its login on
+other backplane server, and any [satellite runner](../reference/words.md#satellite-runner), drops its login on
 its next call to that target.
 
 ## Import and verify

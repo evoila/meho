@@ -99,7 +99,8 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
             {% if descriptor.requires_approval %}
               This operation <span class="font-semibold">requires approval</span>:
               running it parks a request for a reviewer rather than executing
-              immediately.
+              immediately. A change of rights that an admin runs here can run
+              at once.
             {% endif %}
             {% if safety == "destructive" %}
               Preview the exact call first. A second person must approve it

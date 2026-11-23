@@ -150,7 +150,10 @@ always waits.
    `destructive` always waits. So a level never goes below the code's
    value, and `always_wait: false` only goes back to the code's value;
 3. the floors: an operation that connects to an address the caller gives
-   is at least `caution` and always waits.
+   is at least `caution` and always waits. An operation that writes or
+   makes a credential (class `credential_write` or `credential_mint`)
+   keeps the approval its code turns on, also when an install or tenant
+   override turns it off (`_with_floors`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
@@ -214,8 +217,10 @@ The change is the operation `policy.classify` on the connector
 - A person approves each call (`declare_per_call_approval`): no standing
   grant and no run approval covers it.
 - Every request carries the rights-change mark
-  (`register_rights_change_op`, see [approvals.md](approvals.md)). The
-  person who asked can never approve it; another tenant admin must.
+  (`register_rights_change_op`, see [approvals.md](approvals.md)). A
+  tenant admin approves it with a click in the web console, and may be
+  the person who asked. A tenant admin's own call in the web console runs
+  at once.
 - A person needs the `tenant_admin` role to ask.
 - Only a person asks: the policy gate refuses an agent, a service login
   and a hosted agent run on every path, before anything waits
@@ -267,8 +272,10 @@ two steps. Both are in `policy/bulk.py`:
    matches no operation, that would make a conflict, or that sets back an
    install-wide "always wait". Otherwise it calls
    `policy.classify` through `call_operation`, so the role check, the
-   approval and the audit row are those of any other call. The answer
-   waits until another tenant admin approves it.
+   approval and the audit row are those of any other call. On the console
+   page the change runs at once (a tenant admin in the web console). On
+   every other surface the answer waits until a tenant admin approves it in
+   the web console.
 
 | Surface | Dry run | Request |
 |---|---|---|
@@ -276,7 +283,7 @@ two steps. Both are in `policy/bulk.py`:
 | REST, one connector | | `PATCH /api/v1/connectors/{connector_id}/classification` |
 | REST, one group or operation | | `category` / `labels` on the existing group and operation PATCH routes (`202`) |
 | CLI | `meho connector classify --op '<pattern>' --category <name>` | the same with `--apply`; `--category` / `--label` on `edit-op` and `edit-group` |
-| Console | `/ui/policy/classify` ("Show what changes"); the review drawer links to it with the match filled in | "Ask for this change" on the dry run |
+| Console | `/ui/policy/classify` ("Show what changes"); the review drawer links to it with the match filled in | "Ask for this change" on the dry run; it runs at once |
 | Admin MCP tools | the operation `policy.classify_preview` | `category` / `labels` on `meho_connector_edit_op` and `meho_connector_edit_group`; `policy.classify` for a connector or a pattern |
 
 The console page needs the `tenant_admin` role. Another person gets
@@ -287,8 +294,8 @@ entries of the caller's tenant and of the install.
 
 Rules every surface keeps:
 
-- `category` and `labels` on a PATCH route or an MCP edit tool wait for a
-  second admin, so they cannot ride along with fields that are stored at
+- `category` and `labels` on a PATCH route or an MCP edit tool wait for an
+  admin's approval, so they cannot ride along with fields that are stored at
   once. A body with both is refused (`400`, MCP `-32602`,
   `classification_mixed`).
 - The change is always for the caller's tenant. The tenant comes from the

@@ -45,6 +45,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 from . import _composite_wait_audit_helpers as h
 
@@ -135,6 +136,7 @@ async def test_second_run_on_the_agents_path_links_to_the_request_row(
     await h.register_child(stub_embedding_service)
     await h.register_composite(session, h.WAIT_OP_ID, "step_waits_composite")
     agent = h.operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(h.TENANT_ID, "agent-requester")
     call_arguments: dict[str, Any] = {
         "connector_id": h.CONNECTOR_ID,
         "op_id": h.WAIT_OP_ID,
@@ -337,8 +339,7 @@ async def test_one_approval_runs_both_dangerous_steps_once(
     Either the whole run waits (a ``dangerous`` multi-step operation sent with
     a token) or its first step waits. After one approval, given with a web
     click or on the command line, the resume runs both steps: the approval of
-    the run covers the second step, so nothing waits again and nothing is
-    refused with ``composite_resume_multi_gate_unsupported``.
+    the run covers the second step, so nothing waits again.
     """
     await h.register_child(stub_embedding_service)
     await h.register_composite(

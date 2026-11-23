@@ -130,12 +130,13 @@ Detail payloads land in ``extras``. Codes:
 * ``target_connector_mismatch`` -- a typed/composite op whose handler is
   a connector method, called on a target whose connector does not have
   that method (a linux op on an rke2 target). Refused right after the
-  target check, before the policy gate and any wait for approval, with
-  one audit row (#5948, :mod:`~meho_backplane.operations._target_connector_match`).
+  connector list check, before the policy gate and any wait for approval,
+  with one audit row (:mod:`~meho_backplane.operations._target_connector_match`).
 * ``connector_not_allowed`` -- a hosted agent with a connector list called
   an op on a target whose connector is not in the list, or that resolves
-  no single connector. Refused right after the mismatch check, before the
-  policy gate, with one audit row and no approval request
+  no single connector. Refused right after the target check and before the
+  mismatch check, so the answer names only connectors in the list. One
+  audit row, no approval request
   (:mod:`~meho_backplane.operations._target_connector_limit`).
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
@@ -292,6 +293,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ssl
 import time
@@ -330,7 +332,12 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
-from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
@@ -436,10 +443,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
-from meho_backplane.operations._request_preview import (
-    compute_preview_hash,
-    preview_dispatch,
-)
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprint_value,
@@ -487,7 +491,12 @@ from meho_backplane.operations.composite import (
     DispatchChild,
     approved_run_var,
     composite_depth_var,
+    credential_step_waits_after_approval,
     get_dispatch_child,
+)
+from meho_backplane.operations.composite_steps import (
+    child_read_sent_again,
+    mark_child_cleared_by_person,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
@@ -512,13 +521,24 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.rights_change_console import (
+    CONSOLE_RUN_AUDIT_VALUE,
+    CONSOLE_RUN_POLICY_RULE,
+    CONSOLE_RUN_REASON,
+    take_console_run_sign_in,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
+from meho_backplane.operations.service_grants import (
+    CREDENTIAL_CARD_LINE,
+    descriptor_credential_waits,
+)
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
     track_operation,
 )
+from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.uncertain_outcome import (
     changes_target,
     connection_lost_after_send,
@@ -1120,7 +1140,7 @@ async def _execute_and_audit_inner(
             secret_view=secret_view,
         )
 
-    redaction = _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
+    redaction = await _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
     return await _reduce_and_audit_success(
         op_id=op_id,
         descriptor=descriptor,
@@ -1142,7 +1162,7 @@ async def _execute_and_audit_inner(
 SecretView = Literal["hidden", "revealed"]
 
 
-def _protect_secret_values(
+async def _protect_secret_values(
     redaction: RedactionMiddlewareResult,
     *,
     op_id: str,
@@ -1162,6 +1182,10 @@ def _protect_secret_values(
     marked (:func:`~meho_backplane.no_store.mark_answer_holds_secret`), so
     the HTTP answer that carries it says ``Cache-Control: no-store``.
 
+    The default view runs in a worker thread, like the redaction pass of a
+    script: a large text value in the answer takes time to read, and the
+    event loop keeps serving other requests meanwhile.
+
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
     the caller saw the value or not. So no secret value is stored in the
@@ -1175,7 +1199,7 @@ def _protect_secret_values(
     fails; the caller then withholds the envelope.
     """
     redacted = redaction.redacted
-    shown = hide_secret_values(op_id, redacted, raw=redaction.raw)
+    shown = await asyncio.to_thread(hide_secret_values, op_id, redacted, raw=redaction.raw)
     if error_cleanup:
         redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
     if secret_view == "hidden":
@@ -1531,7 +1555,7 @@ async def _reduce_and_audit_composite_error(
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        redaction = _protect_secret_values(
+        redaction = await _protect_secret_values(
             redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
         )
     except Exception as exc:
@@ -3473,6 +3497,9 @@ async def _build_proposed_effect(
         # approve it with a click in the web interface.
         if waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
+        # The approval card says in one line why a credential call waits.
+        if descriptor_credential_waits(descriptor):
+            base["credential_wait"] = CREDENTIAL_CARD_LINE
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3495,6 +3522,57 @@ async def _build_proposed_effect(
             exc_info=True,
         )
         return None
+
+
+def _preview_failed_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> dict[str, Any]:
+    """The ``proposed_effect`` of a request whose preview build raised.
+
+    Keeps the op identity and the risk level and class from the catalog,
+    so the approval rules read the operation's real level. The
+    ``preview_failed`` key lets the approval card say that MEHO could not
+    build the preview.
+    """
+    effect = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+    effect["op_class"] = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
+    effect["safety_level"] = descriptor.safety_level
+    effect["preview_populated"] = False
+    effect["preview_failed"] = True
+    return effect
+
+
+async def _build_park_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``proposed_effect`` a parked request stores; never ``None``.
+
+    :func:`_build_proposed_effect`, or :func:`_preview_failed_effect` when
+    that build raised.
+    """
+    effect = await _build_proposed_effect(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+    if effect is not None:
+        return effect
+    return _preview_failed_effect(
+        op_id=op_id, connector_id=connector_id, descriptor=descriptor, target=target
+    )
 
 
 async def _destructive_binding_refusal(
@@ -3554,7 +3632,7 @@ async def _destructive_binding_refusal(
             "for this (connector_id, op_id, target, params)",
             duration_ms,
         )
-    if compute_preview_hash(authoritative) != preview_hash:
+    if authoritative.get("preview_hash") != preview_hash:
         return result_preview_hash_mismatch(op_id, duration_ms)
 
     # Requirement 3: the mandatory blast-radius statement.
@@ -3803,8 +3881,9 @@ async def _handle_needs_approval(
     # secret-free result under ``proposed_effect["permission_preflight"]``
     # so a write Vault would deny surfaces a "this write will be denied"
     # banner at park time instead of failing only after a four-eyes
-    # approval. Fail-soft too: a probe fault degrades to no banner.
-    proposed_effect = await _build_proposed_effect(
+    # approval. Fail-soft too: a probe fault degrades to no banner. When the
+    # build raises, the request still stores the catalog risk level.
+    proposed_effect = await _build_park_effect(
         op_id=op_id,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -3882,17 +3961,19 @@ async def _handle_needs_approval(
             )
             await session.commit()
         reused = bool(getattr(request, "_reused", False))
+        # Record the add-on step events AFTER commit so a phantom event
+        # cannot outlive a failed transaction (the helper is fail-open). A
+        # late retry that expired its old request and got another waiting
+        # request still sends the old one's expiry event.
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await record_approval_step_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                audit_id=expired_request._audit_id,
+            )
         if not reused:
-            # Record the add-on step events AFTER commit so a phantom event
-            # cannot outlive a failed transaction (the helper is fail-open).
-            expired_request = getattr(request, "_expired_request", None)
-            if expired_request is not None:
-                await record_approval_step_event(
-                    tenant_id=operator.tenant_id,
-                    request=expired_request,
-                    decision="expired",
-                    audit_id=expired_request._audit_id,
-                )
             await record_approval_step_event(
                 tenant_id=operator.tenant_id,
                 request=request,
@@ -3939,8 +4020,11 @@ async def _handle_needs_approval(
         request.id,
         duration_ms,
         reused=reused,
-        audit_id=request.request_audit_id,
+        # A call that got the waiting request of the same call has its own
+        # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
+        audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
+        already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )
 
 
@@ -3960,9 +4044,9 @@ def _params_error(
     param is rejected as ``invalid_params`` here rather than defaulting
     onto the vendor query string in ``_split_ingested_params``.
     """
-    schema_to_validate = descriptor.parameter_schema
+    schema_to_validate = schema_for_checks(descriptor)
     if descriptor.source_kind == "ingested":
-        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
+        schema_to_validate = ingested_schema_for_validation(schema_to_validate)
     try:
         validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:
@@ -4158,20 +4242,10 @@ async def _dispatch_now(
     # before the catalog guard, the policy gate or a wait for approval.
     if target is None and descriptor_requires_target(descriptor):
         return result_target_required(op_id, _elapsed_ms(started))
-    # #5948: a connector-bound op whose handler the target's connector does
-    # not have (a linux op on an rke2 target) cannot run. Refused here, before
-    # the policy gate and any wait for approval, with its own audit row.
-    mismatch = await refuse_target_connector_mismatch(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params_hash=params_hash,
-        started=started,
-    )
-    if mismatch is not None:
-        return mismatch
     # A hosted agent with a connector list may use only targets whose
-    # connector is in the list. Refused here too, before the policy gate.
+    # connector is in the list. Refused here, before the policy gate. This
+    # check comes first, so its answer (which names only the listed
+    # connectors) is the one a caller with a list gets.
     not_allowed = await refuse_target_connector_not_allowed(
         operator=operator,
         descriptor=descriptor,
@@ -4181,6 +4255,18 @@ async def _dispatch_now(
     )
     if not_allowed is not None:
         return not_allowed
+    # A connector-bound op whose handler the target's connector does not
+    # have (a linux op on an rke2 target) cannot run. Refused here too,
+    # before the policy gate and any wait for approval, with its own audit row.
+    mismatch = await refuse_target_connector_mismatch(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        started=started,
+    )
+    if mismatch is not None:
+        return mismatch
     # A target whose known version is outside the range of the connector
     # picked for it (through the fallback entry) is refused the same way.
     outside = await refuse_version_outside_range(
@@ -4385,20 +4471,48 @@ async def _dispatch_now(
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
             policy_rule_var.set(take_rule())
+            console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
             # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step keeps its own approval.
+            # ``requires_approval`` step, or one that reads, writes or makes
+            # a credential, keeps its own approval. A credential read that a
+            # resume sends again is refused whenever it would wait, also when
+            # it is destructive or needs its own approval: an approval request
+            # for it alone cannot finish the waiting run.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
                 and approved_run_var.get()
-                and descriptor.safety_level != "destructive"
-                and not descriptor.requires_approval
             ):
-                _log.info("composite_child_covered_by_approved_run", op_id=op_id)
-                verdict = PermissionVerdict.AUTO_EXECUTE
+                if child_read_sent_again(op_id):
+                    verdict = PermissionVerdict.DENY
+                    gate_reason = (
+                        f"composite_resume_read_not_sent: the step {op_id!r} reads a "
+                        "credential; the run after an approval sends it again only when "
+                        "its policy lets it go ahead with no person"
+                    )
+                elif (
+                    descriptor.safety_level != "destructive"
+                    and not descriptor.requires_approval
+                    and not descriptor_credential_waits(descriptor)
+                ):
+                    _log.info("composite_child_covered_by_approved_run", op_id=op_id)
+                    mark_child_cleared_by_person(op_id)
+                    verdict = PermissionVerdict.AUTO_EXECUTE
+            # A child call that reads, writes or makes a credential waits for
+            # its own approval in a run that goes on after an approval, also
+            # when the approving person's own rights would let it run.
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and credential_step_waits_after_approval(
+                    descriptor.op_id, getattr(descriptor, "op_class", None)
+                )
+            ):
+                _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):
@@ -4414,6 +4528,16 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
+                policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
+                structlog.contextvars.bind_contextvars(
+                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE,
+                    audit_approval_auth=(
+                        console_run_sign_in.audit_payload(operator.sub)
+                        if console_run_sign_in is not None
+                        else None
+                    ),
+                )
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
                 # The row keeps the reason and its code (#5773), so the audit
@@ -4658,7 +4782,8 @@ async def _dispatch_now(
 
         # #3879: a target changed on another server (or by this one, before
         # this process saw it) must not be served with the login kept for its
-        # old values. One dict lookup per dispatch; a drop only on a change.
+        # old values. One dict lookup per dispatch; a drop only on a change,
+        # and also the first time this process sees the target.
         if target is not None:
             await forget_target_if_changed(target)
 

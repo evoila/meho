@@ -124,12 +124,14 @@ def _required(err: ValidationError) -> tuple[str, str]:
 
 def _additional(err: ValidationError) -> tuple[str, str]:
     schema = err.schema if isinstance(err.schema, Mapping) else {}
-    declared = [str(name) for name in schema.get("properties", {})]
+    properties = schema.get("properties", {})
+    # A property with the schema ``false`` takes no value, so it is not listed.
+    declared = [str(name) for name, prop in properties.items() if prop is not False]
     patterns = [str(p) for p in schema.get("patternProperties", {})]
     extra = [
         key
         for key in _instance_keys(err)
-        if key not in declared and not any(re.search(p, key) for p in patterns)
+        if key not in properties and not any(re.search(p, key) for p in patterns)
     ]
     hint = "remove the undeclared property"
     if declared:
@@ -214,6 +216,15 @@ _DESCRIBERS: Final[dict[str, Callable[[ValidationError], tuple[str, str]]]] = {
 }
 
 
+#: The entry for a value at a spot whose schema is ``false``: a property the
+#: op does not take. It reads like an undeclared property and names no name.
+_NOT_TAKEN: Final[tuple[str, str, str]] = (
+    "additionalProperties",
+    "undeclared property (not in the op's declared params)",
+    "remove the undeclared property",
+)
+
+
 def describe_violation(err: ValidationError) -> dict[str, Any]:
     """Return the safe ``validation_errors`` entry for one violation.
 
@@ -226,7 +237,9 @@ def describe_violation(err: ValidationError) -> dict[str, Any]:
     """
     validator = str(err.validator)
     describer = _DESCRIBERS.get(validator)
-    if describer is None:
+    if err.validator is None and err.schema is False:
+        validator, expected, remediation = _NOT_TAKEN
+    elif describer is None:
         expected = f"value that satisfies the schema keyword {validator!r}"
         remediation = _SEE_SCHEMA
     else:

@@ -18,7 +18,7 @@ Then, when an operation needs a second pair of eyes:
 
 | Guide | What you will have at the end |
 |---|---|
-| [Approvals and break-glass](approvals-and-break-glass.md) | What waits for approval and who may approve it, how to approve in the web interface or on the command line, how a **single operator** approves their own change as a MEHO-SA-Operator or a MEHO-Admin, the emergency switch for deployment admins, and how to prove to an auditor which way your deploy runs. |
+| [Approvals and break-glass](approvals-and-break-glass.md) | What waits for approval and who may approve it, how to approve in the web interface or on the command line, how a **single operator** approves their own change as a MEHO-Admin, the emergency switch for deployment admins, and how to prove to an auditor which way your deploy runs. |
 | [Add a tenant](tenant-bootstrap.md) | A new tenant with its role groups and first users, each change approved by a second person, a first login that shows the new tenant, and a first secret read from Vault. |
 | [One person in several tenants](several-tenants.md) | A second tenant in Keycloak with its own Vault login role, a person in both tenants, and a switch between them in the web interface, on the command line and in MCP. |
 
@@ -36,7 +36,7 @@ backplane — reach for whichever the task in front of you needs:
 | [Memory and knowledge](memory-and-knowledge.md) | Two durable stores: scoped, TTL'd memory and the tenant knowledge base, and which belongs where. |
 | [Agent sessions](agent-sessions.md) | Keep uploaded agent sessions in your own object storage: turn the store on with Helm values, rights, retention and quarantine. |
 | [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |
-| [The policy file](policy-file.md) | Keep the categories and classifications of operations in one file: validate it, see a diff, and import it after a second admin approves. Off by default. |
+| [The policy file](policy-file.md) | Keep the categories and classifications of operations in one file: validate it, see a diff, and import it after an admin approves. Off by default. |
 | [The settings file](settings-file.md) | Export a tenant's policies, conventions and targets as one file, import a file after a preview of every change, and read who changed what and when. REST only for now. |
 | [Flight recorder](flight-recorder.md) | The redacted per-dispatch record of the vendor traffic behind an audit row — what it captures, and who can read it back. |
 | [Runbooks](runbooks.md) | Authoring versioned, multi-step procedures and running them one gated step at a time. |

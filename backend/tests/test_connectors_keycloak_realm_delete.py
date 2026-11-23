@@ -663,16 +663,21 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
     """Preview → wait for approval → a second person approves → the delete runs once."""
     requester = _operator("kc-realm-delete-requester")
     # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
-    approver = _operator("kc-realm-delete-approver").model_copy(update={"self_approver": True})
+    approver = _operator("kc-realm-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        # The realm reads of the cards and the handler find the realm; the gone-check after
+        # the delete does not.
         mock.get(_REALM_PATH).mock(
-            side_effect=[
-                httpx.Response(200, json=_realm_rep()),  # the card at park time
-                httpx.Response(200, json=_realm_rep()),  # the card again, before the run
-                httpx.Response(200, json=_realm_rep()),  # the handler's read
-                httpx.Response(404),  # the gone-check
-            ]
+            side_effect=lambda _request: (
+                httpx.Response(404) if del_route.called else httpx.Response(200, json=_realm_rep())
+            )
         )
         _mount_counts(mock)
         del_route = mock.delete(_REALM_PATH).respond(204)

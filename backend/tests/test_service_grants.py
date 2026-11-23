@@ -30,7 +30,7 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
     consult_and_record_grant,
-    credential_read_grant_reason,
+    credential_grant_reason,
     find_live_grant,
     null_target_only_park_hint,
 )
@@ -459,9 +459,9 @@ async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
 
 def test_a_stored_secret_read_class_cannot_be_granted() -> None:
     """A class a connector's safety floor stored on the row counts like the op id."""
-    assert credential_read_grant_reason("GET:/clients") is None
-    assert credential_read_grant_reason("GET:/clients", "credential_read") is not None
-    assert credential_read_grant_reason("GET:/clients", "write") is None
+    assert credential_grant_reason("GET:/clients") is None
+    assert credential_grant_reason("GET:/clients", "credential_read") is not None
+    assert credential_grant_reason("GET:/clients", "write") is None
 
 
 @pytest.mark.asyncio

@@ -109,6 +109,7 @@ from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_mani
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
+    register_person_only_preview_keys,
     register_preview_builder,
 )
 from meho_backplane.redaction.command_line import (
@@ -467,11 +468,242 @@ def apply_subject(applied: Any) -> str | None:
     return f"{shown} and {rest} more" if rest > 0 else shown
 
 
+#: The container lists of a pod spec, in the order Kubernetes starts them.
+_CONTAINER_LISTS = ("initContainers", "containers", "ephemeralContainers")
+
+#: The key of the ``k8s.apply`` preview that names what each pod runs. Only a
+#: person reads it (:func:`apply_run_commands`).
+RUN_COMMANDS_KEY = "run_commands"
+
+
+def _object_label(doc: dict[str, Any]) -> str:
+    """``<Kind>/<namespace>/<name>`` of a manifest document; parts it lacks are left out."""
+    raw_metadata = doc.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    parts = [doc.get("kind"), metadata.get("namespace"), metadata.get("name")]
+    return "/".join(str(part) for part in parts if part)
+
+
+def _runs_a_command(item: dict[str, Any]) -> bool:
+    """True when *item* has a ``command`` or ``args`` list: the echo shows those only by size."""
+    return any(isinstance(item.get(key), list) for key in _COMMAND_LISTS)
+
+
+def _containers_in(node: Any) -> list[dict[str, Any]]:
+    """Every container dict at any depth of *node*, each one once, in document order.
+
+    A container is an entry of a container list of a pod spec, or any other
+    dict with a ``command`` or ``args`` list, under any field: for example
+    the ``container``, ``script`` or ``steps`` of a custom kind. The ``exec``
+    of a hook or probe of a container is part of that container
+    (:func:`_exec_commands`), not one of its own. A YAML alias can name one
+    object many times or name itself, so each dict and list is walked once.
+    """
+    found: list[dict[str, Any]] = []
+    listed: set[int] = set()
+    walked: set[int] = set()
+    stack: list[Any] = [node]
+
+    def add(container: dict[str, Any]) -> None:
+        if id(container) in listed:
+            return
+        listed.add(id(container))
+        found.append(container)
+        listed.update(id(handler["exec"]) for handler in _exec_handlers(container).values())
+
+    while stack:
+        item = stack.pop()
+        if not isinstance(item, dict | list) or id(item) in walked:
+            continue
+        walked.add(id(item))
+        if isinstance(item, list):
+            stack.extend(reversed(item))
+            continue
+        if _runs_a_command(item):
+            add(item)
+        for key in _CONTAINER_LISTS:
+            entries = item.get(key)
+            for entry in entries if isinstance(entries, list) else []:
+                if isinstance(entry, dict):
+                    add(entry)
+        stack.extend(reversed(list(item.values())))
+    return found
+
+
+#: The lifecycle hooks and the probes of a container that can run a command.
+_EXEC_HOOKS = ("postStart", "preStop")
+_EXEC_PROBES = ("startupProbe", "livenessProbe", "readinessProbe")
+
+
+def _exec_handlers(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The hooks and probes of *container* that have an ``exec`` dict, keyed by where they run.
+
+    The keys are ``lifecycle.postStart``, ``lifecycle.preStop`` and the probe
+    names.
+    """
+    lifecycle = container.get("lifecycle")
+    handlers = {
+        f"lifecycle.{hook}": lifecycle.get(hook) if isinstance(lifecycle, dict) else None
+        for hook in _EXEC_HOOKS
+    }
+    handlers.update({probe: container.get(probe) for probe in _EXEC_PROBES})
+    return {
+        where: handler
+        for where, handler in handlers.items()
+        if isinstance(handler, dict) and isinstance(handler.get("exec"), dict)
+    }
+
+
+def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
+    """The commands the hooks and probes of *container* run, keyed by where they run.
+
+    Secret values are hidden. A hook or probe without an ``exec`` command is
+    left out.
+    """
+    commands = {
+        where: _hide_command_line(handler["exec"]).get("command")
+        for where, handler in _exec_handlers(container).items()
+    }
+    return {where: command for where, command in commands.items() if command is not None}
+
+
+def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
+    """What one container runs: its image, its command line and the commands of
+    its hooks and probes, secret values hidden."""
+    entry: dict[str, Any] = {"object": label, "container": container.get("name")}
+    if "image" in container:
+        entry["image"] = container.get("image")
+    entry.update(_hide_command_line(container))
+    exec_commands = _exec_commands(container)
+    if exec_commands:
+        entry["exec_commands"] = exec_commands
+    return entry
+
+
+#: The keys of a :func:`apply_run_commands` entry that hold what it runs.
+_RUN_KEYS = ("command", "args", "exec_commands")
+
+
+def _command_text(entry: dict[str, Any]) -> str:
+    """What *entry* runs as one text: its command line and its hook and probe commands."""
+    parts = [f"{key}: {json.dumps(entry[key])}" for key in ("command", "args") if key in entry]
+    exec_commands = entry.get("exec_commands")
+    if isinstance(exec_commands, dict):
+        parts.extend(f"{where}: {json.dumps(cmd)}" for where, cmd in exec_commands.items())
+    return "; ".join(parts)
+
+
+def _name_only(entry: dict[str, Any], text: str) -> dict[str, Any]:
+    """*entry* without what it runs: the object, the container, the image and the ``cut`` note."""
+    cut = {key: value for key, value in entry.items() if key not in _RUN_KEYS}
+    cut["cut"] = (
+        f"what this container runs is {len(text.encode('utf-8'))} bytes; the card shows "
+        f"only its start, as the list keeps at most {MANIFEST_ECHO_MAX_BYTES} bytes"
+    )
+    cut["command_cut"] = ""
+    return cut
+
+
+def _cut_entry(entry: dict[str, Any], room: int) -> dict[str, Any] | None:
+    """*entry* with what it runs cut to fit in *room* bytes, or ``None`` when it cannot fit.
+
+    The object, the container and the image stay. What it runs becomes
+    one text (:func:`_command_text`) in ``command_cut``, cut at the end,
+    and ``cut`` says so.
+    """
+    text = _command_text(entry)
+    cut = _name_only(entry, text)
+    if _entry_bytes(cut) > room:
+        return None
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        cut["command_cut"] = text[:middle]
+        if _entry_bytes(cut) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    cut["command_cut"] = text[:low]
+    return cut
+
+
+def _omitted_containers(count: int) -> dict[str, Any]:
+    """The closing entry that counts the containers the list has no room for."""
+    return {
+        "omitted_containers": count,
+        "echo_omitted": f"{count} more container(s) not shown; the list keeps "
+        f"at most {MANIFEST_ECHO_MAX_BYTES} bytes",
+    }
+
+
+def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
+    """What each container of a ``k8s.apply`` manifest runs, safe to show a person.
+
+    One entry per container, at any depth of each document
+    (:func:`_containers_in`): the init, main and ephemeral containers of a
+    pod spec, and every other dict with a ``command`` or ``args`` list, so
+    each command line the echo shows only by size is named here. Each entry
+    has the object, the container name, the image, the
+    ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
+    each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
+    hidden the way the Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
+    the shared params redaction, runs over the entries. An empty list when
+    no document runs a container.
+
+    The entries count toward :data:`MANIFEST_ECHO_MAX_BYTES`. Room is kept
+    for the name of every later container, so an entry that is too large
+    is cut (:func:`_cut_entry`) and the next ones are still named.
+    Only when the names alone do not fit does one closing entry count the
+    containers left out.
+
+    The ``manifest`` echo of the same preview shows only the size of each
+    command line. This list is for the person who approves: an agent never
+    reads it (:func:`_register_kubernetes_write_preview_builders`).
+    """
+    entries = [
+        _run_command_entry(_object_label(doc), container)
+        for doc in _parse_manifest(manifest)
+        for container in _containers_in(doc)
+    ]
+    redacted = redact(entries) if entries else []
+    # The least room each entry needs: whole, or cut down to its name.
+    least = [
+        min(_entry_bytes(entry), _entry_bytes(_name_only(entry, _command_text(entry))))
+        for entry in redacted
+    ]
+    later_least = [0] * (len(least) + 1)
+    for index in range(len(least) - 1, -1, -1):
+        later_least[index] = later_least[index + 1] + least[index]
+    if later_least[0] > MANIFEST_ECHO_MAX_BYTES:
+        # The names do not all fit: keep room for the closing count instead.
+        closing = _entry_bytes(_omitted_containers(len(redacted)))
+        later_least = [closing] * len(redacted) + [0]
+    shown: list[dict[str, Any]] = []
+    used = 0
+    for index, entry in enumerate(redacted):
+        room = MANIFEST_ECHO_MAX_BYTES - used - later_least[index + 1]
+        fitted = entry if _entry_bytes(entry) <= room else _cut_entry(entry, room)
+        if fitted is None:
+            shown.append(_omitted_containers(len(redacted) - index))
+            break
+        shown.append(fitted)
+        used += _entry_bytes(fitted)
+    return shown
+
+
+def _run_commands_shown_to_agents() -> bool:
+    """The ``run_commands`` key of the ``k8s.apply`` preview is for a person only."""
+    return False
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
+    register_person_only_preview_keys(
+        "k8s.apply", _run_commands_shown_to_agents, frozenset({RUN_COMMANDS_KEY})
+    )
 
 
 _register_kubernetes_write_preview_builders()

@@ -374,7 +374,33 @@ async def test_a_field_that_makes_a_create_wait_does_not_open_the_agent_preview(
     envelope = await _agent_preview("targets.register", params)
 
     assert envelope["status"] == ("ok" if switch else "unavailable"), envelope
-    assert envelope["requires_approval"] is (capture is not None)
+    assert envelope["requires_approval"] is True
+
+
+async def test_the_agent_preview_of_a_create_stays_unavailable_with_the_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_preview_typed_writes(monkeypatch, False)
+    params = {"name": "new-system", "product": "ssh", "host": "new.example", "extras": {"a": "b"}}
+
+    envelope = await _agent_preview("targets.register", params)
+
+    assert envelope["status"] == "unavailable", envelope
+    assert envelope["requires_approval"] is True
+    assert "proposed_effect" not in envelope, envelope
+    assert "new.example" not in repr(envelope)
+
+
+async def test_the_agent_preview_of_a_create_shows_the_card_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_preview_typed_writes(monkeypatch, True)
+    params = {"name": "new-system", "product": "ssh", "host": "new.example"}
+
+    envelope = await _agent_preview("targets.register", params)
+
+    assert envelope["status"] == "ok", envelope
+    assert envelope["proposed_effect"]["preview"]["target"]["host"] == "new.example"
 
 
 async def test_a_token_delete_waits_and_runs_after_approval(client: TestClient) -> None:

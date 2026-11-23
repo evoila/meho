@@ -102,6 +102,13 @@ _CALL = ToolCallPart(
     {"connector_id": "vault-1.x", "op_id": "vault.kv.read", "params": {"path": "secret/foo"}},
 )
 
+#: A toolset whose connector list holds only the connector of ``_GROUPS``.
+_ONLY_VAULT: dict[str, Any] = {"connectors": ["vault-1.x"]}
+#: A call on a connector outside ``_ONLY_VAULT``: the toolset refuses it.
+_CALL_OTHER = ToolCallPart(
+    "call_operation", {"connector_id": "k8s-1.x", "op_id": "k8s.pod.list", "params": {}}
+)
+
 
 def _scripted(*steps: ToolCallPart, final: str = "done") -> FunctionModel:
     """A model that makes one tool call per turn from *steps*, then answers *final*."""
@@ -229,9 +236,10 @@ async def test_succeeding_run_audits_discovery_call_once_per_call(
 async def test_failing_run_before_dispatch_still_audits_every_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The agent may reach no connector, so call_operation is refused before
-    # the dispatcher runs. The run then fails on a crashing tool.
-    await _seed_definition(toolset={"connectors": []})
+    # The agent may reach only vault-1.x, so call_operation on another
+    # connector is refused before the dispatcher runs. The run then fails on
+    # a crashing tool.
+    await _seed_definition(toolset=_ONLY_VAULT)
 
     async def _boom(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("backend down")
@@ -239,7 +247,7 @@ async def test_failing_run_before_dispatch_still_audits_every_attempt(
     spec = next(s for s in toolset._META_TOOL_CATALOG if s.name == "list_operation_groups")
     monkeypatch.setattr(spec, "handler", _boom)
 
-    outcome = await _invoker(_scripted(_CALL, _GROUPS)).run(_make_operator(), "reader", "go")
+    outcome = await _invoker(_scripted(_CALL_OTHER, _GROUPS)).run(_make_operator(), "reader", "go")
 
     assert outcome.status is AgentRunStatus.FAILED
     rows = await _rows(outcome.run_id)
@@ -364,10 +372,10 @@ async def test_rows_carry_decision_or_execution_class_after_cutover(
     monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
     monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
     get_settings.cache_clear()
-    await _seed_definition(toolset={"connectors": []})
+    await _seed_definition(toolset=_ONLY_VAULT)
     await _seed_echo_op(stub_embedding_service)
 
-    outcome = await _invoker(_scripted(_CALL, _GROUPS)).run(_make_operator(), "reader", "go")
+    outcome = await _invoker(_scripted(_CALL_OTHER, _GROUPS)).run(_make_operator(), "reader", "go")
 
     assert outcome.status is AgentRunStatus.SUCCEEDED
     classes = {

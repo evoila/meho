@@ -103,6 +103,20 @@ boundary redaction:
     opens no HTTP client of its own. The value is `strip_credential_value`-d
     before the PUT. This is the broker's second kind, so a cross-kind
     `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
+    The sink refuses the user its Keycloak target signs in with, when the
+    ref's realm is the realm the target signs in to: a new password would
+    lock MEHO out. `secret.move` asks the sink before the request waits for
+    approval (park check `refuse_sink_before_approval` in
+    `move_preview.py`, which calls the sink's `refuse_before_approval`),
+    and `write_secret` checks again before the PUT. It is the same check as
+    `keycloak.user.reset_password` (`ops_user_login_guard.py`). In MEHO's
+    own login realm the sink also refuses a login MEHO itself uses, the
+    last active platform admin, and the account that asks
+    (`ops_user_meho_access_guard.py`, see "Writes that could take MEHO's
+    own access away" in `connectors-keycloak.md`). There `write_secret`
+    holds the lock of the login realm from the count until the PUT is
+    done (`ops_meho_access_lock.py`). In another realm the park check
+    calls no Keycloak.
   - **`KeycloakClientSecretSourceEndpoint`** (source, #3619). **Source-only**:
     unlike a user password, a confidential client's secret IS served by
     the Admin REST API (`GET .../clients/{uuid}/client-secret` →
@@ -253,13 +267,16 @@ for example `vault-target:vault-prod/secret/app/db#password`.
   `keycloak.user.reset_password`: it sets a Keycloak user's password or
   reads a client secret. The request carries the rights-change mark
   (`register_rights_change_check("secret.move", has_keycloak_side)` in
-  `move_preview.py`). So the requester never approves it, and another
-  admin (a tenant admin or a platform admin) must. A move between two
+  `move_preview.py`). It always waits, also for an admin in the web
+  console. Only an admin (a tenant admin or a platform admin) approves it,
+  with a click in the web console; the admin may be the requester. A move
+  between two
   Vault places (or to a `linux:` place) is not a change of rights.
 - Before the `linux:` store uses SSH, it drops the SSH logins this server
   keeps for the target when a person changed the target since this server
-  last saw it (`forget_target_if_changed`). So the script goes to the host
-  and port the row holds now, also when another server made the change.
+  last saw it (`forget_target_if_changed`). It drops them too the first
+  time this server sees the target. So the script goes to the host and
+  port the row holds now, also when another server made the change.
 - What a caller reads about a `linux:` side is behind the switch
   `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
   `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
@@ -407,8 +424,8 @@ meho secret move \
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
 - The op is `requires_approval=True`, so the move waits for approval
-  before it runs. A `keycloak:` side makes it a change of rights, so
-  another admin must approve it, never the requester. The response
+  before it runs. A `keycloak:` side makes it a change of rights, so an
+  admin approves it with a click in the web console. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
@@ -433,8 +450,8 @@ client id, the tenant id, and the MEHO audience (the audience your MEHO
 checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
 gets. Keep it `operator`. Never use `tenant_admin`.
 
-Step 1 creates a new login with tenant rights. A second admin should approve
-it before it runs.
+Step 1 creates a new login with tenant rights. An admin approves it in the
+web console before it runs.
 
 <!-- recipe:keycloak-client-representation -->
 ```json

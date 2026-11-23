@@ -219,7 +219,11 @@ def _seed_request(
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
-    effect = proposed_effect or {"op_id": op_id, "connector_id": connector_id}
+    effect = proposed_effect or {
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "safety_level": "caution",
+    }
     # A live pending request carries a future deadline. The decision-time
     # deadline gate (F12 / #274) refuses an overdue row on the approve path,
     # so a decision-flow test must seed a non-expired deadline; ``None`` (the
@@ -519,7 +523,7 @@ def test_detail_modal_renders_request_fields() -> None:
         tenant_id=_TENANT_A,
         op_id="vsphere.vm.create",
         connector_id="vsphere-1.x",
-        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3"},
+        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3", "safety_level": "caution"},
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
@@ -2574,6 +2578,78 @@ def test_modal_names_a_classification_conflict() -> None:
     assert "tenant:classifications[0]" in conflict
 
 
+def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
+    from meho_backplane.operations.service_grants import CREDENTIAL_CARD_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "k8s.exec",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "credential_wait": CREDENTIAL_CARD_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-credential-wait">')[1].split("</p>")[0]
+    assert line == CREDENTIAL_CARD_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-credential-wait"' not in plain
+
+
+def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
+    """The card lists the commands next to the warning that the preview failed."""
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview_unavailable": True,
+            "preview_error": "dry run refused",
+            "run_commands": [
+                {
+                    "object": "Pod/apps/a",
+                    "container": "web",
+                    "image": "registry.example.test/web:1",
+                    "command": ["sh", "-c", "serve"],
+                    "args": ["--token", "***REDACTED***"],
+                    "exec_commands": {"livenessProbe": ["check", "--alive"]},
+                },
+                {"omitted_containers": 2, "echo_omitted": "2 more container(s) not shown"},
+            ],
+        }
+    )
+    assert "Blast radius unknown" in body
+    block = body.split('data-testid="approval-run-commands"')[1].split("</ul>")[0]
+    assert "Pod/apps/a" in block
+    assert "registry.example.test/web:1" in block
+    assert "serve" in block
+    assert "livenessProbe" in block
+    assert "--alive" in block
+    assert "REDACTED" in block
+    assert "2 more container(s) not shown" in block
+
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-run-commands"' not in plain
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(
@@ -2581,6 +2657,37 @@ def test_modal_shows_no_classification_without_one() -> None:
     )
     assert 'data-testid="approval-classification"' not in plain
     assert 'title="Category"' not in plain
+
+
+def test_modal_says_meho_could_not_build_the_preview() -> None:
+    """A request whose preview build failed says so plainly on its card."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "op_class": "config_write",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
+    )
+    assert "MEHO could not build the preview of this change." in body
+    assert "data-preview-failed" in body
+    assert "No preview was populated" not in body
+
+
+def test_modal_with_a_preview_has_no_preview_failed_notice() -> None:
+    """A request with a built preview shows no preview-failed notice."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "safety_level": "caution",
+            "preview": {"would_change": ["app/web"]},
+            "preview_populated": True,
+        }
+    )
+    assert "MEHO could not build the preview" not in body
 
 
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:

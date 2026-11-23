@@ -108,8 +108,8 @@ func standardUUID(s string) string {
 	return id.String()
 }
 
-// firstTenantGroups are the five role groups of the first tenant. They
-// keep `tenant_id`, `tenant_role` and `approver`, and carry `meho_tenant`.
+// firstTenantGroups are the three role groups of the first tenant. They
+// keep `tenant_id` and `tenant_role`, and carry `meho_tenant`.
 func (o BootstrapOptions) firstTenantGroups() []groupSpec {
 	specs := make([]groupSpec, 0, len(roleGroups))
 	for _, g := range roleGroups {
@@ -122,7 +122,7 @@ func (o BootstrapOptions) firstTenantGroups() []groupSpec {
 	return specs
 }
 
-// extraTenantGroups are the five groups `MEHO-<tenant>-<Role>` of an extra
+// extraTenantGroups are the three groups `MEHO-<tenant>-<Role>` of an extra
 // tenant. They carry only `meho_tenant`: with no `tenant_id` or
 // `tenant_role`, an older MEHO refuses a person who is only in these
 // groups. The command owns the same keys as on the first tenant's groups,

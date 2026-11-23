@@ -25,13 +25,35 @@ optional `aliases`, `version`, `port`, `fqdn`, `secret_ref`,
 `auth_model`, `verify_tls`, `tls_ca_pin`, `tls_server_name`,
 `vpn_required`, `extras`, `notes`, `preferred_impl_id`,
 `secret_field_map`, `flight_recorder_capture`. Any other field
-is refused. A call that sets `secret_field_map` or
-`flight_recorder_capture` waits for a person on every call, whoever makes
-it: no standing grant and no run approval covers it
-(`declare_wait_when_set` in `connectors/targets/__init__.py`). A call
-without these two fields keeps the usual rules. These two fields do not
-open the agent's `preview_operation`: with `PREVIEW_TYPED_WRITES` off,
-the preview of `targets.register` stays `unavailable`. `vpn_required` (boolean, default `false`) records that a
+is refused.
+
+**Making a target always waits for a person**, like changing one
+(`targets.update`). `targets.register` is `caution` with
+`requires_approval`, and its `host` and `fqdn` carry the address marker
+(`x-meho-caller-address: true`). So every call waits until a person with
+`tenant_admin` approves it: an agent's call (also with an agent grant), a
+service login's call (also with a standing grant, or in a run with a run
+approval), and a person's call made with a token. No standing grant, run
+approval or agent grant covers it. Only a person in the web console (the
+target form and the console target import) makes a target at once. The
+approval card (`build_targets_register_preview`) shows every sent field
+under `target`: name, product, host, `fqdn`, port, `secret_ref` and each
+`extras` key and value, with values under a secret-like name hidden. When
+the call leaves `secret_ref` out, the card shows the default path MEHO
+will store (`tenants/<tenant_id>/<name>`) and `secret_ref_derived` is
+true. `result_if_run`
+says `fails` when a live target of the tenant has the name already. The
+agent's own `preview_operation` gets this card only with
+`PREVIEW_TYPED_WRITES` on; off, its preview is `unavailable`, as for a
+typed write that needs no approval
+(`operations/preview_needs_switch.py`). A
+settings file that adds or changes a target is applied only in the web
+console ([settings.md](settings.md)). The guard
+`tests/test_targets_register_always_waits.py` fails when an operation of
+the target registry that makes or changes a target can be covered by a
+standing grant, a run approval or an agent grant.
+
+`vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
 `target` argument elsewhere resolves
@@ -46,8 +68,7 @@ checks the **per-op role floor** (`operations/role_floors.py`;
 `connectors/targets/ops.py` registers it at import): a person with a
 lower role gets `denied`, nothing is written, and the audit row says
 `denied`. `preview_operation` shows the same verdict. An agent's call
-still waits for approval; a service login's call still waits or runs
-under a grant. The approval queue checks the approver against the same
+and a service login's call wait for approval. The approval queue checks the approver against the same
 floor at the decision: a person below it cannot approve the request, so
 the approved call, run by the agent itself or by the person from an
 approvals surface, was approved by a `tenant_admin`. The dispatcher
@@ -182,8 +203,13 @@ Limits:
 - The kept logins live in each backplane process. The drop above runs
   only in the process that served the PATCH. Every other process (a
   second backplane server, a satellite runner) notices the change on
-  its next call: the dispatcher and the runner executor call
-  `forget_target_if_changed` with the target they just read. It keeps,
+  its next call: every path that takes a cached connector for a stored
+  target calls `forget_target_if_changed` with the target it just read.
+  These are the dispatcher, the runner executor, the topology refresh,
+  scope repair, the dispatch preview of an ingested operation, the
+  Kubernetes token store of the Vault connector, the Keycloak and
+  Linux secret stores, and `meho targets discover` with a seed target
+  (`GET /api/v1/targets/discover`). It keeps,
   per process, a change version for each target: the time a person last
   changed it (`connection_changed_at`), the connector class that
   serves it now (the class itself, not its name), and the product the last
@@ -207,8 +233,10 @@ Limits:
   per target, and the new change version is recorded only when every hook
   is done. So a call that arrives while a hook still runs waits for the
   drop, instead of treating the version as handled and reusing the old
-  login. Paths that call a connector without the dispatcher (topology
-  refresh, scope repair) do not run this check.
+  login. The first time a process sees a target, it records the version
+  and drops the kept logins for that target too: a login kept before then
+  may use values the process cannot compare. On a target with nothing
+  kept, this drop does nothing.
 - The handler does not commit on its own: the request's session
   commits after the response is sent, and the UI import calls it for
   many targets in one transaction. So the drop runs twice: once in the
@@ -363,9 +391,10 @@ from Vault there.
   a 422 alert. The `targets.probe` operation gives the same result as a
   call, with its `error_code`.
 - **A machine login gets only the own path, unless a person approves.**
-  A call of `targets.register` from an agent, a service login or a
-  runner can run with no person, under a standing grant or an approved
-  multi-step run. Such a call may store only the new target's own path
+  Every call of `targets.register` waits for a person, so a machine
+  login's call runs only after approval. The handler still checks a
+  machine login's call that runs with no person's approval: it may store
+  only the new target's own path
   `tenants/<tenant_id>/<name>`, or no path (`secret_ref: null`). MEHO
   also refuses the own path when another target of the tenant, live or
   removed, already stores it. MEHO compares the paths as it reads them:
@@ -619,7 +648,10 @@ and each register path says so and names the probe:
   not match there. The handler checks MEHO's policy for `targets.probe` on
   the found target (`secondary_target_refusal`) before the system is
   contacted. A deny grant for that target refuses the call, and nothing is
-  stored. Another target of the same agent is still probed.
+  stored. Another target of the same agent is still probed. The REST route
+  runs the same check (`probe_policy_refusal`) for an agent, service or
+  runner login and answers 403 `{"error": "denied", ...}` on a refusal. For
+  a person these rules are the role gate the route already has.
 - **A call that waits for approval.** An agent with a `needs-approval`
   grant parks the call; a reviewer runs the approved call as the reviewer.
   So the park records who asked and the requester's policy on the named
@@ -679,8 +711,10 @@ with a token becomes a call of this op.
 - **Risk level.** `caution` with `requires_approval`: every call waits
   until a person with `tenant_admin` approves it. `host` and `fqdn` are
   marked as addresses MEHO connects to (`x-meho-caller-address: true`), and
-  the call can change `secret_ref`. Only the web console changes a target
-  at once.
+  the call can change `secret_ref` and `extras` (a connector can read rules
+  from `extras`). So a call that changes only `extras` waits too, also
+  under a standing grant, and its card shows the old and the new `extras`.
+  Only the web console changes a target at once.
 - **Result.** `{target_id, name, product, version, host, updated_fields}`.
 - **Errors.** An unknown id, a target of another tenant, or a failed check
   give an error that names the cause; nothing changes.

@@ -96,6 +96,7 @@ from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, T
 from meho_backplane.operations.audit_row_safe import FULL_ROW_LOST, TEXT_CHANGED
 from meho_backplane.work_ref import work_ref_filter_values
 
+from .approval_payload import approval_payload_view
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
 
@@ -165,6 +166,7 @@ async def query_audit(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> AuditQueryResult:
     """Tenant-scoped paginated query over ``audit_log``.
 
@@ -178,6 +180,12 @@ async def query_audit(
     ``target_name=None`` rather than leaking the other tenant's target name.
     The LEFT JOIN to ``tenant`` fills ``tenant_name`` (#5238); every row is
     already in ``tenant_id``, so it only ever names the caller's own tenant.
+
+    ``owner_sub`` set (a service login, see
+    :func:`~meho_backplane.audit_query.owner_scope.own_rows_sub`): only the
+    rows with ``operator_sub == owner_sub`` match, before any other filter.
+    So no filter, also not ``has_trace``, tells anything about the rows of
+    another login.
     """
     stmt = (
         sa.select(
@@ -196,6 +204,7 @@ async def query_audit(
         .where(AuditLog.tenant_id == tenant_id)
     )
 
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, filters, tenant_id=tenant_id)
 
     stmt = stmt.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(
@@ -226,6 +235,7 @@ async def count_event_classes(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     now: datetime | None = None,
+    owner_sub: str | None = None,
 ) -> EventClassCounts:
     """Count the rows that match *filters*, per event class (#3747).
 
@@ -239,6 +249,9 @@ async def count_event_classes(
     When ``filters.since`` is not set, only the last
     :data:`DEFAULT_COUNT_WINDOW` is counted. The returned ``since`` is the
     start of the window that was counted, so callers can show it.
+
+    ``owner_sub`` limits the count to the rows of one login, as in
+    :func:`query_audit`.
     """
     since = filters.since
     if since is None:
@@ -249,10 +262,18 @@ async def count_event_classes(
         .where(AuditLog.tenant_id == tenant_id)
         .group_by(AuditLog.event_class)
     )
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
     found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
     counts = {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
     return EventClassCounts(counts=counts, since=since)
+
+
+def _scope_to_owner(stmt: sa.Select[Any], owner_sub: str | None) -> sa.Select[Any]:
+    """Keep only the rows of *owner_sub*; no change when it is ``None``."""
+    if owner_sub is None:
+        return stmt
+    return stmt.where(AuditLog.operator_sub == owner_sub)
 
 
 # A flat chain of independent `if filters.X is not None` guards — one per
@@ -449,7 +470,11 @@ def _build_audit_entry(
     BroadcastEvent observed on the SSE feed for the same ``audit_id``
     agree on the trio.
     """
-    payload = dict(row.payload) if row.payload else {}
+    # An approval row in the older form shows the person who acted as
+    # ``principal_sub`` and the requester as ``requester_sub``.
+    payload = approval_payload_view(
+        method=row.method, operator_sub=row.operator_sub, payload=row.payload or {}
+    )
 
     op_id_raw = payload.get("op_id")
     op_id = (

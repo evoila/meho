@@ -14,7 +14,7 @@ You can add your own connectors the same way as the enterprise pack: see [Write 
 
 These connectors are in the public image, generated from the in-process connector registry. Each row is one registered implementation. The **Docs** column links to the connector's page in the source repository.
 
-MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.
+MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers. MEHO refuses a Kubernetes API file whose paths do not start with `/api/v1` or `/apis/<group>/<version>`: use the standard API file that the cluster serves.
 
 | Connector | Product | What it does | Built for | Tested live on | Kind | Docs |
 | --- | --- | --- | --- | --- | --- | --- |

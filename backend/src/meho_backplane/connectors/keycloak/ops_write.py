@@ -128,6 +128,10 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+    refuse_login_realm_write,
+    refuse_own_client_write,
+)
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     SMTP_PASSWORD_PREFIX,
@@ -355,7 +359,13 @@ async def keycloak_realm_update(
     realm_name = (
         realm_param(params, "realm", "keycloak.realm.update", target) or realms.managed_realm
     )
+    new_name = (
+        realm_param(params, "representation.realm", "keycloak.realm.update", target) or realm_name
+    )
     representation = dict(params["representation"])
+    path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
+    current = await self._get_admin_json(target, path, operator=operator)
+    refuse_login_realm_write(realm_name, current, representation)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX
@@ -363,16 +373,14 @@ async def keycloak_realm_update(
         representation["smtpServer"] = with_smtp_password(
             representation.get("smtpServer"), password
         )
-    new_name = (
-        realm_param(params, "representation.realm", "keycloak.realm.update", target) or realm_name
-    )
     check = await read_merge_write(
         self,
         operator,
         target,
-        path=fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
+        path=path,
         requested=representation,
         read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
+        before=current,
     )
     return {"realm": realm_name, "updated": True, **check}
 
@@ -455,15 +463,21 @@ async def keycloak_client_update(
                 f"keycloak.client.update: no client with clientId={client_id!r} in realm "
                 f"{realms.managed_realm!r}"
             )
-    check = await read_merge_write(
+    path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
+    requested = dict(params["representation"])
+    current = await self._get_admin_json(target, path, operator=operator)
+    await refuse_own_client_write(
         self,
         operator,
         target,
-        path=fill_path(
-            _CLIENT_PATH,
-            {"realm": realms.managed_realm, "client-uuid": uuid},
-        ),
-        requested=dict(params["representation"]),
+        "keycloak.client.update",
+        realms.managed_realm,
+        current,
+        named=client_id,
+        requested=requested,
+    )
+    check = await read_merge_write(
+        self, operator, target, path=path, requested=requested, before=current
     )
     return {"id": uuid, "client_id": client_id, "updated": True, **check}
 
@@ -533,6 +547,16 @@ async def keycloak_protocol_mapper_create(
             )
     representation = dict(params["representation"])
     mapper_name = _opt_str(representation.get("name"))
+    client_path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
+        "keycloak.protocol_mapper.create",
+        realms.managed_realm,
+        await self._get_admin_json(target, client_path, operator=operator),
+        named=client_id,
+    )
     result = await self._write_admin(
         target,
         "POST",

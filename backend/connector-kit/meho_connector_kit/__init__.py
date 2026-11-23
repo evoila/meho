@@ -63,6 +63,7 @@ from meho_backplane.operations._validate import compute_audit_digest_hash
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.dead_handler_sweep import RetiredOp, register_retired_operations
 from meho_backplane.operations.ingest.catalog import register_connector_catalog
+from meho_backplane.operations.switch_params import FILE_REF_PARAMS_SWITCH, SWITCH_MARKER
 from meho_backplane.operations.typed_register import (
     register_typed_op_registrar,
     register_typed_operation,
@@ -135,6 +136,8 @@ def target_cache_key(target: Target) -> tuple[str, str]:
 
 __all__ = [
     "CALLER_ADDRESS_MARKER",
+    "FILE_REF_PARAMS_SWITCH",
+    "SWITCH_MARKER",
     "AuthModel",
     "Connector",
     "ConnectorAuthError",

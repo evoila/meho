@@ -343,6 +343,10 @@ async def test_protocol_mapper_create_resolves_clientid(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get("/admin/realms/example/clients").respond(200, json=[_EXISTING_CLIENT])
+        mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(
+            200, json=_EXISTING_CLIENT
+        )
+        mock.get("/admin/realms/example").respond(200, json={"realm": "example"})
         post_route = mock.post(
             f"/admin/realms/example/clients/{_CLIENT_UUID}/protocol-mappers/models"
         ).respond(201, headers=_location(f"/admin/realms/example/clients/{_CLIENT_UUID}"))

@@ -585,7 +585,7 @@ async def test_cancel_run_cancels_non_terminal_run_for_authorized_operator(
     async with sessionmaker() as session:
         run = await _make_run(session, status=status)
         run_id = run.id
-        operator = _operator(role=TenantRole.OPERATOR)
+        operator = _operator(role=TenantRole.OPERATOR, sub="user-sm")
         cancelled = await cancel_run(session, run_id, operator=operator)
         await session.commit()
 
@@ -640,7 +640,9 @@ async def test_cancel_run_rejects_already_terminal_run(status: AgentRunStatus) -
         run = await _make_run(session, status=status)
         run_id = run.id
         with pytest.raises(IllegalTransitionError):
-            await cancel_run(session, run_id, operator=_operator(role=TenantRole.OPERATOR))
+            await cancel_run(
+                session, run_id, operator=_operator(role=TenantRole.OPERATOR, sub="user-sm")
+            )
 
 
 @pytest.mark.asyncio

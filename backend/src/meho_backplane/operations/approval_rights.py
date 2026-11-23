@@ -16,12 +16,12 @@ same order, so the sign never says something else than the approve does:
 2. A ``read_only`` person without the ``approver`` flag cannot decide.
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
-   for another admin, whatever the group of the requester; an own change only for
-   a MEHO-SA-Operator or a MEHO-Admin, with a click in the web interface when the
+   for an admin, with a click in the web interface (the admin may be the
+   requester); an own change only for
+   a MEHO-Admin, with a click in the web interface when the
    ``caution`` change waited only because it came with a token (#3980),
    or a ``safe`` / ``caution`` change under the break-glass switch;
-   another person's ``dangerous`` or ``destructive`` change only for a
-   MEHO-SA-Operator or an admin.
+   another person's ``dangerous`` or ``destructive`` change only for an admin.
 5. The role floor of the operation (:func:`_check_approver_role_floor`).
 6. With approver routing on, the install's routing as it is now, when the
    caller passes it (:class:`~meho_backplane.policy.routing_floor.InstallFloor`),
@@ -82,7 +82,7 @@ class ApproveRightReason(StrEnum):
 
     * ``ok`` — another person's change; this person may approve it.
     * ``own_change`` — the person's own change. With ``may_approve`` true,
-      a self-approval is allowed (a MEHO-SA-Operator or MEHO-Admin, a web click on a
+      a self-approval is allowed (a MEHO-Admin, a web click on a
       ``caution`` change that waited only for its token, or the
       break-glass switch for a lower-risk change); with false, it is
       refused.
@@ -149,7 +149,7 @@ def _allowed(rule: ApprovalRule) -> ApproveRight:
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         message = (
             "This is your own change. You may approve it, because members of "
-            "MEHO-SA-Operators and MEHO-Admins may approve their own changes. "
+            "MEHO-Admins may approve their own changes. "
             "The audit log records it as a self-approval."
         )
     elif rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:
@@ -182,7 +182,7 @@ def self_approval_confirmation(rule: ApprovalRule | None) -> str | None:
     """
     if rule == ApprovalRule.SA_OPERATOR_SELF_APPROVAL:
         return (
-            "You approved your own change, as a member of MEHO-SA-Operators or "
+            "You approved your own change, as a member of "
             "MEHO-Admins. The audit log records it as a self-approval."
         )
     if rule == ApprovalRule.TOKEN_CALL_SELF_APPROVAL:

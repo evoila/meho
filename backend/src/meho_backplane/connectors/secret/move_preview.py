@@ -69,9 +69,20 @@ A move with a ``keycloak`` side is a change of rights
 Such a move sets a Keycloak user's password or reads a client secret, so
 it counts as a change of rights, like ``keycloak.user.reset_password``
 (:func:`~meho_backplane.operations.grant_approval.register_rights_change_check`
-with :func:`has_keycloak_side`). The requester never approves it, and
-another admin (a tenant admin or a platform admin) must. A move between
-two Vault places is not a change of rights.
+with :func:`has_keycloak_side`). It always waits, also when an admin asks
+in the web console. Only an admin (a tenant admin or a platform admin)
+approves it, in the web console, and the admin may be the one who asked.
+A move between two Vault places is not a change of rights.
+
+A move whose source or sink is in MEHO's own login realm needs a platform
+admin as approver, and so does a move whose realm MEHO cannot read. The
+card says it in its ``grant`` block
+(:func:`~meho_backplane.connectors.keycloak.ops_write_platform_reach.secret_move_grant`,
+registered with
+:func:`~meho_backplane.operations.grant_approval.register_grant_op`). The
+check runs again right before the approved move runs. A move approved
+with a card made before this rule does not run
+(:func:`~meho_backplane.operations.grant_approval.register_harmless_keys_rule`).
 
 What a caller reads about a ``linux`` side is behind the switch
 ``SECRET_MOVE_LINUX_TARGET_CARD`` (``Settings.secret_move_linux_target_card``,
@@ -109,8 +120,9 @@ A ``keycloak:`` side on another realm
 ====================================
 
 A Keycloak target works on one realm only, its managed realm.
-:func:`check_secret_move_realms` is the op's check before the wait for
-approval (:func:`~meho_backplane.operations._park_check.register_park_check`):
+:func:`check_secret_move_realms` runs in the op's check before the wait for
+approval (:func:`check_secret_move_before_approval`, registered with
+:func:`~meho_backplane.operations._park_check.register_park_check`):
 it refuses a ``keycloak:`` ref whose realm is not the managed realm of its
 target, so no approval card is made. The endpoint refuses it again when the
 move runs.
@@ -130,6 +142,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
+    agent_cards_on,
+    secret_move_grant,
+)
 from meho_backplane.connectors.keycloak.secret_move_target import keycloak_side_card
 from meho_backplane.connectors.linux.secret_endpoint import (
     LinuxSecretRefError,
@@ -137,7 +153,11 @@ from meho_backplane.connectors.linux.secret_endpoint import (
     parse_linux_secret_ref,
 )
 from meho_backplane.connectors.linux.secret_sink_target import sink_target_card
-from meho_backplane.connectors.secret.endpoints import parse_secret_ref, resolve_secret_endpoint
+from meho_backplane.connectors.secret.endpoints import (
+    UnknownSecretKindError,
+    parse_secret_ref,
+    resolve_secret_endpoint,
+)
 from meho_backplane.connectors.secret.vault_endpoint import NOT_KNOWN, VaultKvSecretEndpoint
 from meho_backplane.connectors.secret.vault_target_endpoint import (
     VAULT_TARGET_KIND,
@@ -155,7 +175,11 @@ from meho_backplane.operations._preview import (
     register_preview_builder,
 )
 from meho_backplane.operations._validate import params_problem, register_params_check
-from meho_backplane.operations.grant_approval import register_rights_change_check
+from meho_backplane.operations.grant_approval import (
+    register_grant_op,
+    register_harmless_keys_rule,
+    register_rights_change_check,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 
@@ -208,13 +232,16 @@ def _linux_card_on() -> bool:
 def _hide_target_cards(preview: dict[str, Any]) -> dict[str, Any]:
     """The stored preview as a caller reads it.
 
-    No ``keycloak:`` target fields, and no ``linux:`` target fields with
-    ``SECRET_MOVE_LINUX_TARGET_CARD`` off.
+    No ``keycloak:`` target fields, no ``linux:`` target fields with
+    ``SECRET_MOVE_LINUX_TARGET_CARD`` off, and no ``grant`` block with
+    ``KEYCLOAK_RIGHTS_CHANGE_CARDS`` off.
     """
     hidden = {_KEYCLOAK_KIND: _KEYCLOAK_CARD_KEYS}
     if not _linux_card_on():
         hidden[_LINUX_KIND] = _LINUX_CARD_KEYS
     shown = dict(preview)
+    if not agent_cards_on():
+        shown.pop("grant", None)
     for side in ("source", "sink"):
         summary = shown.get(side)
         if not isinstance(summary, dict):
@@ -386,6 +413,41 @@ async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
     return None
 
 
+async def refuse_sink_before_approval(ctx: PreviewContext) -> str | None:
+    """The check before approval of ``secret.move``: ask the sink, if it has a check.
+
+    A sink with a ``refuse_before_approval(operator)`` method can refuse the
+    move before it waits for approval (a Keycloak password sink refuses the
+    user its target signs in with). A ref that does not parse is left to the
+    run, which reports it.
+    """
+    raw_to = ctx.params.get("to")
+    if not isinstance(raw_to, str):
+        return None
+    try:
+        sink = resolve_secret_endpoint(parse_secret_ref(raw_to))
+    except (ValueError, UnknownSecretKindError):
+        return None
+    check = getattr(sink, "refuse_before_approval", None)
+    if check is None:
+        return None
+    reason: str | None = await check(ctx.operator)
+    return reason
+
+
+async def check_secret_move_before_approval(ctx: PreviewContext) -> str | None:
+    """The one check of ``secret.move`` before it waits for approval.
+
+    An op has one such check, so this runs both: first the realm of each
+    ``keycloak:`` ref (:func:`check_secret_move_realms`), then the sink's
+    own check (:func:`refuse_sink_before_approval`). The first reason wins.
+    """
+    problem = await check_secret_move_realms(ctx)
+    if problem is not None:
+        return problem
+    return await refuse_sink_before_approval(ctx)
+
+
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Build the ref-only ``proposed_effect`` preview for ``secret.move``.
 
@@ -423,6 +485,9 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         summary["source"] = await _ref_summary(source, ctx.operator)
         summary["sink"] = await _ref_summary(sink, ctx.operator)
         summary["sink"].update(await _sink_state(sink, ctx.operator, ctx.params, merge=merge))
+        grant = await secret_move_grant(ctx)
+        if grant is not None:
+            summary["grant"] = grant
     summary["merge"] = merge
     reason = ctx.params.get("reason")
     if isinstance(reason, str) and reason:
@@ -433,11 +498,13 @@ async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | Non
 def _register_secret_move_preview_builder() -> None:
     """Wire the ``secret.move`` preview builder and its checks. Import-time."""
     register_preview_builder("secret.move", build_secret_move_preview)
-    register_park_check("secret.move", check_secret_move_realms)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
+    register_park_check("secret.move", check_secret_move_before_approval)
     register_agent_preview_filter("secret.move", _hide_target_cards)
     register_rights_change_check("secret.move", has_keycloak_side)
+    register_grant_op("secret.move", applies=has_keycloak_side)
+    register_harmless_keys_rule("secret.move")
 
 
 _register_secret_move_preview_builder()

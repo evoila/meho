@@ -11,6 +11,8 @@ on a withdrawn request, and the agent waiter. The rules:
   else, an approver included, gets 403. A person, an agent and a service
   principal can each withdraw their own request.
 * Only a ``pending`` request; a closed one gets 409.
+* The people behind the sender are shown only to a person: an agent login
+  that withdraws or reads the request gets ``None`` for them.
 * One ``approval.withdraw`` audit row, which is not a decision row and
   not an operation run: the audit query shows it as ``withdrawn`` (#5717).
 * Approve / reject / decide on a withdrawn request answer 409, and the
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -28,14 +31,20 @@ import httpx
 import pytest
 import respx
 from httpx import ASGITransport
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.audit_query import AuditQueryFilters, query_audit
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequestStatus, AuditEventClass, AuditLog
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+    AuditEventClass,
+    AuditLog,
+    MachineLogin,
+)
 from meho_backplane.main import app
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
@@ -49,6 +58,7 @@ from meho_backplane.operations.approval_queue import (
     withdraw_request,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_service_a_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -104,6 +114,7 @@ async def _park(
     *, sub: str = _SENDER_SUB, tenant_id: uuid.UUID = _TENANT_ID, status: str | None = None
 ) -> uuid.UUID:
     """Park one request as *sub*; optionally force its status. Return its id."""
+    await give_service_a_known_person(tenant_id, sub)
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
             s,
@@ -113,6 +124,7 @@ async def _park(
             target=None,
             params=_PARAMS,
             params_hash=compute_params_hash(_PARAMS),
+            proposed_effect={"safety_level": "caution"},
         )
         if status is not None:
             request.status = status
@@ -327,6 +339,134 @@ async def test_route_each_principal_kind_withdraws_its_own_request(
     assert body["withdrawn_at"] is not None
     assert body["reviewed_by"] is None
     assert body["decided_at"] is None
+
+
+#: The times of the request in the test of the answer of a machine login.
+_CREATED_AT = datetime(2026, 1, 5, 9, 30)
+_EXPIRES_AT = datetime(2026, 1, 19, 9, 30)
+_WITHDRAWN_AT = datetime(2026, 1, 6, 10, 0)
+
+#: The answer of main for the withdrawn request of that test, as a list
+#: shows it. The test puts in the id and the params hash of the request.
+#: The two people-behind keys are not in it.
+_MAIN_ANSWER: dict[str, Any] = {
+    "id": "<request id>",
+    "tenant_id": str(_TENANT_ID),
+    "run_id": None,
+    "principal_sub": _SENDER_SUB,
+    "principal_act": None,
+    "principal_name": "Test Principal",
+    "principal_kind": "service",
+    "op_id": _OP_ID,
+    "connector_id": _CONNECTOR_ID,
+    "target_id": None,
+    "params_hash": "<params hash>",
+    "preview_hash": None,
+    "proposed_effect": {"safety_level": "caution"},
+    "reveal_secret": False,
+    "waits_for_requester": False,
+    "reveal_changes_something": False,
+    "status": "withdrawn",
+    "result_state": None,
+    "resume_outcome": None,
+    "outcome_unknown": None,
+    "outcome_check": None,
+    "expired_reason": None,
+    "expired_message": None,
+    "release_id": None,
+    "reviewed_by": None,
+    "reviewed_by_name": None,
+    "decided_at": None,
+    "withdrawn_at": "2026-01-06T10:00:00",
+    "withdraw_reason": None,
+    "created_at": "2026-01-05T09:30:00",
+    "expires_at": "2026-01-19T09:30:00",
+    "work_ref": None,
+    "agent_session_id": None,
+    "reviewer_context": None,
+    "delegation": None,
+    "may_approve": False,
+    "may_approve_reason": "not_a_person",
+    "rights_change": False,
+}
+
+#: The ``reviewer_context`` of main when one request is shown.
+_MAIN_SHOWN_CONTEXT: dict[str, Any] = {
+    "target_name": None,
+    "target_product": None,
+    "target_version": None,
+    "subject": None,
+    "parent_composite_op_id": None,
+    "blast_radius": None,
+    "summary": None,
+}
+
+
+async def _set_times(request_id: uuid.UUID, **times: datetime) -> None:
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(ApprovalRequest).where(ApprovalRequest.id == request_id).values(**times)
+        )
+        await s.commit()
+
+
+def _assert_main_answer(view: dict[str, Any], expected: dict[str, Any]) -> None:
+    """*view* is *expected*: the same keys in the same order, and the same values."""
+    assert list(view) == list(expected)
+    assert view == expected
+
+
+@pytest.mark.asyncio
+async def test_route_a_machine_login_reads_the_answer_of_main(
+    client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = client
+    request_id = await _park()
+    await _set_times(request_id, created_at=_CREATED_AT, expires_at=_EXPIRES_AT)
+    main_answer = {
+        **_MAIN_ANSWER,
+        "id": str(request_id),
+        "params_hash": compute_params_hash(_PARAMS),
+    }
+
+    withdrawn = await ac.post(
+        f"/api/v1/approvals/{request_id}/withdraw",
+        json={},
+        headers=_headers(key, sub=_SENDER_SUB, role=TenantRole.READ_ONLY, kind="agent"),
+    )
+    assert withdrawn.status_code == 200, withdrawn.text
+    await _set_times(request_id, withdrawn_at=_WITHDRAWN_AT)
+    agent_reader = _headers(key, sub="agent:reader", role=TenantRole.OPERATOR, kind="agent")
+    shown = await ac.get(f"/api/v1/approvals/{request_id}", headers=agent_reader)
+    listed = await ac.get("/api/v1/approvals?status=withdrawn", headers=agent_reader)
+    person = await ac.get(
+        f"/api/v1/approvals/{request_id}", headers=_headers(key, sub=_APPROVER_SUB, kind="user")
+    )
+
+    for response in (shown, listed, person):
+        assert response.status_code == 200, response.text
+    # The withdraw answers with the time of the withdraw and without the
+    # "may I approve?" answer, as on main.
+    withdrawn_view = withdrawn.json()
+    assert withdrawn_view["withdrawn_at"]
+    _assert_main_answer(
+        withdrawn_view,
+        {
+            **main_answer,
+            "withdrawn_at": withdrawn_view["withdrawn_at"],
+            "may_approve": None,
+            "may_approve_reason": None,
+        },
+    )
+    _assert_main_answer(shown.json(), {**main_answer, "reviewer_context": _MAIN_SHOWN_CONTEXT})
+    assert len(listed.json()) == 1
+    _assert_main_answer(listed.json()[0], main_answer)
+    assert person.json()["people_behind_known"] is True
+    assert person.json()["people_behind"]
+    # Each REST call of a machine login notes it; a person is not noted.
+    async with get_sessionmaker()() as session:
+        noted = set((await session.scalars(select(MachineLogin.sub))).all())
+    assert noted == {_SENDER_SUB, "agent:reader"}
 
 
 @pytest.mark.asyncio

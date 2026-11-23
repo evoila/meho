@@ -69,7 +69,7 @@ _WHEN_TO_USE_DISABLE = (
     "Use to turn a person's account off without deleting it "
     "(``keycloak.user.disable``), so they can no longer sign in to any app "
     "that uses this realm, and the account and its history stay. Dangerous: "
-    "a MEHO-SA-Operator or a tenant admin must approve. Key on the user UUID "
+    "a tenant admin must approve. Key on the user UUID "
     "(``id``) or ``username``. Disabling does NOT end sessions that are "
     "already open. To cut access at once, run ``keycloak.user.disable`` and "
     "then ``keycloak.user.logout``. Safe to run twice."
@@ -92,8 +92,11 @@ _NEXT_DISABLE = (
 _NEXT_ENABLE = "The person can sign in again. To turn the account off, run keycloak.user.disable."
 
 _PRECONDITIONS = (
-    "The user exists in the target's managed realm. A second person with the "
-    "right to approve a dangerous change approves the call."
+    "The user exists in the target's managed realm. The call waits for a "
+    "person with the right to approve it. keycloak.user.enable is a change "
+    "of rights: an admin approves it in the web console. In MEHO's own login "
+    "realm only a platform admin approves it, or makes it alone in the web "
+    "console after a fresh sign-in."
 )
 
 USER_ENABLED_OPS: tuple[KeycloakOp, ...] = (

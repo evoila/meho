@@ -82,6 +82,7 @@ _AGENT_SUB = "agent:r2-approval-gate-example"
 
 #: The human operator's ``sub`` — the reviewer who decides on the request.
 _OPERATOR_SUB = "operator:r2-approval-gate-example"
+_ADMIN_SUB = "admin:r2-approval-gate-example"
 
 #: The change-class op the demo agent exercises. Distinct from the existing
 #: ``vmware.composite.vm.snapshot.revert`` op id so the test does not collide
@@ -387,7 +388,10 @@ async def test_pause_approve_resume_execute_cycle() -> None:
                 op_pattern=_OP_ID,
                 target_scope="*",
                 verdict=PermissionVerdict.NEEDS_APPROVAL.value,
-                created_by_sub=_OPERATOR_SUB,
+                # The tenant admin gives the grant (README §1). The person who
+                # approves below is another person: the giver of a grant in
+                # force counts as a requester of the agent's changes.
+                created_by_sub=_ADMIN_SUB,
             )
         )
         await s.commit()

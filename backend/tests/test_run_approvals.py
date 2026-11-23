@@ -62,6 +62,7 @@ from meho_backplane.operations.run_approvals import (
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_service_a_known_person
 
 _TENANT_A = uuid.UUID("00000000-0000-0000-0000-00000000412a")
 _TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000412b")
@@ -121,6 +122,13 @@ async def _descriptors(_settings_env: None) -> None:
     await _seed_descriptor(_OTHER_OP)
     await _seed_descriptor(_DANGEROUS_OP, safety_level="dangerous")
     await _seed_descriptor("targets.register", product="meho", version="", impl_id="")
+
+
+@pytest.fixture(autouse=True)
+async def _known_person_behind(_settings_env: None) -> None:
+    """The service login has a known person behind it, who approves nothing here."""
+    for tenant_id in (_TENANT_A, _TENANT_B):
+        await give_service_a_known_person(tenant_id, _PRINCIPAL)
 
 
 @pytest.fixture
@@ -960,40 +968,24 @@ async def _request_rights_change_list(monkeypatch: pytest.MonkeyPatch) -> uuid.U
         _approver(role=TenantRole.READ_ONLY, approver=True),
         _approver(role=TenantRole.OPERATOR),
         _approver(role=TenantRole.OPERATOR, sa=True),
+        _approver(role=TenantRole.TENANT_ADMIN),
+        _operator(sub=_PRINCIPAL, kind=PrincipalKind.USER, role=TenantRole.TENANT_ADMIN),
     ],
-    ids=["approver-flag", "operator", "sa-operator"],
+    ids=["approver-flag", "operator", "sa-operator", "another-admin", "the-requester-admin"],
 )
 @pytest.mark.asyncio
-async def test_a_list_with_a_rights_change_needs_an_admin(
+async def test_nobody_approves_a_list_with_a_rights_change(
     person: Operator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A run approval list never covers a change of rights: a person approves each call."""
     approval_id = await _request_rights_change_list(monkeypatch)
 
-    with pytest.raises(RunApprovalGroupError, match="rights_change_required: entries\\[0\\]"):
+    with pytest.raises(
+        RunApprovalGroupError, match="rights_change_required: entries\\[0\\]"
+    ) as exc:
         await RunApprovalService().approve(person, approval_id)
+    assert "A run approval list never covers it" in str(exc.value)
     assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_the_requester_of_a_rights_change_list_cannot_approve_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    approval_id = await _request_rights_change_list(monkeypatch)
-    person = _operator(sub=_PRINCIPAL, kind=PrincipalKind.USER, role=TenantRole.TENANT_ADMIN)
-
-    with pytest.raises(RunApprovalGroupError, match="Another admin must approve it"):
-        await RunApprovalService().approve(person, approval_id)
-    assert (await RunApprovalService().get(_TENANT_A, approval_id)).status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_another_admin_approves_a_list_with_a_rights_change(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    approval_id = await _request_rights_change_list(monkeypatch)
-    admin = _approver(role=TenantRole.TENANT_ADMIN)
-
-    assert (await RunApprovalService().approve(admin, approval_id)).status == "approved"
 
 
 @pytest.mark.asyncio

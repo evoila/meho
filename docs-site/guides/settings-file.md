@@ -48,8 +48,12 @@ with a token waits for approval. When you send such a file with a token
 - The preview still works with a token. It shows the target changes.
 - A file that changes no target still applies with a token. A target in
   the file that is the same as the stored one is no change.
-- Policies and conventions have no such rule. Their own API writes at
-  once with a token too.
+- Two policies change only in the web console:
+  `run_approval_target_kinds` turned on and `announce_gate_enabled`
+  turned off. The web console cannot apply a settings file yet, so these
+  two changes cannot be made at all today. See
+  [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
+  The other policies and the conventions apply with a token.
 
 The web console does not have the settings file yet. Until it does, add
 or change each target with `meho targets` or the target API (with a
@@ -115,6 +119,32 @@ spec:
   preview shows a warning. The import still runs.
 - When a `tenant_admin` imports a file with only their own tenant, the
   tenant `id` may be left out.
+
+### Approval policies change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs:
+
+- `run_approval_target_kinds: true` lets one run approval cover a whole
+  target kind, not only one target.
+- `announce_gate_enabled: false` turns the announce gate off.
+
+These two changes apply only for a person in the web console. The web
+console cannot apply a settings file yet, so today these two changes
+cannot be made at all. When you send such a file with a token (the CLI, a
+script or an AI tool), MEHO answers `403`, names each policy, and saves
+nothing from the file, also not its other parts. This includes
+`policies: null` when the gate is on, because it turns the gate off.
+
+!!! warning "Turn the announce gate on only if you want to keep it on"
+    Turning the gate on applies with a token. Turning it off again
+    cannot be done until the web console can apply a settings file.
+
+- The preview works with a token. It shows the change in `diff` and
+  names it in `warnings`.
+- The other direction (`run_approval_target_kinds: false`,
+  `announce_gate_enabled: true`) applies with a token.
+- A value that is the same as the stored one is no change.
+- The other policies apply with a token.
 
 ### What is never in the file
 

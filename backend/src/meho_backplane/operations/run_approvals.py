@@ -42,11 +42,12 @@ Rules that never change:
 * An operation that a connector marks for per-call approval
   (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
   covered either.
-* An operation that reads a credential (the ``credential_read`` class,
-  :func:`~meho_backplane.operations.service_grants.credential_read_grant_reason`)
+* An operation that reads, writes or makes a credential (the classes
+  ``credential_read``, ``credential_write`` and ``credential_mint``,
+  :func:`~meho_backplane.operations.service_grants.credential_grant_reason`)
   is never covered either: each call waits for a person. A request that
-  lists one is accepted, and the answer names the entry in
-  ``entries_that_wait``
+  lists one is refused. A request made before this rule can still list
+  one: show and approve name such an entry in ``entries_that_wait``
   (:func:`~meho_backplane.operations.run_approval_notes.with_wait_notes`).
 * A target kind entry (``target_product``) works only when the tenant
   setting ``run_approval_target_kinds_enabled`` is on.
@@ -68,11 +69,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, RunApproval, Tenant
 from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
-from meho_backplane.operations.grant_approval import RIGHTS_CHANGE_REFUSAL, is_rights_change_op
+from meho_backplane.operations.grant_approval import is_rights_change_op
+from meho_backplane.operations.people_behind import (
+    behind_subs,
+    find_people_behind,
+    is_person_behind,
+    people_behind_unknown,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_approval_notes import with_wait_notes
 from meho_backplane.operations.run_approval_schemas import (
@@ -84,6 +91,7 @@ from meho_backplane.operations.run_approval_schemas import (
 from meho_backplane.operations.service_grants import (
     always_wait_grant_reason,
     caller_address_grant_reason,
+    credential_refusal,
     delete_grant_reason,
 )
 from meho_backplane.policy.routing import approver_set_for, routing_enabled, routing_refusal
@@ -108,6 +116,12 @@ _log = structlog.get_logger(__name__)
 #: Why a run approval never covers an operation marked with
 #: :func:`~meho_backplane.op_classes.declare_root_shell`.
 ROOT_SHELL_REFUSAL = "runs a command as root on the host; a person approves each call"
+
+#: Why a run approval list with a change of rights cannot be approved.
+RIGHTS_CHANGE_IN_LIST = (
+    "This is a change of rights. A run approval list never covers it: "
+    "a person approves each call in the web console."
+)
 
 #: How long a run approval lasts when the request names no ``expires_at``.
 DEFAULT_RUN_APPROVAL_HOURS = 24
@@ -221,10 +235,16 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
             f"op {entry.op_id!r}: a person approves each call. A run approval never "
             "covers it: leave it out of the list"
         )
+    credential = credential_refusal(entry.op_id)
+    if credential is not None:
+        return credential
     product, version, impl_id = parse_connector_id(entry.connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=entry.op_id
     )
+    credential = credential_refusal(entry.op_id, getattr(descriptor, "op_class", None))
+    if credential is not None:
+        return credential
     reason = (
         caller_address_grant_reason(descriptor)
         or always_wait_grant_reason(descriptor)
@@ -240,22 +260,60 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     )
 
 
+async def _check_people_behind(
+    session: AsyncSession, operator: Operator, row: RunApproval
+) -> frozenset[str]:
+    """Apply the rule of the people behind the service login that asked.
+
+    MEHO looks them up now (:mod:`~meho_backplane.operations.people_behind`):
+    who paired or owns its add-on, and who gave one of its standing grants
+    in force. The pairing is found by the login id and by the client id
+    stored on the list when the add-on asked. A person behind it may
+    approve the list only when they may approve their own change
+    (:attr:`Operator.may_self_approve`). When MEHO knows nobody behind the
+    login, only an admin may approve the list.
+    Returns the subs of the people behind.
+    """
+    from meho_backplane.operations.approval_queue import is_admin_approver
+
+    people = await find_people_behind(
+        session,
+        tenant_id=operator.tenant_id,
+        sub=row.principal_sub,
+        client_id=row.principal_client_id,
+        kind=PrincipalKind.SERVICE.value,
+    )
+    if people_behind_unknown(PrincipalKind.SERVICE.value, people):
+        if is_admin_approver(operator):
+            return frozenset()
+        raise RunApprovalGroupError(
+            "requester_not_known: MEHO does not know who set up the login that asked for "
+            "this list, so only an Admin may approve it"
+        )
+    if is_person_behind(operator.sub, people) and not operator.may_self_approve:
+        raise RunApprovalGroupError(
+            "own_change: you set up the add-on or gave a grant to the login that asked for "
+            "this list, so it counts as your own change. Ask another person to approve it "
+            "on the Approvals page of the web interface"
+        )
+    return behind_subs(people)
+
+
 async def _check_approver_group(
     session: AsyncSession,
     operator: Operator,
     entries: Sequence[dict[str, object]],
-    requester_sub: str,
 ) -> None:
     """Apply the approver-group rule of a single request to the whole list.
 
-    An entry that is a change of rights needs another admin
-    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
-    the same check as a single request.
+    An entry that is a change of rights is refused: a run approval list
+    never covers one (a person approves each call in the web console), so
+    such a list cannot be approved.
 
     A ``dangerous`` (or ``destructive``) operation of another principal may
     be approved only by the groups of
     ``docs/decisions/approval-groups-and-self-approval.md``: a
-    MEHO-SA-Operator or a tenant admin. The same check
+    tenant admin. The same check
     (:func:`~meho_backplane.operations.approval_queue.may_approve_high_risk`)
     decides here, on the risk level each entry's operation has now in this
     tenant. An entry whose operation MEHO cannot find has no known risk
@@ -275,12 +333,10 @@ async def _check_approver_group(
     routed: list[dict[str, object]] = []
     for index, raw in enumerate(entries):
         entry = RunApprovalEntry.model_validate(raw)
-        if is_rights_change_op(entry.op_id) and not operator.may_approve_rights_change(
-            requester_sub
-        ):
+        if is_rights_change_op(entry.op_id):
             raise RunApprovalGroupError(
                 f"rights_change_required: entries[{index}] ({entry.op_id!r}): "
-                f"{RIGHTS_CHANGE_REFUSAL}"
+                f"{RIGHTS_CHANGE_IN_LIST}"
             )
         product, version, impl_id = parse_connector_id(entry.connector_id)
         descriptor = await lookup_descriptor(
@@ -457,13 +513,13 @@ class RunApprovalService:
             ):
                 raise RunApprovalValidationError(
                     "an entry names a target kind (target_product), but this tenant does not "
-                    "allow target kinds in run approvals; name each target, or ask a tenant "
-                    "admin to turn on run_approval_target_kinds in the settings file"
+                    "allow target kinds in run approvals; name each target"
                 )
             await _refuse_live_or_record_expired(session, operator, payload.work_ref, now)
             row = RunApproval(
                 tenant_id=operator.tenant_id,
                 principal_sub=operator.sub,
+                principal_client_id=operator.client_id,
                 work_ref=payload.work_ref,
                 entries=[e.model_dump(mode="json", exclude_none=True) for e in payload.entries],
                 reason=payload.reason,
@@ -532,7 +588,8 @@ class RunApprovalService:
                 denial = role_floor_denial(str(entry["op_id"]), operator.tenant_role)
                 if denial is not None:
                     raise RunApprovalRoleFloorError(f"role_floor_required: {denial}")
-            await _check_approver_group(session, operator, row.entries, row.principal_sub)
+            await _check_people_behind(session, operator, row)
+            await _check_approver_group(session, operator, row.entries)
             row.approved_at = now
             row.approved_by_sub = operator.sub
             await session.commit()

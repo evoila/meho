@@ -1071,9 +1071,11 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.user.reset_password`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write import keycloak_user_reset_password
 
-        return await keycloak_user_reset_password(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_user_reset_password(self, operator, target, params)
 
     async def role_mapping_assign(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1095,11 +1097,13 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.group.update_attributes`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_groups import (
             keycloak_group_update_attributes,
         )
 
-        return await keycloak_group_update_attributes(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_group_update_attributes(self, operator, target, params)
 
     async def group_member_add(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1113,25 +1117,31 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.group.member.remove`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_groups import keycloak_group_member_remove
 
-        return await keycloak_group_member_remove(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_group_member_remove(self, operator, target, params)
 
     async def user_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.user.delete`` (#3944)."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_delete import keycloak_user_delete
 
-        return await keycloak_user_delete(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_user_delete(self, operator, target, params)
 
     async def group_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.group.delete`` (#3944)."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_delete import keycloak_group_delete
 
-        return await keycloak_group_delete(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_group_delete(self, operator, target, params)
 
     async def client_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1163,11 +1173,13 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.user.required_actions.update``."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_user_required_actions import (
             keycloak_user_required_actions_update,
         )
 
-        return await keycloak_user_required_actions_update(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_user_required_actions_update(self, operator, target, params)
 
     async def user_otp_status(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1217,11 +1229,13 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.user.disable``."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_user_enabled import (
             keycloak_user_disable,
         )
 
-        return await keycloak_user_disable(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_user_disable(self, operator, target, params)
 
     async def user_enable(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
@@ -1275,11 +1289,13 @@ class KeycloakConnector(HttpConnector):
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Bound-method shim for ``keycloak.user.credential.delete``."""
+        from meho_backplane.connectors.keycloak.ops_meho_access_lock import meho_access_scope
         from meho_backplane.connectors.keycloak.ops_write_user_credential import (
             keycloak_user_credential_delete,
         )
 
-        return await keycloak_user_credential_delete(self, operator, target, params)
+        async with meho_access_scope():
+            return await keycloak_user_credential_delete(self, operator, target, params)
 
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]

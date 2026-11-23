@@ -183,15 +183,16 @@ func renderDeletePreview(cmd *cobra.Command, opID string, p *dispatch.PreviewRes
 		}
 	} else {
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "%s %s — preview status=%s\n", ConnectorID, opID, p.Status)
+		fmt.Fprintf(w, "%s %s — preview status=%s\n", ConnectorID, opID, output.SafeText(p.Status))
 		if p.Status == "ok" {
 			fmt.Fprintln(w, "  Nothing was deleted, and nothing waits for approval yet.")
-			fmt.Fprintf(w, "  preview_hash: %s\n", p.PreviewHash)
+			hash := output.SafeText(p.PreviewHash)
+			fmt.Fprintf(w, "  preview_hash: %s\n", hash)
 			fmt.Fprintf(w, "  To ask for approval, run the same command again and add: --preview-hash %s\n",
-				p.PreviewHash)
+				hash)
 		} else {
 			if p.Error != nil && *p.Error != "" {
-				fmt.Fprintf(w, "meho: preview %s: %s\n", p.Status, *p.Error)
+				fmt.Fprintf(w, "meho: preview %s: %s\n", output.SafeText(p.Status), output.SafeLines(*p.Error))
 			}
 			if len(p.Extras) > 0 && string(p.Extras) != "null" {
 				fmt.Fprintln(w, "extras:")

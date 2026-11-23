@@ -51,6 +51,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_service_a_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -289,6 +290,7 @@ async def test_uncertain_resume_shows_uncertain_on_rest_list_and_mcp(
 
 
 async def _park_pending() -> uuid.UUID:
+    await give_service_a_known_person(_TENANT_ID, _OWNER_SUB)
     params = {"path": "ssh/known_hosts", "value": "<pin>"}
     async with get_sessionmaker()() as s:
         request = await create_pending_request(
@@ -299,6 +301,7 @@ async def _park_pending() -> uuid.UUID:
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
         return request.id

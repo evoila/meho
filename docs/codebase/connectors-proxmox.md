@@ -17,7 +17,7 @@ passthrough plus a small identity/task surface:
 | op_id | group | safety | approval | endpoint |
 |---|---|---|---|---|
 | `proxmox.about` | `proxmox-identity` | safe | no | `GET /version` + `GET /nodes` |
-| `proxmox.api.get` | `proxmox-api-read` | safe | no | `GET`/`HEAD <path>` (allowlisted) |
+| `proxmox.api.get` | `proxmox-api-read` | safe | no; **yes** for a read inside a guest or of a secret (below) | `GET`/`HEAD <path>` (allowlisted) |
 | `proxmox.task.status` | `proxmox-tasks` | safe | no | `GET /nodes/{node}/tasks/{upid}/status` |
 | `proxmox.api.write` | `proxmox-api-write` | dangerous | **yes** | `POST`/`PUT`/`DELETE <path>` (allowlisted) |
 
@@ -92,6 +92,48 @@ dispatch to the human approve-queue (`awaiting_approval`) and floors an agent
 dispatch to needs-approval (an agent refusal stays a refusal); the handler
 runs only on the `_approved=True` resume path. The connector adds no refusal
 of its own — the descriptor flag is the only knob the connector controls.
+
+The raw write can reach any path of the Proxmox API, also the ones that set
+a password or make an API token. So `op_classes.py` of the connector marks
+it with `declare_credential_capable`: each call waits for a person, and no
+standing grant, no agent grant and no run approval covers it. Grant create,
+agent grant create and run approval create refuse it, and an override does
+not turn its approval off
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The approval card says in one line why the call waits.
+
+### Reads that wait for a person
+
+Most `proxmox.api.get` calls run at once: nodes, VM lists, VM status and
+`config`, snapshots, storage, tasks. Some paths can return a secret, so
+such a call is a credential call: it waits for a person on every call, also
+for a person's own call, and no standing grant, no agent grant and no run
+approval covers it. `op_classes.py` of the connector tells them apart by
+the path (`path_reads_guest_or_secret`, registered with
+`declare_credential_check`):
+
+- a read inside a guest: a guest agent read under
+  `nodes/<node>/qemu/<vmid>/agent/`, except the reads in
+  `PLAIN_AGENT_READS` (`get-osinfo`, `get-fsinfo`, `get-host-name`,
+  `get-users`, `network-get-interfaces`, `info` and the other `get-*`
+  reads of the system state). So `file-read` (a file in the guest),
+  `exec-status` (the output of a command in the guest) and any read MEHO
+  does not know wait. The list itself (`.../agent`) runs at once;
+- the cloud-init data of a VM: `nodes/<node>/qemu/<vmid>/cloudinit` and
+  everything under it (`cloudinit/dump`);
+- a file from a backup: `nodes/<node>/storage/<storage>/file-restore/...`;
+- a console or a tunnel: any path with a `vncwebsocket`,
+  `mtunnelwebsocket`, `vncproxy`, `termproxy` or `spiceproxy` segment;
+- a path whose answer can hold a stored secret: `cluster/acme/plugins`
+  (the API data of a DNS plugin), `cluster/notifications/endpoints/webhook`,
+  `cluster/metrics/server`, `cluster/sdn/ipams`, `cluster/sdn/dns`,
+  `access/domains/<realm>` and `nodes/<node>/subscription`, each with
+  everything under it.
+
+MEHO compares the path in lower case. A path it cannot read (not text, an
+empty or a `.` segment) waits too. The `query` param does not change the
+answer: the path alone decides. A sensor never runs a call that waits, and
+the migration inventory reads only paths that run at once.
 
 ### Async writes → UPID → task poll
 

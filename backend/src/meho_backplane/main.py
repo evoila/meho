@@ -259,6 +259,10 @@ from meho_backplane.request_usage.retention import (
     stop_request_usage_retention_sweeper,
 )
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.embedding_state import (
+    check_embedding_model_at_start,
+    embedding_model_probe,
+)
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.session_store.config import load_config as load_session_store_config
@@ -564,6 +568,14 @@ async def _run_lifespan_startup() -> None:
     # after a restart. Runs after the catalog stamp so a shipped profile keeps
     # its key; like the catalog stamp it never enables an op.
     await restore_ingested_profiled_connectors()
+    # Stored operations whose paths look like Kubernetes paths without the
+    # usual start: one warning line per connector, nothing changes. Imported
+    # here, after the connectors are loaded.
+    from meho_backplane.connectors.kubernetes.short_path_warning import (
+        warn_stored_short_kubernetes_paths,
+    )
+
+    await warn_stored_short_kubernetes_paths()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)
@@ -607,6 +619,13 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Warn when the stored vectors come from another model than the set one.
+    # The readiness check is added only then, and only with the switch
+    # EMBEDDING_MODEL_HEALTH_CHECK on, so by default the health answer (and
+    # so meho_status) stays as it was.
+    model_differs = await check_embedding_model_at_start()
+    if model_differs and get_settings().embedding_model_health_check:
+        register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
@@ -1176,7 +1195,7 @@ app.include_router(api_v1_tenants_router)
 app.include_router(api_v1_instance_settings_router)
 # The policy file (policy: v1): /api/v1/policy/validate, /import
 # (?preview=true), /export, /history. tenant_admin or platform_admin; the
-# import is human-only and waits for a second admin. REST + CLI only.
+# import is human-only and waits for an admin's approval. REST + CLI only.
 app.include_router(api_v1_policy_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
@@ -1233,7 +1252,7 @@ app.include_router(api_v1_connectors_ingest_router)
 # approval flags, and the "operations running with reduced approval" list.
 app.include_router(api_v1_operation_overrides_router)
 # #6038 -- read and edit the classification of operations (category,
-# labels, "always wait"): dry run, then a request a second admin approves.
+# labels, "always wait"): dry run, then a request an admin approves.
 app.include_router(api_v1_policy_classification_router)
 app.include_router(api_v1_connector_classification_router)
 # #5029 -- each tenant turns built-in operations on or off for itself.

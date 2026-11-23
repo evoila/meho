@@ -162,6 +162,7 @@ from meho_backplane.operations.embed import (
     compute_embedding_text_hash,
     encode_endpoint_text,
 )
+from meho_backplane.operations.switch_registration import check_switch_names
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
@@ -1717,6 +1718,10 @@ async def _register_in_session(
     safety_level, requires_approval = raise_for_caller_address(
         parameter_schema, safety_level=safety_level, requires_approval=requires_approval
     )
+
+    # A parameter switch name that MEHO does not know stops the op from
+    # registering, so a typo never shows a parameter.
+    check_switch_names(parameter_schema, op_id=op_id)
 
     log = structlog.get_logger()
     now = datetime.now(UTC)

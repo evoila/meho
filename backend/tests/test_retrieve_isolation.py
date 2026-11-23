@@ -380,5 +380,5 @@ def test_eligibility_predicate_guards_expiry_before_any_cast() -> None:
     for statement in (_BM25_CANDIDATES_SQL, _COSINE_CANDIDATES_SQL):
         haystack = " ".join(str(statement.text).split())
         assert needle in haystack
-        # The predicate sits in WHERE, before ORDER BY / LIMIT.
-        assert haystack.index(needle) < haystack.index("ORDER BY")
+        # The predicate sits in WHERE, before the statement's last ORDER BY / LIMIT.
+        assert haystack.index(needle) < haystack.rindex("ORDER BY")

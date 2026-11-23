@@ -96,7 +96,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb.schemas import KB_SOURCE
-from meho_backplane.kb.service import add_shared_hits
+from meho_backplane.kb.service import add_shared_hits, kb_any_word
 from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki, wiki_exact_filters
 from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.retriever import MemoryEligibility, RetrievalHit, retrieve
@@ -309,6 +309,21 @@ async def retrieve_endpoint(
     # straight through with no per-principal scoping; the predicate is
     # AND-enforced in the substrate, so a client-supplied
     # `metadata_filters={"user_sub": "<other>"}` cannot widen it.
+    # A knowledge search joins the shared scope below, so it decides once,
+    # for the own tenant and the shared owners together (#6784).
+    any_word = (
+        await kb_any_word(
+            operator.tenant_id,
+            body.query,
+            kind=body.kind,
+            own_filters=dict(body.metadata_filters or {}),
+            shared_filters=body.metadata_filters,
+            include_shared=True,
+            principal_sub=operator.sub,
+        )
+        if body.source == KB_SOURCE
+        else None
+    )
     hits = await retrieve(
         tenant_id=operator.tenant_id,
         query=body.query,
@@ -318,6 +333,7 @@ async def retrieve_endpoint(
         metadata_filters=body.metadata_filters,
         principal_sub=operator.sub,
         memory_eligibility=_memory_eligibility(operator, body.source),
+        any_word=any_word,
     )
     wiki: KbWikiSearch | None = None
     if body.source == KB_SOURCE:
@@ -330,6 +346,7 @@ async def retrieve_endpoint(
             kind=body.kind,
             limit=body.limit,
             metadata_filters=body.metadata_filters,
+            any_word=any_word,
         )
         wiki = await search_wiki(
             operator,

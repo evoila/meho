@@ -137,7 +137,7 @@ func TestResultWithoutStoredRunGivesClearMessage(t *testing.T) {
 		"pending":   "still waits for approval",
 		"approved":  "has not stored a result",
 		"rejected":  "rejected, so the operation did not run",
-		"expired":   "ran out before the operation ran",
+		"expired":   "the request expired and the operation did not run",
 		"withdrawn": "withdrew the request",
 	} {
 		t.Run(status, func(t *testing.T) {

@@ -10,10 +10,21 @@ the end of the list were left out.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp import registry
+from meho_backplane.mcp.short_texts import with_short_text
+from meho_backplane.mcp.tools._kb_wiki_order_text import (
+    INTERLEAVED_ORDER,
+    PARTIAL_IN_TURNS,
+    PLAIN_ORDER,
+    PLAIN_PARTIAL,
+)
+from meho_backplane.mcp.tools._kb_word_hint import with_word_hint
 from meho_backplane.mcp.tools._short_tool_texts import SEARCH_KNOWLEDGE_SHORT
 from meho_backplane.mcp.tools.knowledge import _bounded_search_response
 from meho_backplane.settings import get_settings
@@ -39,10 +50,30 @@ def _switch(monkeypatch: pytest.MonkeyPatch, *, interleave: bool, short: bool) -
     get_settings.cache_clear()
 
 
-def _description(client: TestClient) -> str:
+def _entry(client: TestClient) -> dict[str, Any]:
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    tool = next(t for t in response.json()["result"]["tools"] if t["name"] == "search_knowledge")
-    return str(tool["description"])
+    tools = response.json()["result"]["tools"]
+    return dict(next(t for t in tools if t["name"] == "search_knowledge"))
+
+
+def _description(client: TestClient) -> str:
+    return str(_entry(client)["description"])
+
+
+def _main_entry(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The ``tools/list`` entry with the text chain of main (no order text)."""
+    found = registry.get_tool("search_knowledge")
+    assert found is not None
+    definition, handler = found
+    main_chain = with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT))
+    monkeypatch.setitem(
+        registry._TOOLS,
+        "search_knowledge",
+        (definition.model_copy(update={"for_settings": main_chain}), handler),
+    )
+    entry = _entry(client)
+    monkeypatch.setitem(registry._TOOLS, "search_knowledge", found)
+    return entry
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -58,6 +89,48 @@ def test_switch_off_the_description_says_best_first_as_before(
     assert "in turns" not in text
     if short:
         assert text.endswith(SEARCH_KNOWLEDGE_SHORT.description)
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("short", [False, True])
+def test_switch_off_the_whole_entry_is_the_same_as_on_main(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    short: bool,
+) -> None:
+    _switch(monkeypatch, interleave=False, short=short)
+    client = client_with_operator[0]
+    assert _entry(client) == _main_entry(client, monkeypatch)
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("short", [False, True])
+def test_switch_on_only_the_order_and_cut_words_change(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    short: bool,
+) -> None:
+    _switch(monkeypatch, interleave=True, short=short)
+    client = client_with_operator[0]
+    entry = _entry(client)
+    main = _main_entry(client, monkeypatch)
+    expected = str(main["description"]).replace(PLAIN_ORDER, INTERLEAVED_ORDER)
+    expected = expected.replace(PLAIN_PARTIAL, PARTIAL_IN_TURNS)
+    assert entry == {**main, "description": expected}
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_switch_on_the_full_text_agrees_with_the_cut_answer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch(monkeypatch, interleave=True, short=False)
+    text = _description(client_with_operator[0])
+    assert PARTIAL_IN_TURNS in text
+    assert "low hits" not in text
+    hits = [{"slug": f"s{n}", "pad": "x" * 100} for n in range(4)]
+    remediation = _bounded_search_response(hits, 200, in_turns=True)["remediation"]
+    assert "hits at the end of the list were left out" in remediation
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

@@ -242,6 +242,8 @@ accessor of the `jwt` mount), not by the entity `name`. So link the login
 to this entity with an alias, or, when the operator has already logged in,
 set the metadata on the entity of that login. The commands for both cases
 are in [`vault-provisioning.md`](./vault-provisioning.md) §3.
+An entity holds one `tenant_id`, so a person who works in more than one
+tenant needs a separate login identity for each tenant (same §3).
 
 > **The metadata value is the canonical dashed-lowercase UUID string**
 > (`str(UUID)`), matching the tenant UUID's spelling in audit rows, JWT

@@ -144,17 +144,29 @@ give each tenant's callers the group that matches their `tenant_role`.
 
 The per-tenant policy grants only the tenant folders. A target whose
 `secret_ref` points somewhere else (for example under `secret/meho/`)
-needs its secret moved first: copy the secret into
-`secret/tenants/<tenant_id>/`, update the target's `secret_ref`, and check
-that MEHO reads the moved secret. Use a check that reads the secret: run a
-read-only operation on the target, or run steps 2 and 3 of
-[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md) §5
-with your own login. `meho targets probe` alone does not prove it, because
-some connectors probe without a login. Set up the login of every person
-and every agent that uses MEHO (the entity metadata and the group below)
-before you remove the old grants. Otherwise each read of that person or
-agent fails, while the health check still passes. Then replace the old
-policy. The steps are in
+needs its secret moved. Keep the old policy and its grants until the move
+is done, and do the steps in this order:
+
+1. Set up the login of every person and every agent that uses MEHO (the
+   entity metadata and the group below).
+2. Bind the per-tenant policies through the groups next to the old
+   policy, so each login reads both the old paths and its tenant folder.
+   If Sensors check targets, add the new paths to the check runner's
+   policy too (surface 7), and keep its old paths.
+3. Copy each secret into `secret/tenants/<tenant_id>/` and update the
+   target's `secret_ref`.
+4. Check that MEHO reads the moved secret. Use a check that reads the
+   secret: run a read-only operation on the target, or run steps 2 and 3
+   of [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+   §5 with your own login. `meho targets probe` alone does not prove it,
+   because some connectors probe without a login. For a target that a
+   Sensor checks, also check that its next scheduled run shows a real
+   state, not `unknown`.
+5. Only then remove the old grants. Without the setup of step 1, each
+   read of that person or agent fails after the old grants are gone,
+   while the health check still passes.
+
+The steps are in
 [`vault-per-tenant-migration.md`](./vault-per-tenant-migration.md).
 
 Set the tenant metadata and the group on the entity that the JWT login
@@ -183,6 +195,16 @@ vault write identity/entity/id/"$ENTITY_ID" metadata=tenant_id="<tenant-uuid>"
 # Then put this entity id into the tenant's role group
 # (connector-vault-tenant-policy.md §4, member_entity_ids).
 ```
+
+**One tenant for each login identity.** The entity holds one `tenant_id`
+value. A person who works in more than one tenant (`meho tenants use`)
+keeps the same `sub`, so the same entity. Setting `tenant_id` again
+replaces the first value, and then that person cannot read the first
+tenant's secrets. So this recipe needs a separate login identity (its own
+`sub`) for each tenant a person works in. If one login is used in more
+than one tenant, check the read in each tenant (steps 2 and 3 of
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§5) before you remove the old grants.
 
 Check the result with the caller's own login, not with a root token. Log
 in as [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)

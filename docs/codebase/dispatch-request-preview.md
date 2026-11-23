@@ -357,8 +357,11 @@ named-pattern catalogue and policy resolution.
 `credential_write` shows each secret input as the fixed mark
 `***REDACTED***`, in `redacted_body` and in `query`. It uses the same name
 rule and the same mark as the echo of a waiting call
-(`_scrub_secret_param_keys`, then the engine above). The method, the path
-and the other inputs stay as they are. `preview_hash` also covers a keyed
+(`_scrub_secret_param_keys`, then the engine above). Each value under a
+name that the shared secret-name rule marks is the fixed mark. This also
+covers a text setting whose name holds a secret word, and the whole value
+of an object or a list under such a name. The method, the path and every
+other input stay as they are. `preview_hash` also covers a keyed
 digest (made with the server key) of the literal query and body. The digest
 is not in the answer. A changed hidden value gives a new hash, and the hash
 check refuses the old one. The dispatcher and the approval resume check

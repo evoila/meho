@@ -13,7 +13,8 @@ not a credential write keeps its literal body and query.
 The tests search the whole answer for the value, on the shared funnel
 (:func:`~meho_backplane.operations.meta_tools.preview_operation`), on the MCP
 tool handler and on the REST route. A preview writes no audit row and logs
-no input value; the tests check both.
+no input value; the tests check both. A hosted agent run saves the answer
+in its run record; a test searches the saved event for the value.
 
 Every value below is made up.
 """
@@ -52,7 +53,9 @@ from meho_backplane.operations._request_preview import (
 from meho_backplane.operations.dispatcher import _destructive_binding_refusal
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.redaction import clear_overrides
+from meho_backplane.session_store.models import AgentSessionEvent
 from meho_backplane.settings import get_settings
+from tests._hosted_run_helpers import record_hosted_run
 from tests.test_operations_request_preview import (
     _TENANT,
     _FakeTarget,
@@ -261,6 +264,40 @@ async def test_rest_preview_of_a_credential_write_shows_the_mark(
     assert _SECRET not in response.text
     _assert_masked(response.json())
     assert _SECRET not in await _audit_rows_text()
+
+
+@pytest.mark.asyncio
+async def test_hosted_run_record_of_a_credential_write_preview_holds_the_mark(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A hosted agent run saves the preview answer as a tool result event with the mark."""
+    await _seed_write_op(session, stub_embedding_service)
+    await _seed_target()
+    operator = _make_operator()
+    envelope = await _preview_operation_handler(operator, _write_arguments())
+
+    run_id = await record_hosted_run(
+        tenant_id=_TENANT,
+        sub=operator.sub,
+        events=[("tool_result", {"tool_name": "preview_operation", "content": envelope})],
+    )
+
+    async with get_sessionmaker()() as s:
+        saved = (
+            (
+                await s.execute(
+                    select(AgentSessionEvent).where(AgentSessionEvent.record_id == run_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [event.kind for event in saved] == ["tool_result"]
+    content = saved[0].data["content"]
+    assert content["query"]["api_key"] == _MARK
+    assert content["redacted_body"]["password"] == _MARK
+    assert content["redacted_body"]["users"][0]["client_secret"] == _MARK
+    assert _SECRET not in json.dumps([event.data for event in saved], default=str)
 
 
 @pytest.mark.asyncio

@@ -1282,6 +1282,7 @@ async def _find_same_call_pending_request(
     *,
     tenant_id: uuid.UUID,
     principal_sub: str,
+    principal_kind: str,
     op_id: str,
     connector_id: str,
     target_id: uuid.UUID | None,
@@ -1299,13 +1300,13 @@ async def _find_same_call_pending_request(
     expired here. A request of an agent run or of a step of a multi-step
     operation (``resume_parent`` set, or ``composite_step`` not false) never
     counts: approving it runs that run or that step, not this direct call. A
-    request made before migration 0182 has ``composite_step`` NULL, so it
+    request made before migration 0183 has ``composite_step`` NULL, so it
     never counts either. The match
     is the same as for a retry key: same operation, connector, target, params,
     ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
-    choice and the same people behind the login (*people_behind*, compared
-    by casefolded ``sub``): the self-approval check reads only the list
-    stored on the request.
+    choice, the same kind of login (*principal_kind*) and the same people
+    behind the login (*people_behind*, compared by casefolded ``sub``): the
+    approval checks read only the kind and the list stored on the request.
     """
     own_people = behind_subs(people_behind)
     stmt = (
@@ -1313,6 +1314,7 @@ async def _find_same_call_pending_request(
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.principal_kind == principal_kind,
             ApprovalRequest.op_id == op_id,
             ApprovalRequest.connector_id == connector_id,
             ApprovalRequest.target_id == target_id
@@ -1329,7 +1331,7 @@ async def _find_same_call_pending_request(
         # instead of SQL NULL for a direct call.
         if (
             existing.resume_parent is None
-            # NULL is a request made before migration 0182: it may be a step.
+            # NULL is a request made before migration 0183: it may be a step.
             and existing.composite_step is False
             and params_hash_matches(params, existing.params_hash)
             and existing.preview_hash == preview_hash
@@ -1977,6 +1979,7 @@ async def create_pending_request(
             session,
             tenant_id=operator.tenant_id,
             principal_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
             op_id=op_id,
             connector_id=connector_id,
             target_id=target_id,

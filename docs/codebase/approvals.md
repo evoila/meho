@@ -2788,6 +2788,10 @@ of this is the same:
   request of another person;
 - `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
   `work_ref` and the `reveal_secret` choice.
+- the kind of login (`principal_kind`: `user`, `agent`, `service` or `runner`).
+  The approval checks read the kind stored on the request. So a call of
+  the same login with another kind gets its own request with its own
+  kind.
 - the people behind the login (`people_behind`, compared by the set of
   `sub` values, casefolded). The self-approval check reads only the list
   stored on the request, and the people behind an agent, service or
@@ -2811,7 +2815,7 @@ second `approval.request` row:
 A retry with the same key writes no such row: it gets the first call's
 `approval.request` row as its `audit_id`, as before. A key that is different from the key of the waiting request does
 not matter. MEHO keeps that other key in the table `approval_request_key`
-(one row per key, linked to the request; migration `0182`). The key lookup
+(one row per key, linked to the request; migration `0183`). The key lookup
 (`_find_idempotent_request`) reads it too, so a later retry with that key
 gets the same request back, also after the request was approved. The table
 keeps no tenant or login: they come from the request row.
@@ -2829,7 +2833,7 @@ keeps no tenant or login: they come from the request row.
   (`run_id` set) or of a step of a multi-step operation (`resume_parent`
   set, or `composite_step` not false) is never returned to a direct call:
   approving it would run that run or that step, not the direct call. Every
-  new request stores `composite_step` (migration `0182`): true for a step
+  new request stores `composite_step` (migration `0183`): true for a step
   sent through `dispatch_child`, false for any other call. A request made
   before the migration keeps NULL, because it may be a step that was
   already waiting. The lookup returns only a request marked false, so such
@@ -2841,8 +2845,8 @@ keeps no tenant or login: they come from the request row.
   `approval_request_reused: true`. After commit the dispatcher still
   publishes `approval.expired` for A, and no second `approval.pending` for
   B.
-- Not covered: two calls that arrive at the same moment can still make two
-  requests. There is no database lock for this case.
+- Two calls that arrive at the same moment each get their own request;
+  there is no database lock for this case.
 
 **Races.** A partial unique index,
 `approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,

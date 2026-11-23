@@ -59,6 +59,7 @@ from meho_backplane.operations.approval_queue import (
     IdempotencyKeyConflictError,
     ResumeRequester,
     SelfApprovalForbiddenError,
+    UnknownRequesterApprovalError,
     approval_result_state,
     approve_request,
     create_pending_request,
@@ -1050,6 +1051,65 @@ async def test_a_call_with_the_same_people_behind_the_login_gets_the_waiting_req
 ) -> None:
     first = await _park_machine_call(monkeypatch, _person_behind("Person-A"))
     second = await _park_machine_call(monkeypatch, _person_behind("person-a"))
+
+    assert second.id == first.id
+    assert getattr(second, "_reused", False) is True
+    assert await _approval_row_count() == 1
+
+
+async def _park_as_kind(monkeypatch: pytest.MonkeyPatch, kind: PrincipalKind) -> ApprovalRequest:
+    """Park the same call of one login id, signed in as *kind*.
+
+    A person has no people behind (``None``). An agent login has nobody known
+    behind it (``[]``).
+    """
+
+    async def _find(*_args: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
+        return None if kwargs["kind"] == PrincipalKind.USER.value else []
+
+    monkeypatch.setattr(approval_queue_module, "find_people_behind", _find)
+    operator = _operator(sub="shared-login", principal_kind=kind)
+    call_params = {"name": "web-01"}
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=operator,
+            connector_id="gh-rest-3",
+            op_id="POST:/vms",
+            target=None,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            proposed_effect={"safety_level": "caution"},
+        )
+        await s.commit()
+    return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_the_same_login_as_another_kind_gets_its_own_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    as_person = await _park_as_kind(monkeypatch, PrincipalKind.USER)
+    as_agent = await _park_as_kind(monkeypatch, PrincipalKind.AGENT)
+
+    assert as_agent.id != as_person.id
+    assert getattr(as_agent, "_reused", False) is False
+    assert as_agent.principal_kind == PrincipalKind.AGENT.value
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        with pytest.raises(UnknownRequesterApprovalError):
+            await approve_request(s, as_agent.id, operator=_operator(sub="other-person"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+@pytest.mark.parametrize("kind", [PrincipalKind.USER, PrincipalKind.AGENT])
+async def test_the_same_login_as_the_same_kind_gets_the_waiting_request(
+    monkeypatch: pytest.MonkeyPatch, kind: PrincipalKind
+) -> None:
+    first = await _park_as_kind(monkeypatch, kind)
+    second = await _park_as_kind(monkeypatch, kind)
 
     assert second.id == first.id
     assert getattr(second, "_reused", False) is True

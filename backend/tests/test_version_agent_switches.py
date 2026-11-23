@@ -42,6 +42,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "audit_session_links",
         "checks_agent_events",
         "connector_list_product_aliases",
+        "embedding_model_health_check",
         "group_listing_operations",
         "jsonflux_answer_ready",
         "k8s_node_list_resources",

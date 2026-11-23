@@ -563,12 +563,13 @@ class Settings(BaseModel):
         384-dim, Apache-2.0, English-optimised, matches v0.1-spec
         L391's chosen model. Operators on non-English tenancies can
         swap via ``RETRIEVAL_EMBEDDING_MODEL`` to another fastembed-
-        supported identifier; **changing the output dimensionality
-        requires a re-embed-everything migration** because the
-        ``documents.embedding`` column is hard-pinned to
-        ``vector(384)`` by migration ``0003``. Swap to a same-
-        dimension model (e.g. a multilingual 384-dim variant) is
-        zero-migration.
+        supported identifier. The ``documents.embedding`` column is
+        hard-pinned to ``vector(384)`` by migration ``0003``, so only a
+        model with 384 dimensions fits. **A model change also needs
+        ``python -m meho_backplane.retrieval.reembed``**: stored vectors
+        stay from the old model until it has run, and until then
+        searches compare new question vectors with old vectors. MEHO
+        logs ``embedding_model_mismatch`` at start while they differ.
     retrieval_model_cache_dir:
         Filesystem path fastembed reads ONNX weights from. Default
         :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`
@@ -1879,6 +1880,11 @@ class Settings(BaseModel):
     # with a few key words, and its answer has `word_match` (some / none).
     # Set via ``KB_SEARCH_WORD_HINT``.
     kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on and the stored vectors come from another model
+    # than ``RETRIEVAL_EMBEDDING_MODEL``, the start adds the readiness check
+    # ``embedding_model`` (seen in ``/ready`` and ``meho_status``). The start
+    # warning is logged either way. Set via ``EMBEDDING_MODEL_HEALTH_CHECK``.
+    embedding_model_health_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -3379,6 +3385,7 @@ def get_settings() -> Settings:
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
         kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
+        embedding_model_health_check=parse_bool_env(os.environ.get("EMBEDDING_MODEL_HEALTH_CHECK")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

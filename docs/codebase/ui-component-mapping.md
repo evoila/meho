@@ -75,13 +75,18 @@ markup), not a workaround here.
 | `badge badge-error badge-sm` | `badge(…, variant="error")` | 15 |
 | `badge badge-info badge-sm` | `badge(…, variant="info")` | 10 |
 
-## Three cases the component set does not cover
+## Three cases the component set did not cover
 
-These are the reason this page exists. Each needs a decision **before** the
-batch that hits it, and none of them can be resolved by the person doing the
+These are the reason this page exists. Each needed a decision **before** the
+batch that hit it, because none could be resolved by the person doing the
 conversion without changing how a page looks.
 
-### 1. The bare `btn` and bare `badge` — 67 elements
+**Two are settled.** The UI lead chose to widen the enum in both, over a
+silent restyle; `meho-ui` 0.7.0 ships them (meho-ui#17, 2026-11-23). They are
+kept here with their reasoning because the reasoning is the point, not the
+open question.
+
+### 1. The bare `btn` and bare `badge` — 67 elements — **RESOLVED: `default`**
 
 30 buttons carry a size and no variant (`btn btn-sm`, `btn btn-xs`). 37
 badges do the same.
@@ -105,9 +110,16 @@ Same for `badge()`, which defaults to `neutral`.
 - **Leave them as raw markup** until decided. Keeps the batch honest, but
   leaves raw `btn` in the tree, which is what P2.6 exists to remove.
 
-**Not decided here.** This needs the UI lead, like P2.1's variant question.
+**Resolved** by the first option: `meho-ui` 0.7.0 adds a `default` variant to
+both macros, compiling to no modifier at all. It widens the enum P2.1
+narrowed, which was the trade accepted rather than silently restyling 67
+elements.
 
-### 2. `badge-ghost badge-outline` together — 13 elements
+Of the 67, far fewer were actually reachable: most bare `btn` elements also
+carry `hx-*`, and several bare badges take a dynamic class. The decision
+unblocked them in principle; the other blockers on this page still apply.
+
+### 2. `badge-ghost badge-outline` together — 13 elements — **RESOLVED: `quiet-outline`**
 
 In `retrieval/_usage_results.html`, `runbooks/_list.html`,
 `runbooks/detail.html` and `retrieval/_diagnostics_results.html`.
@@ -125,9 +137,9 @@ measure.** That analysis counted style-plus-colour combinations on *buttons*
 and found twelve, all identical. It did not check style-plus-style on
 *badges*. Thirteen exist.
 
-**Options:** a named variant for the pair (the `danger-quiet` precedent), or
-convert these four files to whichever single variant is closest and accept
-the change.
+**Resolved** by a named variant for the pair, on the `danger-quiet`
+precedent: `meho-ui` 0.7.0 adds `quiet-outline`, emitting
+`badge-ghost badge-outline`.
 
 ### 3. The cut variants — 4 elements
 
@@ -211,6 +223,31 @@ whole-template difference which is an artefact of the harness, not of the
 conversion. Four files tripped it; all four were identical once rendered with
 a realistic row. Re-render before believing a difference.
 
+## A fourth blocker the first batches did not see
+
+**26 badges and 9 buttons choose their DaisyUI modifier at render time.**
+
+```jinja
+<span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
+```
+
+`row.status_badge` is a view-computed string such as `badge-success`. The
+macro takes a variant **name**, not a class, so there is nothing to pass it.
+Converting one means changing what the view hands the template — mapping
+server-side values onto variant names — which is a code change in the route,
+not a template conversion, and belongs in its own ticket.
+
+They are easy to convert *wrongly*. A converter that reads the class
+attribute as a token list sees the literal text and emits
+
+```jinja
+{{ badge(row.status, variant="default", class="row.status_badge {{ }}") }}
+```
+
+which compiles, renders, and is wrong. Five files were written that way
+before the node-wise check caught it. Any converter has to refuse a `class`
+containing `{{` or `{%` outright.
+
 ## Not every family converts mechanically
 
 P2.6 was scoped as "convert the templates". Measured per family, only one of
@@ -219,8 +256,8 @@ the remaining batches.
 
 | Family | In tree | Mechanically convertible | What stops the rest |
 |---|---|---|---|
-| `badge` | 340 | **128 done**, 94 more | 69 need one of the three decisions above |
-| `btn` | 406 | **32 done** | 374 carry attributes the macro does not name |
+| `badge` | 340 | **166 done** | 32 nested labels, 26 dynamic classes, 5 unmapped |
+| `btn` | 406 | **39 done** | 337 unnamed attributes, 9 dynamic classes, 7 nested labels |
 | `alert` | 175 | ~7 | 133 of 140 wrap nested markup |
 | `modal` | 73 | — | same shape as `alert` |
 

@@ -15,6 +15,8 @@
   Context variables:
     similar -- list[KbSimilarEntry]: the entries, best first
 -#}
+
+{% from "_components.html" import badge %}
 <ul class="list-disc pl-5 space-y-2" aria-label="Similar entries">
   {% for item in similar %}
   <li>
@@ -30,7 +32,7 @@
     <blockquote class="text-xs opacity-70 border-l-2 border-base-300 pl-2 mt-1 whitespace-pre-wrap">{{ item.snippet }}</blockquote>
     {% endif %}
     {% if item.may_change %}
-    <span class="badge badge-ghost badge-sm">You can update this entry</span>
+    {{ badge("You can update this entry", variant="quiet") }}
     {% else %}
     <span class="badge badge-warning badge-outline badge-sm">Shared by another tenant: you cannot change it. Create anyway, or ask its owner.</span>
     {% endif %}

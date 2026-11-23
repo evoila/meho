@@ -17,6 +17,8 @@
   ended). Pure server-side; no JS, no client date library. All timestamps
   are tz-aware UTC (coerced in the view projection).
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _ago(ts) -%}
   {#- Past-relative renderer ("X ago"). Input is a tz-aware UTC datetime
       (coerced in the projection); the tooltip carries the exact ISO
@@ -68,7 +70,7 @@
             <span class="opacity-40">—</span>
           {% endif %}
         </td>
-        <td><span class="badge badge-ghost badge-sm">{{ row.trigger }}</span></td>
+        <td>{{ badge(row.trigger, variant="quiet") }}</td>
         <td class="text-xs">
           {% if row.model %}
             <span class="font-mono">{{ row.model }}</span>
@@ -80,7 +82,7 @@
         <td class="text-xs">{{ row.turns }}</td>
         <td>
           {% if row.work_ref %}
-            <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
+            {{ badge(row.work_ref, variant="outline", size="xs", class="font-mono") }}
           {% else %}
             <span class="opacity-40">—</span>
           {% endif %}

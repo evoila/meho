@@ -16,6 +16,8 @@
   ``_rel`` macro; no JS, no client date library. Liveness is server-derived
   (revoked / dead-man ``unknown`` / live) -- never recomputed here.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
   {%- if ago < 60 -%}just now
@@ -68,7 +70,7 @@
         </td>
         <td class="text-xs">
           {% if row.revoked %}
-            <span class="badge badge-neutral badge-sm">revoked</span>
+            {{ badge("revoked", variant="neutral") }}
           {% else %}
             <span class="opacity-60">no</span>
           {% endif %}

@@ -52,6 +52,8 @@
                           "no grounded answer" string renders the same way with
                           an empty citation list. Set only by the Ask mode.
 -#}
+
+{% from "_components.html" import badge %}
 {#- Shared cited-chunk card list, reused by the ``cited`` and ``ask_fallback``
     branches so the #1919 citation render lives in one place. -#}
 {% macro chunk_cards(cited) %}
@@ -117,14 +119,10 @@
                  visible as metadata. When no title was supplied the id remains
                  the heading (``link.label``), so it is not repeated as a badge. #}
               {% if chunk_title and chunk.document_id %}
-                <span class="badge badge-ghost badge-outline font-mono" title="Document id">
-                  {{ chunk.document_id }}
-                </span>
+                {{ badge(chunk.document_id, variant="quiet-outline", size="md", class="font-mono", title="Document id") }}
               {% endif %}
               {% if chunk.collection %}
-                <span class="badge badge-ghost badge-outline" title="Source collection">
-                  {{ chunk.collection }}
-                </span>
+                {{ badge(chunk.collection, variant="quiet-outline", size="md", title="Source collection") }}
               {% endif %}
               {% if chunk.score is not none %}
                 <span

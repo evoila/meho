@@ -39,6 +39,7 @@
     connector_id  -- str: the previewed connector id (for the heading)
     op_id         -- str: the previewed op id (for the heading)
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 {% if error_message %}
@@ -53,7 +54,7 @@
 {% elif envelope.status == "ok" %}
   <div class="space-y-3" data-preview-status="ok">
     <div class="flex items-center gap-2">
-      <span class="badge badge-success badge-sm">would-be request</span>
+      {{ badge("would-be request", variant="success") }}
       <span class="text-xs opacity-60">not sent &middot; not run</span>
     </div>
 

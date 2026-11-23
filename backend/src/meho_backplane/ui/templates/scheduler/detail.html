@@ -20,6 +20,8 @@
   "UTC" suffix is accurate on both the PostgreSQL (tz-aware) and SQLite
   (naive round-trip) paths.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Scheduled trigger &middot; MEHO Operator Console{% endblock %}
@@ -35,7 +37,7 @@
     <div class="space-y-1">
       <a href="/ui/scheduler" class="link link-hover text-sm opacity-70">&larr; Scheduler</a>
       <h1 class="text-xl font-semibold flex items-center gap-3">
-        <span class="badge badge-ghost">{{ trigger.kind }}</span>
+        {{ badge(trigger.kind, variant="quiet", size="md") }}
         <span class="badge {{ trigger.status_badge }}">{{ trigger.status }}</span>
         <span class="font-mono text-sm opacity-70">{{ trigger.id }}</span>
       </h1>
@@ -149,7 +151,7 @@
           <dt class="opacity-60">Change ticket</dt>
           <dd>
             {% if trigger.work_ref %}
-              <span class="badge badge-outline badge-sm font-mono">{{ trigger.work_ref }}</span>
+              {{ badge(trigger.work_ref, variant="outline", class="font-mono") }}
             {% else %}
               <span class="opacity-40">—</span>
             {% endif %}

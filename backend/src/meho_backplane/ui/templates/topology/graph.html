@@ -64,7 +64,7 @@
   unchanged.
 -#}
 
-{% from "_components.html" import button %}
+{% from "_components.html" import badge, button %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
@@ -127,7 +127,7 @@
           {% if overlay_mode == "dependents" %}Dependents{% else %}Dependencies{% endif %}
           of
           <span class="font-mono">{{ overlay_root_name }}</span>{% if overlay_root_kind %}
-            <span class="badge badge-ghost badge-sm">{{ overlay_root_kind }}</span>{% endif %},
+            {{ badge(overlay_root_kind, variant="quiet") }}{% endif %},
           depth {{ overlay_depth }}.
         </span>
       {% elif overlay_mode == "path" %}

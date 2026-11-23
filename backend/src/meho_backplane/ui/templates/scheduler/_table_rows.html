@@ -17,6 +17,8 @@
   library. A null ``next_fire_at`` (terminal trigger) / ``last_fired_at``
   (never fired) renders an em-dash.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {#- Relative-time renderer for both past ("X ago") and future ("in X")
       instants. The scheduler's ``next_fire_at`` is a future instant; its
@@ -47,7 +49,7 @@
     {% for row in rows %}
       <tr data-trigger-id="{{ row.id }}">
         <td>
-          <span class="badge badge-ghost badge-sm">{{ row.kind }}</span>
+          {{ badge(row.kind, variant="quiet") }}
         </td>
         <td>
           <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
@@ -84,7 +86,7 @@
         <td class="text-xs">{{ row.agent_name }}</td>
         <td>
           {% if row.work_ref %}
-            <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
+            {{ badge(row.work_ref, variant="outline", size="xs", class="font-mono") }}
           {% else %}
             <span class="opacity-40">—</span>
           {% endif %}

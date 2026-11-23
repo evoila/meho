@@ -23,6 +23,8 @@
   The ``Target`` column shows the target's detected product and version. A
   warning under the operation says when the connector does not fit them.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
   {%- if ago < 60 -%}just now
@@ -39,7 +41,7 @@
         <td class="font-medium">
           {{ row.name }}
           {% if row.status != "active" %}
-            <span class="badge badge-outline badge-sm ml-1">{{ row.status }}</span>
+            {{ badge(row.status, variant="outline", class="ml-1") }}
           {% endif %}
         </td>
         <td class="text-xs">

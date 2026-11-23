@@ -2750,6 +2750,11 @@ for approval.
   longer holds its key, so the same key parks a new request. An `approved`
   request keeps its key even after it ran: a retry then returns the request
   that already ran, so the op is never run twice.
+  The answer keeps its `status` and `extras`, but its text is
+  "awaiting_approval: the approval request `<id>` is already approved". This
+  text is the same for every approved request, also for one that shows a
+  secret value. A retry of a waiting request keeps the text
+  "requires approval before execution".
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be

@@ -2720,6 +2720,16 @@ class Settings(BaseModel):
     #: evaluation and the model tests show it helps. Set via
     #: ``SEARCH_PLAIN_SENTENCES``.
     search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Word half of the knowledge search (#6784). ``False`` (default): a
+    #: passage needs every word of the question, as before. ``True``: only
+    #: when that finds no passage, a second word search keeps passages that
+    #: hold one of the first 32 different words of the question
+    #: (``ANY_WORD_MAX_WORDS`` in ``retrieval/retriever.py``). The choice
+    #: is made once for the whole knowledge search:
+    #: if a passage of any searched tenant (own and shared) holds every word,
+    #: no tenant uses the any-word search. Only ``source="kb"``; memory and
+    #: operations search do not change. Set via ``KB_SEARCH_PLAIN_SENTENCES``.
+    kb_search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Stricter ``matched`` outcome of ``search_operations`` (#6014), behind
     #: a switch that is off by default. When on, a search answers
     #: ``ambiguous`` if another hit is closer in meaning than the top hit.
@@ -3905,6 +3915,9 @@ def get_settings() -> Settings:
         ),
         search_plain_sentences=parse_bool_env(
             os.environ.get("SEARCH_PLAIN_SENTENCES"),
+        ),
+        kb_search_plain_sentences=parse_bool_env(
+            os.environ.get("KB_SEARCH_PLAIN_SENTENCES"),
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),

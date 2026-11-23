@@ -194,6 +194,45 @@ async def test_long_sentence_is_matched_only_with_the_switch(
     assert on["hits"] == off["hits"]
 
 
+@pytest.mark.parametrize("operations_switch", [False, True])
+@pytest.mark.parametrize(
+    ("query", "group"),
+    [
+        pytest.param(_SENTENCE, None, id="long-question"),
+        pytest.param("tag object", None, id="short-question"),
+        pytest.param("zebra inventory quartz", None, id="no-word-found"),
+        pytest.param(_SENTENCE, "tags", id="group"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_knowledge_switch_never_changes_operations_search(
+    pg_engine: None,  # noqa: F811 -- fixture
+    fixed_vectors: None,
+    monkeypatch: pytest.MonkeyPatch,
+    operations_switch: bool,
+    query: str,
+    group: str | None,
+) -> None:
+    """KB_SEARCH_PLAIN_SENTENCES (#6784) is for the knowledge search only.
+
+    The same ``search_operations`` call gives the same answer with it off
+    and on: outcome, advisory, ordered hits and every score.
+    """
+    await _seed()
+    _set_switch(monkeypatch, "SEARCH_PLAIN_SENTENCES", on=operations_switch)
+    _set_switch(monkeypatch, "KB_SEARCH_PLAIN_SENTENCES", on=False)
+    assert get_settings().kb_search_plain_sentences is False
+    off = await _search(query, group)
+    _set_switch(monkeypatch, "KB_SEARCH_PLAIN_SENTENCES", on=True)
+    assert get_settings().kb_search_plain_sentences is True
+    on = await _search(query, group)
+    assert off["hits"]
+    # The time the search took is the only value that may differ.
+    off.pop("query_duration_ms", None)
+    on.pop("query_duration_ms", None)
+    assert on == off
+
+
 @pytest.mark.asyncio
 async def test_top_hit_without_a_query_word_stays_ambiguous(
     pg_engine: None,  # noqa: F811 -- fixture

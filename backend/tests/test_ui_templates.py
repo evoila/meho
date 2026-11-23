@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 from jinja2 import Environment, UndefinedError
@@ -890,24 +892,62 @@ def test_alert_ghost_outline_badges_have_readable_contrast() -> None:
     assert "background-color: var(--color-base-200)" in body
 
 
+def _usage_report_stub() -> SimpleNamespace:
+    """The shape ``retrieval/_usage_results.html`` reads off ``report``.
+
+    ``buckets`` is non-empty so the per-day table renders, which is where the
+    ghost+outline badge lives.
+    """
+    return SimpleNamespace(
+        total_searches=7,
+        rest_excluded=True,
+        counted_surfaces=("mcp:search_knowledge",),
+        since=datetime(2026, 11, 1, tzinfo=UTC),
+        until=datetime(2026, 11, 23, tzinfo=UTC),
+        buckets=(
+            SimpleNamespace(
+                date=date(2026, 11, 23),
+                surface="mcp:ask",
+                search_count=2,
+                distinct_operators=1,
+                action_conversion_pct=50.0,
+            ),
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "partial",
     ["_usage_results.html"],
 )
-def test_retrieval_honesty_gap_badges_sit_inside_alert(partial: str) -> None:
-    """The honesty-gap ``mcp:*`` badges sit inside ``.alert`` so #2460's rule targets them.
+def test_retrieval_usage_partial_still_emits_the_ghost_outline_combo(partial: str) -> None:
+    """The usage partial still renders ``badge-ghost`` and ``badge-outline`` together.
 
-    The retrieval usage partial renders the counted-surface labels as
-    ``badge badge-ghost badge-outline`` spans inside the ``.alert.alert-info``
-    honesty-gap banner. The contrast fix lives in styles.css and is scoped to
-    ``.alert``; guard that the partial keeps the combo inside the alert so
-    the rule keeps matching (a move onto a plain card would silently escape it).
+    That pair is what the unlayered ``.alert .badge-ghost.badge-outline`` rule
+    checked above targets, so the markup has to keep producing it. It comes
+    from the shared ``badge(variant="quiet-outline")`` macro now, so this is
+    checked on the *rendered* partial: the literal class string is no longer in
+    the template source, while the classes it emits are unchanged.
+
+    **This no longer claims the combo sits inside the alert, because here it
+    does not.** The badges inside the ``.alert.alert-info`` banner are
+    ``badge-neutral`` deliberately -- the template says why (#169): a ghost
+    badge inherits the alert's surface colour and reads as near-invisible on
+    the teal banner. The ghost+outline pair lives in the per-day bucket table
+    below it, and the two hardly ever co-render: the banner is gated on
+    ``report.total_searches == 0`` and the table on a non-empty
+    ``report.buckets``.
+
+    The earlier version compared ``str.find`` offsets in the template source,
+    so "appears later in the file" stood in for "nested inside" and the claim
+    never had to hold. Whether the #2460 rule still has a target inside an
+    alert somewhere is a separate question from whether this partial emits the
+    pair, and belongs to the owners of that rule.
     """
-    source = (templates_dir() / "retrieval" / partial).read_text(encoding="utf-8")
-    alert_at = source.find("alert alert-info")
-    badge_at = source.find("badge badge-ghost badge-outline")
-    assert alert_at != -1, f"{partial}: expected an .alert.alert-info banner"
-    assert badge_at != -1, f"{partial}: expected the honesty-gap badge combo"
-    assert badge_at > alert_at, (
-        f"{partial}: honesty-gap badge combo must sit inside the alert banner"
+    env = get_jinja_env()
+    rendered = env.get_template(f"retrieval/{partial}").render(report=_usage_report_stub())
+    combo = re.search(r'class="[^"]*\bbadge-ghost\b[^"]*\bbadge-outline\b[^"]*"', rendered)
+    assert combo is not None, (
+        f"{partial}: nothing renders badge-ghost and badge-outline together, so the "
+        f".alert .badge-ghost.badge-outline rule in styles.css has no target"
     )

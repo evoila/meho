@@ -114,6 +114,7 @@ from meho_backplane.broadcast.events import (
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
+    ApprovalRequestKey,
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
@@ -187,6 +188,7 @@ from meho_backplane.operations.grant_approval import (
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
+    behind_subs,
     find_people_behind,
     is_person_behind,
     people_behind_unknown,
@@ -1152,18 +1154,195 @@ async def _find_idempotent_request(
     its locked re-read missed; by then the row may have been approved on
     another connection. Without the refresh the session would keep the
     cached ``pending`` state, treat the row as overdue again, and loop.
+
+    A key that a same-call reuse linked to a request
+    (:class:`ApprovalRequestKey`) gets that request back too, so each key
+    a caller got the request with keeps working after the approval.
     """
+    live_for_caller = (
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == principal_sub,
+        ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+    )
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.idempotency_key == idempotency_key, *live_for_caller)
+        .execution_options(populate_existing=True)
+    )
+    found = (await session.execute(stmt)).scalars().first()
+    if found is not None:
+        return found
+    linked = (
+        select(ApprovalRequest)
+        .join(ApprovalRequestKey, ApprovalRequestKey.approval_request_id == ApprovalRequest.id)
+        .where(ApprovalRequestKey.idempotency_key == idempotency_key, *live_for_caller)
+        .order_by(ApprovalRequest.created_at.desc())
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(linked)).scalars().first()
+
+
+async def _link_reuse_key(
+    session: AsyncSession, request: ApprovalRequest, idempotency_key: str | None
+) -> None:
+    """Link *idempotency_key* to the reused *request*, so a later retry finds it.
+
+    Nothing to do without a key, or when the row already holds this key.
+    The insert runs in a savepoint: when a call that arrives at the same
+    moment already linked the same key, the duplicate is dropped and the
+    outer transaction stays usable.
+    """
+    if idempotency_key is None or request.idempotency_key == idempotency_key:
+        return
+    try:
+        async with session.begin_nested():
+            session.add(
+                ApprovalRequestKey(
+                    approval_request_id=request.id,
+                    idempotency_key=idempotency_key,
+                    created_at=_now(),
+                )
+            )
+            await session.flush()
+    except IntegrityError:
+        _log().info(
+            "approval_request_reuse_key_already_linked",
+            approval_request_id=str(request.id),
+        )
+
+
+async def _write_reuse_audit_row(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Write the ``approval.reuse`` audit row of a call that got *request*.
+
+    Same transaction as the call. The row names the reused request and the
+    caller's own session. Its id is kept in ``request._reuse_audit_id``, so
+    the answer's ``audit_id`` is this row and not the first call's
+    ``approval.request`` row.
+    """
+    audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
+        operator=operator,
+        request=request,
+        path=_REUSE_PATH,
+        status_code=_APPROVAL_STATUS_CODE,
+        duration_ms=0.0,
+        caller_session=True,
+    )
+    request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
+
+
+def _is_composite_step() -> bool:
+    """True when this call is a step a multi-step operation sent through ``dispatch_child``."""
+    from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
+
+    return composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+
+
+def _same_call_reuse_applies(
+    run_id: uuid.UUID | None,
+    resume_parent: dict[str, Any] | None,
+    requester: ResumeRequester | None,
+) -> bool:
+    """True when a direct call may get the waiting request of the same call.
+
+    Needs the switch ``APPROVAL_SAME_CALL_REUSE``. A call inside an agent
+    run, a step of a multi-step operation (one sent through
+    ``dispatch_child``, or one saved to restart after approval), or a re-run
+    for an earlier requester always gets its own request.
+    """
+    from meho_backplane.settings import get_settings
+
+    if run_id is not None or resume_parent is not None or requester is not None:
+        return False
+    if _is_composite_step():
+        return False
+    return get_settings().approval_same_call_reuse
+
+
+async def _own_people_behind(
+    session: AsyncSession, operator: Operator
+) -> list[dict[str, Any]] | None:
+    """The people behind the caller's own login (``None`` for a person)."""
+    return await find_people_behind(
+        session,
+        tenant_id=operator.tenant_id,
+        sub=operator.sub,
+        client_id=operator.client_id,
+        kind=operator.principal_kind.value,
+        runner_id=operator.runner_id,
+    )
+
+
+async def _find_same_call_pending_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    principal_kind: str,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+    reveal_secret: bool,
+    people_behind: list[dict[str, Any]] | None,
+) -> ApprovalRequest | None:
+    """Return the waiting request of this login for the same call, or ``None``.
+
+    Used only with ``APPROVAL_SAME_CALL_REUSE`` on. Scoped to the tenant and
+    the login, so a caller never learns about the request of another person.
+    Only a ``pending`` request inside its deadline counts: an approved one
+    may have run, and an overdue one can no longer be approved. Nothing is
+    expired here. A request of an agent run or of a step of a multi-step
+    operation (``resume_parent`` set, or ``composite_step`` not false) never
+    counts: approving it runs that run or that step, not this direct call. A
+    request made before migration 0183 has ``composite_step`` NULL, so it
+    never counts either. The match
+    is the same as for a retry key: same operation, connector, target, params,
+    ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
+    choice, the same kind of login (*principal_kind*) and the same people
+    behind the login (*people_behind*, compared by casefolded ``sub``): the
+    approval checks read only the kind and the list stored on the request.
+    """
+    own_people = behind_subs(people_behind)
     stmt = (
         select(ApprovalRequest)
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.principal_sub == principal_sub,
-            ApprovalRequest.idempotency_key == idempotency_key,
-            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+            ApprovalRequest.principal_kind == principal_kind,
+            ApprovalRequest.op_id == op_id,
+            ApprovalRequest.connector_id == connector_id,
+            ApprovalRequest.target_id == target_id
+            if target_id is not None
+            else ApprovalRequest.target_id.is_(None),
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.run_id.is_(None),
         )
+        .order_by(ApprovalRequest.created_at)
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(stmt)).scalars().first()
+    for existing in (await session.execute(stmt)).scalars():
+        # Checked here, not in SQL: a JSON column can hold JSON ``null``
+        # instead of SQL NULL for a direct call.
+        if (
+            existing.resume_parent is None
+            # NULL is a request made before migration 0183: it may be a step.
+            and existing.composite_step is False
+            and params_hash_matches(params, existing.params_hash)
+            and existing.preview_hash == preview_hash
+            and existing.work_ref == work_ref_var.get()
+            and bool(existing.reveal_secret) == reveal_secret
+            and behind_subs(existing.people_behind) == own_people
+            and not _is_overdue_pending(existing)
+        ):
+            return existing
+    return None
 
 
 def _reuse_idempotent_request(
@@ -1396,8 +1575,16 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
+#: Audit path of a call that got the waiting request of the same call
+#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
+#: ``approval.request`` row.
+_REUSE_PATH = "approval.reuse"
+
+#: Audit paths written on the task of the call that waits.
+_CALLER_PATHS = frozenset({"approval.request", _REUSE_PATH})
+
 #: Audit paths that carry the runbook run and step of the call.
-_RUNBOOK_STEP_PATHS = frozenset({"approval.request", "approval.result"})
+_RUNBOOK_STEP_PATHS = frozenset({*_CALLER_PATHS, "approval.result"})
 
 
 async def _write_audit_row(
@@ -1411,6 +1598,7 @@ async def _write_audit_row(
     status_code: int,
     duration_ms: float,
     extra_payload: dict[str, Any] | None = None,
+    caller_session: bool = False,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
 
@@ -1435,6 +1623,10 @@ async def _write_audit_row(
     itself is the one stored as ``request.request_audit_id``, so it
     parent-links to the contextvar value instead of self-parenting;
     decision rows parent-link to the stored id.
+
+    *caller_session* is ``True`` for the ``approval.reuse`` row: it is
+    written on the task of the call that got the waiting request, so it
+    names that call's own session, not the session stored on *request*.
     """
     payload: dict[str, Any] = {
         "approval_request_id": str(request.id),
@@ -1503,7 +1695,12 @@ async def _write_audit_row(
     # session id. The decision rows are written later, on the approver's or
     # the expiry sweep's task, so the listener that marks CLI rows does not
     # see them: mark them here from the stored flag.
-    if request.session_from_client:
+    agent_session_id = request.agent_session_id
+    from_client = bool(request.session_from_client)
+    if caller_session:
+        agent_session_id = resolve_audit_session_id()
+        from_client = session_is_from_client()
+    if from_client:
         payload[SESSION_FROM_CLIENT_KEY] = True
     # The reviewer's name next to ``reviewed_by`` on an approve or reject row.
     if principal_name and payload.get("reviewed_by") == operator.sub:
@@ -1524,7 +1721,7 @@ async def _write_audit_row(
     # "decision" row can be written on the task of another call: a retry
     # that expires an old overdue request writes that request's decision
     # row while the retry's own rule is bound.
-    if path == "approval.request":
+    if path in _CALLER_PATHS:
         policy_kwargs.update(policy_rule_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
@@ -1556,7 +1753,7 @@ async def _write_audit_row(
         tenant_id=operator.tenant_id,
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
-        agent_session_id=request.agent_session_id,
+        agent_session_id=agent_session_id,
         event_class=event_class,
         method="APPROVAL",
         path=path,
@@ -1703,10 +1900,12 @@ async def create_pending_request(
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past
             its deadline is not returned: it is expired in this
-            transaction and a new request is parked. The new row then
-            carries the expired one as ``_expired_request`` (else
+            transaction and a new request is parked. The returned row
+            then carries the expired one as ``_expired_request`` (else
             ``None``), so the caller can publish ``approval.expired``
-            after commit. ``None`` keeps the old behaviour.
+            after commit. That holds also when the returned row is
+            another waiting request that the call got (``_reused``).
+            ``None`` keeps the old behaviour.
         requester: The requester to save on the row instead of *operator*
             (#4217). Set for a composite step that waits again while an
             approved request is re-run: the new request belongs to the
@@ -1746,8 +1945,10 @@ async def create_pending_request(
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
 
+    expired_request: ApprovalRequest | None = None
+
     def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
-        return _reuse_idempotent_request(
+        reused = _reuse_idempotent_request(
             existing,
             op_id=op_id,
             connector_id=connector_id,
@@ -1755,8 +1956,11 @@ async def create_pending_request(
             params=params,
             preview_hash=preview_hash,
         )
+        # A late retry can expire its old request and still get another
+        # waiting request: the caller then sends the old one's expiry event.
+        reused._expired_request = expired_request  # type: ignore[attr-defined]
+        return reused
 
-    expired_request: ApprovalRequest | None = None
     if idempotency_key is not None:
         live, expired_request = await _resolve_idempotent_request(
             session,
@@ -1766,6 +1970,30 @@ async def create_pending_request(
         )
         if live is not None:
             return _reuse(live)
+
+    own_people_behind: list[dict[str, Any]] | None = None
+    own_people_known = False
+    if _same_call_reuse_applies(run_id, resume_parent, requester):
+        own_people_behind = await _own_people_behind(session, operator)
+        own_people_known = True
+        same_call = await _find_same_call_pending_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params=params,
+            preview_hash=preview_hash,
+            reveal_secret=reveal_secret,
+            people_behind=own_people_behind,
+        )
+        if same_call is not None:
+            reused = _reuse(same_call)
+            await _link_reuse_key(session, reused, idempotency_key)
+            await _write_reuse_audit_row(session, operator, reused)
+            return reused
 
     if proposed_effect is None:
         proposed_effect = {
@@ -1803,13 +2031,8 @@ async def create_pending_request(
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
         principal_kind = operator.principal_kind.value
-        people_behind = await find_people_behind(
-            session,
-            tenant_id=operator.tenant_id,
-            sub=operator.sub,
-            client_id=operator.client_id,
-            kind=principal_kind,
-            runner_id=operator.runner_id,
+        people_behind = (
+            own_people_behind if own_people_known else await _own_people_behind(session, operator)
         )
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
@@ -1882,6 +2105,7 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        composite_step=_is_composite_step(),
         allowed_connectors=stored_connector_limit(),
         **_policy_rule_fields(),
     )

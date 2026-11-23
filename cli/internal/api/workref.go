@@ -17,6 +17,19 @@ import (
 // reads to stamp audit_log.work_ref on the row for that request.
 const WorkRefHeader = "Meho-Work-Ref"
 
+// SessionIDHeader is the request header that carries the id of the
+// login session. The backplane stores it as the session of the audit
+// rows of the request.
+const SessionIDHeader = "Meho-Session-Id"
+
+// CommandHeader is the request header that carries the command path of
+// the running CLI command without the program name, for example
+// "vmware vm list". Only the command names are sent, never an argument
+// or a flag. With AUDIT_SESSION_LINKS on, the backplane stores it on the
+// audit rows of the request, so an uploaded agent session that ran the
+// command can find its rows.
+const CommandHeader = "Meho-Command"
+
 // WorkRefEnv is the environment variable the root --work-ref flag
 // falls back to when the flag is not set.
 const WorkRefEnv = "MEHO_WORK_REF"
@@ -80,6 +93,27 @@ func isRefusedWorkRefRune(r rune) bool {
 
 type workRefKey struct{}
 
+type commandKey struct{}
+
+// WithCommand returns a copy of ctx that carries the command path
+// (see CommandHeader). An empty path returns ctx unchanged.
+func WithCommand(ctx context.Context, path string) context.Context {
+	if path == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, commandKey{}, path)
+}
+
+// SetCommandHeader sets the Meho-Command header on req when the
+// request's context carries a command path. The AuthedClient request
+// editor calls it for every generated-client call; hand-rolled backplane
+// requests call it next to SetWorkRefHeader.
+func SetCommandHeader(req *http.Request) {
+	if path, _ := req.Context().Value(commandKey{}).(string); path != "" {
+		req.Header.Set(CommandHeader, path)
+	}
+}
+
 // WithWorkRef returns a copy of ctx that carries ref. Requests built
 // with that context get the Meho-Work-Ref header (see SetWorkRefHeader).
 // An empty ref returns ctx unchanged.
@@ -103,5 +137,15 @@ func WorkRefFrom(ctx context.Context) string {
 func SetWorkRefHeader(req *http.Request) {
 	if ref := WorkRefFrom(req.Context()); ref != "" {
 		req.Header.Set(WorkRefHeader, ref)
+	}
+}
+
+// SetSessionIDHeader sets the Meho-Session-Id header on req when
+// sessionID is not empty. The AuthedClient request editor calls it for
+// every generated-client call; hand-rolled backplane requests call it
+// next to their Authorization header, with AuthedClient.SessionID.
+func SetSessionIDHeader(req *http.Request, sessionID string) {
+	if sessionID != "" {
+		req.Header.Set(SessionIDHeader, sessionID)
 	}
 }

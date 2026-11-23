@@ -20,9 +20,11 @@ on each login client copies them into the token.
 |---|---|---|
 | `MEHO-Readers` | `read_only` | Read only. |
 | `MEHO-Operators` | `operator` | Run actions. Their `dangerous` and `destructive` changes wait for an admin. |
-| `MEHO-SA-Operators` | `operator` | An old group: MEHO reads it as `MEHO-Operators` ([who may approve](../../guides/approvals-and-break-glass.md#who-may-approve)). |
 | `MEHO-Admins` | `tenant_admin` | Manage the tenant. |
-| `MEHO-Approvers` | `read_only` | An old group: MEHO reads it as `MEHO-Readers`. |
+
+A realm made by an older MEHO version can also have `MEHO-SA-Operators`
+and `MEHO-Approvers`. MEHO reads them as `MEHO-Operators` and
+`MEHO-Readers`. A new realm does not have them, so a recipe that maps people into them stops the setup.
 
 `MEHO-Platform-Admins` is separate. It adds `platform_admin` to the
 token and gives no tenant or role. Only the first admin needs it.
@@ -50,7 +52,7 @@ set it up, so that recipe uses the Keycloak admin console.
 
 ## The rules
 
-1. **One group per person.** A person is in exactly one of the five
+1. **One group per person.** A person is in exactly one of the role
    groups. In two groups, MEHO refuses the login with
    `401 multiple_role_groups`. In none, MEHO refuses it with
    `401 missing_tenant_claim`.

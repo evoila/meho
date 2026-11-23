@@ -254,7 +254,9 @@ async def test_logout_unknown_id_is_not_found(kc: KeycloakConnector) -> None:
 async def test_logout_waits_for_approval_then_runs(kc: KeycloakConnector) -> None:
     """The call waits; a second person approves; only then the POST runs once."""
     requester = _operator("kc-logout-requester")
-    approver = _operator("kc-logout-approver")
+    approver = _operator("kc-logout-approver").model_copy(
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "platform_admin": True}
+    )
     args = {
         "connector_id": _CONNECTOR_ID,
         "op_id": _OP_ID,
@@ -275,7 +277,12 @@ async def test_logout_waits_for_approval_then_runs(kc: KeycloakConnector) -> Non
         request_id = uuid.UUID(call["extras"]["approval_request_id"])
 
         async with get_sessionmaker()() as session:
-            approved = await approve_request(session, request_id, operator=approver, params=None)
+            approved = await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         assert approved.status == "approved"
 
@@ -283,7 +290,7 @@ async def test_logout_waits_for_approval_then_runs(kc: KeycloakConnector) -> Non
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "ok", resumed
     assert resumed.result == {"id": _USER_UUID, "username": "event-guest", "logged_out": True}

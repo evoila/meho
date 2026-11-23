@@ -342,6 +342,22 @@ shared resume check and in the re-run (`object_changed`). The Keycloak
 writes that use it are listed in
 [connectors-keycloak.md](connectors-keycloak.md#writes-that-are-changes-of-rights).
 
+## Making or changing a target always waits for a person
+
+`targets.register` and `targets.update` both need approval
+(`requires_approval`), and their `host` and `fqdn` carry the address
+marker (`x-meho-caller-address: true`). So every call of them waits until
+a person with `tenant_admin` approves it, whoever makes it: an agent (also
+with an agent grant), a service login (also with a standing grant, or in a
+run with a run approval) and a person with a token. Only a person in
+the web console writes a target at once. A settings file that adds or
+changes a target is applied only in the web console
+([settings.md](settings.md)). The approval card shows the
+values the person must see: for a new target every sent field, also each
+`extras` key and value; for a change the old and the new value of each
+sent field. Values under a secret-like name are hidden. Details:
+[targets.md](targets.md).
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -353,6 +369,13 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
+  - A credential write, and a `k8s.apply` whose manifest holds a Secret
+    (the param a connector declares with `declare_hidden_stored_param`),
+    keep the params, and the params of a parent multi-step call, only in
+    the encrypted one-time handoff (`approval_handoff`). The row keeps no
+    plain copy, also not when the request is approved and never runs.
+    Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
+    call instead of letting it wait.
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
@@ -642,6 +665,47 @@ in lock-step with the audit log. A direct human call (no delegation
 bound) and an autonomous agent run both resolve to `principal_act=NULL`.
 (Before #1481 the field read a nonexistent `Operator.identity_act`
 attribute and was always `NULL`.)
+
+### The session of a CLI call, and the origin columns
+
+Every request and audit row can say which session made it, also when
+several sessions share one login. `meho login` makes a random session id
+(a version-4 UUID) and saves it with the token. The CLI sends it in the
+`Meho-Session-Id` header on every call. A token refresh keeps the id. The
+next `meho login` makes a new one.
+
+The audit middleware (`backend/src/meho_backplane/audit.py`) reads the
+header and binds it to `client_session_id_var`
+(`backend/src/meho_backplane/operations/_audit.py`). A header that is not
+a UUID is ignored. `resolve_audit_session_id()` returns it last, after an
+agent run and an MCP session. So the operation rows of a CLI call, the
+HTTP row of the call and a parked approval request all carry it in
+`agent_session_id`. Only the writers of these rows use it. The coordination
+hints for agents (`resolve_agent_session_id()`) never see it, and the
+console does not treat such a row as an agent row. The id is a label the
+client sends. It tells sessions apart; it does not say who the caller is. A CLI that has no saved session id (a login from an
+older CLI) sends no header; running `meho login` again fixes that.
+
+The CLI sets the header with `api.SetSessionIDHeader` on every backplane
+call: the generated client, and the hand-built requests too (`meho
+targets import`, `meho event-source`, `meho broadcast watch`, `meho
+status --watch`). The retry after a token refresh sends it again.
+
+A parked approval request stores `session_from_client=true` when its
+session id came from the CLI header (migration 0180). When the approved
+operation runs, `resume_dispatch_after_approval()` binds that id to
+`client_session_id_var`, not to `agent_session_id_var`. So the audit rows
+of the run carry the requester's CLI session, and the run is not an agent
+session: the coordination hints add nothing to its answer. The approver's
+own CLI session never labels the requester's run. The approve, reject and
+expiry rows of such a request also store `session_from_client: true`,
+written by `_write_audit_row`.
+
+`ApprovalRequestView` has `agent_session_id` next to `work_ref`.
+`meho approvals list` shows two more columns: `WORK-REF` and `SESSION`
+(the first 8 characters of the session id; `--json` has the whole id).
+Both show `-` when empty. With them, a person can see which session
+parked a request and for which change ticket.
 
 ### Display-name resolution alongside the sub (#3300)
 
@@ -1260,7 +1324,7 @@ login client (see the `client` block in [audit_query.md](audit_query.md)):
   "self_declared": true}`. The tool sends this text about itself, and MEHO
   cannot check it.
 
-## Changes of rights: the login is never its own approver
+## Changes of rights: who the change is for
 
 `operations/grant_approval.py` checks the Keycloak writes that change who
 has rights: `keycloak.group.member.add`, `keycloak.role_mapping.assign`,
@@ -1288,7 +1352,8 @@ preview of the waiting request:
 - `members`: for a group attribute change in the login realm, the ids of
   the logins in the group (up to 1000, read page by page). `None` when
   they could not be read, when Keycloak answers with something that is
-  not a list (an error object, `null`), or when the group has more.
+  not a list (an error object, `null`), or when the group has more. The
+  card shows it; no approval rule reads it.
 
 A value that could not be read is `None`, never a guess.
 
@@ -1300,18 +1365,51 @@ The group rule (`_check_approver_group`, used by `approve_request` and
 - when the login or the group the change is for is unknown (the lookup
   failed when the request was parked). Nobody can approve such a request;
   the requester sends a new one;
-- when the login the change is for is the approver, in every group and for
-  every risk level. A second login of the same person is another login, so
-  it is another approver in this check;
-- for a group attribute change in the login realm, when the approver is in
-  the group, or when MEHO could not read who is in the group;
-- in the login realm, when the approver is not a platform admin and the
-  change can give platform admin rights (a group or role that gives them;
-  see "How MEHO decides that a group change gives platform admin rights"
-  in [connectors-keycloak.md](connectors-keycloak.md)).
+- in the login realm, when the approver is not a platform admin, for
+  every change of rights there; the text says why when the change can
+  give platform admin rights (a group or role that gives them; see "How
+  MEHO decides that a group change gives platform admin rights" and
+  "Every Keycloak write in the login realm needs a platform admin" in
+  [connectors-keycloak.md](connectors-keycloak.md));
+- in the login realm, when the approver is the login that asked, unless
+  it asked in the web console (`asked_in_web_console` in
+  `proposed_effect`, set by `create_pending_request` on every change of
+  rights it parks, `ASKED_IN_WEB_CONSOLE`) and approves in the web
+  console too;
+- when the change is a `secret.move` that sets the password of the
+  approver's own login (`FOR_LOGIN`).
 
-A request without the `grant` block, or with a group MEHO could not read,
-gets the strict rule. The decision audit row carries `grant_user_id`,
+`register_grant_op` takes `applies`, a check of the params: only a request
+that passes it counts (`secret.move` with a Keycloak side). Such an op does
+not count in `is_rights_change_op`. With `per_call=False` an op is checked
+here too, but it gets no per-call mark and does not count in
+`is_rights_change_op`: it is a change of rights only in the login realm
+(the Keycloak writes that only take away). Such an op can register a check
+by its params (`register_grant_cover_check`, `operations/grant_cover_check.py`):
+when the check says so, the policy gate looks up no standing grant and no
+run approval for the call, and the shadow policy evaluator does the same.
+A card can name the login of a change whose params name none: the `grant`
+fact `for_login` (`FOR_LOGIN`, set by a `secret.move` that sets a password
+in the login realm). Then that login never approves it, and an unknown
+login cannot be approved. `register_harmless_keys_rule`
+records an op whose card carries `harmless_keys_only`
+(`HARMLESS_KEYS_ONLY`); `grant_changed_since_request` refuses the run of
+such a request when the approved card does not have it
+(`GRANT_REASON_OLD_CARD`), in every realm. The Keycloak rule that uses it
+is in "Every Keycloak write in the login realm needs a platform admin" in
+[connectors-keycloak.md](connectors-keycloak.md). `platform_admin_reason(request)` gives
+the reason a platform admin must approve (from `platform_admin_reason` in
+the `grant` block), or `None`; the refusal text and the console card show
+it.
+
+An admin may approve a change of their own login and a change of a group
+they are in, except a `secret.move` that sets the password of their own
+login (`FOR_LOGIN`). In the login realm the approver is the login that
+asked (`principal_sub`) only when that login asked in the web console; a
+request asked with a token, the command line, MCP or by an agent waits
+for a second platform admin. A person behind the agent, service or
+runner login that asked may approve it. A request without the `grant`
+block, or with a group MEHO could not read, gets the strict rule. The decision audit row carries `grant_user_id`,
 `grant_group_id` (when the change names a group), `grant_for_approver`,
 `grant_in_login_realm` and, when the request named one, `grant_username`.
 MEHO does not link two logins of one person.
@@ -1330,11 +1428,6 @@ own resume) and in the re-run after a failure (`approval_rerun`).
 **The run is also bound to the facts that decided who may approve.** The
 same check refuses the run:
 
-- for a group attribute change in the login realm, when the approver
-  (`reviewed_by`) is in the group now. A person can join the group after
-  the request was made, so the saved member list is not enough. When the
-  live member list cannot be read, or no approver is recorded, the run is
-  refused too;
 - when the change now needs a stricter approval than the one it got: the
   live card says login realm or platform admin where the saved one said
   no, or cannot say which it is;
@@ -1373,29 +1466,112 @@ realm. Both ops are also registered with `bound_ids_missing`, so this
 refusal says plainly: "This request was made before MEHO read what a role
 gives. Send it again."
 
-## The rights-change mark: another admin must approve
+## The rights-change mark: an admin approves it in the web console
 
 A waiting request can carry one mark: "this is a change of rights"
-(`ApprovalRequest.rights_change`). No login approves its own rights
-change, at any risk level, in any group. An admin, who may
-approve their own other changes, may not approve this one. The break-glass
-switch `APPROVAL_ALLOW_SELF_APPROVAL` does not clear the mark.
+(`ApprovalRequest.rights_change`). Only an admin approves it, and only
+with a click in the web console (`Operator.web_session`). The admin may be
+the person who asked: the decision row then has `self_approved: true` and
+the rule `sa_operator_self_approval`. No other group approves it, at any
+risk level. The break-glass switch `APPROVAL_ALLOW_SELF_APPROVAL` does not
+clear the mark.
 
-**One check.** `Operator.may_approve_rights_change(requester_sub)`
-decides: not the requester, a person in a chosen tenant, and an admin
-(a `tenant_admin` role or a platform admin). It is used by:
+**One check.** `Operator.may_approve_rights_change()` decides who is an
+admin: a person in a chosen tenant with the `tenant_admin` role or
+platform admin rights. It is used by `check_rights_change_approval` in
+`operations/grant_approval.py`, which the group rule
+(`_check_approver_group`) runs first. So the approve and the "may I
+approve?" sign (`approve_right`) give the same answer. The refusal is one
+sentence:
 
-- `check_rights_change_approval` in `operations/grant_approval.py`, which
-  the group rule (`_check_approver_group`) runs first. So the approve and
-  the "may I approve?" sign (`approve_right`) give the same answer. The
-  refusal is one sentence, on every surface: "This is a change of rights.
-  Another admin must approve it." The REST detail is
-  `rights_change_required: <that sentence>`, and `may_approve_reason` is
-  `rights_change`.
-- run approvals (`RunApprovalService.approve`): a list with a rights-change
-  operation is refused for its requester and for anyone who is not an
-  admin (`rights_change_required`). A list knows the operation but not the
-  realm, so every registered group or role operation counts.
+- not an admin: "This is a change of rights. Only an admin may approve it."
+- an admin on the command line or over REST (no web session): "This is a
+  change of rights. Approve this change of rights in the web console."
+  This holds also for another admin's request.
+
+The REST detail is `rights_change_required: <that sentence>`, and
+`may_approve_reason` is `rights_change`.
+
+Run approvals (`RunApprovalService.approve`): a list with a rights-change
+operation is refused for everyone (`rights_change_required`): a run
+approval list never covers a change of rights. A list knows the operation
+but not the realm, so every registered group or role operation counts.
+
+**An admin's own call in the web console runs at once.**
+`operations/rights_change_console.py` decides it in the policy gate
+(`_non_agent_verdict` in `operations/_validate.py`). The call runs at once
+when all of this holds:
+
+- the operation is registered with `register_rights_change_op` or
+  `register_grant_op` (`is_rights_change_op`);
+- it is not `destructive`, it has no "always wait" mark
+  (`policy_always_wait`, from an override or a classification rule), and
+  it does not read, write or make a credential (`credential_call_waits`).
+  Its params carry no credential either (`params_write_credential`, with
+  the check a connector registers with `register_credential_params_check`;
+  the Keycloak writes register `carries_credential`, which looks for keys
+  such as a client's `secret`, a user's `credentials` or a `password`).
+  Those always wait. A change of
+  rights only by its params (`register_rights_change_check`, for example a
+  `secret.move` with a `keycloak:` side) always waits too;
+- the caller is a person with a web session and an admin
+  (`may_approve_rights_change`). A token call (command line, REST, MCP),
+  also the admin's own token, an agent, a service login, a hosted agent
+  run (the stricter of the caller and the agent) and an Operator wait.
+
+Before it runs, `console_check` runs the operation's check before a wait
+(`park_check_refusal`); a refusal there is a `deny`. Then the call waits,
+as every other change of rights does, when:
+
+- the console session lacks the sign-in a console approve needs
+  (`has_web_approval_sign_in` in `ui/routes/approvals/sign_in.py`, the
+  same rule as `web_approval_auth`: a fresh sign-in, and the approval
+  sign-in level where `APPROVAL_SIGN_IN_LEVEL` asks for it). The session
+  id is `Operator.web_session_id`;
+- the approval card, built against the live system (`live_card`), does
+  not build, or does not say who the change gives rights to: a
+  `register_grant_op` operation needs the `grant` block. Outside the login
+  realm the block must name the one login or group of the change; in the
+  login realm the block's realm facts are enough. Only an operation
+  registered with `register_no_login_realm_op` (`policy.apply`,
+  `policy.classify`) needs no such block.
+
+Then `may_make_alone` runs the check of who may make the change on that
+card, the same rule as `check_grant_approval` on approve. When the admin
+may not make it alone (in the login realm: an admin who is not a platform
+admin), the call waits, and a platform admin approves it. In the login
+realm the guard of `connectors/keycloak/ops_meho_own_login_guard.py`
+refuses many of these writes first, before any wait (a delete or most
+changes of a client MEHO signs in with, a new mapper on it, most realm
+keys), and no approval lets them run. A change that can change the
+approval sign-in and that the guard lets through never runs alone and
+is never approved by the login that asked or by a person behind it
+(`people_behind`): a connector registers a check
+of such a request with `register_approval_sign_in_check`
+(`operations/approval_sign_in_writes.py`; the Keycloak checks are in
+`connectors/keycloak/approval_sign_in_writes.py`). For Keycloak these
+are: a `client.update` of a sign-in client, or one that sets the
+`clientId` of one on another client; a `client.create` with the
+`clientId` of a sign-in client; a `client.delete` of a sign-in client; a
+`protocol_mapper.create` on a sign-in client or of a sign-in claim; a
+scope mapper update of a sign-in claim; and a `realm.update` of other keys
+than names, mail, events and languages. The sign-in clients are the CLI
+and web approval clients, the console login client and the client of the
+Keycloak admin API (`KEYCLOAK_ADMIN_CLIENT_ID`), compared without letter
+case. The key
+`asked_in_web_console` of `proposed_effect` is internal
+(`INTERNAL_EFFECT_KEYS` in `operations/_preview.py`): no approval response
+returns it. The dispatcher
+marks the audit row of a call that runs at once with `rights_change_run: admin_in_web_console`
+(an `audit_*` context key), and sets its `policy_rule` column to
+`default:rights_change.admin_in_web_console` (`CONSOLE_RUN_POLICY_RULE`),
+so the main columns show that no second person approved. The policy evaluator has the same rule
+(`admin_console_rights_change`, mark `rights_change`, lookups
+`rights_change_refusal` and `rights_change_waits`).
+
+`policy.apply` and `policy.classify` check again in the handler: a run
+without an approval, or a run by the person who asked (also a re-run of a
+failed approved request), writes only for an admin in the web console.
 
 **Who sets the mark.**
 
@@ -1428,7 +1604,7 @@ A request parked before the column existed has no stored mark. It counts
 through the same `is_rights_change` check, so an upgrade weakens nothing.
 
 **Where the person sees it.** `ApprovalRequestView.rights_change` on REST.
-`meho approvals show` prints `Rights change: another admin must approve`,
+`meho approvals show` prints `Rights change: approve this change of rights in the web console`,
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
@@ -1965,11 +2141,121 @@ above). The two agent-run entry points in
   `principal_act=<agent-sub>`, so the rules for the person's own change
   apply.
 
+### The people behind a request
+
+A request made by an agent, a service login (an add-on) or a runner
+counts as a request of the people behind that login. The code is
+`backend/src/meho_backplane/operations/people_behind.py`.
+
+**Who counts.** `find_people_behind` looks in the login's tenant when the
+request is made (`create_pending_request`):
+
+| Login | People behind it (reason code) |
+|---|---|
+| Agent | who registered it (`registered`) or owns it (`owns`), from `agent_principal` by client id; who gave one of its grants in force (`gave_grant`, `agent_permission`, key = token `sub` or client id, not expired); who wrote (`agent_definition`) or last changed (`changed_agent_definition`) an agent definition with `identity_ref` = the client id; who made a schedule of those definitions, active or not (`made_schedule`); when one of those schedules waits for events, who made an event source of the tenant (`made_event_source`) |
+| Service login | who paired (`registered`) or owns (`owns`) its add-on (`addon_pairing` by `service_account_sub` or client id); who gave one of its standing grants in force (`gave_grant`, not revoked, not replaced, not expired) |
+| Runner | who registered (`registered`) or owns (`owns`) it (`runner_principal` by the token's `runner_id`, or by client id) |
+| Every machine login | who started (`started_run`) or last handed over (`handed_over_run`) a runbook run assigned to it that has not ended |
+| A person, or a delegated call | nobody: the person is the requester |
+
+**A machine login never counts as a person behind another login.**
+`machine_subs` (`backend/src/meho_backplane/auth/machine_logins.py`)
+leaves out every id that MEHO knows as an agent, service or runner login:
+a row of the `machine_login` table, or the login of an agent definition,
+an agent, an add-on or a runner of the tenant. Each REST call
+(`verify_jwt_and_bind`) and each MCP call (`verify_mcp_jwt_and_bind`) of
+a machine login adds its id to `machine_login` (`note_machine_login`,
+safe to run twice). So does the sign-in of a hosted agent run that a
+schedule or an event starts (`_authenticate_scheduled_agent`). When MEHO finds only machine logins, the list is
+empty and only an admin may approve.
+
+The checks investigator runs as an agent (`run_scheduled`), so its
+requests follow the agent row. A sensor never makes a request.
+
+**What MEHO stores.** Migration `0178` adds four columns and a table:
+
+- `approval_request.people_behind` — JSON list of
+  `{"sub", "name", "why"}`, one entry per person and reason. `NULL` for a
+  person's request. An empty list: MEHO knows nobody behind the login.
+  The name is the newest `principal_name` of the person in the tenant's
+  audit log, or `null`. A step of a multi-step operation that waits
+  again keeps the list of the first request (`ResumeRequester`).
+- `agent_definition.updated_by_sub` — set by every edit of a person
+  (`AgentDefinitionService.update`). An edit by a machine login keeps the
+  person who was there. The migration fills it from the newest successful
+  `agent.edit` audit row of the definition by a login that is not a
+  machine login, else from `created_by_sub`. A machine login here is a
+  row of `machine_login`, or the login of an agent definition, an agent,
+  an add-on pairing (client id or service login) or a runner of the
+  tenant: the same records `machine_subs` reads. It reads only audit rows from the time the definition
+  was created, so an edit of a deleted definition with the same name does
+  not count.
+- `runbook_runs.reassigned_by` — set by `RunbookRunService.reassign_run`
+  when a person hands the run over. A handover by a machine login keeps
+  the person who was there.
+- `run_approval.principal_client_id` — the client id of the add-on login
+  that asked for a run approval list. At approve time MEHO finds the
+  add-on pairing by the login id and by this client id. `NULL` on a list
+  from before the upgrade: then MEHO uses the login id alone.
+- `machine_login` — one row per tenant and login id that MEHO has seen
+  as an agent, service or runner login. The migration fills it from
+  the requests of such logins (`approval_request.principal_kind`) and
+  from the `client` block of the audit rows.
+
+**The rule.** One shared check, `_check_approver_group`, used by every
+approve door (`approve_request`, so REST approve and decide, the CLI and
+the web console) and by the "may I approve?" answer (`approve_right`,
+`approve_right_any_status`: the button, the lists, the waiting count and
+web push):
+
+1. A change of rights: `Operator.may_approve_rights_change(requester,
+   behind)` refuses the requester and every person behind it, also an
+   admin.
+2. A machine login asked and MEHO knows nobody behind it:
+   `_check_requester_known` lets only an admin approve
+   (`UnknownRequesterApprovalError`, 403). An unknown origin never gets
+   less control than a known one.
+3. `_check_self_approval` treats a person behind the login like the
+   requester: they may approve only where they may approve their own
+   change (`Operator.may_self_approve`, the web click on a `caution`
+   change that waited only for its token, the emergency switch for
+   `safe` and `caution`). Else `SelfApprovalForbiddenError` with
+   `behind=True`; its text says the change counts as the person's own
+   change, and who may approve it.
+
+Run approval lists (`RunApprovalService.approve`) look up the people
+behind the service login at approve time (`_check_people_behind`), so a
+list that waited across the upgrade follows the rule too. A person behind
+it may approve the list only when `may_self_approve` is true; nobody
+known: only an admin; a change of rights: never a person behind it. The
+policy evaluator (`policy/approve.py`) gets the same facts on
+`ApprovalAsk` (`people_behind`, `requester_unknown`), so shadow mode
+reports no difference. `tests/test_people_behind_doors_guard.py` lists
+every door and fails when a new function writes an approval without the
+check.
+
+**Audit.** When a person behind the login approves, the
+`approval.decision` audit row carries `self_approved: true`,
+`approver_behind_requester: true` and `approver_behind_why` (the reason
+codes). The `approval.approved` step event of an add-on carries only
+`self_approved: true`.
+
+**Where people see it.** REST `ApprovalRequestView.people_behind`
+(`sub`, `name`, `why`, `why_text`) and `people_behind_known`, only
+when a person calls the API: for a person's request, and for an agent,
+service or runner login that reads the request, the answer leaves both
+keys out; the web
+console request card ("Set up by Ann. Grant by Bob.") and the request
+modal ("Behind it"); `meho approvals show` ("Behind it:"). When MEHO
+knows nobody, each says "Set up by: not known".
+
 ### Troubleshooting — `self_approval_forbidden`
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `approve` returns `self_approval_forbidden` | The request is your own change, and you are not in MEHO-Admins. | Ask a person in one of the groups the refusal names to approve it on the Approvals page. On a one-operator tenant, make yourself an **Admin** (MEHO-Admins; the change applies at your next login), then approve with a click in the web interface. |
+| `approve` returns `self_approval_forbidden` and the text says you set up, changed or started the login that asked | You are one of the people behind the agent, service or runner login (see [The people behind a request](#the-people-behind-a-request)). | Ask another person the text names. |
+| `approve` refuses with "MEHO does not know who set up the login" | A machine login asked and `people_behind` is empty. | An admin approves it, or give the login a grant in MEHO so its next requests have a known person behind them. |
 
 ### Where operators see this
 
@@ -2381,6 +2667,14 @@ for the paired add-on that requested the approval
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
 
+On MCP, with `MCP_OWN_REQUEST_STATUS` on (off by default), the owner makes
+the same read with `call_operation(connector_id, op_id, approval_request_id)`.
+The owner is the same login. The read checks no agent grant.
+It uses `read_approval_result` too, so the owner check and the
+`approval.result` audit row are the same. Another person's request and an
+unknown id both answer `approval_request_not_found`
+([mcp.md](mcp.md#reading-the-state-of-your-own-approval-request-mcp_own_request_status-off-by-default)).
+
 ## The audit row of an approved run (#3864)
 
 When a person approves a request, MEHO runs the operation. The run writes its
@@ -2456,6 +2750,11 @@ for approval.
   longer holds its key, so the same key parks a new request. An `approved`
   request keeps its key even after it ran: a retry then returns the request
   that already ran, so the op is never run twice.
+  The answer keeps its `status` and `extras`, but its text is
+  "awaiting_approval: the approval request `<id>` is already approved". This
+  text is the same for every approved request, also for one that shows a
+  secret value. A retry of a waiting request keeps the text
+  "requires approval before execution".
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be
@@ -2917,9 +3216,21 @@ The per-op preview is opt-in via a builder registry in
   `meho_approvals_get` and `meho_approvals_list` read the stored request
   through `proposed_effect_for_agent`: with the switch off, an op behind
   a builder switch shows the generic params echo of its stored params,
-  and an op with person-only keys shows its preview without them. So the
-  caller gets the same answer there as from `preview_operation`. The REST
-  approvals API and the console show the stored card.
+  and an op with person-only keys shows its preview without them.
+  `register_agent_preview_filter(op_id, filter)` gives a caller the
+  stored preview as the filter returns it, for fields deeper than the
+  top-level keys; it runs after the person-only keys are gone, so an op
+  can have both. So the caller gets the same answer there as from
+  `preview_operation`. The console shows the stored card, and so does the
+  REST approvals API for a person. For an agent, service or runner login
+  the REST API leaves out the top-level person-only keys (for example
+  `credential_wait`, the line that says why a credential call waits), and
+  for `linux.script.run` and `k8s.apply` it gives the same view as the MCP
+  tools (`api/v1/approvals.py::_proposed_effect_for`).
+- `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
+  every preview the builder of `op_id` returns, whatever module
+  registered the builder and when. A step that raises makes the preview
+  unavailable, the same as a builder that raises.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. A bespoke builder's result — wrapped as
@@ -3076,6 +3387,27 @@ in an `additionalProperties` representation) never reaches the durable
 row. `keycloak.role_mapping.assign` populates
 `{resource, username, id, realm, granted_roles}` (the granted realm role
 names). Further connectors register their own builders as needed.
+
+For a person the `k8s.apply` preview also has `run_commands`: one entry
+per container (init, main and ephemeral, at any depth, and every other
+object with a `command` or `args` list, under any field, such as the
+`container`, `script` or `steps` of a custom kind) with the object,
+the container name, the image, the `command` and `args`, and in
+`exec_commands` the `exec` command of each lifecycle hook (`postStart`,
+`preStop`) and exec probe (`startupProbe`, `livenessProbe`,
+`readinessProbe`), with secret values hidden by the rules of the Job
+preview. The list keeps at most 16 KB and always keeps room for the
+name of every later container: an entry that is too large keeps
+the object, the container and the image, the start of what it runs in
+`command_cut`, and a `cut` note. The `manifest` echo above shows only the
+size of each command line. When the dry run fails, the stored request has the
+`preview_unavailable` marker and, for a person, a top-level `run_commands`
+built from the manifest text (`register_preview_failure_keys` in
+`operations/_preview.py`). The console card shows that list in a "What
+each container runs" block under the warning that the preview failed
+(`approvals/_modal.html`). An agent never reads `run_commands`: its own
+preview has no such key, and the stored request it reads (MCP tools and
+the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 
 ## Credential writes: what the approver sees (#4850)
 
@@ -4693,7 +5025,8 @@ For each request, `web_push/recipients.py` builds a person from each row's
 facts and asks `approve_right_any_status` (`operations/approval_rights.py`)
 whether that person may approve the request. That is the same rule as the
 approve: the group rule for `dangerous` and `destructive` changes, the
-own-change rules, the rule for a change of rights (only another admin), and
+own-change rules, the rule for a change of rights (only an admin, in the web
+console), and
 the role an operation needs from its approver (for example `tenant_admin`
 for `targets.register`). It only leaves out the "still pending" check, so
 the decision message goes to the same people as the first message.

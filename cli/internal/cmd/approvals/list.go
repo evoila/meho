@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -69,7 +70,7 @@ func newListCmd() *cobra.Command {
 			"no:own_change; no:wrong_group (another person's dangerous " +
 			"or destructive change needs a MEHO-Admin" +
 			"); no:role_too_low; no:rights_change (a change " +
-			"of rights: another admin must approve); no:no_approval_access; " +
+			"of rights: approve it in the web console); no:no_approval_access; " +
 			"no:not_a_person; no:not_routed (approver routing sends the " +
 			"change to other login groups). A request that is not pending shows -. " +
 			"In --json the same answer is may_approve and " +
@@ -272,7 +273,9 @@ func listOrder(opts listOpts) string {
 }
 
 // printListTable renders the list as a compact table.
-// Columns: ID, STATUS, RUN, APPROVE, CONNECTOR, OP, PRINCIPAL, CREATED.
+// Columns: ID, STATUS, RUN, APPROVE, CONNECTOR, OP, PRINCIPAL, WORK-REF,
+// SESSION, CREATED. SESSION is the first 8 characters of the id of the
+// session that parked the request; --json has the whole id.
 // RUN (#3543) says whether an approved request ran and how it ended, so a
 // run that failed after the approval does not look like a plain
 // "approved". APPROVE (#3329) says whether the caller may approve the
@@ -286,10 +289,10 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 		fmt.Fprintln(w, emptyListMessage(statusFilter, workRef, offset))
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
-		"ID", "STATUS", "RUN", "APPROVE", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
+	fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %-24s %-8s %s\n",
+		"ID", "STATUS", "RUN", "APPROVE", "CONNECTOR", "OP", "PRINCIPAL", "WORK-REF", "SESSION", "CREATED")
 	for _, e := range items {
-		fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %s\n",
+		fmt.Fprintf(w, "%-36s %-9s %-11s %-23s %-24s %-32s %-20s %-24s %-8s %s\n",
 			e.Id.String(),
 			output.SafeText(string(e.Status)),
 			output.SafeText(runStateLabel(e.ResultState)),
@@ -297,10 +300,35 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 			truncate(output.SafeText(e.ConnectorId), 24),
 			truncate(output.SafeText(e.OpId), 32),
 			truncate(requesterScanLabel(e.PrincipalSub, e.PrincipalName, e.PrincipalKind), 20),
+			truncate(dashIfEmpty(output.SafeText(derefString(e.WorkRef))), 24),
+			sessionLabel(e.AgentSessionId),
 			output.SafeText(e.CreatedAt),
 		)
 	}
 	fmt.Fprintf(w, "\nShowing %d.\n", len(items))
+}
+
+// sessionLabel returns the first 8 characters of the session id, or "-"
+// when the request has none.
+func sessionLabel(id *uuid.UUID) string {
+	if id == nil {
+		return "-"
+	}
+	return id.String()[:8]
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // emptyListMessage says which state filter, change ticket and offset

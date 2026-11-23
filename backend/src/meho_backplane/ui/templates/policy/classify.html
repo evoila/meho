@@ -6,8 +6,8 @@
   "always wait" mark of one operation, one group, one connector, or many
   operations by pattern. Step 1 is the dry run (``Show what changes``):
   every matched operation with its values before and after; nothing is
-  written. Step 2 (in the dry-run result) asks for the change; it waits
-  until another tenant admin approves it.
+  written. Step 2 (in the dry-run result) makes the change: a change of
+  rights that a tenant admin makes in the console runs at once.
 
   Context contract:
     * ``enabled``    -- bool: the POLICY_CLASSIFICATION switch.

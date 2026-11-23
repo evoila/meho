@@ -422,14 +422,15 @@ async def test_flow_op_card_names_the_client(kc: KeycloakConnector) -> None:
 
 
 async def test_wrong_password_makes_one_failed_sign_in(kc: KeycloakConnector) -> None:
-    # The card and the check share one read, so one sign-in, not two.
+    # The card and the check share one read, so one sign-in for both. The
+    # approver rule reads the realm name once more, with its own sign-in.
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         sign_in = mock.post(f"/realms/{_ADMIN_REALM}/protocol/openid-connect/token").respond(
             401, json={"error": "invalid_client"}
         )
         result = await _dispatch(_FLOW_OP)
     assert result["status"] == "awaiting_approval", result
-    assert sign_in.call_count == 1
+    assert sign_in.call_count == 2
     assert (await _effect(result))["preview"]["rights_check"] == NO_RIGHTS_CHECK
 
 

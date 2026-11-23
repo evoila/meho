@@ -325,13 +325,8 @@ This runs the OAuth device-code flow: the CLI prints a verification
 URL and code, you approve it in a browser, and the CLI stores the
 resulting token in your OS keyring.
 
-**Who logs in.** The install made two users with temporary passwords: the first admin (`admin`, in `MEHO-Admins`)
-and an approver (`approver`, in `MEHO-SA-Operators`). The approver is not an admin. MEHO reads the old group `MEHO-SA-Operators` as
-Operators, so the approver can approve the admin's `safe` and `caution`
-changes. The admin approves their own `dangerous` and `destructive`
-changes. A change of rights needs a second admin. See
-[who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). Both logins are in the
-Secret `meho-core-first-login`. Keycloak asks for a new password, a
+**Who logs in.** The install made one Admin login with a temporary password (`admin`, in `MEHO-Admins` and
+`MEHO-Platform-Admins`). It is in the Secret `meho-core-first-login`. Keycloak asks for a new password, a
 name and an email at the first login. Then it asks you to set up an
 authenticator app, and shows twelve recovery codes once. Save them: each
 works one time, instead of the code from the app. Read the admin's user name,
@@ -350,7 +345,7 @@ kubectl -n meho get secret meho-core-first-login \
 Do not run the password command without the last pipe. Clear the clipboard
 after the first login.
 
-Keep these passwords in your own key store.
+Keep this password in your own key store.
 
 Prove the whole chain end to end:
 
@@ -595,14 +590,11 @@ realm needs:
    PKCE — what `meho approvals approve` uses for its fresh sign-in;
 6. eight **protocol mappers** and four **default client scopes** on the
    login clients, so issued tokens carry the claims MEHO validates;
-7. five **groups** (`MEHO-Readers`, `MEHO-Operators`,
-   `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers`) that give each
+7. three **groups** (`MEHO-Readers`, `MEHO-Operators`,
+   `MEHO-Admins`) that give each
    person their tenant and role. The groups are the only source: no
    login client carries a fixed tenant or role;
-8. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`, and a
-   second one in `MEHO-SA-Operators`. MEHO reads that old group as
-   Operators, so the second person can approve the first one's `safe`
-   and `caution` changes.
+8. a first **user** in `MEHO-Admins` and `MEHO-Platform-Admins`.
 
 **Follow [Keycloak realm setup](keycloak-realm.md) now** — it is the
 step-by-step recipe, including the non-obvious Keycloak 25+ `basic`

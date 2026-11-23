@@ -77,6 +77,7 @@ _PREVIEW: dict[str, Any] = {
     "redacted_body": _PARAMS,
 }
 _PREVIEW_HASH = preview_module.compute_preview_hash(_PREVIEW)
+_PREVIEW["preview_hash"] = _PREVIEW_HASH
 
 #: The card of a user found by name: the approver saw this id.
 _USER_CARD: dict[str, Any] = {

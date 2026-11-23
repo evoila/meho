@@ -84,6 +84,11 @@ from meho_backplane.connectors.keycloak._paths import (
     _USER_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_group_meho_access_guard import (
+    refuse_group_meho_access_loss,
+)
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import refuse_own_client_write
+from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import refuse_meho_access_loss
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     CLIENT_DELETE_OP,
     GROUP_DELETE_OP,
@@ -364,6 +369,9 @@ async def keycloak_user_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_user_guards(self, operator, target, found)
+    await refuse_meho_access_loss(
+        self, operator, target, found.rep or {}, op_id=USER_DELETE_OP, params=params
+    )
     path = fill_path(_USER_PATH, {"realm": found.realm, "user-id": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=USER_DELETE_OP, path=path, result=result
@@ -382,6 +390,15 @@ async def keycloak_client_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     await check_client_guards(self, operator, target, found)
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
+        CLIENT_DELETE_OP,
+        found.realm,
+        found.rep,
+        named=params.get("client_id"),
+    )
     path = fill_path(_CLIENT_PATH, {"realm": found.realm, "client-uuid": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=CLIENT_DELETE_OP, path=path, result=result
@@ -409,6 +426,15 @@ async def keycloak_group_delete(
     if not found.present or found.object_id is None:
         return _absent(result)
     check_group_guards(found, params)
+    await refuse_group_meho_access_loss(
+        self,
+        operator,
+        target,
+        found.object_id,
+        op_id=GROUP_DELETE_OP,
+        params=params,
+        realm=found.realm,
+    )
     path = fill_path(_GROUP_PATH, {"realm": found.realm, "group-id": found.object_id})
     return await _delete_and_verify(
         self, operator, target, op_id=GROUP_DELETE_OP, path=path, result=result

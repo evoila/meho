@@ -211,6 +211,32 @@ JSON-shaped (so it can grow without a migration):
     the stored id. One `approval.reveal` audit row, nothing runs. A hosted run
     does not offer this input today; the check holds wherever the list is
     bound.
+  - `list_targets` shows only the targets whose connector is in the list
+    (`targets_within_limit` in `operations/_target_connector_limit.py`).
+    A target that picks no single connector is left out. Each page holds
+    up to `limit` such targets, and its `next_cursor` is the name of the
+    last of them (`_read_target_page` in `mcp/tools/topology.py` reads on
+    past the targets outside the list, at least 200 rows at a time).
+    `targets_within_limit` reads the saved login types of all the targets
+    in one read per tenant, so a target of a connector made from a saved
+    API file is checked like any other.
+  - The target resolver (`targets/resolver.py`, `_pick_one`) does three
+    things with a list:
+    - When every hit of the exact-name step, or every hit of the alias
+      step, is outside the list, the answer is `no_target` with no close
+      names.
+    - An answer never names a target outside the list, and never names
+      its product.
+    - The near-matches of a `no_target` answer leave out the targets
+      outside the list, so there can be fewer than five, or none.
+    Test: `tests/test_agent_connector_list_hidden_targets.py`.
+  - `list_operation_groups` and `search_operations` refuse a
+    `connector_id` outside the list before the handler runs, like
+    `call_operation` (`_CONNECTOR_SCOPED_TOOLS` in `agent/toolset.py`).
+    Test: `tests/test_agent_connector_list_targets.py`.
+  - The list does not limit Memory, knowledge or the broadcast
+    (`search_memory`, `search_knowledge`, `read_context_resource`,
+    `broadcast_recent`, `broadcast_watch`). These are shared on purpose.
   - With `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST=true`
     (`Settings.agent_topology_off_with_connector_list`, off by default),
     `query_topology` is not registered for a spec with a list (disabled
@@ -510,12 +536,12 @@ hosted tool also needs its role floor, and the docs tools need the tenant's
 |---|---|---|
 | `meho_status` | yes | Default. Same health payload, without the MCP session fields. |
 | `meho_connector_list` | yes | Default. Shows only the allowed connectors when the spec has a `connectors` list. |
-| `list_operation_groups` | yes | Default. |
-| `search_operations` | yes | Default. |
+| `list_operation_groups` | yes | Default. With a `connectors` list, answers only for connectors in the list. |
+| `search_operations` | yes | Default. With a `connectors` list, answers only for connectors in the list. |
 | `call_operation` | yes | Default. Same dispatch: policy, grants, approval and audit. |
 | `preview_operation` | yes | Default. |
 | `result_query` | yes | Default. With a `connectors` list, reads only results stored under the list. |
-| `list_targets` | yes | Default. |
+| `list_targets` | yes | Default. With a `connectors` list, shows only the targets of connectors in the list. |
 | `meho_broadcast_announce` | yes | Default, named `broadcast_announce`. |
 | `meho_broadcast_recent` | yes | Default, named `broadcast_recent`. |
 | `meho_broadcast_watch` | yes | Default, named `broadcast_watch`. |

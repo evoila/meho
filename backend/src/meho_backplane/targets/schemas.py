@@ -603,8 +603,11 @@ class TargetUpdate(BaseModel):
     # #3711. Entries are merged into the stored map: a string value adds or
     # replaces that entry, a ``null`` value removes it. An explicit
     # ``{"secret_field_map": null}`` clears the whole map. Absent = untouched.
+    # One change may remove every stored entry and add a full new set, so it
+    # holds up to twice the limit; the merged map keeps the limit
+    # (``merge_secret_field_map``).
     secret_field_map: dict[SecretFieldName, SecretFieldName | None] | None = Field(
-        default=None, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+        default=None, max_length=2 * SECRET_FIELD_MAP_MAX_ENTRIES
     )
     extras: dict[str, Any] | None = None
     notes: str | None = None

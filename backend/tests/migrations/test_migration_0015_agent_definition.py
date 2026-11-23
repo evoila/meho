@@ -60,6 +60,7 @@ _EXPECTED_COLUMNS = {
     "output_schema",
     "enabled",
     "created_by_sub",
+    "updated_by_sub",
     "created_at",
     "updated_at",
 }

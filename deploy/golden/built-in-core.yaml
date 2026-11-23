@@ -389,20 +389,6 @@ data:
           }
         },
         {
-          "name": "MEHO-SA-Operators",
-          "attributes": {
-            "tenant_id": [
-              "${MEHO_REALM_TENANT_ID}"
-            ],
-            "tenant_role": [
-              "operator"
-            ],
-            "meho_tenant": [
-              "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:SA-Operators"
-            ]
-          }
-        },
-        {
           "name": "MEHO-Admins",
           "attributes": {
             "tenant_id": [
@@ -413,23 +399,6 @@ data:
             ],
             "meho_tenant": [
               "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Admins"
-            ]
-          }
-        },
-        {
-          "name": "MEHO-Approvers",
-          "attributes": {
-            "tenant_id": [
-              "${MEHO_REALM_TENANT_ID}"
-            ],
-            "tenant_role": [
-              "read_only"
-            ],
-            "approver": [
-              "true"
-            ],
-            "meho_tenant": [
-              "${MEHO_REALM_TENANT_ID}:${MEHO_REALM_TENANT_NAME}:Approvers"
             ]
           }
         },
@@ -4183,7 +4152,7 @@ spec:
                   fieldPath: metadata.namespace
             # Names and addresses only; every secret below comes by reference.
             - name: MEHO_CORE_KEYCLOAK_PLAN
-              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+              value: "{\"admin_username\":\"admin\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
             # Values for the `${...}` placeholders of the realm file, the
             # same ones the Keycloak pod gets.
             - name: MEHO_REALM_PUBLIC_URL
@@ -4299,7 +4268,7 @@ spec:
           terminationMessagePolicy: FallbackToLogsOnError
           env:
             - name: MEHO_CORE_KEYCLOAK_PLAN
-              value: "{\"admin_username\":\"admin\",\"approver_username\":\"approver\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
+              value: "{\"admin_username\":\"admin\",\"ci\":{\"enabled\":false,\"secret_name\":\"golden-core-ci-login\",\"tenant_id\":\"\"},\"console_admin_secret\":\"golden-core-console-admin\",\"console_admin_username\":\"console-admin\",\"first_login_secret\":\"golden-core-first-login\",\"keycloak_url\":\"http://golden-keycloak:8080/auth\",\"realm_file\":\"/opt/meho/realm/meho-realm.json\",\"tenants\":[]}"
             # The secrets Job (-30) makes it. Optional, so a missing Secret
             # means "cannot tell" and not a pod that never starts.
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET

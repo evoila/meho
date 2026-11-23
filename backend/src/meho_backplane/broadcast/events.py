@@ -84,6 +84,7 @@ from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
+    "HIDDEN_PARAM_MARKER",
     "BroadcastEvent",
     "classify_op",
     "has_snmp_word",
@@ -1100,6 +1101,9 @@ _REFERENCE_WORD: Final[str] = "ref"
 #: engine's ``[REDACTED:<pattern>]`` shape so feed consumers see one
 #: consistent redaction vocabulary.
 _REDACTED_PARAM: Final[str] = "[REDACTED:param_name]"
+
+#: The marker that replaces a hidden param value in a stored request.
+HIDDEN_PARAM_MARKER: Final[str] = _REDACTED_PARAM
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 

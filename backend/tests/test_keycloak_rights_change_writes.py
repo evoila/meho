@@ -11,11 +11,13 @@ tests check:
   fails here until it gets this decision;
 * every change of rights is registered as one and carries the per-call
   mark, from the register function alone;
-* for each change of rights: the requester cannot approve their own
-  request, a MEHO-SA-Operator who is not an admin cannot approve it,
-  another admin can, no standing grant can be made for it, an older grant
-  row does not clear the wait, a run approval cannot list it or clear the
-  wait, and an agent's call waits even with a grant that would run it.
+* for each change of rights: a requester who is not an admin cannot
+  approve their own request, a MEHO-SA-Operator who is not an admin cannot
+  approve it, an admin can in the web console (also the admin who asked),
+  no admin can with a token, no standing grant can be made for it, an
+  older grant row does not clear the wait, a run approval cannot list it
+  or clear the wait, and an agent's call waits even with a grant that
+  would run it.
 
 Fixture values are made up.
 """
@@ -35,7 +37,6 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
     KeycloakConnector,
 )
-from meho_backplane.connectors.keycloak.ops_write_grant import GRANT_OPS
 from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,
     RIGHTS_CHANGE_OPS,
@@ -89,10 +90,15 @@ from tests.test_api_v1_approvals_fresh_sign_in import (
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _RIGHTS = tuple(sorted(RIGHTS_CHANGE_OPS))
-_RIGHTS_NOT_GRANT = tuple(op for op in _RIGHTS if op not in GRANT_OPS)
-#: A ``caution`` write that is not a change of rights: a grant or a run
-#: approval still covers it, so the tests show that the wait comes from
-#: the mark and not from a grant that does not match.
+#: The changes of rights with no approval card facts: neither one login or
+#: group (``GRANT_OPS``) nor a write that can give platform admin rights.
+_RIGHTS_NOT_GRANT = tuple(op for op in _RIGHTS if op not in grant_approval._GRANT_OPS)
+#: A ``caution`` write that is not a change of rights: outside the login
+#: realm a grant or a run approval covers it, so the tests show that the
+#: wait comes from the mark and not from a grant that does not match. The
+#: calls here name no target, which counts as the login realm, so the tests
+#: take away the login realm check of the control
+#: (:func:`_without_login_realm_check`); that check has its own tests.
 _CONTROL = "keycloak.user.logout"
 _PARAMS: dict[str, Any] = {"representation": {"name": "example"}}
 _REQUESTER = "person-requester"
@@ -101,7 +107,11 @@ _RUN_REF = "run-keycloak-0001"
 
 
 def _person(
-    sub: str, *, role: TenantRole = TenantRole.TENANT_ADMIN, sa_operator: bool = False
+    sub: str,
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    sa_operator: bool = False,
+    web: bool = True,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -109,6 +119,7 @@ def _person(
         tenant_id=_TENANT_A,
         tenant_role=role,
         self_approver=sa_operator,
+        web_session=web,
     )
 
 
@@ -251,8 +262,10 @@ async def _status(request_id: uuid.UUID) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _RIGHTS)
-async def test_the_requester_cannot_approve_their_own_request(op_id: str) -> None:
-    requester = _person(_REQUESTER, sa_operator=True)
+async def test_a_requester_who_is_not_an_admin_cannot_approve_their_own_request(
+    op_id: str,
+) -> None:
+    requester = _person(_REQUESTER, role=TenantRole.OPERATOR, sa_operator=True)
     request_id = await _park(op_id, requester)
 
     with pytest.raises(RightsChangeApprovalError):
@@ -274,12 +287,35 @@ async def test_an_sa_operator_who_is_not_an_admin_cannot_approve(op_id: str) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _RIGHTS_NOT_GRANT)
-async def test_another_admin_approves(op_id: str) -> None:
+async def test_another_admin_approves_in_the_console(op_id: str) -> None:
     request_id = await _park(op_id, _person(_REQUESTER, role=TenantRole.OPERATOR))
 
     await _approve(request_id, _person("person-admin"))
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _RIGHTS_NOT_GRANT)
+async def test_the_admin_who_asked_approves_in_the_console(op_id: str) -> None:
+    request_id = await _park(op_id, _person(_REQUESTER))
+
+    await _approve(request_id, _person(_REQUESTER))
+
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _RIGHTS)
+async def test_no_admin_approves_with_a_token(op_id: str) -> None:
+    request_id = await _park(op_id, _person(_REQUESTER))
+
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person(_REQUESTER, web=False))
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person("person-admin", web=False))
+
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -345,9 +381,16 @@ async def _add_grant_rows(*op_ids: str) -> None:
         await session.commit()
 
 
+def _without_login_realm_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.operations import grant_cover_check
+
+    monkeypatch.delitem(grant_cover_check._CHECKS, _CONTROL)
+
+
 @pytest.mark.asyncio
-async def test_an_older_grant_row_does_not_clear_the_wait() -> None:
+async def test_an_older_grant_row_does_not_clear_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     await KeycloakConnector.register_operations()
+    _without_login_realm_check(monkeypatch)
     # Written straight to the table, past the create check.
     await _add_grant_rows(*_RIGHTS, _CONTROL)
     service = _machine(PrincipalKind.SERVICE)
@@ -358,8 +401,9 @@ async def test_an_older_grant_row_does_not_clear_the_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_run_approval_does_not_clear_the_wait() -> None:
+async def test_a_run_approval_does_not_clear_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     await KeycloakConnector.register_operations()
+    _without_login_realm_check(monkeypatch)
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
         session.add(
@@ -455,7 +499,7 @@ async def test_an_edit_that_turns_approval_off_is_refused(op_id: str) -> None:
         overrides = (await session.execute(select(OperationPolicyOverride))).scalars().all()
 
     assert caught.value.code == "approval_off_rights_change"
-    assert "another admin" in str(caught.value)
+    assert "an admin approves it in the web console" in str(caught.value)
     assert overrides == []
 
 
@@ -482,7 +526,7 @@ async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -
         sub=_REQUESTER,
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT_A,
-        tenant_role=TenantRole.TENANT_ADMIN,
+        tenant_role=TenantRole.OPERATOR,
         web_session=True,
     )
 
@@ -494,7 +538,12 @@ async def test_an_older_override_with_approval_off_does_not_let_the_call_run() -
 def test_every_registered_change_of_rights_keeps_approval() -> None:
     import meho_backplane.connectors.policy  # noqa: F401 -- registers its changes of rights
 
-    registered = set(grant_approval._GRANT_OPS) | set(grant_approval._RIGHTS_CHANGE_OPS)
+    always = {
+        op
+        for op, grant in grant_approval._GRANT_OPS.items()
+        if grant.applies is None and grant.per_call
+    }
+    registered = always | set(grant_approval._RIGHTS_CHANGE_OPS)
     assert set(RIGHTS_CHANGE_OPS) <= registered
     assert len(registered) > len(RIGHTS_CHANGE_OPS)
     off = EffectivePolicy(safety_level="safe", requires_approval=False)

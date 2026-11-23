@@ -184,7 +184,10 @@ or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
 `credential_mint` (for example `vault.token.create`). The class comes from
 the class stored on the row of an ingested operation, or from the op id (a
 connector's `declare_op_classes`, or the core lists of
-`broadcast/events.py`). The rule is the one of the standing grants
+`broadcast/events.py`). An operation a connector marks with
+`declare_credential_capable` counts too (today `k8s.exec` and
+`proxmox.api.write`), and so does a `k8s.apply` whose manifest holds a
+Secret or cannot be read. The rule is the one of the standing grants
 (`service_grants.credential_grant_reason`,
 [service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
@@ -231,6 +234,25 @@ kind is not among them gets 403 `approval_group_required` with the entry
 and one sentence that names who may approve. A change of rights is not
 routed. A run approval stores no kinds: they are worked out at the
 approve. With the switch off, nothing changes.
+
+## The people behind the service login
+
+`RunApprovalService.approve` looks up the people behind the service login
+that asked (`_check_people_behind`): who paired or owns its add-on and who
+gave one of its standing grants in force. MEHO finds the add-on pairing by
+the login id, and by the client id it stored on the list when the add-on
+asked (`run_approval.principal_client_id`). The lookup runs at approve time,
+so a list that waited across an upgrade follows the rule too.
+
+- A person behind the login may approve the list only when they may approve
+  their own change (`Operator.may_self_approve`). Else `403`
+  `own_change: ...`.
+- MEHO knows nobody behind the login: only an admin may approve. Else `403`
+  `requester_not_known: ...`.
+- An entry that is a change of rights: never the requester and never a
+  person behind it (`rights_change_required`).
+
+See [The people behind a request](approvals.md#the-people-behind-a-request).
 
 ## REST
 

@@ -253,7 +253,7 @@ func printListTable(w io.Writer, r *api.ConventionListResponse) {
 			e.Kind,
 			e.Priority,
 			e.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-			truncate(e.Title, 60),
+			output.SafeText(truncate(e.Title, 60)),
 		)
 	}
 }

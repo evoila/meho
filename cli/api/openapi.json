@@ -2184,7 +2184,7 @@
           "policy"
         ],
         "summary": "Import Policy",
-        "description": "Show what the file would change (``?preview=true``), or ask to import it.\n\nThe import replaces the whole policy of *scope*: an entry that is not in\nthe file is removed. It waits until a second admin approves it.",
+        "description": "Show what the file would change (``?preview=true``), or ask to import it.\n\nThe import replaces the whole policy of *scope*: an entry that is not in\nthe file is removed. It waits until an admin approves it in the web console.",
         "operationId": "import_policy_api_v1_policy_import_post",
         "parameters": [
           {
@@ -5567,7 +5567,7 @@
           "connectors"
         ],
         "summary": "Edit Group Endpoint",
-        "description": "Edit a group's ``when_to_use`` / ``name`` overrides.\n\nAt least one of the two body fields must be set; an empty body\nyields 400. Writes one ``meho_connector_edit_group`` audit row\nvia the service layer. Returns 204 on success.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; another tenant admin must approve it. Sent with other fields: 400.",
+        "description": "Edit a group's ``when_to_use`` / ``name`` overrides.\n\nAt least one of the two body fields must be set; an empty body\nyields 400. Writes one ``meho_connector_edit_group`` audit row\nvia the service layer. Returns 204 on success.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.",
         "operationId": "edit_group_endpoint_api_v1_connectors__connector_id__groups__group_key__patch",
         "parameters": [
           {
@@ -5614,7 +5614,7 @@
             "description": "Successful Response"
           },
           "202": {
-            "description": "category / labels were sent: the change waits until another tenant admin approves it.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5643,7 +5643,7 @@
           "connectors"
         ],
         "summary": "Edit Op Endpoint",
-        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; another tenant admin must approve it. Sent with other fields: 400.",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.",
         "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
         "parameters": [
           {
@@ -5697,7 +5697,7 @@
             }
           },
           "202": {
-            "description": "category / labels were sent: the change waits until another tenant admin approves it.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6116,7 +6116,7 @@
           "policy"
         ],
         "summary": "Request Classification",
-        "description": "Ask for one edit. It waits until another tenant admin approves it.\n\nRefused with ``400`` (nothing asked) when the edit is not valid, matches\nno operation, or would give an operation a conflict: run the preview\nfirst to see why.",
+        "description": "Ask for one edit. It waits until a tenant admin approves it in the web console.\n\nRefused with ``400`` (nothing asked) when the edit is not valid, matches\nno operation, or would give an operation a conflict: run the preview\nfirst to see why.",
         "operationId": "request_classification_api_v1_policy_classification_post",
         "parameters": [
           {
@@ -6142,7 +6142,7 @@
         },
         "responses": {
           "202": {
-            "description": "The change waits until another tenant admin approves it.",
+            "description": "The change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6224,7 +6224,7 @@
           "connectors"
         ],
         "summary": "Classify Connector",
-        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until another tenant admin approves it. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
+        "description": "Ask to set the category, labels or \"always wait\" of one whole connector.\n\nIts groups and operations take these values unless they have their own.\nWaits until a tenant admin approves it in the web console. A connector id with\n``*``, ``?`` or ``[`` is refused with ``400``: this route edits one\nconnector, never a pattern.",
         "operationId": "classify_connector_api_v1_connectors__connector_id__classification_patch",
         "parameters": [
           {
@@ -6259,7 +6259,7 @@
         },
         "responses": {
           "202": {
-            "description": "The change waits until another tenant admin approves it.",
+            "description": "The change waits until a tenant admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8556,7 +8556,7 @@
           "audit"
         ],
         "summary": "Show",
-        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".",
+        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".\n\n``stored_session_id`` names the stored agent session of the row (#4904).\nIt is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person\nwho may read sessions\n(:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).\nFor anyone else, and for a row with no stored session, the answer has\nno such field: it is the same as before the switch existed.",
         "operationId": "show_api_v1_audit_show__audit_id__get",
         "parameters": [
           {
@@ -8586,7 +8586,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuditEntry"
+                  "$ref": "#/components/schemas/AuditEntryDetail"
                 }
               }
             }
@@ -8710,7 +8710,7 @@
           "audit"
         ],
         "summary": "Trace",
-        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams stored and never\nre-processes, un-redacts, or writes.\n\nA person keeps **full** access, independent of the agent gate: this serves\nredaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so\nan operator sees when a trace was withheld from agents. Paired add-ons\nuse this same route \u2014 no separate add-on surface. A paired add-on logs in\nas a service login, so it gets the traces of its own calls.\n\nAn **agent** login gets the same rules as the agent read\n(:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the\ntenant lets agents read traces\n(:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), only\nthe trace of a call the agent made itself, and never a trace marked\n``redaction_uncertain``. A **service** login gets only the trace of a\ncall it made itself. Each answers ``trace_present=False``, like a\ndispatch with no trace. A call that ran after a person approved it\nbelongs to the login that asked for it.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the\nanswer is the same as for an id that does not exist. An audit row that\nexists but carries **no trace** is a 200 with ``trace_present=False`` \u2014\ncapture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder; any\nother class answers ``trace_present=False``.",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams stored and never\nre-processes, un-redacts, or writes.\n\nA person keeps **full** access, independent of the agent gate: this serves\nredaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so\nan operator sees when a trace was withheld from agents. Paired add-ons\nuse this same route \u2014 no separate add-on surface. A paired add-on logs in\nas a service login, so it gets the traces of its own calls.\n\nAn **agent** login gets the same rules as the agent read\n(:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the\ntenant lets agents read traces\n(:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), only\nthe trace of a call the agent made itself, and never a trace marked\n``redaction_uncertain``. A **service** login gets only the trace of a\ncall it made itself. Each answers ``trace_present=False``, like a\ndispatch with no trace. A call that ran after a person approved it\nbelongs to the login that asked for it.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and the\nanswer is the same as for an id that does not exist. An audit row that\nexists but carries **no trace** is a 200 with ``trace_present=False`` \u2014\ncapture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nA service login reads only the rows of its own calls, so for a row of\nanother login it gets the same 404. One case differs: a call that ran\nafter a person approved it. Its audit row names the person who\napproved, but its trace names the login that asked for the call. That\nlogin gets the trace (:func:`_trace_asked_by`); the answer holds no\nfield of the approver's audit row.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder; any\nother class answers ``trace_present=False``.",
         "operationId": "trace_api_v1_audit__audit_id__trace_get",
         "parameters": [
           {
@@ -13679,7 +13679,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(``targets.register`` and the ``topology.*`` writes need\n``tenant_admin``); below it the answer is 403 ``role_floor_required``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. A grant lets the service principal run\nthe op with no approval, so the caller needs the op's role floor\n(the ``topology.*`` writes need ``tenant_admin``); below it the answer\nis 403 ``role_floor_required``. A grant for ``targets.register`` or\n``targets.update`` is refused, because a person approves each call of\nthese ops: 422, or 403 ``role_floor_required`` below ``tenant_admin``.\nAudited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -17941,7 +17941,7 @@
           "ui-policy"
         ],
         "summary": "Ui Policy Classify Request",
-        "description": "Ask for the change. It waits until another tenant admin approves it.",
+        "description": "Make the change. A tenant admin's change of rights in the console runs at once.",
         "operationId": "ui_policy_classify_request_ui_policy_classify_request_post",
         "requestBody": {
           "content": {
@@ -28077,6 +28077,19 @@
             "nullable": true,
             "title": "Principal Kind"
           },
+          "people_behind": {
+            "items": {
+              "$ref": "#/components/schemas/PersonBehindView"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "People Behind"
+          },
+          "people_behind_known": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "People Behind Known"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"
@@ -28191,6 +28204,12 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
           },
           "reviewer_context": {
             "$ref": "#/components/schemas/ReviewerContextView",
@@ -29059,6 +29078,182 @@
         ],
         "title": "AuditEntry",
         "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` takes the whole id (see its field).\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``actor_sub`` \u2190 ``audit_log.actor_sub`` (#5773): the agent that acted\n  for the person in ``principal_sub``, in a run the person started.\n  ``None`` when nobody acted for another login.\n* ``actor_name`` \u2014 the agent's name, read from ``actor_sub``\n  (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+      },
+      "AuditEntryDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "title": "Result Status"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "policy_decision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Decision"
+          },
+          "policy_rule": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Rule"
+          },
+          "policy_version": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Policy Version"
+          },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
+          },
+          "actor_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Name"
+          },
+          "broadcast_event_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Broadcast Event Id"
+          },
+          "stored_session_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Stored Session Id",
+            "description": "The stored agent session this row belongs to, for `meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS on, to a person who may read sessions, for a row with a stored session."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "tenant_id",
+          "principal_sub",
+          "principal_name",
+          "target_id",
+          "target_name",
+          "method",
+          "path",
+          "status_code",
+          "request_id",
+          "duration_ms",
+          "payload",
+          "op_id",
+          "op_class",
+          "result_status",
+          "parent_audit_id",
+          "agent_session_id",
+          "work_ref",
+          "policy_decision",
+          "event_class",
+          "sandbox_mode",
+          "broadcast_event_id"
+        ],
+        "title": "AuditEntryDetail",
+        "description": "The 200 body of ``GET /api/v1/audit/show/{audit_id}``: one row, and its stored session.\n\nOnly this route has ``stored_session_id`` (#4904). The list, query and\nreplay answers keep the plain :class:`AuditEntry`."
       },
       "AuditEventClass": {
         "type": "string",
@@ -32662,7 +32857,7 @@
           "changed_operations"
         ],
         "title": "ClassificationRequestResponse",
-        "description": "The answer to an edit request: it waits until a second tenant admin approves it."
+        "description": "The answer to an edit request: it waits until a tenant admin approves it in the console."
       },
       "ClassificationTaxonomyOut": {
         "properties": {
@@ -35546,7 +35741,7 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "nullable": true,
             "title": "Category",
-            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it."
+            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console."
           },
           "labels": {
             "additionalProperties": {
@@ -35556,7 +35751,7 @@
             "maxProperties": 32,
             "nullable": true,
             "title": "Labels",
-            "description": "Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin."
+            "description": "Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console."
           }
         },
         "additionalProperties": false,
@@ -35606,7 +35801,7 @@
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "nullable": true,
             "title": "Category",
-            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until another tenant admin approves it."
+            "description": "A category of the taxonomy. A change of rights: send it without other fields; the answer is 202 and the change waits until a tenant admin approves it in the web console."
           },
           "labels": {
             "additionalProperties": {
@@ -35616,7 +35811,7 @@
             "maxProperties": 32,
             "nullable": true,
             "title": "Labels",
-            "description": "Free key=value labels. Same rules as category: a request of its own that waits for another tenant admin."
+            "description": "Free key=value labels. Same rules as category: a request of its own that waits for a tenant admin's approval in the web console."
           }
         },
         "additionalProperties": false,
@@ -40015,6 +40210,35 @@
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
       },
+      "PersonBehindView": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Name"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "why_text": {
+            "type": "string",
+            "title": "Why Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "why",
+          "why_text"
+        ],
+        "title": "PersonBehindView",
+        "description": "One person behind the agent, service or runner login that asked."
+      },
       "PolicyExplainBody": {
         "properties": {
           "connector_id": {
@@ -44107,6 +44331,15 @@
             },
             "type": "array",
             "title": "Uploads"
+          },
+          "mcp_sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionMcpLink"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Mcp Sessions",
+            "description": "The MCP sessions of the session's calls: for an upload, the ones MEHO found at upload; for a hosted agent run, the run itself. Their audit rows link to this session. Sent only with the switch AUDIT_SESSION_LINKS on."
           }
         },
         "type": "object",
@@ -44170,6 +44403,29 @@
         ],
         "title": "SessionListResponse",
         "description": "A page of sessions, newest upload first."
+      },
+      "SessionMcpLink": {
+        "properties": {
+          "mcp_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mcp Session Id",
+            "description": "The agent_session_id of the audit rows of these calls."
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref",
+            "description": "The newest work reference (ticket id) on those audit rows, or null."
+          }
+        },
+        "type": "object",
+        "required": [
+          "mcp_session_id",
+          "work_ref"
+        ],
+        "title": "SessionMcpLink",
+        "description": "One MCP session whose calls are in this session."
       },
       "SessionRetention": {
         "properties": {
@@ -45594,7 +45850,7 @@
               "minLength": 1
             },
             "type": "object",
-            "maxProperties": 50,
+            "maxProperties": 100,
             "nullable": true,
             "title": "Secret Field Map"
           },

@@ -133,10 +133,12 @@ func sendFeedRequest(ctx context.Context, client *api.AuthedClient, feedURL, las
 	}
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
+	api.SetSessionIDHeader(req, client.SessionID())
 	if lastEventID != "" {
 		req.Header.Set("Last-Event-Id", lastEventID)
 	}
 	api.SetWorkRefHeader(req)
+	api.SetCommandHeader(req)
 	api.SetTenantHeader(req)
 	resp, err := client.HTTPClient().Do(req)
 	if err != nil {
@@ -202,6 +204,8 @@ func printFrameData(w io.Writer, raw string, jsonOut bool) error {
 	if err := json.Unmarshal([]byte(raw), &event); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(w, "%v\n", event)
+	// The event text comes from the server and may hold control
+	// characters; print them as visible escapes.
+	_, err := fmt.Fprintln(w, output.SafeText(fmt.Sprintf("%v", event)))
 	return err
 }

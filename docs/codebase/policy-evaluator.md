@@ -42,8 +42,11 @@ All are frozen dataclasses.
 | `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), every step in order (`steps`, each a `Step` with its rule and verdict), and the same steps as text lines (`trace`). |
 
 The op class marks of `Asked` come from the code: `root_shell`,
-`credential_read`, `per_call_approval`, `delete_shaped` and
-`classified_always_wait`.
+`credential_read`, `per_call_approval`, `delete_shaped`,
+`classified_always_wait` and `sandbox_delete_grant`. The last one is set
+in sandbox mode for an op marked with `declare_sandbox_delete_grant`
+(today only `k8s.delete`): a delete grant may still run its call, for a
+service login.
 
 ## Control flow
 
@@ -93,7 +96,8 @@ satellite ladder.
 `may_approve(asker, ask) -> (bool, RuleRef)` answers with today's rules,
 in the order of `approve_right`: only a person approves (floor); a
 `read_only` person needs the approver flag; only a pending request; a
-change of rights only another admin (floor); the checks of who a login or
+change of rights only an admin, with a click in the web interface (floor);
+the checks of who a login or
 group change is for; own changes (MEHO-Admins, a web
 click on a token-only `caution` wait, the break-glass switch for a lower
 risk level); another person's `dangerous` or `destructive` change only a
@@ -407,7 +411,7 @@ its own issue; when it is fixed, its line goes away.
   these checks. The sandbox cases without a hash are in
   `test_policy_shadow.py`.
 - A change of rights on the call side (#6595). `Decision.approvers` does
-  not know it yet (only another admin approves it), so the call table
+  does not know it yet (only an admin approves it), so the call table
   uses no such operation. The approval table covers it.
 - Approver routing (#6596). The evaluator does not know approver routing
   (`POLICY_APPROVER_ROUTING`): `Decision.approvers` and `may_approve`

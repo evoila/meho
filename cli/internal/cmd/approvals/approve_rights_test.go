@@ -177,7 +177,7 @@ func TestPrintDetailShowsMayApprove(t *testing.T) {
 		{ptr(true), ptr("own_change"), "May approve:  yes, your own change (a self-approval"},
 		{ptr(false), ptr("own_change"), "May approve:  no, it is your own change"},
 		{ptr(false), ptr("wrong_group"), "May approve:  no, another person's dangerous or destructive change needs a MEHO-Admin"},
-		{ptr(false), ptr("rights_change"), "May approve:  no, it is a change of rights and another admin must approve it"},
+		{ptr(false), ptr("rights_change"), "May approve:  no, it is a change of rights: approve this change of rights in the web console"},
 		{ptr(false), ptr("not_routed"), "May approve:  no, approvals of this change go to other login groups"},
 		{ptr(false), ptr("something_new"), "May approve:  no (something_new)"},
 	}
@@ -214,7 +214,7 @@ func TestPrintDetailShowsRightsChange(t *testing.T) {
 		d.RightsChange = c.mark
 		cmd, stdout, _ := newCapturingCmd(t)
 		printDetail(cmd, &d)
-		got := strings.Contains(stdout.String(), "Rights change: another admin must approve")
+		got := strings.Contains(stdout.String(), "Rights change: approve this change of rights in the web console")
 		if got != c.want {
 			t.Errorf("mark %v: got %v, want %v:\n%s", c.mark, got, c.want, stdout.String())
 		}

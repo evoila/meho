@@ -62,6 +62,11 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _UPDATE_OP = "keycloak.user.required_actions.update"
 _DISABLE_OP = "keycloak.user.disable"
@@ -395,8 +400,13 @@ async def test_the_sign_in_user_name_of_another_realm_is_not_refused(
 async def test_a_user_renamed_to_the_sign_in_user_while_the_request_waits_is_refused_on_run(
     kc: KeycloakConnector,
 ) -> None:
-    """The real path: park, rename, a second person approves, MEHO refuses and writes nothing."""
-    approver = _operator("kc-guard-approver", TenantRole.TENANT_ADMIN)
+    """The real path: park, rename, a second person approves, MEHO refuses and writes nothing.
+
+    The target manages ``master``, where a Platform Admin approves a Keycloak write.
+    """
+    approver = _operator("kc-guard-approver", TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True, "web_session": True}
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         api = _Keycloak(mock, _ADMIN_REALM)
         api.add(_user("event-guest", ["VERIFY_EMAIL"]))

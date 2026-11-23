@@ -9,8 +9,9 @@ Two surfaces, one substrate (T3 :func:`replay_session`):
   replay meta-tool. RBAC gate, tenant scoping, count-first 10k guard,
   and tree shape.
 * ``query_audit`` with ``shape="tree"`` — an ``operator`` self-session
-  replay path. The self-session check rejects any ``agent_session_id``
-  that is not the caller's own bound MCP session id (-32602).
+  replay path. A session whose stored rows hold no row of the caller's
+  own calls answers with an empty tree, the same as a session that does
+  not exist. The ``Mcp-Session-Id`` header plays no part in that check.
 
 The substrate (:func:`replay_session`) and the row-count helper are
 patched at the tool's import site so these tests don't depend on a
@@ -64,6 +65,7 @@ def _add_audit_row(
     second: int,
     method: str,
     agent_session_id: uuid.UUID | None,
+    operator_sub: str = "op-1",
 ) -> None:
     """Stage one :class:`AuditLog` row at a fixed base + ``second`` offset.
 
@@ -79,7 +81,7 @@ def _add_audit_row(
         AuditLog(
             id=uuid.uuid4(),
             occurred_at=base + timedelta(seconds=second),
-            operator_sub="op-1",
+            operator_sub=operator_sub,
             tenant_id=tenant_id,
             method=method,
             path="/mcp",
@@ -89,6 +91,23 @@ def _add_audit_row(
             agent_session_id=agent_session_id,
         ),
     )
+
+
+def _seed_own_session_row(op: Operator, session_id: str) -> None:
+    """Store one row of *op*'s own calls in *session_id*, so the session is theirs."""
+
+    async def _seed() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            _add_audit_row(
+                session,
+                tenant_id=op.tenant_id,
+                second=0,
+                method="MCP",
+                agent_session_id=uuid.UUID(session_id),
+                operator_sub=op.sub,
+            )
+
+    asyncio.run(_seed())
 
 
 def _node(node_id: str, *, depth: int, children: list[ReplayNode] | None = None) -> ReplayNode:
@@ -540,10 +559,12 @@ def test_query_audit_tree_own_session_returns_tree(
     """An operator replaying their OWN bound session gets the tree.
 
     The ``Mcp-Session-Id`` header binds the caller's session id; passing
-    the same id as ``agent_session_id`` with ``shape="tree"`` satisfies
-    the self-session check and dispatches through the substrate.
+    the same id as ``agent_session_id`` with ``shape="tree"``; the stored
+    rows of the session hold a row of the caller, so the call dispatches
+    through the substrate.
     """
     client, op = client_with_operator
+    _seed_own_session_row(op, _SESSION_ID)
     mock_replay = AsyncMock(return_value=_two_level_tree())
     mock_count = AsyncMock(return_value=2)
     with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):
@@ -577,18 +598,19 @@ def test_query_audit_tree_own_session_returns_tree(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_query_audit_tree_foreign_session_returns_invalid_params(
+def test_query_audit_tree_replays_only_the_rows_of_the_caller(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``shape="tree"`` with a DIFFERENT session id than the caller's own → -32602.
+    """``shape="tree"`` replays with the caller's own ``sub`` as ``owner_sub``.
 
-    This is the self-session security contract: even though the flat path
-    would happily return other in-tenant principals' rows, the tree path
-    is locked to the caller's own session. The substrate is never reached.
+    Also for a person, and whatever session id the ``Mcp-Session-Id`` header
+    names. With no row of the caller in the session the substrate returns no
+    root, so the answer is the same as for a session that does not exist.
     """
-    client, _op = client_with_operator
-    mock_replay = AsyncMock(return_value=_two_level_tree())
-    mock_count = AsyncMock(return_value=2)
+    client, op = client_with_operator
+    _seed_own_session_row(op.model_copy(update={"sub": "someone-else"}), _OTHER_SESSION_ID)
+    mock_replay = AsyncMock(return_value=[])
+    mock_count = AsyncMock(return_value=0)
     with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):
         response = post_mcp(
             client,
@@ -601,12 +623,15 @@ def test_query_audit_tree_foreign_session_returns_invalid_params(
                     "arguments": {"agent_session_id": _OTHER_SESSION_ID, "shape": "tree"},
                 },
             },
-            headers={"Mcp-Session-Id": _SESSION_ID},
+            headers={"Mcp-Session-Id": _OTHER_SESSION_ID},
         )
     body = response.json()
-    assert body["error"]["code"] == INVALID_PARAMS
-    assert "own session" in body["error"]["message"].lower()
-    mock_replay.assert_not_awaited()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["root"] == []
+    assert payload["row_count"] == 0
+    assert mock_replay.await_args.kwargs["owner_sub"] == op.sub
+    assert mock_count.await_args.kwargs["owner_sub"] == op.sub
 
 
 @pytest.mark.parametrize(
@@ -642,22 +667,15 @@ def test_query_audit_tree_without_agent_session_id_returns_invalid_params(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_query_audit_tree_without_session_header_returns_invalid_params(
+def test_query_audit_tree_own_session_needs_no_session_header(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """No ``Mcp-Session-Id`` header → no contextvar → -32602.
-
-    With no header the transport does not bind the ``mcp_session_id``
-    contextvar at all (G0.14-T6 #1147 decoupled capture from
-    enforcement — no header, no synthetic id), so the self-session
-    check at :func:`_resolve_self_session_id` reads ``None`` and
-    rejects any ``agent_session_id`` the client supplies. The tree
-    path stays self-session-only even when the caller didn't establish
-    an explicit session.
-    """
-    client, _op = client_with_operator
+    """No ``Mcp-Session-Id`` header: the stored rows still prove the session is yours."""
+    client, op = client_with_operator
+    _seed_own_session_row(op, _SESSION_ID)
     mock_replay = AsyncMock(return_value=_two_level_tree())
-    with patch(_REPLAY_PATCH, new=mock_replay):
+    mock_count = AsyncMock(return_value=2)
+    with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):
         response = post_mcp(
             client,
             {
@@ -671,8 +689,10 @@ def test_query_audit_tree_without_session_header_returns_invalid_params(
             },
         )
     body = response.json()
-    assert body["error"]["code"] == INVALID_PARAMS
-    mock_replay.assert_not_awaited()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["row_count"] == 2
+    mock_replay.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -684,7 +704,8 @@ def test_query_audit_tree_session_too_large_returns_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
     """The self-session tree path shares the count-first 10k guard."""
-    client, _op = client_with_operator
+    client, op = client_with_operator
+    _seed_own_session_row(op, _SESSION_ID)
     mock_replay = AsyncMock(return_value=_two_level_tree())
     mock_count = AsyncMock(return_value=10_001)
     with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):

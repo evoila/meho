@@ -5,9 +5,27 @@
 
 See :mod:`meho_backplane.op_classes`. The broadcast classifier reads these
 before its pattern rules.
+
+Every ``k8s.apply`` waits for a person, for every kind of object: there is
+no list of kinds that keep the rules of the operation. So does every
+``k8s.exec``, ``k8s.delete``, ``k8s.label``, ``k8s.annotate`` and
+``k8s.namespace.create``. No standing grant, no agent grant and no run
+approval covers these calls. In sandbox mode a delete grant still covers
+``k8s.delete``, and only that one of them.
 """
 
-from meho_backplane.op_classes import declare_no_secret_value, declare_op_classes
+from collections.abc import Callable, Mapping
+from typing import Any, Final
+
+import yaml
+
+from meho_backplane.op_classes import (
+    declare_credential_capable,
+    declare_hidden_stored_param,
+    declare_no_secret_value,
+    declare_op_classes,
+    declare_sandbox_delete_grant,
+)
 
 declare_op_classes(
     credential_read=(
@@ -38,3 +56,123 @@ declare_op_classes(
 # The compare read returns only "same" or "different", never a value. So it
 # runs without waiting for approval (meho_backplane.operations.credential_read).
 declare_no_secret_value(("k8s.secret.compare_to_ref",))
+
+# Every call of these operations waits for a person, and no standing grant,
+# agent grant or run approval covers it:
+# - k8s.exec: a command in a container can read or write any credential the
+#   container holds.
+# - k8s.apply: what an apply does to an object depends on the object as it is
+#   on the cluster and on the fields other writers own, not only on the
+#   manifest.
+# - k8s.delete: it deletes a Pod, a Job or a ReplicaSet.
+# - k8s.label and k8s.annotate: on a Namespace they can set or remove the
+#   labels that decide how the cluster checks the pods in it.
+# - k8s.namespace.create: it makes a new namespace, and MEHO sets no labels
+#   on it.
+declare_credential_capable(
+    ("k8s.exec", "k8s.apply", "k8s.delete", "k8s.label", "k8s.annotate", "k8s.namespace.create")
+)
+
+# In sandbox mode a live delete grant still covers k8s.delete. No other
+# grant covers it, and a delete grant covers none of the other calls above.
+declare_sandbox_delete_grant(("k8s.delete",))
+
+#: Kinds whose objects hold a credential, in lower case. A ServiceAccount
+#: token is a Secret too.
+CREDENTIAL_KINDS: Final[frozenset[str]] = frozenset({"secret"})
+
+#: The most objects the check reads in one manifest: each document and each
+#: entry of an ``items`` array counts. A manifest with more counts as one MEHO
+#: cannot read. YAML aliases let a small text name the same object or the same
+#: ``items`` array many times; the check reads each of them once.
+MAX_CHECKED_OBJECTS: Final[int] = 10_000
+
+#: Tells whether one manifest object counts. It gets a mapping with a
+#: non-empty text ``kind``.
+_Counts = Callable[[Mapping[str, Any]], bool]
+
+
+def _is_list_kind(kind: str) -> bool:
+    """True for a Kubernetes list object: ``List`` in any case, or ``<Kind>List``.
+
+    Only the bare ``List`` is read without case: a kind such as ``Playlist``
+    is not a list.
+    """
+    return kind.lower() == "list" or kind.endswith("List")
+
+
+def _items_to_read(doc: Any, counts: _Counts) -> list[Any] | None:
+    """The ``items`` the check reads next, or ``None`` when *doc* counts.
+
+    *doc* counts when *counts* says so or when it cannot be read. Only a list
+    object (``kind: List`` or ``<Kind>List``) has its ``items`` read. The
+    ``items`` field of any other kind is part of its spec.
+    """
+    if not isinstance(doc, Mapping):
+        return None
+    kind = doc.get("kind")
+    if not isinstance(kind, str) or not kind or counts(doc):
+        return None
+    items = doc.get("items") if _is_list_kind(kind) else []
+    if items is None:
+        return []
+    return items if isinstance(items, list) else None
+
+
+def _any_object_counts(docs: list[Any], counts: _Counts) -> bool:
+    """True when a doc counts, a list holds one that counts, or one cannot be read.
+
+    Each object and each ``items`` array is read once. Each document and each
+    ``items`` entry counts toward :data:`MAX_CHECKED_OBJECTS`.
+    """
+    budget = len(docs)
+    stack = list(docs)
+    seen: set[int] = set()
+    while stack and budget <= MAX_CHECKED_OBJECTS:
+        doc = stack.pop()
+        if id(doc) in seen:
+            continue
+        seen.add(id(doc))
+        items = _items_to_read(doc, counts)
+        if items is None:
+            return True
+        if not items or id(items) in seen:
+            continue
+        seen.add(id(items))
+        budget += len(items)
+        stack.extend(items)
+    return budget > MAX_CHECKED_OBJECTS
+
+
+def _manifest_has(params: Mapping[str, Any], counts: _Counts) -> bool:
+    manifest = params.get("manifest")
+    if not isinstance(manifest, str):
+        return True
+    try:
+        docs = [doc for doc in yaml.safe_load_all(manifest) if doc is not None]
+    except (yaml.YAMLError, RecursionError):
+        return True
+    if not docs:
+        return True
+    return _any_object_counts(docs, counts)
+
+
+def _is_credential_kind(doc: Mapping[str, Any]) -> bool:
+    return str(doc["kind"]).lower() in CREDENTIAL_KINDS
+
+
+def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
+    """True when the ``k8s.apply`` manifest in *params* holds a credential kind.
+
+    Any document of a multi-document manifest counts, and any item of a
+    list object. A manifest MEHO cannot read counts too: it is not text, it is not
+    YAML or JSON, a document has no kind, or it has more than
+    :data:`MAX_CHECKED_OBJECTS` objects.
+    """
+    return _manifest_has(params, _is_credential_kind)
+
+
+# The manifest of an apply of a Secret holds the Secret's values. A stored
+# request keeps it only in the encrypted handoff of the run
+# (meho_backplane.operations.approval_queue.create_pending_request).
+declare_hidden_stored_param("k8s.apply", "manifest", manifest_holds_credential)

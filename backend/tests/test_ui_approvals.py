@@ -2578,6 +2578,78 @@ def test_modal_names_a_classification_conflict() -> None:
     assert "tenant:classifications[0]" in conflict
 
 
+def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
+    from meho_backplane.operations.service_grants import CREDENTIAL_CARD_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "k8s.exec",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "credential_wait": CREDENTIAL_CARD_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-credential-wait">')[1].split("</p>")[0]
+    assert line == CREDENTIAL_CARD_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-credential-wait"' not in plain
+
+
+def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
+    """The card lists the commands next to the warning that the preview failed."""
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview_unavailable": True,
+            "preview_error": "dry run refused",
+            "run_commands": [
+                {
+                    "object": "Pod/apps/a",
+                    "container": "web",
+                    "image": "registry.example.test/web:1",
+                    "command": ["sh", "-c", "serve"],
+                    "args": ["--token", "***REDACTED***"],
+                    "exec_commands": {"livenessProbe": ["check", "--alive"]},
+                },
+                {"omitted_containers": 2, "echo_omitted": "2 more container(s) not shown"},
+            ],
+        }
+    )
+    assert "Blast radius unknown" in body
+    block = body.split('data-testid="approval-run-commands"')[1].split("</ul>")[0]
+    assert "Pod/apps/a" in block
+    assert "registry.example.test/web:1" in block
+    assert "serve" in block
+    assert "livenessProbe" in block
+    assert "--alive" in block
+    assert "REDACTED" in block
+    assert "2 more container(s) not shown" in block
+
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-run-commands"' not in plain
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(

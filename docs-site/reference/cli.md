@@ -20,6 +20,10 @@ Every command accepts the global flags below.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`. The backplane cleans every ticket id with one rule: it removes white space at both ends, refuses an empty value, control characters (also a tab inside the id) and invisible characters, allows at most 256 characters, and stores the text in Unicode form NFC.
 
+## Login session
+
+`meho login` makes a random id for the login session and stores it with the login. Every command sends it in the `Meho-Session-Id` header, next to `Meho-Work-Ref`. MEHO stores it as the session id of the audit rows of the request and marks those rows with `session_from_client: true`, so a CLI call is not counted as an agent session. A token refresh keeps the id; the next `meho login` makes a new one.
+
 ## Current tenant
 
 One login can be in several tenants. MEHO then works in one current tenant, and every command sends it in the `Meho-Tenant` header. Choose it with `meho tenants use <name>`; without a name, `meho tenants use` lists your tenants and marks the current one. No new login is needed. `$MEHO_TENANT` (a tenant name or ID) wins over the stored choice for one shell. A login in one tenant needs none of this.
@@ -103,7 +107,7 @@ Idempotently provision the public CLI + MCP clients in a Keycloak realm
 meho admin keycloak bootstrap-clients [flags]
 ```
 
-- `--add-tenant` — also make the five groups `MEHO-<name>-<Role>` of one more tenant with this short name
+- `--add-tenant` — also make the three groups `MEHO-<name>-<Role>` of one more tenant with this short name
 - `--add-tenant-id` — the UUID of the `--add-tenant` tenant (default: the UUID its groups already carry, else a new one, printed at the end)
 - `--admin-user-email` — optional email for the new admin user
 - `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
@@ -123,9 +127,9 @@ meho admin keycloak bootstrap-clients [flags]
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
 - `--realm` — target realm name (NOT the master realm — that's where the admin token is minted)
-- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the five role groups are still created
-- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the five MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
-- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the five MEHO role groups
+- `--skip-user-provisioning` — skip the admin user step (use when people come from a directory or another login system); the three role groups are still created
+- `--tenant-id` — tenant UUID written as the `tenant_id` attribute on the three MEHO role groups (default: the all-zero UUID). Changing it later moves everyone to a new tenant
+- `--tenant-name` — the first tenant's short name (lowercase letters, digits, dashes), written into the `meho_tenant` attribute of the three MEHO role groups
 - `--web-approve-client-id` — the console's approval sign-in client_id (matches the backplane's UI_KEYCLOAK_APPROVE_CLIENT_ID); when the realm has it, it is bound to the approval sign-in flow
 - `--web-client-id` — the console's client_id; when the realm has it, it gets the login flow with the passkey touch level
 
@@ -4274,7 +4278,7 @@ meho policy history [flags]
 
 ### `meho policy import`
 
-Ask to import a policy file; a second admin must approve it
+Ask to import a policy file; an admin approves it in the web console
 
 ```
 meho policy import FILE [flags]

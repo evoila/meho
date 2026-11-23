@@ -283,6 +283,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
     "AUDIT_EVENT_CLASSES",
+    "AUDIT_LOG_CLIENT_AZP",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
     "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
@@ -726,6 +727,13 @@ class AuditLog(Base):
             "operator_sub",
             postgresql_using="btree",
         ),
+        # Migration ``0172``: the rows of one person, by time.
+        Index(
+            "audit_log_operator_sub_occurred_at_idx",
+            "operator_sub",
+            "occurred_at",
+            postgresql_using="btree",
+        ),
         Index(
             "audit_log_tenant_id_idx",
             "tenant_id",
@@ -762,6 +770,28 @@ class AuditLog(Base):
             postgresql_using="btree",
         ),
     )
+
+
+#: The login client (``azp``) that an audit row names in its ``client``
+#: block, as text. ``NULL`` when the row has no such block. The keys are
+#: written into the SQL text, not sent as parameters: the index below
+#: serves a query only when the query has the same expression, and
+#: PostgreSQL cannot match a parameter to it in a reused query plan.
+#: PostgreSQL (JSONB) and SQLite (3.38 and newer) both know ``->`` and
+#: ``->>``.
+AUDIT_LOG_CLIENT_AZP: sa.ColumnElement[str] = AuditLog.payload.op("->")(
+    sa.literal_column("'client'")
+).op("->>", return_type=sa.Text)(sa.literal_column("'azp'"))
+
+# Migration ``0179``: the newest row of one person for one login client
+# (the last use on "Your tools" of the account page).
+Index(
+    "audit_log_operator_sub_client_azp_occurred_at_idx",
+    AuditLog.operator_sub,
+    AUDIT_LOG_CLIENT_AZP,
+    AuditLog.occurred_at,
+    postgresql_using="btree",
+)
 
 
 @sa.event.listens_for(AuditLog, "before_insert")
@@ -2039,6 +2069,12 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. ``True`` on the row of one call whose params make it a
+    #: call that writes or makes a credential
+    #: (:func:`~meho_backplane.op_classes.declare_credential_check`). Then the
+    #: call waits for a person, and no standing grant, no agent grant and no
+    #: run approval covers it.
+    credential_call = False
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or
@@ -2297,7 +2333,7 @@ class TenantPolicy(Base):
 
 
 class PolicyRevision(Base):
-    """One imported policy file (``meho policy import``), after a second admin approved it.
+    """One imported policy file (``meho policy import``).
 
     ``tenant_id`` is the tenant, or ``NULL`` for the install's policy.
     ``file_text`` is the file as sent, ``document`` the stored policy after
@@ -4275,6 +4311,10 @@ class AgentDefinition(Base):
         default=True,
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last changed the definition. NULL until the first
+    # change after migration ``0178`` on a row the migration could not fill.
+    # An edit by a machine login keeps the person.
+    updated_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -5248,6 +5288,30 @@ class RunnerPrincipal(Base):
             "last_seen_at",
             postgresql_using="btree",
         ),
+    )
+
+
+class MachineLogin(Base):
+    """A login id that MEHO has seen as an agent, service or runner login.
+
+    MEHO adds a row when such a login signs in
+    (:func:`~meho_backplane.auth.machine_logins.note_machine_login`).
+    The people-behind lookup reads it: a machine login never counts as a
+    person behind another login, and a change by a machine login does not
+    replace the person who last changed an agent definition or handed over
+    a runbook run. ``tenant_id`` has no foreign key: an MCP call notes the
+    login before any other write of the tenant.
+    """
+
+    __tablename__ = "machine_login"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
     )
 
 
@@ -6453,6 +6517,10 @@ class RunApproval(Base):
     # JWT ``sub`` of the service principal that asked. Soft reference, no FK
     # -- same discipline as ServicePrincipalGrant.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # OAuth client id of the login that asked. MEHO finds the add-on pairing
+    # by it when a person approves the list (operations/people_behind.py).
+    # NULL on a list from before migration 0178.
+    principal_client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_ref: Mapped[str] = mapped_column(Text, nullable=False)
     entries: Mapped[list[dict[str, object]]] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=False
@@ -7283,8 +7351,8 @@ class ApprovalRequest(Base):
 
     * ``rights_change`` -- Boolean nullable. The rights-change mark: ``True``
       when the request changes who has rights (groups, roles, categories,
-      labels, the policy file). Then the requester can never approve it,
-      whatever their group, and another admin must
+      labels, the policy file). Then only an admin approves it, with a click
+      in the web console; the admin may be the requester
       (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
       NULL on every other request. Added by migration ``0153``.
 
@@ -7481,6 +7549,14 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # True when agent_session_id is the login session id the ``meho`` CLI
+    # sent (client_session_id_var), not an agent run or MCP session. The
+    # re-dispatch then binds it onto client_session_id_var, so it labels
+    # the audit rows only. NULL on older rows reads as False. Added by
+    # migration 0180.
+    session_from_client: Mapped[bool | None] = mapped_column(
+        sa.Boolean(), nullable=True, default=None
+    )
     # The ``approval.request`` audit row written alongside this row (the
     # durable audit record of the parking call). Decision audit rows and
     # the resumed dispatch's audit row parent-link to it, stitching the
@@ -7573,7 +7649,7 @@ class ApprovalRequest(Base):
     reveal_secret: Mapped[bool] = mapped_column(
         sa.Boolean(), nullable=False, default=False, server_default=sa.false()
     )
-    # The request changes who has rights: only another admin approves it.
+    # The request changes who has rights: only an admin approves it, in the console.
     # See the class docstring. Added by migration ``0153``.
     rights_change: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True, default=None)
     # The policy rule that matched the call when it was made, and the
@@ -7590,6 +7666,14 @@ class ApprovalRequest(Base):
     # entry that set them. See the class docstring. Added by migration ``0167``.
     approver_roles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     approver_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The people behind a request of an agent, service or runner login:
+    # ``[{"sub", "name", "why"}]``, set at park time by
+    # :mod:`meho_backplane.operations.people_behind`. NULL for a person's
+    # request. An empty list: MEHO knows nobody behind the login. Added by
+    # migration ``0178``.
+    people_behind: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True, default=None
+    )
     # The categories the tenant's and the install's routing used. Added by
     # migration ``0173``.
     approver_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -8927,6 +9011,10 @@ class RunbookRun(Base):
         default=None,
     )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person who last handed the run to a new assignee. NULL when the
+    # run was never handed over. A handover by a machine login keeps the
+    # person. Added by migration ``0178``.
+    reassigned_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

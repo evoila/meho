@@ -4,9 +4,11 @@
 """A ``secret.move`` with a ``keycloak:`` side is a change of rights, bound to its Keycloak target.
 
 * A move to a ``keycloak:`` user password, or from a ``keycloak:`` client
-  secret, is a change of rights: the requester never approves it, a
-  reviewer who is not an admin cannot approve it, and another tenant admin
-  can. A move between two Vault places is not a change of rights.
+  secret, is a change of rights: it waits also when an admin asks in the
+  web console, a reviewer who is not an admin cannot approve it, no admin
+  approves it with a token, and an admin approves it in the web console
+  (also the admin who asked). A move between two Vault places is not a
+  change of rights.
 * The card a person reads names, for each ``keycloak:`` side, the Keycloak
   target it points to (id and name), its host and its secret reference.
   The agent's views leave these fields out.
@@ -48,6 +50,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations.approval_queue import (
+    ApprovalRoleFloorError,
     RightsChangeApprovalError,
     approve_request,
     resume_dispatch_after_approval,
@@ -85,6 +88,7 @@ def _person(
     *,
     role: TenantRole = TenantRole.OPERATOR,
     sa_operator: bool = False,
+    web: bool = True,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -95,10 +99,11 @@ def _person(
         tenant_role=role,
         principal_kind=PrincipalKind.USER,
         self_approver=sa_operator,
+        web_session=web,
     )
 
 
-#: The requester is a tenant admin, so only the rights-change rule stops them.
+#: The requester is a tenant admin in the web console: the move still waits.
 _REQUESTER = _person("kc-requester", role=TenantRole.TENANT_ADMIN)
 #: A reviewer who approves a dangerous change of another person, but is not an admin.
 _PLAIN_REVIEWER = _person("kc-reviewer", sa_operator=True)
@@ -279,14 +284,15 @@ async def test_a_move_with_a_keycloak_side_is_a_change_of_rights(
     row = await _ask(params)
     assert row.rights_change is True
     assert is_rights_change(row)
+    assert row.status == ApprovalRequestStatus.PENDING.value
 
-    with pytest.raises(RightsChangeApprovalError):
-        await _approve(row.id, _REQUESTER)
     with pytest.raises(RightsChangeApprovalError):
         await _approve(row.id, _PLAIN_REVIEWER)
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(row.id, _person("kc-other-admin", role=TenantRole.TENANT_ADMIN, web=False))
     assert await _status(row.id) == ApprovalRequestStatus.PENDING.value
 
-    approved = await _approve(row.id, _OTHER_ADMIN)
+    approved = await _approve(row.id, _REQUESTER)
     assert approved.status == ApprovalRequestStatus.APPROVED.value
     assert keycloak.hosts_called() == set()  # parking and approving call no Keycloak
 
@@ -530,15 +536,19 @@ async def test_a_card_without_the_target_a_connection_field_or_secret_ref_refuse
     assert fake.secrets.kv.v2.read_calls == []  # the sink check runs before the source read
 
 
-async def test_a_name_with_no_target_at_park_refuses_the_run_once_it_finds_one(
+async def test_a_name_with_no_target_at_park_cannot_be_approved_once_it_finds_one(
     monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:
+    """MEHO cannot read the target's admin realm, so it cannot name the login either."""
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     row = await _ask(
         {"from": _VAULT_PLACE, "to": f"keycloak:new-idp/{_REALM}/{_USERNAME}#password"}
     )
     await _update("kc-b", aliases=["new-idp"])
 
-    result = await _approve_and_run(row.id)
+    with pytest.raises(ApprovalRoleFloorError, match="could not establish which login"):
+        await _approve(row.id, _OTHER_ADMIN)
 
-    _assert_refused(result, "cannot tell what was approved", fake, keycloak)
+    assert await _status(row.id) == ApprovalRequestStatus.PENDING.value
+    assert keycloak.hosts_called() == set()
+    assert fake.secrets.kv.v2.put_calls == []

@@ -1,27 +1,27 @@
 # Run your first operations
 
-MEHO does not expose one tool per vendor operation — a vCenter alone
-would be thousands. Instead, every connector publishes its operations
+MEHO does not expose one tool per vendor [operation](../reference/words.md#operation) — a vCenter alone
+would be thousands. Instead, every [connector](../reference/words.md#connector) publishes its operations
 into one searchable catalog, and you (or your agent) reach them
 through a small, stable set of meta-tools: **discover the connector,
-list its operation groups, search for the operation, preview it,
+list its [operation groups](../reference/words.md#operation-group), search for the operation, [preview](../reference/words.md#preview) it,
 call it**. This guide walks that ladder once, end to end, against a
 typed Kubernetes connector — the same flow applies to every connector,
 including ones ingested from an OpenAPI spec.
 
-Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
+Most rungs exist twice: as an [MCP](../reference/words.md#mcp) tool (for agents) and as a CLI verb
 (for operators), and where both surfaces exist they share one backplane
 rather than two implementations. The rung that *dispatches* — `call` —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
-the request and hands it back, sending nothing and writing no audit row.
-It also tells you the risk level and what MEHO would do with the call
-for you — run it at once, wait for approval, or refuse it
+the request and hands it back, sending nothing and writing no [audit row](../reference/words.md#audit-record).
+It also tells you the [risk level](../reference/words.md#risk-level) and what MEHO would do with the call
+for you — run it at once, wait for [approval](../reference/words.md#approval), or refuse it
 (`policy_verdict`, `policy_reason`).
 
 !!! note "Prerequisites"
 
-    - A registered, probe-green target —
+    - A registered, probe-green [target](../reference/words.md#target) —
       [Register targets and secrets](targets-and-secrets.md). The
       examples below use the `lab-rke2` Kubernetes target from that
       guide. On a GSM deployment with per-operator Workload Identity
@@ -40,7 +40,7 @@ for you — run it at once, wait for approval, or refuse it
 | Search operations | `search_operations` | `meho operation search <connector_id> "<query>"` |
 | Preview the request | `preview_operation` | `meho operation preview <connector_id> <op_id>` |
 | Call | `call_operation` | `meho operation call <connector_id> <op_id>` |
-| Page a large result | `result_query` | `meho operation result-query <handle_id>` |
+| Page a large result | [`result_query`](../reference/words.md#result_query) | `meho operation result-query <handle_id>` |
 
 ## Step 0 — find your connector id
 
@@ -55,9 +55,9 @@ per target.
     A product with more than one implementation — a modern REST
     connector and a legacy one for older appliances — registers each as
     its own `connector_id`. Each target carries a product and version
-    (a probe-derived fingerprint); each implementation advertises the
+    (a probe-derived [fingerprint](../reference/words.md#detected-product-and-version)); each implementation advertises the
     version ranges it supports; and the resolver matches the target's
-    fingerprint to one implementation, with tenant or operator
+    fingerprint to one implementation, with [tenant](../reference/words.md#tenant) or operator
     preference breaking a tie. You address the operation by its
     `connector_id`, but you never hand-pick which implementation runs
     against a given target. The public connectors ship one
@@ -108,7 +108,7 @@ meho operation search k8s-1.x "pods that are not running" --group workload
 
 Each hit carries the fields that matter before you call anything:
 
-- **`op_id`** — the handle you pass to call, e.g. `k8s.pod.list`.
+- **[`op_id`](../reference/words.md#op_id)** — the handle you pass to call, e.g. `k8s.pod.list`.
 - **`safety_level`** — `safe`, `caution`, `dangerous`, or `destructive`.
 - **`requires_approval`** — whether a call parks for a second pair of
   eyes instead of executing.
@@ -223,7 +223,7 @@ Two conveniences worth knowing:
 
 Set-shaped results are **automatically reduced server-side** above a
 threshold (more than 50 rows, or more than 4 KB serialized). You get
-a representative sample inline plus a **result handle** — never a
+a representative sample inline plus a **[result handle](../reference/words.md#result-link)** — never a
 multi-megabyte payload in your context. This is not opt-in and cannot
 be opted out of per call.
 
@@ -363,7 +363,7 @@ a one-VM drill becomes a cluster-wide incident.
 | An operation works for another tenant but not for yours | Your tenant turned this built-in operation off for itself. A tenant setting changes only that tenant; the `en` column of `meho connector review` is the install default, the `ten` column is your tenant's own setting. | `meho connector tenant-setting show <id>`; a tenant admin turns it back with `meho connector tenant-setting set <id> <op_id> --on` (or `--default`). |
 | `status: "error"` with `invalid_params` | The params failed the operation's schema. **Do not retry the same arguments verbatim.** | Read `extras.validation_errors`, fix the shape (e.g. `k8s.pod.list` requires exactly one of `namespace` / `all_namespaces: true`), re-call. |
 | `status: "error"` with a `connector_error` / credential message | Dispatch reached the connector but the target's credential failed to resolve or was rejected. | Work the [targets & secrets failure table](targets-and-secrets.md#what-can-go-wrong-here) — the error strings there map one-to-one. |
-| `status: "denied"` | Policy refused the call for this principal — distinct from a missing approval. | Inspect the reason in `extras`; this is a grants/policy conversation, not a retry. |
+| `status: "denied"` | Policy refused the call for this principal — distinct from a missing approval. | Inspect the reason in `extras`; this is a [grants](../reference/words.md#grant)/policy conversation, not a retry. |
 | `status: "awaiting_approval"` on what you expected to just run | The op carries `requires_approval` — working as designed. | See [Safety flags](#safety-flags-at-first-contact). |
 | `handle_not_found` from `result_query` | Handle expired, or it belongs to another operator/tenant. | Re-run the producing operation; page promptly. |
 

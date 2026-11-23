@@ -9,7 +9,7 @@ docs/upgrade-rows/<version>/<short-name>.md
 
 The folder name is the version of the next release (for example
 `v0.47.0`). A folder of a version that is already released takes no new
-row. The file has two sections, each one line of text:
+row, and CI fails a pull request that adds one there. The file has two sections, each one line of text:
 
 ```
 ## Note

@@ -332,7 +332,12 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
-from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    ApprovalRequestStatus,
+    AuditEventClass,
+    EndpointDescriptor,
+    PermissionVerdict,
+)
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.no_store import mark_answer_holds_secret
@@ -438,10 +443,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
-from meho_backplane.operations._request_preview import (
-    compute_preview_hash,
-    preview_dispatch,
-)
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprint_value,
@@ -519,9 +521,18 @@ from meho_backplane.operations.reducer import (
     handle_owner_sub_var,
 )
 from meho_backplane.operations.result_document import json_text_bytes
+from meho_backplane.operations.rights_change_console import (
+    CONSOLE_RUN_AUDIT_VALUE,
+    CONSOLE_RUN_POLICY_RULE,
+    CONSOLE_RUN_REASON,
+    take_console_run_sign_in,
+)
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
-from meho_backplane.operations.service_grants import credential_call_waits
+from meho_backplane.operations.service_grants import (
+    CREDENTIAL_CARD_LINE,
+    descriptor_credential_waits,
+)
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
     shutting_down_result,
@@ -3481,6 +3492,9 @@ async def _build_proposed_effect(
         # approve it with a click in the web interface.
         if waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
+        # The approval card says in one line why a credential call waits.
+        if descriptor_credential_waits(descriptor):
+            base["credential_wait"] = CREDENTIAL_CARD_LINE
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3613,7 +3627,7 @@ async def _destructive_binding_refusal(
             "for this (connector_id, op_id, target, params)",
             duration_ms,
         )
-    if compute_preview_hash(authoritative) != preview_hash:
+    if authoritative.get("preview_hash") != preview_hash:
         return result_preview_hash_mismatch(op_id, duration_ms)
 
     # Requirement 3: the mandatory blast-radius statement.
@@ -4001,6 +4015,7 @@ async def _handle_needs_approval(
         reused=reused,
         audit_id=request.request_audit_id,
         note=await rights_change_note(request),
+        already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,
     )
 
 
@@ -4447,6 +4462,7 @@ async def _dispatch_now(
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
             policy_rule_var.set(take_rule())
+            console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
@@ -4471,9 +4487,7 @@ async def _dispatch_now(
                 elif (
                     descriptor.safety_level != "destructive"
                     and not descriptor.requires_approval
-                    and not credential_call_waits(
-                        descriptor.op_id, getattr(descriptor, "op_class", None)
-                    )
+                    and not descriptor_credential_waits(descriptor)
                 ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)
@@ -4505,6 +4519,16 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
+                policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
+                structlog.contextvars.bind_contextvars(
+                    audit_rights_change_run=CONSOLE_RUN_AUDIT_VALUE,
+                    audit_approval_auth=(
+                        console_run_sign_in.audit_payload(operator.sub)
+                        if console_run_sign_in is not None
+                        else None
+                    ),
+                )
             if verdict == PermissionVerdict.DENY:
                 duration_ms = _elapsed_ms(started)
                 # The row keeps the reason and its code (#5773), so the audit

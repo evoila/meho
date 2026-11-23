@@ -137,6 +137,13 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
+   A `safe` read whose call waits for a person on every call
+   (`call_always_waits` in `meho_backplane.op_classes`, for example a
+   `proxmox.api.get` of a file inside a guest) is refused too: 422
+   `sensor_requires_safe_operation` at create and edit
+   (`SensorRequiresNoPersonError`) and `unknown`
+   (`reason: op_waits_for_person`) at dispatch, so a tick never adds an
+   approval request.
 5. **Connector fit check (#5858)**: when the body names a target, the
    service looks it up in the Sensor's tenant and checks the connector
    against the target's product and version (see **Connector fit** below).

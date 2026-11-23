@@ -555,7 +555,47 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     values: a JSON or YAML file in a string, such as a ConfigMap entry or
     the last-applied note of kubectl (`redaction/secret_text.py`: the
     quoted-pair text step, then a YAML read that replaces each secret value
-    in place; a YAML file inside a JSON note is read too). The YAML read
+    in place; a YAML file inside a JSON note is read too). Two more steps
+    (`redaction/secret_markup.py`) hide what the YAML read does not see:
+    a comment line such as `# dbPassword: ...` in a YAML text (with the
+    comment lines below it whose text after the `#` is indented deeper:
+    a commented-out block value or a value over more lines), every
+    `key: value` line of a text that does not read as YAML (the key bare
+    or in quotes; the lines below a secret-named key that are indented
+    deeper are hidden with the value; a quoted value ends at its closing
+    quote, also when it holds an escaped quote (`\"` or `''`); a note after
+    the value such as `# rotate monthly` stays, and so does a comment line
+    below the key that is not part of a block value or of a quoted value
+    that is still open, with its own secret-named value hidden; a byte
+    order mark at the start of the text is skipped), and XML text: the text of a secret-named
+    element (`<password>...</password>`, child elements and CDATA
+    included; a closing tag closes the nearest open element with its
+    name, tags inside CDATA are text, and the text of an XML comment is
+    read on its own, in one pass, as comments do not nest), a
+    secret-named attribute (`dbPassword="..."`), the `value` attribute and
+    the text of an element whose `name` or `key` attribute is a secret
+    name (`<add key="DbPassword" value="..."/>`), and the `<value>` child
+    of an element whose `<name>` child is a secret name (the name/value
+    form of many Java and Hadoop configuration files). The name of such a
+    pair is read as XML text first, so a name in CDATA or with a character
+    reference (`&#x50;`) is the same name. In a JSON text each
+    string is read on its own, and as text: its escapes (`\"`, `\u003c`)
+    are read before its XML. The XML step itself changes only the hidden
+    value and keeps the other escapes of the string. When the YAML step
+    also reads the JSON text, it writes the changed string back, and a
+    `\u` escape can then become the plain character; the JSON still
+    parses and means the same. A start tag and a closing tag in two
+    different strings are no element. In a YAML text each value (with
+    its key on the same entry) and each comment is read on its own in the
+    same way, so a start tag and a closing tag in two different YAML
+    values or comment lines are no element, and the keys and values
+    between them stay. A text that is one complete XML document (such as
+    one root element with `key: value` lines in it), or reads as neither
+    YAML nor JSON, is read as XML whole, so an element over more lines is
+    still hidden. These steps
+    write the marker without quotes. A step that is too deep to read hides
+    the whole text. An element with no closing tag is not touched, and
+    text without a secret-named field comes back unchanged. The YAML read
     uses the same rules as the key-name walk: a bare `community` in an SNMP
     place, and the `value` of a secret-named pair also when it is a list
     or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
@@ -1350,6 +1390,67 @@ explicit omission reason (`record_sdk_vendor_call(response_body_omitted=...)`),
 the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
 This closes the case where the F2 cap cuts only a trailing newline, the cut
 body still parses, and an unmasked Secret value would otherwise be kept.
+
+### What an agent reads in the trace of a Kubernetes call
+
+The stored trace keeps the Kubernetes API answer with the whole object, for
+example the full pod definition of a pod list. Who reads what:
+
+- **A person** (the console, `meho audit trace`, `GET /api/v1/audit/{id}/trace`
+  and `GET /api/v1/audit/traces`) reads the stored trace as it is.
+- **A service login** (a paired add-on) reads the stored traces of its own
+  calls as they are, on the same REST routes.
+- **An agent login** reads a copy on the two REST trace routes.
+- **The trace handle** on a `call_operation` answer
+  (`flight_recorder_trace_handle`, paged with `result_query`) holds the copy
+  for every caller. A person and a service login read the stored trace on
+  the REST routes, in the console and with `meho audit trace`.
+
+In the agent's copy, each span of a Kubernetes call (connector product
+`k8s`, or an operation id that starts with `k8s.`) goes through
+`connectors/kubernetes/trace_agent_view.py::agent_view`, at any depth of the
+span (pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs,
+CronJobs, pod templates in custom resources, the items of a list):
+
+- Each `env` list goes through the same secret rules as the direct answer
+  of an operation (`operations/_secret_values.py::hide_secret_values`):
+  `scrub_secret_named_values` with numbers hidden, then
+  `hide_secret_text_leaves`. So the value of an entry with a secret-shaped
+  name (`DB_PASSWORD`, `API_TOKEN`) becomes `[REDACTED:param_name]`, and a
+  secret field inside a text value is hidden. Plain values (`LOG_LEVEL`)
+  stay. The names, an entry with `valueFrom` and every `envFrom` entry stay.
+  `test_flight_recorder_k8s_agent_view_same_rules.py` runs the same Pod and
+  Deployment through both paths and checks that they hide the same env
+  values.
+- Each `command` and `args` pair goes through the command-line pass of the
+  `k8s.job.create` approval preview (`ops_write_preview._hide_command_line`).
+  The words stay. Hidden are the value of a secret-named `NAME=VALUE` or
+  `--name=value`, the argument after a secret flag (a password flag and its
+  value on a command line), the
+  password in `user:password` after `-u`, the password in a URL and tokens
+  with a known vendor prefix. The script after `sh -c` is read as a shell
+  script. On a container command line, the pass counts `-p` as a password
+  flag after any program. So the word after it is hidden in the copy, also
+  when it is not a password (for example the folder of `mkdir -p`).
+- An annotation value that is a JSON object or list (the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation holds a
+  whole earlier object) is cleaned by the same walk. Each text inside it
+  also goes through `command_line.hide_in_text`. Then it is written back
+  as JSON. A last-applied value that is not such JSON becomes
+  `[MEHO-REDACTED:last-applied-configuration]`. Other annotation values go
+  through `command_line.hide_in_text` (the password in a URL, tokens with a
+  known vendor prefix).
+
+Nothing else in the span changes: `managedFields` and plain values stay as
+they are in the stored trace. The spans of every other connector
+are copied unchanged. The copy is made when the agent reads, so the stored
+trace stays as it is (`flight_recorder/agent_view.py`). When a trace holds
+a Kubernetes span, the walk runs in a worker thread (`asyncio.to_thread`),
+and its time grows in line with the size of the trace. When the copy cannot
+be made (a body nested too deep), the agent gets no trace. Tests:
+`test_flight_recorder_k8s_agent_view.py`,
+`test_flight_recorder_k8s_agent_view_reads.py`,
+`test_flight_recorder_k8s_agent_view_same_rules.py`.
 
 ## References
 

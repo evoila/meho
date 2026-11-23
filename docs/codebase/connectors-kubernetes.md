@@ -24,6 +24,127 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
+Six of these calls always wait for a person, and no standing grant, no
+agent grant and no run approval covers them
+([service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- every `k8s.exec` call: a command in a container can read or write any
+  credential the container holds. Grant create, agent grant create and
+  run approval create refuse `k8s.exec`.
+- every `k8s.apply` call, for every kind of object, in every document of
+  a manifest and every item of a list object, and also a manifest MEHO
+  cannot read. What an apply does to an object depends on the object as
+  it is on the cluster and on the fields other writers own, not only on
+  the manifest. So there is no list of kinds that keep the rules of
+  `k8s.apply`. Grant create, agent grant create and run approval create
+  refuse `k8s.apply`. A person's own call waits for approval, as every
+  `k8s.apply` call does.
+- every `k8s.delete` call: it deletes a Pod, a Job or a ReplicaSet.
+- every `k8s.label` call: on a Namespace it can set or remove the labels
+  that decide how the cluster checks the pods in it. This holds for
+  every kind of object.
+- every `k8s.annotate` call, for the same reason as `k8s.label`.
+- every `k8s.namespace.create` call: it makes a new namespace, and MEHO
+  sets no labels on it.
+
+Grant create, agent grant create and run approval create refuse all six.
+In sandbox mode a delete grant still covers `k8s.delete`, and only that
+one of the six (`declare_sandbox_delete_grant`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`k8s.scale`, `k8s.rollout.restart` and `k8s.cordon` (also with
+`uncordon: true`) keep their rules: a standing grant and a run approval
+still cover them.
+
+All six are declared in `op_classes.py` of the connector. The approval card
+says in one line why the call waits; only a person reads that line. The
+card of a `k8s.apply` also names, for a person only, what each container
+runs: the object, the container, the image, the `command` and `args`, and
+the `exec` commands of its lifecycle hooks and probes, with secret values
+hidden (`run_commands`, see `approvals.md`). A container here is also any
+other object with a `command` or `args` list, under any field of a
+custom kind, so every command line the manifest echo shows only by size
+is named. It does so also when the dry
+run fails. The list keeps at most 16 KB. It always keeps room for the
+name of every later container: an entry that is too large keeps
+the start of what it runs, and its `cut` field says so.
+The stored request of a `k8s.apply` of a Secret keeps its manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The row of the request keeps no copy, also not when the request is
+approved and never runs, and a step of a multi-step run keeps no copy of
+the parent's params either. A row stored before this rule keeps its
+manifest until the run starts or the request ends; then MEHO replaces it
+with the same marker it writes for a secret-named value. A new run of a
+failed apply needs the params sent again.
+
+`k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
+defines, unchanged, so the caller does not choose what runs. Writing the
+CronJob with `k8s.apply` waits for a person. The card shows the job
+template of the CronJob.
+
+An operator can also ingest a Kubernetes API file as a generic connector.
+The operations it makes that read or write a Secret, run a command in a
+pod, open a proxy or a port forward, or make a token get the same rule.
+So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
+object or of a collection of objects, of every kind: `/api/v1/...` and
+`/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
+group: a namespace, a node, a persistent volume or a component status).
+There is no list of kinds that keep their rules. Every write to a
+sub-part of one object waits too: a path that goes on past the name of
+the object, for example a pod's `eviction` or `binding`, a Namespace's
+`finalize`, or the action of an add-on API. This includes the two
+sub-parts that waited first: a pod's `ephemeralcontainers` and the
+`approval` of a certificate signing request. Only `status` and `scale`,
+right after the name of the object, keep the rules of the operation, for
+every kind. A `status` write is where a controller reports what it sees;
+it does not change what the object asks the cluster to run. A `scale`
+write changes only the number of copies of a workload, the same change
+as `k8s.scale`. A longer path, such as `.../status/<more>`, waits.
+`status` and `scale` keep their rules only as a sub-part of one object:
+a path that also reads as a write to a collection, such as
+`/apis/<group>/<version>/namespaces/{namespace}/status`, waits, except
+the `status` of a core Namespace. A
+trailing `/` counts the same as none. A path can have any prefix in
+front, for example the base path of a proxy. A read keeps the rules of
+the operation
+(`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The rule reads the path of every operation made from an ingested API
+file, whatever the product. So an API file of another product whose
+paths have the same form (`/api/v1/namespaces/...`,
+`/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+gets the same rule: its writes wait for a person on every call, and
+grant create refuses them. The method is read without case: `post:`
+counts the same as `POST:`.
+
+MEHO refuses a whole API file when one of its paths looks like a
+Kubernetes path without the usual start (`/api/v1` or
+`/apis/<group>/<version>`), for example `/namespaces/{namespace}/secrets`
+or `/apps/v1/namespaces/{namespace}/deployments`. Nothing from the file is
+stored. The dry run, the ingest and the start check of the shipped files
+all refuse it, because they use the same parser
+([spec-ingestion.md](spec-ingestion.md)). The shapes live in one place,
+`full_kubernetes_path` (`short_paths.py`). There is no setting that turns
+the check off. The ways past: use the standard API file that the cluster
+serves, which has full paths. Or, when the start is in the file's server
+address, write it there as a relative path (for example `/api/v1`, or
+`/k8s/clusters/<id>/api/v1` for a cluster behind a management product)
+and put the host in the target address. MEHO then adds the start to each
+path. A tool with its own API that only uses Kubernetes names can write
+its real start as a relative server address (for example `/api`). A path
+with `namespaces/{x}/secrets`, or a pod's `exec`, `attach`,
+`portforward` or `proxy`, is refused from any `/` of the path, also with
+a relative server address.
+
+An operation that an older ingest stored from such a file stays as it
+is. Each of its calls gets the answer of the same call on the full path:
+`ingested_op_is_credential_call` reads the call with the full path that
+`full_kubernetes_path` gives. So it waits for a person exactly where the
+full path waits (a write of an object, a Secret, a pod's `exec`,
+`attach`, `portforward` or `proxy`, a ServiceAccount token), and a plain
+read keeps its rules. At start MEHO writes one warning log line,
+`short_kubernetes_paths_stored`, for each connector with such operations
+(`short_path_warning.py`). It names the connector id, the tenant and the
+count.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types
@@ -1545,6 +1666,17 @@ a "200 but nothing happened" apply can be explained from the trace.
   error.
 - When capture is off the wrapper costs one contextvar read.
 - Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
+
+What the span holds depends on who reads it. A person reads the stored
+span: the whole object of the answer, with Secret data masked as above. An
+agent reads a copy (`trace_agent_view.py`): an `env` value is hidden by
+the same secret rules as in the direct answer of an operation (a
+secret-named entry is hidden; plain values, the names and `valueFrom`
+references stay), the secret values on each `command` / `args` line and in
+`sh -c` scripts are hidden, and annotation values are cleaned (the
+last-applied object is cleaned like the object). `managedFields` stays. A
+service login reads the stored span of its own calls as it is. The rules and who reads which copy are in
+[redaction.md](redaction.md#what-an-agent-reads-in-the-trace-of-a-kubernetes-call).
 
 The shared recorder is
 `flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the

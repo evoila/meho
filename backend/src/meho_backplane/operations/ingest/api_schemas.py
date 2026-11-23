@@ -1065,12 +1065,12 @@ class ConnectorListResponse(BaseModel):
 _CATEGORY_PATTERN = "^[a-z][a-z0-9_-]{0,62}$"
 _CATEGORY_DESCRIPTION = (
     "A category of the taxonomy. A change of rights: send it without other "
-    "fields; the answer is 202 and the change waits until another tenant admin "
-    "approves it."
+    "fields; the answer is 202 and the change waits until a tenant admin "
+    "approves it in the web console."
 )
 _LABELS_DESCRIPTION = (
     "Free key=value labels. Same rules as category: a request of its own that "
-    "waits for another tenant admin."
+    "waits for a tenant admin's approval in the web console."
 )
 
 

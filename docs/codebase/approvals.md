@@ -151,7 +151,7 @@ row then has no `reason`). So during a rolling update a MEHO that still
 runs the older release cannot start a request whose inputs are gone: its
 claim finds no `approved` row, and the database refuses any write that
 sets `resumed_at` on a `rejected`, `expired` or `withdrawn` request (the
-CHECK `ck_approval_request_ended_not_started`, migration `0183`). A claim
+CHECK `ck_approval_request_ended_not_started`, migration `0184`). A claim
 of an older release that read the row before the clean-up and writes after
 it fails there. It reads 500 rows per
 transaction, in the order of their id, writes only rows that change, and

@@ -7775,7 +7775,7 @@ class ApprovalRequest(Base):
             _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
             name="ck_approval_request_outcome_check_reason",
         ),
-        # Matches migration 0183: a request that ended without a run is
+        # Matches migration 0184: a request that ended without a run is
         # never started, under any release.
         sa.CheckConstraint(
             "status NOT IN ('rejected', 'expired', 'withdrawn') OR resumed_at IS NULL",
@@ -7793,7 +7793,7 @@ class ApprovalRequestKey(Base):
     B, so a later retry with key B gets the same request, also after it was
     approved. Read by the key lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
-    ``0183``.
+    ``0184``.
 
     Columns
     -------

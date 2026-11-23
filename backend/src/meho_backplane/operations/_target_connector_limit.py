@@ -39,8 +39,10 @@ The same list limits what a hosted agent reads back:
   reveal fetch when a stored approval request is for a connector, or a
   target of a connector, outside the list.
 * **Targets.** :func:`targets_within_limit` keeps only the targets whose
-  connector is in the list. ``list_targets`` and the near-match targets of
-  a ``no_target`` or ``ambiguous_target`` answer use it.
+  connector is in the list. ``list_targets`` and the target resolver use
+  it: a name or alias of a target outside the list answers ``no_target``,
+  and the near-match targets of a ``no_target`` or ``ambiguous_target``
+  answer name only targets inside the list.
 
 Outside an agent run with a connector list, the limit is unset and
 ``dispatch`` behaves as without this module.
@@ -54,6 +56,9 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
+
+import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult, resolve_connector_or_label
@@ -76,6 +81,8 @@ __all__ = [
     "target_picks_other_connector",
     "targets_within_limit",
 ]
+
+_log = structlog.get_logger(__name__)
 
 #: The connector ids a hosted agent may use, or ``None`` for no limit.
 allowed_connectors_var: ContextVar[frozenset[str] | None] = ContextVar(
@@ -304,13 +311,42 @@ async def targets_within_limit[T](targets: Iterable[T]) -> list[T]:
     target that picks no single connector is left out.
     """
     allowed = allowed_connectors_var.get()
-    if allowed is None:
-        return list(targets)
+    rows = list(targets)
+    if allowed is None or not rows:
+        return rows
+    # A target may use a connector built from a saved API file, so load
+    # those first, as the run step does: one read for all the targets.
+    await _restore_saved_ingest_profiles_for(rows)
     kept: list[T] = []
-    for target in targets:
-        # A target may use a connector built from a saved API file, so load
-        # those first, as the run step does.
-        cls = await _picked_connector_class(target, ingested=True)
+    for target in rows:
+        cls = await _picked_connector_class(target, ingested=False)
         if cls is not None and connector_id_of(cls) in allowed:
             kept.append(target)
     return kept
+
+
+async def _restore_saved_ingest_profiles_for(targets: list[Any]) -> None:
+    """Load the connectors built from saved API files for all *targets* at once.
+
+    The same load the run step does for one target, with one read per
+    tenant of the targets, for all their products. A database error is
+    logged and the check goes on with the connectors this replica has.
+    """
+    # Imported lazily: the ingest package imports the operations package.
+    from meho_backplane.operations.ingest.ingest_auth_store import (
+        restore_ingested_profiled_connectors,
+    )
+
+    products_by_tenant: dict[uuid.UUID | None, set[str]] = {}
+    for target in targets:
+        product = getattr(target, "product", None)
+        if not isinstance(product, str) or not product:
+            continue
+        tenant_id = getattr(target, "tenant_id", None)
+        key = tenant_id if isinstance(tenant_id, uuid.UUID) else None
+        products_by_tenant.setdefault(key, set()).add(product)
+    for tenant_id, products in products_by_tenant.items():
+        try:
+            await restore_ingested_profiled_connectors(products=products, tenant_id=tenant_id)
+        except SQLAlchemyError:
+            _log.warning("ingested_profile_restore_before_check_failed", exc_info=True)

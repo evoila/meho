@@ -41,6 +41,7 @@ hand-written connector or a shipped login setup keeps that class.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -226,6 +227,7 @@ async def restore_ingested_profiled_connectors(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     *,
     product: str | None = None,
+    products: Collection[str] | None = None,
     tenant_id: UUID | None = None,
 ) -> int:
     """Register a profiled connector class for every saved login type.
@@ -233,6 +235,7 @@ async def restore_ingested_profiled_connectors(
     Each row goes into the table of its own scope. A scope that already
     holds the row's login type is skipped, so it is safe to run twice.
     With *product* set, only the rows of that product are read; with
+    *products* set, only the rows of those products, in one read; with
     *tenant_id* set, only the built-in rows and that tenant's rows. The
     dispatcher sets both before a call: the resolver looks only at
     connectors of the target's product, as the target's tenant sees them.
@@ -245,6 +248,8 @@ async def restore_ingested_profiled_connectors(
         )
         if product is not None:
             stmt = stmt.where(IngestedAuthProfile.product == product)
+        if products is not None:
+            stmt = stmt.where(IngestedAuthProfile.product.in_(sorted(products)))
         if tenant_id is not None:
             stmt = stmt.where(
                 or_(

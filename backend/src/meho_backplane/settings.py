@@ -1583,6 +1583,13 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    kb_wiki_interleave:
+        Off by default. When on, ``search_knowledge`` lists the store hits
+        and the knowledge repo hits in turns (store 1, knowledge repo 1,
+        store 2, ...), so the knowledge repo's hits are not always last
+        and cut first when the answer is too large. When off, the store
+        hits come first. It stays off until a before-and-after
+        measurement shows it helps. Env ``KB_WIKI_INTERLEAVE``.
     mcp_short_tool_texts:
         Off by default. When on, the biggest tools on the default MCP tool
         list send a short description and short input texts
@@ -1618,6 +1625,16 @@ class Settings(BaseModel):
         person gets the value on the command line, in the console or over
         REST. It stays off until model tests show it helps. Env
         ``MCP_REVEAL_FETCH``.
+    mcp_own_request_status:
+        Off by default. When on, ``call_operation`` on MCP takes an
+        ``approval_request_id`` of the caller's own approval request and
+        answers with the state of that request (waiting, approved and
+        running, the stored result, or why it did not run). It runs nothing
+        and makes no new request
+        (:mod:`meho_backplane.mcp.tools._call_operation_status`). When off,
+        the tool has no text about this and refuses the input. The
+        measurement that must come before it goes on is tracked in
+        evoila/meho#6803. Env ``MCP_OWN_REQUEST_STATUS``.
     mcp_approval_exit_code:
         Off by default. When on, the ``resume_outcome`` of an approval on the
         MCP tools ``meho_approvals_list`` and ``meho_approvals_get`` also has
@@ -1858,6 +1875,10 @@ class Settings(BaseModel):
     # written as before, and a dry run lists no entries. It stays off until
     # model tests show it helps. Set via ``KB_SIMILAR_CHECK``.
     kb_similar_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on, `search_knowledge` tells the agent to search
+    # with a few key words, and its answer has `word_match` (some / none).
+    # Set via ``KB_SEARCH_WORD_HINT``.
+    kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2597,11 +2618,13 @@ class Settings(BaseModel):
         default=False, json_schema_extra=AGENT_FACING
     )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -2683,6 +2706,16 @@ class Settings(BaseModel):
     #: evaluation and the model tests show it helps. Set via
     #: ``SEARCH_PLAIN_SENTENCES``.
     search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: Word half of the knowledge search (#6784). ``False`` (default): a
+    #: passage needs every word of the question, as before. ``True``: only
+    #: when that finds no passage, a second word search keeps passages that
+    #: hold one of the first 32 different words of the question
+    #: (``ANY_WORD_MAX_WORDS`` in ``retrieval/retriever.py``). The choice
+    #: is made once for the whole knowledge search:
+    #: if a passage of any searched tenant (own and shared) holds every word,
+    #: no tenant uses the any-word search. Only ``source="kb"``; memory and
+    #: operations search do not change. Set via ``KB_SEARCH_PLAIN_SENTENCES``.
+    kb_search_plain_sentences: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Stricter ``matched`` outcome of ``search_operations`` (#6014), behind
     #: a switch that is off by default. When on, a search answers
     #: ``ambiguous`` if another hit is closer in meaning than the top hit.
@@ -3345,6 +3378,7 @@ def get_settings() -> Settings:
         kb_shared_tenant_ids=os.environ.get("KB_SHARED_TENANT_IDS", "").strip(),
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
+        kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3807,6 +3841,9 @@ def get_settings() -> Settings:
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
         ),
+        kb_wiki_interleave=parse_bool_env(
+            os.environ.get("KB_WIKI_INTERLEAVE"),
+        ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
         ),
@@ -3821,6 +3858,9 @@ def get_settings() -> Settings:
         ),
         mcp_reveal_fetch=parse_bool_env(
             os.environ.get("MCP_REVEAL_FETCH"),
+        ),
+        mcp_own_request_status=parse_bool_env(
+            os.environ.get("MCP_OWN_REQUEST_STATUS"),
         ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),
@@ -3858,6 +3898,9 @@ def get_settings() -> Settings:
         ),
         search_plain_sentences=parse_bool_env(
             os.environ.get("SEARCH_PLAIN_SENTENCES"),
+        ),
+        kb_search_plain_sentences=parse_bool_env(
+            os.environ.get("KB_SEARCH_PLAIN_SENTENCES"),
         ),
         search_clear_lead=parse_bool_env(
             os.environ.get("SEARCH_CLEAR_LEAD"),

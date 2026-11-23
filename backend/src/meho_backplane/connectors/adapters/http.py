@@ -84,9 +84,10 @@ import asyncio
 import hashlib
 import os
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import anyio
 import httpx
 import structlog
 from httpx._decoders import SUPPORTED_DECODERS
@@ -465,7 +466,54 @@ class _WireCappedStream(httpx.AsyncByteStream):
         await self._inner.aclose()
 
 
-async def _read_capped_json_response(
+#: Upper time limit, in seconds, that a stop waits for the close of an answer.
+_STOP_CLOSE_LIMIT_S = 5.0
+
+#: Strong references to read tasks that outlive a stop, so the event loop
+#: cannot collect one before its close ends.
+_stopped_reads: set[asyncio.Future[Any]] = set()
+
+
+def _stopped_read_done(task: asyncio.Future[Any]) -> None:
+    _stopped_reads.discard(task)
+    if not task.cancelled():
+        # The caller already got the stop; an error of the read has no reader.
+        task.exception()
+
+
+async def _run_stop_safe[T](work: Callable[[], Awaitable[T]]) -> T:
+    """Run *work* so that a stop cannot cut the close of an answer.
+
+    httpcore closes an answer or a connection inside ``AsyncShieldCancellation``.
+    That shield holds against anyio cancel scopes, but not against a plain
+    ``task.cancel()``. A stop that lands during such a close leaves the
+    connection open and its pool slot taken. So *work* runs in its own task,
+    inside an anyio cancel scope. A stop on the caller cancels that scope,
+    which respects httpcore's shield, and the close runs to its end. Then
+    the caller gets the stop (``CancelledError``) as before.
+    """
+    scope = anyio.CancelScope()
+
+    async def _inside_scope() -> T | None:
+        with scope:
+            return await work()
+        return None
+
+    task: asyncio.Future[T | None] = asyncio.ensure_future(_inside_scope())
+    _stopped_reads.add(task)
+    task.add_done_callback(_stopped_read_done)
+    try:
+        result = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        scope.cancel()
+        await asyncio.wait({task}, timeout=_STOP_CLOSE_LIMIT_S)
+        raise
+    if result is None:
+        raise RuntimeError("the read ended without an answer")
+    return result
+
+
+async def _stream_capped_json_response(
     client: httpx.AsyncClient,
     method: str,
     path: str,
@@ -556,6 +604,42 @@ async def _read_capped_json_response(
             request=resp.request,
             extensions=resp.extensions,
         )
+
+
+async def _read_capped_json_response(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    extensions: dict[str, Any] | None = None,
+    timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    content: bytes | None = None,
+) -> httpx.Response:
+    """Issue the request with a streamed, byte-capped read (see the worker).
+
+    The worker runs through :func:`_run_stop_safe`, so a stop that comes while
+    an answer closes (after a time limit, or on a 3xx before the next hop)
+    leaves no connection open and no pool slot taken. The caller still gets
+    the stop.
+    """
+    return await _run_stop_safe(
+        lambda: _stream_capped_json_response(
+            client,
+            method,
+            path,
+            params=params,
+            json=json,
+            data=data,
+            headers=headers,
+            extensions=extensions,
+            timeout=timeout,
+            content=content,
+        )
+    )
 
 
 # Hard cap on the same-origin redirect chain followed by

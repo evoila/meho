@@ -207,3 +207,42 @@ async def test_other_conflict_is_a_plain_client_error() -> None:
             await client.fetch_assignment(known_version=None)
 
     assert not isinstance(exc_info.value, RunnerWireVersionMismatchError)
+
+
+async def test_post_results_returns_the_refused_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "accepted": 1,
+                "duplicates": 0,
+                "refused": [{"result_uid": "u2", "reason": "future_time"}],
+            },
+        )
+
+    batch = RunnerResultBatch(runner_id="runner-7", results=[])
+    async with _client(httpx.MockTransport(handler)) as client:
+        refused = await client.post_results(batch)
+
+    assert [(entry.result_uid, entry.reason) for entry in refused] == [("u2", "future_time")]
+
+
+async def test_post_results_without_a_refused_list_returns_none_refused() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, content=b"")
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        assert await client.post_results(RunnerResultBatch(runner_id="runner-7", results=[])) == []
+
+
+async def test_client_names_that_it_runs_counted_checks_on_their_schedule() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(304)
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        await client.fetch_assignment(known_version="digest-abc")
+
+    assert captured[0].headers[wire.FEATURES_HEADER] == wire.FEATURE_SCHEDULED_CHECKS

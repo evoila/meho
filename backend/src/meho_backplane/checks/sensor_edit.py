@@ -37,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.checks.assertions import AssertionSpec
+from meho_backplane.checks.runner_binding import require_runner_can_run
 from meho_backplane.checks.schemas import (
     _CONNECTOR_ID_MAX_LENGTH,
     _CRON_EXPR_MAX_LENGTH,
@@ -237,8 +238,14 @@ def identity_after_change(identity_sub: str, editor_sub: str, changed: Iterable[
     return SENSOR_IDENTITY_SENTINEL
 
 
-async def _require_safe_read(tenant_id: uuid.UUID, merged: SensorCreate) -> None:
-    """Refuse an operation that is unknown, not safe, or a write."""
+async def _require_safe_read(
+    tenant_id: uuid.UUID, merged: SensorCreate, runner_name: str | None
+) -> None:
+    """Refuse an operation that is unknown, not safe, or a write.
+
+    For a Sensor bound to a runner, also refuse an operation the runner
+    cannot run unattended (:func:`require_runner_can_run`).
+    """
     product, version, impl_id = parse_connector_id(merged.connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id,
@@ -250,6 +257,8 @@ async def _require_safe_read(tenant_id: uuid.UUID, merged: SensorCreate) -> None
     if descriptor is None:
         raise SensorOperationNotFoundError(merged.connector_id, merged.op_id)
     _require_read(merged, descriptor)
+    if runner_name is not None:
+        require_runner_can_run(descriptor, merged.op_id, merged.params)
 
 
 def _apply(row: Sensor, merged: SensorCreate, now: datetime) -> None:
@@ -324,7 +333,7 @@ async def edit_sensor(
         before, after = _changed_fields(row, merged)
         if not after:
             return SensorEditResult(SensorRead.model_validate(row, from_attributes=True), {}, {})
-        await _require_safe_read(tenant_id, merged)
+        await _require_safe_read(tenant_id, merged, row.runner_name)
         await _lock_and_require_operation(session, tenant_id, merged)
         identity_sub = identity_after_change(row.identity_sub, editor_sub, after)
         if identity_sub != row.identity_sub:

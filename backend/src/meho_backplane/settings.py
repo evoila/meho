@@ -1679,6 +1679,18 @@ class Settings(BaseModel):
         a direct call never gets the request of such a step.
         When off, every such call makes a new request. Env
         ``APPROVAL_SAME_CALL_REUSE``.
+    runner_checks_enabled:
+        Off by default. When on, a check bound to a runner counts like a
+        central check: the result a runner posts for its own check sets the
+        state of the check, shows on the dashboard, sends mails on change and
+        recovery and can start the investigator. A dead runner shows its
+        checks as ``unknown``. When off, MEHO only stores runner results.
+        Env ``RUNNER_CHECKS_ENABLED``.
+    runner_check_results_retention_days:
+        Days the clean-up job keeps raw runner result rows while
+        ``RUNNER_CHECKS_ENABLED`` is on (default 7; ``0`` keeps them). With
+        the switch off, the job deletes none. Env
+        ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2548,6 +2560,15 @@ class Settings(BaseModel):
     # triggers can match them. Off by default: nothing is written and nothing
     # else changes. Set via ``CHECKS_AGENT_EVENTS``.
     checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # With this switch on, the results of a runner count like the results of a
+    # central check: they set the state of the check, show on the dashboard,
+    # send mails and can start the investigator. Off by default: results are
+    # only stored. Set via ``RUNNER_CHECKS_ENABLED``.
+    runner_checks_enabled: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Days the clean-up job keeps raw ``runner_check_results`` rows while
+    # ``RUNNER_CHECKS_ENABLED`` is on. ``0``, or the switch off, keeps them for
+    # ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+    runner_check_results_retention_days: int = Field(default=7, ge=0, le=3650)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -3854,6 +3875,10 @@ def get_settings() -> Settings:
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
         checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
+        runner_checks_enabled=parse_bool_env(os.environ.get("RUNNER_CHECKS_ENABLED", "false")),
+        runner_check_results_retention_days=int(
+            os.environ.get("RUNNER_CHECK_RESULTS_RETENTION_DAYS", "7"),
+        ),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(

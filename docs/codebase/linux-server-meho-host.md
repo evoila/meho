@@ -361,11 +361,13 @@ too. Output that is not this JSON gives one red doctor line. See
    older `install.sh`. `values_with_target_networks` replaces the last
    block, `config` with `targetSsrfAllowlist`, as `render_target_values` of
    `lib/core.sh` writes it, or removes it for `none`. The block runs from
-   its heading to the next top-level key. A record without the new line
-   afterwards, or a `config` block with any other line (another key, an
-   empty line, a comment, or a value on the heading), is not in the form
-   `install.sh` writes: the new files are removed and the command stops
-   with a `[FAIL]` line. Otherwise both files move into
+   its heading to the next top-level line. A record without the new line
+   afterwards is not in the form `install.sh` writes, and neither is a
+   values file with a top-level line other than a comment or a plain
+   heading such as `ingress:` (for example a quoted `"config":`), or a
+   `config` block with any other line than the list (another key, an
+   empty line, a comment, or a value on the heading). Then the new files
+   are removed and the command stops with a `[FAIL]` line. Otherwise both files move into
    place, mode 0600.
 5. Patch `MEHO_TARGET_SSRF_ALLOWLIST` in the ConfigMap `meho-config` with
    a JSON merge patch on standard input, so every other key stays. Helm

@@ -1305,11 +1305,13 @@ record_with_target_networks() {
 # values_with_target_networks <values file> <list>: print the Helm values
 # of this place with the new list in their last block, config, as
 # render_target_values in lib/core.sh writes it, or without the block for
-# an empty list. The block runs from its heading to the next line that
-# starts a top-level key. Exit code 3 when the block is not in the form
-# that install.sh writes, the heading "config:" and then only the list
-# line: any other line in it, also an empty line or a comment, means that
-# install.sh did not write it, and a rewrite could break it.
+# an empty list. The block runs from its heading to the next top-level
+# line. Exit code 3 when the file is not in the form that install.sh
+# writes: every top-level line is a comment or a plain heading such as
+# "ingress:", and the config block holds the heading "config:" and then
+# only the list line. Any other line, for example a quoted heading
+# ("config":), another key or an empty line in the config block, means
+# that install.sh did not write the file, and a rewrite could break it.
 values_with_target_networks() {
     awk -v list="$2" '
         /^config:/ {
@@ -1320,6 +1322,7 @@ values_with_target_networks() {
         in_config && /^[^[:space:]#]/ { in_config = 0 }
         in_config && /^  targetSsrfAllowlist: "[^"]*"$/ { next }
         in_config { foreign = 1; next }
+        /^[^[:space:]#]/ && !/^[A-Za-z][A-Za-z0-9]*:$/ { foreign = 1 }
         { print }
         END {
             if (foreign) exit 3
@@ -1374,7 +1377,7 @@ command_target_networks() {
     values_with_target_networks "$values" "$TARGET_NETWORKS" >"$new_values" || status=$?
     if ((status != 0)); then
         rm -f "$new_record" "$new_values"
-        fail "$MEHO_PLACE_VALUES has a config block that install.sh did not write, so meho-host cannot change it. Nothing was changed." \
+        fail "$MEHO_PLACE_VALUES is not in the form install.sh writes, so meho-host cannot change it. Nothing was changed." \
             "$SUPPORT_HINT"
     fi
     chmod 0600 "$new_record" "$new_values"

@@ -265,28 +265,34 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
         )
         self.assert_nothing_changed(before)
 
-    def test_values_with_a_config_block_of_their_own_change_nothing(self) -> None:
+    def test_values_in_another_form_change_nothing(self) -> None:
         blocks = {
             "another key": 'config:\n  logLevel: "DEBUG"\n',
             "an empty line in the block": 'config:\n\n  logLevel: "DEBUG"\n',
             "an empty line after the list": target_block() + "\n",
             "a comment in the block": f'config:\n# set by hand\n  targetSsrfAllowlist: "{LIST}"\n',
             "a value on the heading": "config: {}\n",
+            "a quoted heading": f'"config":\n  targetSsrfAllowlist: "{LIST}"\n',
+            "a heading in single quotes": f"'config':\n  targetSsrfAllowlist: \"{LIST}\"\n",
+            "a space before the colon": f'config :\n  targetSsrfAllowlist: "{LIST}"\n',
+            "a flow mapping": f'{{config: {{targetSsrfAllowlist: "{LIST}"}}}}\n',
+            "a top-level key with a value": 'logLevel: "DEBUG"\n',
         }
         for name, block in blocks.items():
-            with self.subTest(block=name):
-                self.host.host_file(VALUES_PATH, place_values() + block)
-                before = self.files()
+            for value in (LIST, "none"):
+                with self.subTest(block=name, value=value):
+                    self.host.host_file(VALUES_PATH, place_values() + block)
+                    before = self.files()
 
-                result = self.run_command(LIST)
+                    result = self.run_command(value)
 
-                self.assert_one_fail_line(
-                    result,
-                    "[FAIL] /etc/meho/values-place.yaml has a config block that install.sh did "
-                    f"not write, so meho-host cannot change it. Nothing was changed. Fix: "
-                    f"{SUPPORT_HINT}",
-                )
-                self.assert_nothing_changed(before)
+                    self.assert_one_fail_line(
+                        result,
+                        "[FAIL] /etc/meho/values-place.yaml is not in the form install.sh "
+                        f"writes, so meho-host cannot change it. Nothing was changed. Fix: "
+                        f"{SUPPORT_HINT}",
+                    )
+                    self.assert_nothing_changed(before)
 
     def test_without_the_values_file_nothing_changes(self) -> None:
         self.host.host_path(VALUES_PATH).unlink()

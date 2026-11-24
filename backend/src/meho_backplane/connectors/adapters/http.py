@@ -503,7 +503,7 @@ _NO_ANSWER: Any = object()
 async def _close_when_done(
     task: asyncio.Future[Any], discard: Callable[[Any], Awaitable[None]]
 ) -> None:
-    """Wait for a read the caller no longer waits for, then close its answer."""
+    """Wait for a read whose caller has stopped waiting, then close its answer."""
     await asyncio.wait({task})
     if task.cancelled() or task.exception() is not None:
         return

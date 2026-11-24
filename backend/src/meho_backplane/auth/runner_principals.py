@@ -528,8 +528,9 @@ class RunnerPrincipalService:
     ) -> None:
         """Disable the runner's Keycloak client — the authoritative kill switch.
 
-        Also removes the runner's public key from the client. This runs for
-        every runner, also when MEHO has no record of an enrolled key.
+        Then deletes the client, so its public key is gone for good. A key
+        write that Keycloak applies later finds no client and changes nothing.
+        This runs for every runner, also when MEHO has no record of a key.
 
         Called *before* the DB row is marked revoked so a non-404 failure
         aborts the revoke without falsely reporting a still-token-issuing
@@ -540,7 +541,7 @@ class RunnerPrincipalService:
         try:
             async with kc_client:
                 await kc_client.disable_client(keycloak_internal_id)
-                await kc_client.clear_client_signed_jwt_key(keycloak_internal_id)
+                await kc_client.delete_client(keycloak_internal_id)
         except KeycloakClientNotFoundError:
             self._log.warning(
                 "runner_principal_revoke_keycloak_not_found",
@@ -582,8 +583,8 @@ class RunnerPrincipalService:
         revoked) to obtain its ``keycloak_internal_id``, and take the
         runner's lock. Enrollment takes the same lock, so the two take turns.
         Phase 2: disable the Keycloak client (``enabled=false``) — the
-        authoritative kill switch — and remove the runner's public key
-        from the client.
+        authoritative kill switch — and then delete the client with its
+        public key.
         Phase 3: commit ``revoked=true`` in the DB. The commit releases the
         lock.
 

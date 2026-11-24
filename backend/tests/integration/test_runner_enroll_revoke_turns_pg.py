@@ -67,10 +67,14 @@ _skip_no_docker = pytest.mark.skipif(
 
 
 class _Keycloak:
-    """One client; the first ``PUT`` waits for :attr:`go`."""
+    """One client; the first ``PUT`` waits for :attr:`go`. ``DELETE`` removes it."""
 
     def __init__(self) -> None:
-        self.client: dict[str, Any] = {"id": _INTERNAL_ID, "enabled": True, "attributes": {}}
+        self.client: dict[str, Any] | None = {
+            "id": _INTERNAL_ID,
+            "enabled": True,
+            "attributes": {},
+        }
         self.calls: list[str] = []
         self.first_put = asyncio.Event()
         self.go = asyncio.Event()
@@ -80,7 +84,16 @@ class _Keycloak:
 
     def _get(self, _request: httpx.Request) -> httpx.Response:
         self.calls.append("GET")
+        if self.client is None:
+            return httpx.Response(404)
         return httpx.Response(200, json=self.client)
+
+    def _delete(self, _request: httpx.Request) -> httpx.Response:
+        self.calls.append("DELETE")
+        if self.client is None:
+            return httpx.Response(404)
+        self.client = None
+        return httpx.Response(204)
 
     async def _put(self, request: httpx.Request) -> httpx.Response:
         self.calls.append("PUT")
@@ -93,10 +106,14 @@ class _Keycloak:
             self.time_out_next_put = False
             self.late_puts.append(sent)
             raise httpx.ReadTimeout("no answer in time", request=request)
+        if self.client is None:
+            return httpx.Response(404)
         self.apply(sent)
         return httpx.Response(502 if self.lose_answers else 204)
 
     def apply(self, sent: dict[str, Any]) -> None:
+        if self.client is None:
+            return  # Keycloak answers 404 to a write on a deleted client.
         attributes = {**self.client.get("attributes", {}), **sent.get("attributes", {})}
         self.client = {
             **self.client,
@@ -116,10 +133,16 @@ class _Keycloak:
         url = f"{_ADMIN_URL}/clients/{_INTERNAL_ID}"
         router.get(url).mock(side_effect=self._get)
         router.put(url).mock(side_effect=self._put)
+        router.delete(url).mock(side_effect=self._delete)
 
     @property
     def has_key(self) -> bool:
-        return "jwks.string" in self.client["attributes"]
+        return self.client is not None and "jwks.string" in self.client["attributes"]
+
+    @property
+    def stored(self) -> dict[str, Any]:
+        assert self.client is not None
+        return self.client
 
 
 @pytest.fixture
@@ -211,9 +234,8 @@ async def test_a_revoke_during_an_enrollment_leaves_the_client_disabled_and_with
     enrolled, revoked = await _overlap(keycloak, enroll, _revoke())
     assert enrolled.client_id == f"runner:{_NAME}"
     assert revoked.revoked is True
-    assert keycloak.client["enabled"] is False
-    assert not keycloak.has_key
-    assert keycloak.client["clientAuthenticatorType"] == "client-secret"
+    assert keycloak.client is None
+    assert keycloak.calls[-1] == "DELETE"
     row = await _row()
     assert row.revoked is True
     assert row.enrollment_code_hash is None
@@ -229,8 +251,7 @@ async def test_an_enrollment_during_a_revoke_is_refused(
     revoked, enrolled = await _overlap(keycloak, revoke, enroll_runner_key(code, _jwk(), _NAME))
     assert revoked.revoked is True
     assert isinstance(enrolled, EnrollmentCodeInvalidError)
-    assert keycloak.client["enabled"] is False
-    assert not keycloak.has_key
+    assert keycloak.client is None
     assert (await _row()).enrolled_key_id is None
 
 
@@ -245,7 +266,7 @@ async def test_two_keys_with_one_code_at_once_enroll_one_key(
     first, second = await _overlap(keycloak, enroll, enroll_runner_key(code, _jwk(), _NAME))
     assert first.key_id == ec_key_id(first_key)
     assert isinstance(second, EnrollmentCodeInvalidError)
-    (jwk,) = json.loads(keycloak.client["attributes"]["jwks.string"])["keys"]
+    (jwk,) = json.loads(keycloak.stored["attributes"]["jwks.string"])["keys"]
     assert jwk["kid"] == first.key_id == (await _row()).enrolled_key_id
 
 
@@ -259,7 +280,7 @@ async def test_two_revokes_at_once_revoke_one_time(
     first, second = await _overlap(keycloak, revoke, _revoke())
     assert first.revoked is True
     assert isinstance(second, RunnerPrincipalNotFoundError)
-    assert keycloak.client["enabled"] is False
+    assert keycloak.client is None
 
 
 async def _expire_code() -> None:
@@ -290,19 +311,18 @@ async def test_the_code_keeps_its_key_when_keycloak_stored_it_and_the_answer_was
     assert row.key_enrolled_at is None
     with pytest.raises(EnrollmentCodeInvalidError):
         await enroll_runner_key(code, _jwk(), _NAME)
-    (jwk,) = json.loads(keycloak.client["attributes"]["jwks.string"])["keys"]
+    (jwk,) = json.loads(keycloak.stored["attributes"]["jwks.string"])["keys"]
     assert jwk["kid"] == ec_key_id(first_key)
     await _expire_code()
     finished = await enroll_runner_key(code, first_key, _NAME)
     assert finished.key_id == ec_key_id(first_key)
     assert (await _row()).key_enrolled_at is not None
     await _revoke()
-    assert keycloak.client["enabled"] is False
-    assert not keycloak.has_key
+    assert keycloak.client is None
 
 
 @_skip_no_docker
-async def test_a_key_write_that_keycloak_applies_after_a_revoke_leaves_the_client_disabled(
+async def test_a_key_write_that_keycloak_applies_after_a_revoke_stores_no_key(
     pg_engine: None,  # noqa: F811
     keycloak: _Keycloak,
 ) -> None:
@@ -313,14 +333,16 @@ async def test_a_key_write_that_keycloak_applies_after_a_revoke_leaves_the_clien
     keycloak.time_out_next_put = True
     with pytest.raises(KeycloakAdminError, match="network error"):
         await enroll_runner_key(code, first_key, _NAME)
+    assert keycloak.late_puts
     revoked = await _revoke()
     assert revoked.revoked is True
-    assert keycloak.client["enabled"] is False
+    assert keycloak.client is None
     keycloak.apply_late_puts()
-    assert keycloak.client["enabled"] is False
+    assert keycloak.client is None
+    assert not keycloak.has_key
     with pytest.raises(EnrollmentCodeInvalidError):
         await enroll_runner_key(code, first_key, _NAME)
-    assert keycloak.client["enabled"] is False
+    assert keycloak.client is None
     assert (await _row()).revoked is True
 
 

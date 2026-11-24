@@ -77,11 +77,12 @@ async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     """Register a runner's public key with its one-time code.
 
     No login is needed: the code is the proof. A wrong, empty, used, expired or
-    revoked code all get 403 ``enrollment_code_invalid``. A good code of a
-    runner with another name gets 409 ``enrollment_code_for_another_runner``,
-    and the code stays usable for its own runner. A good code with a bad
-    key gets 422. A repeat of a used code with the key it enrolled gives the
-    same answer again.
+    revoked code all get 403 ``enrollment_code_invalid``, whatever the name and
+    the key are. A used code with another key gets the same 403. A good code of
+    a runner with another name gets 409 ``enrollment_code_for_another_runner``,
+    and the code stays usable for its own runner. A good, unused code with a
+    bad key gets 422. A repeat of a used code with the key it enrolled gives
+    the same answer again.
     """
     try:
         result = await enroll_runner_key(

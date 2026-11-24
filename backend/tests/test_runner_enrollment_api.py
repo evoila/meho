@@ -207,6 +207,60 @@ async def test_an_expired_code_is_refused(client: TestClient, tmp_path: Any) -> 
 
 
 @pytest.mark.asyncio
+async def test_an_expired_unused_code_gets_403_with_any_name_or_key(
+    client: TestClient, tmp_path: Any
+) -> None:
+    """An ended code that has no key yet says nothing about the name or the key."""
+    code = (await _register(client, "site-q"))["enrollment_code"]
+    await _expire_code("site-q")
+    good = {"enrollment_code": code, "public_key": _jwk(tmp_path), "runner_name": "site-q"}
+    factory, kc = _kc_mock()
+    with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory):
+        for body in (
+            {**good, "runner_name": "site-other"},
+            {**good, "public_key": {"kty": "EC", "crv": "P-384", "x": "AA", "y": "AA"}},
+            {**good, "public_key": {**good["public_key"], "d": "AAAA"}},
+            {**good, "runner_name": "site-other", "public_key": {"kty": "RSA"}},
+        ):
+            resp = client.post(_ENROLL, json=body)
+            assert resp.status_code == 403, resp.text
+            assert resp.json() == {"detail": "enrollment_code_invalid"}
+    kc.set_client_signed_jwt_key.assert_not_awaited()
+    assert (await _row("site-q")).enrolled_key_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_used_code_refuses_another_key_with_403_before_the_name(
+    client: TestClient, tmp_path: Any
+) -> None:
+    """A used code answers 403 to another or a bad key, also with a wrong name."""
+    code = (await _register(client, "site-r"))["enrollment_code"]
+    first_key = _jwk(tmp_path)
+    body = {"enrollment_code": code, "public_key": first_key, "runner_name": "site-r"}
+    factory, kc = _kc_mock()
+    kc.set_client_signed_jwt_key = AsyncMock(side_effect=KeycloakAdminError("boom"))
+    with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory):
+        assert client.post(_ENROLL, json=body).status_code == 502
+    await _expire_code("site-r")
+    factory2, kc2 = _kc_mock()
+    with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory2):
+        for other in (
+            {**body, "public_key": _jwk(tmp_path / "other"), "runner_name": "site-other"},
+            {**body, "public_key": {"kty": "RSA"}, "runner_name": "site-other"},
+        ):
+            refused = client.post(_ENROLL, json=other)
+            assert refused.status_code == 403, refused.text
+            assert refused.json() == {"detail": "enrollment_code_invalid"}
+        wrong_name = client.post(_ENROLL, json={**body, "runner_name": "site-other"})
+        assert wrong_name.status_code == 409
+        kc2.set_client_signed_jwt_key.assert_not_awaited()
+        retry = client.post(_ENROLL, json=body)
+    assert retry.status_code == 200
+    assert retry.json()["key_id"] == ec_key_id(first_key)
+    kc2.set_client_signed_jwt_key.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad",
     ["", "nodot", "zz.abc", "0123456789abcdef0123456789abcdef.wrong", "0" * 32 + "." + "x" * 5000],
@@ -451,7 +505,7 @@ async def test_a_runner_with_the_code_of_another_runner_stops_and_changes_nothin
 
 
 @pytest.mark.asyncio
-async def test_revoke_removes_the_key_and_the_code_of_a_revoked_runner_is_refused(
+async def test_revoke_deletes_the_client_and_the_code_of_a_revoked_runner_is_refused(
     client: TestClient, tmp_path: Any
 ) -> None:
     code = (await _register(client, "site-g"))["enrollment_code"]
@@ -469,8 +523,8 @@ async def test_revoke_removes_the_key_and_the_code_of_a_revoked_runner_is_refuse
             == 200
         )
     kc2 = await _revoke(client, "site-g")
-    kc2.disable_client.assert_awaited_once()
-    kc2.clear_client_signed_jwt_key.assert_awaited_once_with(_KC_INTERNAL_ID)
+    kc2.disable_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    kc2.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
 
 
 @pytest.mark.asyncio
@@ -479,7 +533,7 @@ async def test_the_code_of_a_runner_revoked_before_enrolling_is_refused(
 ) -> None:
     code = (await _register(client, "site-h"))["enrollment_code"]
     kc = await _revoke(client, "site-h")
-    kc.clear_client_signed_jwt_key.assert_awaited_once_with(_KC_INTERNAL_ID)
+    kc.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
     factory2, kc2 = _kc_mock()
     with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory2):
         resp = client.post(

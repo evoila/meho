@@ -749,9 +749,11 @@ the same machine, and then no proxy from the environment is used
   (`api/v1/runner_enrollment.py`). That route has no login: the code is the
   proof.
 - `enroll_runner_key` refuses a wrong, empty, used, expired or revoked code
-  (all give 403 `enrollment_code_invalid`). With a good code it refuses a
-  private member in the key and a key that is not P-256 (422, the list shape
-  of every other validation error).
+  (all give 403 `enrollment_code_invalid`). An expired code with no key yet
+  gets this 403 before the name and the key are checked. A used code gets it
+  for any key other than its own, before the name is checked. With a good,
+  unused code it refuses a private member in the key and a key that is not
+  P-256 (422, the list shape of every other validation error).
 - The runner sends its `MEHO_RUNNER_ID` as `runner_name`. When the code
   belongs to a runner with another name, the route answers 409
   `enrollment_code_for_another_runner` before anything changes, so the code
@@ -770,9 +772,10 @@ the same machine, and then no proxy from the environment is used
   lock (`take_runner_lock`) from the read of the row until the commit.
 - `KeycloakAdminClient.set_client_signed_jwt_key` sets the client to
   `client-jwt` and stores the key set in `jwks.string`. Its write leaves out
-  `enabled`, and Keycloak keeps a field that a `PUT` leaves out. So when a call
-  to Keycloak ends without an answer and Keycloak applies the write after a
-  revoke, the client stays disabled and gives no token.
+  `enabled`, and Keycloak keeps a field that a `PUT` leaves out, so this write
+  never turns a disabled client on. When a call to Keycloak ends without an
+  answer and Keycloak applies the write after a revoke, it finds no client:
+  revoke deletes it.
 
 **The saved login.** The runner uses the login record only when it is for
 `MEHO_RUNNER_ID` and its key id is the one of the private key on disk. When the
@@ -791,8 +794,9 @@ one when less than a quarter of its life (at least 30 seconds) is left.
 `401` it gets a new token and sends the call once more. Nothing in the module
 logs a key, a code, an assertion or a token.
 
-**Revoke.** `RunnerPrincipalService.revoke` disables the client and calls
-`clear_client_signed_jwt_key` for every runner. It also clears the code.
+**Revoke.** `RunnerPrincipalService.revoke` disables the client, then deletes
+it with its public key, for every runner. It also clears the code. The runner
+row stays, so the name stays taken.
 
 ## Dependencies
 

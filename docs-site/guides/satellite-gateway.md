@@ -184,8 +184,8 @@ switch:
 meho runner-principal revoke edge-dc-a
 ```
 
-Revoke disables the runner's Keycloak client and removes its public key
-there. The runner gets no new token, and its calls with the token it has
+Revoke disables the runner's Keycloak client, then deletes it with its
+public key. The runner gets no new token, and its calls with the token it has
 stop working when that token ends.
 
 ## Satellite vs. the in-process check runner

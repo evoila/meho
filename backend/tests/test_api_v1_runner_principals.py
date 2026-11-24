@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 import respx
@@ -728,8 +728,8 @@ async def test_register_vault_write_failure_detail_splits_on_token_validity(
 
 
 @pytest.mark.asyncio
-async def test_revoke_disables_keycloak_client(client: TestClient) -> None:
-    """Revoke disables the backing Keycloak client — the kill switch fires."""
+async def test_revoke_disables_then_deletes_keycloak_client(client: TestClient) -> None:
+    """Revoke disables the backing Keycloak client, then deletes it."""
     await _seed_tenants()
     key = make_rsa_keypair("kid-kill")
     factory = _mock_kc_ok()
@@ -749,6 +749,10 @@ async def test_revoke_disables_keycloak_client(client: TestClient) -> None:
         assert resp.status_code == 200, resp.text
 
     mock_client.disable_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    assert mock_client.mock_calls.index(
+        call.disable_client(_KC_INTERNAL_ID)
+    ) < mock_client.mock_calls.index(call.delete_client(_KC_INTERNAL_ID))
 
 
 @pytest.mark.asyncio

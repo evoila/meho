@@ -190,8 +190,8 @@ async def test_disable_client_not_found_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_signed_jwt_key_is_set_and_removed_and_the_rest_stays() -> None:
-    """The key attributes are removed with empty values; Keycloak keeps left-out ones."""
+async def test_signed_jwt_key_is_set_and_the_rest_stays() -> None:
+    """The key write sets the key attributes and keeps the other ones."""
     state: dict[str, object] = {
         "id": _INTERNAL_ID,
         "enabled": True,
@@ -219,16 +219,7 @@ async def test_signed_jwt_key_is_set_and_removed_and_the_rest_stays() -> None:
                 "jwks.string": json.dumps(jwks),
                 "token.endpoint.auth.signing.alg": "ES256",
             }
-            await kc.clear_client_signed_jwt_key(_INTERNAL_ID)
-    assert state["clientAuthenticatorType"] == "client-secret"
     assert state["enabled"] is True
-    assert state["attributes"] == {
-        "kind": "runner",
-        "use.jwks.url": "",
-        "use.jwks.string": "",
-        "jwks.string": "",
-        "token.endpoint.auth.signing.alg": "",
-    }
 
 
 @pytest.mark.asyncio

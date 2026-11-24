@@ -181,6 +181,23 @@ async def _row_of_code(session: AsyncSession, code: str) -> RunnerPrincipal:
     return row
 
 
+def _check_not_expired(row: RunnerPrincipal) -> None:
+    expires = row.enrollment_code_expires_at
+    if expires is None or _as_utc(expires) <= datetime.now(UTC):
+        raise EnrollmentCodeInvalidError
+
+
+def _claimed_key(row: RunnerPrincipal, public_jwk: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Return ``(jwks, key_id)`` when *public_jwk* is the key the code accepted."""
+    try:
+        jwks, key_id = _public_jwks(public_jwk)
+    except EnrollmentKeyInvalidError:
+        raise EnrollmentCodeInvalidError from None
+    if key_id != row.enrolled_key_id:
+        raise EnrollmentCodeInvalidError
+    return jwks, key_id
+
+
 def _check_runner_name(row: RunnerPrincipal, runner_name: str) -> None:
     if not hmac.compare_digest(row.name.encode("utf-8"), runner_name.encode("utf-8")):
         raise EnrollmentRunnerMismatchError
@@ -195,9 +212,6 @@ async def _claim_key(
     Keycloak ends without an answer, the code still belongs to this one key:
     another key is refused, and this key can finish, also after the code's end.
     """
-    expires = row.enrollment_code_expires_at
-    if expires is None or _as_utc(expires) <= datetime.now(UTC):
-        raise EnrollmentCodeInvalidError
     row.enrolled_key_id = key_id
     row.updated_at = datetime.now(UTC)
     await session.commit()
@@ -231,6 +245,8 @@ async def enroll_runner_key(
     code's end, so a runner that did not get the answer can ask for it again.
     *runner_name* is the name the runner expects. A code of another runner is
     refused before anything changes, so the code stays usable for its runner.
+    An ended code that has no key yet, and a used code with another key, get
+    the code refusal before the name or the key is checked.
 
     Raises :class:`EnrollmentCodeInvalidError` for a bad code or for a used
     code with another key, :class:`EnrollmentRunnerMismatchError` when the code
@@ -247,15 +263,18 @@ async def enroll_runner_key(
         row = await _row_of_code(session, code)
         await take_runner_lock(session, row.id)
         row = await _row_of_code(session, code)
-        _check_runner_name(row, runner_name)
-        try:
-            jwks, key_id = _public_jwks(public_jwk)
-        except EnrollmentKeyInvalidError:
-            if row.enrolled_key_id is not None:
-                raise EnrollmentCodeInvalidError from None
-            raise
         if row.enrolled_key_id is None:
+            # A new key: the code must not have ended. Only then do the name
+            # and the key count, so an ended code always gets the same refusal.
+            _check_not_expired(row)
+            _check_runner_name(row, runner_name)
+            jwks, key_id = _public_jwks(public_jwk)
             row = await _claim_key(session, row, code, key_id)
+        else:
+            # A used code answers only its own key; any other key gets the
+            # same refusal as a wrong code, before the name is looked at.
+            jwks, key_id = _claimed_key(row, public_jwk)
+            _check_runner_name(row, runner_name)
         if row.enrolled_key_id != key_id:
             raise EnrollmentCodeInvalidError
         repeated = row.key_enrolled_at is not None

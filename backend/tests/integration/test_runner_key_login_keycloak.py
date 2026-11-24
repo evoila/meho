@@ -6,8 +6,8 @@
 The runner client is made over the Admin API like ``runner-principal
 register`` does. Its public key is put on the client, then the runner signs
 its own login request (signed JWT client login), gets a token that the
-production JWT chain accepts, and gets a new token on demand. After the key is
-removed and the client is disabled, no new token comes.
+production JWT chain accepts, and gets a new token on demand. After the client
+is disabled and deleted, no new token comes, and a key write finds no client.
 
 Skips without ``MEHO_TEST_KEYCLOAK_IMAGE`` or Docker, like the other live
 Keycloak tests.
@@ -20,7 +20,7 @@ from uuid import uuid4
 import pytest
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
-from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
+from meho_backplane.auth.keycloak_admin import KeycloakAdminClient, KeycloakClientNotFoundError
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.auth.runner_enrollment import SIGNING_ALG, _public_jwks
 from meho_backplane.runner.login import (
@@ -93,17 +93,16 @@ async def test_runner_signs_its_own_login_and_renews(
 
     async with admin:
         await admin.disable_client(internal_id)
-        await admin.clear_client_signed_jwt_key(internal_id)
+        await admin.delete_client(internal_id)
         assert admin._http is not None
         stored = await admin._http.get(
             f"{keycloak_bootstrap.admin_url}/clients/{internal_id}",
             headers=admin._auth_headers(),
         )
-    assert stored.status_code == 200
-    client = stored.json()
-    assert client["enabled"] is False
-    assert client["clientAuthenticatorType"] == "client-secret"
-    assert not client["attributes"].get("jwks.string")
-    assert client["attributes"]["kind"] == "runner"
+        assert stored.status_code == 404
+        with pytest.raises(KeycloakClientNotFoundError):
+            await admin.set_client_signed_jwt_key(
+                internal_id, jwks={"keys": []}, signing_alg=SIGNING_ALG
+            )
     with pytest.raises(RunnerLoginError):
         await provider.refresh()

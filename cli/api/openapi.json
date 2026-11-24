@@ -10453,7 +10453,7 @@
           "runner-principals"
         ],
         "summary": "Enroll Runner",
-        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``. A good code of a\nrunner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good code with a bad\nkey gets 422. A repeat of a used code with the key it enrolled gives the\nsame answer again.",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``, whatever the name and\nthe key are. A used code with another key gets the same 403. A good code of\na runner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good, unused code with a\nbad key gets 422. A repeat of a used code with the key it enrolled gives\nthe same answer again.",
         "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
         "requestBody": {
           "content": {

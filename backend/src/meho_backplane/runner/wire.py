@@ -61,6 +61,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 
 __all__ = [
+    "FEATURES_HEADER",
+    "FEATURE_SCHEDULED_CHECKS",
     "SCHEMA_VERSION",
     "WIRE_VERSION_HEADER",
     "WIRE_VERSION_MISMATCH",
@@ -88,6 +90,20 @@ WIRE_VERSION_HEADER = "X-MEHO-Runner-Wire-Version"
 #: The version a call without :data:`WIRE_VERSION_HEADER` counts as. Every
 #: runner built before the header existed spoke version ``"1"``.
 WIRE_VERSION_WHEN_MISSING = "1"
+
+#: Request header in which the runner names what it can do, as a list of
+#: words with a comma between them. A runner without the header can do none
+#: of them. A new word needs no ``SCHEMA_VERSION`` bump: the central MEHO
+#: sends work that needs a word only to a runner that names it.
+FEATURES_HEADER = "X-MEHO-Runner-Features"
+
+#: The runner runs a work item only when it is due (see
+#: :attr:`RunnerWorkItem.next_due_at`), cleans secret values from the answer
+#: before it keeps or sends it, and sends a list answer as it is. The
+#: central MEHO sends the work of the checks it counts only to a runner that
+#: names this word, so an older runner never runs a daily check on every
+#: poll.
+FEATURE_SCHEDULED_CHECKS = "scheduled-checks"
 
 #: First word of the central MEHO's refusal text on a version mismatch.
 #: The runner client looks for it to tell this refusal apart from other
@@ -241,6 +257,19 @@ class RunnerWorkItem(BaseModel):
     signature: str | None = None
     expires_at: datetime | None = None
     package_set: str | None = None
+    #: The schedule of an item for a check that MEHO counts: the check's own
+    #: ``interval_seconds``, or ``cron_expr`` with ``timezone``. The runner
+    #: runs such an item only when it is due, also from a cached assignment.
+    #: An item with neither runs on every tick.
+    interval_seconds: int | None = None
+    cron_expr: str | None = None
+    timezone: str | None = None
+    #: The next due time of a check that MEHO counts, on MEHO's clock. The
+    #: runner runs the item once this time has come, also on its first poll
+    #: and after a restart. ``meho sensor run`` and the shorter retry of a
+    #: waiting state change move it forward. Set only for such a check, and
+    #: only for a runner that names :data:`FEATURE_SCHEDULED_CHECKS`.
+    next_due_at: datetime | None = None
 
 
 class RunnerAssignment(BaseModel):
@@ -282,8 +311,32 @@ class RunnerResult(BaseModel):
     check_ref: str
     op_id: str
     status: str
-    result: dict[str, Any] | None = None
+    #: The answer of the operation: an object, or a list for an operation
+    #: that answers with a list.
+    result: dict[str, Any] | list[Any] | None = None
     error: str | None = None
+    #: When the runner made the result, on the runner's clock. Central never
+    #: uses it as the time of the check (it uses the time it received the
+    #: result). It only refuses a time in the future and drops a result made
+    #: before the last one it counted. MEHO stores a result without it, but
+    #: does not count it.
+    produced_at: datetime | None = None
+    #: A code for the kind of error, set only for a refused login
+    #: (``connector_auth_failed``). MEHO pauses a check after a few of them.
+    error_code: str | None = None
+
+
+class RefusedResult(BaseModel):
+    """A result MEHO refused, named in the answer to a result batch.
+
+    ``reason`` is ``future_time``: the runner time of the result is later
+    than MEHO's clock. MEHO neither stores nor counts such a result.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    result_uid: str
+    reason: str
 
 
 class RunnerResultBatch(BaseModel):

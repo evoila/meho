@@ -4993,6 +4993,7 @@ meho sensor create [flags]
 - `--params` — optional op-params JSON object (inline JSON, @<path>, or @-)
 - `--retry-backoff-seconds` — accelerated re-check spacing in seconds while a state change is pending, 5..300 (omitted when unset; the server then applies its default of 15)
 - `--retry-times` — consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)
+- `--runner` — name of a runner that runs the check at its site (needs RUNNER_CHECKS_ENABLED)
 - `--severity` — worst rollup state a failing assertion drives: degraded | critical (default critical)
 - `--target` — optional dispatch-target JSON object (inline JSON, @<path>, or @-)
 - `--tenant` — target tenant UUID (platform_admin cross-tenant create)

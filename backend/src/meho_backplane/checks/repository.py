@@ -35,6 +35,7 @@ from meho_backplane.checks.acknowledgement import AckEndReason, settle_acknowled
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorResult, SensorStatus
 from meho_backplane.scheduler.cron import next_fire_after
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "RecordedResult",
@@ -85,6 +86,7 @@ async def create_sensor(
     identity_sub: str,
     created_by_sub: str,
     base: datetime | None = None,
+    runner_name: str | None = None,
 ) -> Sensor:
     """Insert a sensor with a materialised first ``next_fire_at``.
 
@@ -134,6 +136,7 @@ async def create_sensor(
         retry_backoff_seconds=retry_backoff_seconds,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
+        runner_name=runner_name,
     )
     session.add(row)
     await session.flush()
@@ -409,15 +412,15 @@ async def claim_due_sensors(
     status='active'``.
     """
     conn = await session.connection()
-    stmt = (
-        select(Sensor)
-        .where(
-            Sensor.status == SensorStatus.ACTIVE.value,
-            Sensor.next_fire_at <= now,
-        )
-        .order_by(Sensor.next_fire_at.asc())
-        .limit(limit)
-    )
+    conditions = [
+        Sensor.status == SensorStatus.ACTIVE.value,
+        Sensor.next_fire_at <= now,
+    ]
+    if get_settings().runner_checks_enabled:
+        # With the switch on, a check bound to a runner runs at its site.
+        # With it off, no runner counts results, so the central loop runs it.
+        conditions.append(Sensor.runner_name.is_(None))
+    stmt = select(Sensor).where(*conditions).order_by(Sensor.next_fire_at.asc()).limit(limit)
     if conn.dialect.name == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
     result = await session.execute(stmt)

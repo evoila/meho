@@ -12,16 +12,37 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from meho_backplane import op_classes
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations import (
+    _validate,
+    dispatch,
+    register_typed_operation,
+    reset_dispatcher_caches,
+    service_read_scopes,
+)
 from meho_backplane.operations._validate import PER_CALL_WAIT_NOTE, policy_gate
+from meho_backplane.operations.composite import (
+    _covered_by_approved_run,
+    approved_run_var,
+    composite_depth_var,
+    enforce_subop_policy,
+    per_call_step_waits_after_approval,
+)
 from meho_backplane.operations.ingest import spec_corrections
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+from meho_backplane.operations.rights_change_console import CONSOLE_RUN_REASON, ConsoleCheck
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import _entry_refusal
 from meho_backplane.operations.service_grants import (
@@ -240,3 +261,214 @@ async def test_a_safe_old_row_waits_at_the_gate_and_a_plain_safe_row_runs(
         decide_only=True,
     )
     assert shadow.verdict is Verdict.WAIT
+
+
+def _person(*, web: bool = False, role: TenantRole = TenantRole.OPERATOR) -> Operator:
+    return Operator(
+        sub="examplebackup-person",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=role,
+        principal_kind=PrincipalKind.USER,
+        web_session=web,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("web", [False, True], ids=["token", "web"])
+async def test_a_person_call_of_a_safe_old_row_waits_and_a_plain_safe_row_runs(web: bool) -> None:
+    operator = _person(web=web)
+    plain = _row(_PLAIN_ID, "GET", "/groups", safety_level="safe")
+    verdict, reason = await policy_gate(
+        operator=operator, descriptor=plain, target=None, connector_id=_CONNECTOR
+    )
+    assert verdict is PermissionVerdict.AUTO_EXECUTE, reason
+    old = _old_row(safety_level="safe")
+    verdict, reason = await policy_gate(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
+    assert reason == PER_CALL_WAIT_NOTE
+    shadow = await evaluate_call(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert shadow.verdict is Verdict.WAIT
+
+
+@pytest.mark.asyncio
+async def test_an_admin_change_of_rights_in_the_web_console_still_runs_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_validate, "runs_at_once_in_console", lambda *_a, **_k: True)
+    monkeypatch.setattr(_validate, "console_check", AsyncMock(return_value=ConsoleCheck()))
+    verdict, reason = await policy_gate(
+        operator=_person(web=True, role=TenantRole.TENANT_ADMIN),
+        descriptor=_old_row(safety_level="safe"),
+        target=None,
+        connector_id=_CONNECTOR,
+        decide_only=True,
+    )
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+    assert reason == CONSOLE_RUN_REASON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_scope", "verdict", "shadow_verdict"),
+    [
+        (False, PermissionVerdict.DENY, Verdict.DENY),
+        (True, PermissionVerdict.NEEDS_APPROVAL, Verdict.WAIT),
+    ],
+    ids=["outside-scope", "inside-scope"],
+)
+async def test_a_marked_read_outside_the_read_scope_is_denied_and_waits_inside_it(
+    monkeypatch: pytest.MonkeyPatch,
+    in_scope: bool,
+    verdict: PermissionVerdict,
+    shadow_verdict: Verdict,
+) -> None:
+    denial = None if in_scope else "read_scope_denied: the target is outside the read scope"
+    monkeypatch.setattr(service_read_scopes, "read_scope_denial", AsyncMock(return_value=denial))
+    old = _old_row(safety_level="safe")
+    got, reason = await policy_gate(
+        operator=_service(), descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert got is verdict, reason
+    assert reason is not None
+    assert reason.startswith("read_scope_denied") is not in_scope
+    shadow = await evaluate_call(
+        operator=_service(), descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert shadow.verdict is shadow_verdict
+
+
+def test_the_approval_of_a_run_does_not_cover_a_marked_step() -> None:
+    assert not _covered_by_approved_run(
+        op_id=_NEW_ID, safety_level="safe", requires_approval=False, per_call_approval=True
+    )
+    token = approved_run_var.set(True)
+    try:
+        assert per_call_step_waits_after_approval(_old_row(safety_level="safe"))
+        assert not per_call_step_waits_after_approval(_row(_PLAIN_ID, "GET", "/groups"))
+    finally:
+        approved_run_var.reset(token)
+    assert not per_call_step_waits_after_approval(_old_row(safety_level="safe"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operator", [_service(), _person()], ids=["service", "person"])
+async def test_an_approved_run_does_not_cover_a_marked_step(operator: Operator) -> None:
+    token = approved_run_var.set(True)
+    try:
+        result = await enforce_subop_policy(
+            operator=operator,
+            connector_id=_CONNECTOR,
+            op_id=_NEW_ID,
+            safety_level="safe",
+            requires_approval=False,
+            target=None,
+            params={},
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert result is not None
+    assert result.status == "awaiting_approval", result.error
+
+
+_CHILD_PRODUCT = "examplechild"
+_CHILD_CONNECTOR = "examplechild-1.x"
+_MARKED_CHILD = "examplechild.group.member.add"
+_PLAIN_CHILD = "examplechild.group.list"
+_handler_calls: list[str] = []
+
+
+class _ChildStub(Connector):
+    """Lets the resolver pick a connector; the typed handlers never call it."""
+
+    product = _CHILD_PRODUCT
+    version = "1.x"
+    impl_id = _CHILD_PRODUCT
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+class _Target:
+    def __init__(self) -> None:
+        self.product = _CHILD_PRODUCT
+        self.fingerprint = None
+        self.preferred_impl_id: str | None = None
+        self.id = uuid.uuid4()
+        self.name = "test-target"
+        self.host = "test.example.com"
+        self.port = 443
+        self.auth_model = "shared_service_account"
+
+
+async def _child_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _handler_calls.append("ran")
+    return {"ran": True}
+
+
+@pytest.fixture
+def child_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setattr(op_classes, "_PER_CALL_APPROVAL", {_NEW_ID, _MARKED_CHILD})
+    _handler_calls.clear()
+    reset_dispatcher_caches()
+    clear_registry()
+    register_connector_v2(product=_CHILD_PRODUCT, version="", impl_id="", cls=_ChildStub)
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("child_stub")
+@pytest.mark.parametrize(
+    ("op_id", "status", "calls"),
+    [(_MARKED_CHILD, "awaiting_approval", []), (_PLAIN_CHILD, "ok", ["ran"])],
+    ids=["marked", "plain"],
+)
+async def test_an_approved_run_does_not_cover_a_marked_child_call(
+    op_id: str, status: str, calls: list[str]
+) -> None:
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await register_typed_operation(
+        product=_CHILD_PRODUCT,
+        version="1.x",
+        impl_id=_CHILD_PRODUCT,
+        op_id=op_id,
+        handler=_child_handler,
+        summary="A child step.",
+        description="A child step.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        safety_level="safe",
+        embedding_service=embedding,
+    )
+    approved = approved_run_var.set(True)
+    depth = composite_depth_var.set(1)
+    try:
+        result = await dispatch(
+            operator=_service(),
+            connector_id=_CHILD_CONNECTOR,
+            op_id=op_id,
+            target=_Target(),
+            params={},
+        )
+    finally:
+        composite_depth_var.reset(depth)
+        approved_run_var.reset(approved)
+    assert result.status == status, result.error
+    assert _handler_calls == calls

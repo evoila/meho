@@ -418,6 +418,17 @@ def _rights_change_step(steps: _Steps, found: Lookups) -> None:
     )
 
 
+def _runs_but_for_per_call_mark(asker: Asker, asked: Asked, hits: list[FloorHit]) -> bool:
+    """True when the call runs at once, or waits only for the per-call mark.
+
+    The read scope of a service login holds for such a call, the same as in
+    the policy gate.
+    """
+    steps = _non_agent_default(asker, asked)
+    _apply_floors(steps, [hit for hit in hits if hit.rule_id != "per_call_approval_waits"])
+    return steps.verdict is Verdict.RUN
+
+
 def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     hits = call_floors(asker, asked)
     if hits and hits[0].verdict == "deny":
@@ -429,7 +440,7 @@ def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
         return steps
     if asker.kind != "service":
         return steps
-    if steps.verdict is Verdict.RUN and found.read_scope_denial is not None:
+    if found.read_scope_denial is not None and _runs_but_for_per_call_mark(asker, asked, hits):
         steps.set(
             Verdict.DENY,
             RuleRef(source="read_scope", rule_id="read_scope", text=found.read_scope_denial),

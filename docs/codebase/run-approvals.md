@@ -164,8 +164,12 @@ a standing grant covers such an operation:
   a marked operation.
 - The check also reads the op id that the connector's ingest correction gives
   the stored row (`descriptor_needs_per_call_approval`), so a row stored
-  with another op id for the same call waits too. Such a call of an agent
-  or a service login waits also at risk level `safe`.
+  with another op id for the same call waits too. Such a call waits also at
+  risk level `safe`, for an agent, a service login and a person. An admin's
+  change of rights in the web console still runs at once.
+- The approval of a multi-step operation does not cover a marked step or
+  child call: it waits for its own approval
+  (`per_call_step_waits_after_approval` in `operations/composite.py`).
 
 Marked today:
 

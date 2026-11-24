@@ -109,9 +109,13 @@ fields of the row (method, path, tags, parameter schema and the rest), as
 at ingest. A row stored with another op id is marked too. A correction
 that fails counts the call as marked. Grant create, run approval create,
 the call-time check and the policy shadow report use it. At call time a
-marked call of an agent or a service login always waits for a person, also
-at risk level `safe` (`PER_CALL_WAIT_NOTE` in `operations/_validate.py`,
-the floor `per_call_approval_waits` in `policy/floors.py`).
+marked call always waits for a person, also at risk level `safe`: the call
+of an agent, a service login and a person (`PER_CALL_WAIT_NOTE` in
+`operations/_validate.py`, the floor `per_call_approval_waits` in
+`policy/floors.py`). An admin's change of rights in the web console still
+runs at once. A service login whose read scope does not cover the target
+gets `read_scope_denied` for such a call, not a wait. The approval of a
+multi-step operation does not cover a marked step or child call.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
 holds: a credential call, per-call approval, a caller-address field,

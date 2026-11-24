@@ -820,11 +820,13 @@ def _non_agent_park_reason(
       the destructive tier (decision ``governed-delete-operations.md``
       requirement 1).
     * ``requires_approval`` (G11.7-T1): the approval queue.
-    * Service principals: a call that a connector marks for a person's
-      approval on each call waits (:data:`PER_CALL_WAIT_NOTE`); else
-      :func:`_service_safety_gate_reason` (#3152). They keep their
-      standing-grant rule and are not under the token rule.
+    * Service principals: :func:`_service_safety_gate_reason` (#3152). They
+      keep their standing-grant rule and are not under the token rule.
     * Everyone else: :func:`_person_park_reason` (#3980).
+    * A call that would run at once but that a connector marks for a
+      person's approval on each call waits (:data:`PER_CALL_WAIT_NOTE`), for
+      a service and for a person. An admin's change of rights in the web
+      console still runs at once (:func:`_console_rights_verdict`).
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -837,19 +839,26 @@ def _non_agent_park_reason(
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
-    if is_service:
-        from meho_backplane.operations.service_grants import descriptor_needs_per_call_approval
+    from meho_backplane.operations.service_grants import descriptor_needs_per_call_approval
 
-        if descriptor_needs_per_call_approval(descriptor):
-            return PER_CALL_WAIT_NOTE
-        return _service_safety_gate_reason(descriptor)
-    return _person_park_reason(operator, descriptor)
+    waits = (
+        _service_safety_gate_reason(descriptor)
+        if is_service
+        else _person_park_reason(operator, descriptor)
+    )
+    if waits is None and descriptor_needs_per_call_approval(descriptor):
+        return PER_CALL_WAIT_NOTE
+    return waits
 
 
-async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
+async def _service_read_scope_denial(
+    *, operator: Operator, descriptor: EndpointDescriptor, target: Any
+) -> str | None:
     """The #4992 read-scope refusal for a service principal, or ``None``.
 
-    Runs only for a call that would otherwise run at once. A person can
+    Runs only for a call that would otherwise run at once, also one that
+    waits only because a connector marks it for a person on each call
+    (:data:`PER_CALL_WAIT_NOTE`). A person can
     limit a service principal's reads to named targets; a call on a
     target outside that list (or without a target, when the scope has no
     "no target" entry) is denied. A principal without a scope is not
@@ -857,7 +866,17 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     """
     from meho_backplane.operations.service_read_scopes import read_scope_denial
 
-    return await read_scope_denial(operator=operator, target=target)
+    denial = await read_scope_denial(operator=operator, target=target)
+    if denial is not None:
+        _log.info(
+            "policy_gate_read_scope_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=str(getattr(target, "id", None)) if target is not None else None,
+        )
+    return denial
 
 
 def _person_role_floor_denial(
@@ -930,17 +949,11 @@ async def _non_agent_verdict(
     )
     if console is not None:
         return console
-    if gate_reason is None and is_service:
-        denial = await _service_read_scope_denial(operator=operator, target=target)
+    if is_service and gate_reason in (None, PER_CALL_WAIT_NOTE):
+        denial = await _service_read_scope_denial(
+            operator=operator, descriptor=descriptor, target=target
+        )
         if denial is not None:
-            _log.info(
-                "policy_gate_read_scope_denied",
-                operator_sub=operator.sub,
-                tenant_id=str(operator.tenant_id),
-                op_id=descriptor.op_id,
-                safety_level=descriptor.safety_level,
-                target_id=target_id_str,
-            )
             return PermissionVerdict.DENY, denial
 
     if gate_reason is None:

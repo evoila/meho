@@ -1217,6 +1217,10 @@ its own parameters.
   window, then one day before it, then at the start of the log, and stops
   when it has enough lines or a `BEGIN` or `END` mark. One such read takes
   at most 64 MiB from the stream and keeps only the last 256 lines.
+- A log line is never held whole in memory when it is over 1 MiB. Without
+  `since`, a page ends behind such a line. When it is the newest line, the
+  read fails with an error. In a window the error of `k8s.logs` names its
+  time.
 - No result handle is built here; the result reduction does it.
 
 ### Init container logs in `k8s.logs` (#3686)

@@ -15,8 +15,10 @@ parsing, and the steps from source entries to the answer, in this order:
 
 1. :func:`redact_entries` hides secrets in the entries as one text, so a
    secret that spans lines (a PEM key) is found whole. The connector gives
-   it the lines before the entries too (:class:`LogContext`): an entry can
-   be in the middle of a key that started earlier.
+   it some lines from before the entries too: an entry can be in the middle
+   of a key that started earlier. That key can have started even before
+   them, so text that can be part of a key is always hidden
+   (:mod:`~meho_backplane.connectors.log_key_text`).
 2. :func:`take_page` applies the text filter and the line limit. It also
    says which entries were looked at.
 3. :func:`build_log_answer` builds the answer.
@@ -29,10 +31,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
+from meho_backplane.connectors.log_key_text import HIDDEN_KEY_TEXT, hide_key_text
 from meho_backplane.redaction import apply_connector_boundary_redaction
 from meho_backplane.redaction.secret_text import hide_secret_text
 
@@ -46,7 +49,6 @@ __all__ = [
     "MAX_LINE_CHARS",
     "MAX_LOG_LINES",
     "REDACTION_CONTEXT_LINES",
-    "LogContext",
     "LogEntry",
     "LogPage",
     "LogReadError",
@@ -68,9 +70,9 @@ MAX_LOG_LINES = 5000
 #: Most characters of one returned line. The filter looks at the whole line.
 MAX_LINE_CHARS = 4096
 
-#: How many lines before the first entry a connector reads, so a private
-#: key that started there is still found. A PEM block of a 16384-bit RSA
-#: key has about 200 lines.
+#: How many lines before the first entry a connector reads, so a secret
+#: over many lines that started there is still found as one text. A PEM
+#: block of a 16384-bit RSA key has about 200 lines. They are never returned.
 REDACTION_CONTEXT_LINES = 256
 
 #: How much of one line before the first entry is kept.
@@ -84,10 +86,6 @@ _FRACTION_RE = re.compile(r"\.(\d+)")
 _PEM_MARK_RE = re.compile(r"-----(BEGIN|END) ((?:[A-Z0-9]+ )*)PRIVATE KEY-----")
 _PEM_MARK_END = "PRIVATE KEY-----"
 _PEM_MARK_CHARS = 120
-
-#: A line that can be part of a key body: only base64 text, or a long piece of it.
-_KEY_BODY_RE = re.compile(r"\A\s*[A-Za-z0-9+/=]+\s*\Z|[A-Za-z0-9+/=]{16}")
-_HIDDEN_KEY_LINE = "[REDACTED:pem_private_key]"
 
 
 class LogReadError(ValueError):
@@ -225,25 +223,15 @@ class LogEntry:
 
     ``group`` is set by a source whose continuation marker is a time: the
     entries of one time share it, and a page never ends between them.
-    ``marker`` is the source's own marker of this entry.
+    ``marker`` is the source's own marker of this entry. ``key_text_hidden``
+    is set when text that can be part of a private key was hidden in it.
     """
 
     time: str | None
     line: str
     group: tuple[int, int] | None = None
     marker: str | None = None
-
-
-@dataclass(frozen=True)
-class LogContext:
-    """The lines right before the first entry, oldest first. They are never returned.
-
-    ``complete`` is true when they reach back
-    :data:`REDACTION_CONTEXT_LINES` lines or to the start of the log.
-    """
-
-    lines: list[str] = field(default_factory=list)
-    complete: bool = True
+    key_text_hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,27 +291,11 @@ def bound_context_line(line: str) -> str:
     return f"{head} {line[max(0, mark - _PEM_MARK_CHARS) : mark + len(_PEM_MARK_END)]}"
 
 
-def _unclear_key_lines(lines: list[str], context: LogContext) -> set[int]:
-    """Return the lines that can belong to a key whose start was not read.
-
-    Only when the context ends early and holds no key mark: then nothing
-    says whether the first lines stand inside a key.
-    """
-    if context.complete or any(map(has_key_mark, context.lines)):
-        return set()
-    unclear: set[int] = set()
-    for index, line in enumerate(lines[: REDACTION_CONTEXT_LINES - len(context.lines)]):
-        if has_key_mark(line):
-            break
-        if _KEY_BODY_RE.search(line):
-            unclear.add(index)
-    return unclear
-
-
 def _redact_lines(
-    lines: list[str], context: LogContext, labels: dict[str, str | None]
-) -> list[str]:
-    everything = context.lines + lines
+    lines: list[str], context: list[str], labels: dict[str, str | None]
+) -> tuple[list[str], list[bool]]:
+    """Return the redacted lines, and which of them lost text that can be part of a key."""
+    everything = context + lines
     starts = _close_cut_keys(everything)
     text: list[str] = []
     real: list[bool] = []
@@ -332,29 +304,29 @@ def _redact_lines(
             text.append(starts.pop(0)[1])
             real.append(False)
         text.append(line)
-        real.append(index >= len(context.lines))
-    result = apply_connector_boundary_redaction(text, **labels)
-    shown = [line for line, keep in zip(result.redacted, real, strict=True) if keep]
-    for index in _unclear_key_lines(lines, context):
-        shown[index] = _HIDDEN_KEY_LINE
-    return shown
+        real.append(index >= len(context))
+    redacted = apply_connector_boundary_redaction(text, **labels).redacted
+    shown = hide_key_text(redacted)
+    kept = [index for index, keep in enumerate(real) if keep]
+    return [shown[i] for i in kept], [shown[i] != redacted[i] for i in kept]
 
 
 async def redact_entries(
     entries: list[LogEntry],
     *,
-    context: LogContext,
+    context: list[str],
     connector: Any,
     operator: Operator | None,
     op_id: str,
 ) -> list[LogEntry]:
     """Return *entries* with the secrets in their lines hidden.
 
-    The lines of *context* and of the entries go through the redaction of
+    *context* are the lines right before the entries, oldest first; they
+    are never returned. They and the entries go through the redaction of
     the result boundary as one text, under the same policy. This runs
     before the filter and the line limit: they can take the ``BEGIN`` and
-    ``END`` lines of a key away. The result boundary still redacts the
-    answer.
+    ``END`` lines of a key away. Text that can be part of a key is hidden
+    after that. The result boundary still redacts the answer.
     """
     tenant_id = None if operator is None else operator.tenant_id
     labels = {
@@ -362,10 +334,13 @@ async def redact_entries(
         "tenant": None if tenant_id is None else str(tenant_id),
         "op": op_id,
     }
-    lines = await asyncio.to_thread(
+    lines, hidden = await asyncio.to_thread(
         _redact_lines, [entry.line for entry in entries], context, labels
     )
-    return [replace(entry, line=line) for entry, line in zip(entries, lines, strict=True)]
+    return [
+        replace(entry, line=line, key_text_hidden=lost)
+        for entry, line, lost in zip(entries, lines, hidden, strict=True)
+    ]
 
 
 def _matches(entry: LogEntry, needle: str | None) -> bool:
@@ -447,6 +422,7 @@ def build_log_answer(
     *,
     source_cut: bool = False,
     continuation: str | None = None,
+    warning: str = "",
 ) -> dict[str, Any]:
     """Build the answer of a log read from one page.
 
@@ -454,13 +430,25 @@ def build_log_answer(
     says the source holds more than was read. ``covered`` is the time
     span of the entries that were looked at, also when none matches
     (``null`` for entries without times). ``continuation`` is the
-    source's own marker to read on from, passed on as it is.
+    source's own marker to read on from, passed on as it is. The answer
+    has a ``warning`` when the source gave one, or when text was hidden
+    that only can be part of a key: the filter does not see that text.
     """
     times = [entry.time for entry in page.examined if entry.time]
-    return {
+    hidden = sum(entry.key_text_hidden for entry in page.examined)
+    if hidden:
+        note = (
+            f"{hidden} of the lines that were searched have text that can be part of a "
+            f"private key; it is hidden as {HIDDEN_KEY_TEXT}, and the filter does not see it"
+        )
+        warning = f"{warning}; {note}" if warning else note
+    answer: dict[str, Any] = {
         "rows": page.rows,
         "total": len(page.rows),
         "truncated": bool(page.rest) or source_cut,
         "covered": {"from": times[0], "to": times[-1]} if times else None,
         "continuation": continuation,
     }
+    if warning:
+        answer["warning"] = warning
+    return answer

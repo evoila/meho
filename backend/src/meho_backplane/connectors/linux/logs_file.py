@@ -6,10 +6,13 @@
 The file is opened and checked like in ``linux.log.tail``
 (:mod:`.ops_file`). Only the command that reads the open file differs: it
 sends the last lines of the file whole, and the lines before them cut
-short. Those earlier lines are for the redaction only
-(:class:`~meho_backplane.connectors.log_read.LogContext`), so long ones
-must not fill the output limit of SSH. Both parts come from one pass over
-the file, so a line that is written meanwhile cannot move between them.
+short. Those earlier lines are for the redaction only, so long ones must
+not fill the output limit of SSH. Both parts come from one pass over the
+file, so a line that is written meanwhile cannot move between them.
+
+The output of SSH is read as UTF-8, and one other byte would fail the
+whole read. So the host sends a line that is not UTF-8 with ``?`` for each
+byte that is not ASCII. The key marks are ASCII and stay.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from meho_backplane.connectors.linux.ops_inspect import LinuxInspectError
 from meho_backplane.connectors.log_read import (
     MAX_CONTEXT_LINE_CHARS,
     REDACTION_CONTEXT_LINES,
-    LogContext,
 )
 
 if TYPE_CHECKING:
@@ -46,14 +48,24 @@ _HEADER = "MEHO_LOG_LINES"
 
 #: a[first] to a[NR] is the page; a[old] to a[first - 1] is the context.
 #: A line that leaves the page is cut short: its first characters and the
-#: last mark of a private key in it.
+#: last mark of a private key in it. clean() makes a line UTF-8: it takes
+#: the valid characters out of a copy and looks for what is left.
 _AWK = (
+    "function clean(s,  t) { if (s !~ /[\\200-\\377]/) return s; t = s; "
+    'gsub(/[\\302-\\337][\\200-\\277]/, " ", t); '
+    'gsub(/\\340[\\240-\\277][\\200-\\277]/, " ", t); '
+    'gsub(/\\355[\\200-\\237][\\200-\\277]/, " ", t); '
+    'gsub(/[\\341-\\354\\356\\357][\\200-\\277][\\200-\\277]/, " ", t); '
+    'gsub(/\\360[\\220-\\277][\\200-\\277][\\200-\\277]/, " ", t); '
+    'gsub(/[\\361-\\363][\\200-\\277][\\200-\\277][\\200-\\277]/, " ", t); '
+    'gsub(/\\364[\\200-\\217][\\200-\\277][\\200-\\277]/, " ", t); '
+    'if (t ~ /[\\200-\\377]/) gsub(/[\\200-\\377]/, "?", s); return s } '
     "function cut(s,  p, q, m) { if (length(s) <= chars) return s; "
     "p = split(s, q, /PRIVATE KEY-----/); s = substr(s, 1, chars); "
     "if (p > 1) { m = q[p - 1]; if (length(m) > 120) m = substr(m, length(m) - 119); "
     's = s " " m "PRIVATE KEY-----" } gsub(/[^ -~]/, "?", s); return s } '
     "BEGIN { first = 1; old = 1 } "
-    "{ n = length($0) + 1; all += n; size += n; a[NR] = $0; "
+    "{ n = length($0) + 1; all += n; size += n; a[NR] = clean($0); "
     "while (size > max || NR - first + 1 > rows) { size -= length(a[first]) + 1; "
     "a[first] = cut(a[first]); first++; "
     "if (first - old > context) { delete a[old]; old++ } } } "
@@ -70,7 +82,7 @@ class FileLines:
     """The last lines of the file, oldest first, and the lines before them."""
 
     lines: list[str]
-    context: LogContext
+    context: list[str]
     cut: bool
 
 
@@ -104,8 +116,7 @@ def parse_log_file_content(content: str, path: str) -> FileLines:
     lines.pop()
     if len(lines) < before:
         raise LinuxInspectError(f"the read of log file {path!r} did not finish cleanly")
-    context = LogContext(lines[:before], complete=not short or before >= REDACTION_CONTEXT_LINES)
-    return FileLines(lines[before:], context, cut=short or before > 0)
+    return FileLines(lines[before:], lines[:before], cut=short or before > 0)
 
 
 def _check_file_was_read(output: ReadOutput, path: str) -> None:

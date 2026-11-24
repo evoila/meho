@@ -217,7 +217,7 @@ stay, with their own names and parameters.
 - The answer: `rows` of `{time, line, line_truncated}` (oldest first;
   `time` is `null` for a file), `total`, `truncated`, `covered` and
   `continuation` (`null` for a file), and `warning` when `journalctl`
-  printed one. `covered` is the time span (`{from, to}`) of all entries
+  printed one or text was hidden that can be part of a key. `covered` is the time span (`{from, to}`) of all entries
   the read looked at, also when none matches; `null` without times.
 - A line is returned up to 4096 characters. A longer one is cut around
   the match, and `line_truncated` is true. The filter looks at the whole
@@ -228,15 +228,24 @@ stay, with their own names and parameters.
   run. The lines go through the redaction of the result boundary as one
   text (`redact_entries` in `connectors/log_read.py`), so a private key
   over many lines is found whole. The read also takes up to 256 lines from
-  before the first line (`LogContext`), because a page or a time window
-  can start inside a key. They are only for the redaction and are never
+  before the first line, because a page or a time window can start inside
+  a key. They are only for the redaction and are never
   returned. The host sends long ones cut short, with the last `BEGIN` or
   `END` mark in them, so they do not fill the output limit of SSH.
 - The file is read in one pass (`logs_file.py`). The journal takes a
   second command for the lines before the page (`logs_journal.py`).
-- When the lines before could not all be read and hold no mark, the first
-  lines that can be part of a key body (base64 text) are hidden. A key
-  whose first lines are not there is also found by its `END` line.
+- A key can start even further back: other messages can stand between its
+  lines, and a rotated log can start inside it. So text that can be part
+  of a key body is always hidden (`hide_key_text` in
+  `connectors/log_key_text.py`), also when no `BEGIN` or `END` line was
+  read. Hidden are lines that are only base64 text, and long mixed base64
+  text inside a line. Words, lower case paths and lower case hex values
+  stay. Other long values, for example a key fingerprint or a request id
+  in mixed case, are hidden too. `warning` then says in how many lines,
+  because the filter does not see that text. A key whose first lines are
+  not there is also found by its `END` line.
+- The output of SSH is read as UTF-8. In a line of a file that is not
+  UTF-8, the host puts `?` for each byte that is not ASCII.
 - The filter never matches a value that the answer hides. The result
   boundary still redacts the answer (`docs/codebase/redaction.md`).
 - The handler builds no result handle. The normal result reduction

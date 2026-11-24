@@ -40,7 +40,6 @@ from meho_backplane.connectors.kubernetes.ops_logs_window import (
 from meho_backplane.connectors.log_read import (
     DEFAULT_LOG_LINES,
     LOG_READ_RESPONSE_SCHEMA,
-    LogContext,
     LogEntry,
     LogReadError,
     build_log_answer,
@@ -108,7 +107,7 @@ class _Read:
     """What one read gave: the entries, what is before them, and what is left."""
 
     entries: list[LogEntry]
-    context: LogContext
+    context: list[str]
     truncated: bool
     next_time: str | None = None
 
@@ -188,7 +187,8 @@ _LOGS_READ_OP = KubernetesOp(
             "searched, also when no line matches; it is null without 'since'. "
             "'line_truncated' marks a line that was cut at 4096 characters; the filter looks "
             "at the whole line. Kubernetes keeps only part of a log: check 'covered' and "
-            "'truncated' before you conclude that something is absent."
+            "'truncated' before you conclude that something is absent. 'warning' says when "
+            "text that can be a key was hidden."
         ),
         "next_step": (
             "To read on, call again with 'since' set to 'continuation'. For the events of "

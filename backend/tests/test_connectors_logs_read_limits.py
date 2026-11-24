@@ -29,13 +29,15 @@ from meho_backplane.connectors.linux.logs_journal import (
 )
 from meho_backplane.connectors.linux.ops_file import CONTENT_MARKER
 from meho_backplane.connectors.linux.ops_inspect import LinuxInspectError
+from meho_backplane.connectors.log_key_text import HIDDEN_KEY_TEXT, hide_key_text
 from meho_backplane.connectors.log_read import (
     MAX_CONTEXT_LINE_CHARS,
-    REDACTION_CONTEXT_LINES,
-    LogContext,
     LogEntry,
+    LogReadError,
     bound_context_line,
+    build_log_answer,
     redact_entries,
+    take_page,
 )
 from tests._log_read_helpers import (
     START,
@@ -69,7 +71,11 @@ def _assert_hidden(answer: dict[str, Any], total: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _redacted(lines: list[str], context: LogContext) -> list[str]:
+#: Text of other services that stands between the lines of a key.
+_OTHER = [f"svc: request {i} ok" for i in range(300)]
+
+
+async def _redacted(lines: list[str], context: list[str]) -> list[str]:
     entries = await redact_entries(
         [LogEntry(None, line) for line in lines],
         context=context,
@@ -81,24 +87,63 @@ async def _redacted(lines: list[str], context: LogContext) -> list[str]:
 
 
 async def test_a_key_that_starts_in_the_context_is_hidden() -> None:
-    shown = await _redacted([*_BODY[:5], _END, "after"], LogContext(["x", _BEGIN]))
+    shown = await _redacted([*_BODY[:5], _END, "after"], ["x", _BEGIN])
     assert len(shown) == 7 and shown[-1] == "after"
     assert "madeUpKeyBody" not in "".join(shown)
-    closed = await _redacted(["plain"], LogContext([_BEGIN, "body", _END]))
+    closed = await _redacted(["plain"], [_BEGIN, "body", _END])
     assert closed == ["plain"]
 
 
-async def test_lines_that_can_be_a_key_body_are_hidden_when_the_context_is_not_known() -> None:
-    lines = [_BODY[0], f"app: {'A' * 64}", "a plain line", "another: failed", ""]
-    shown = await _redacted(lines, LogContext(["x y"], complete=False))
-    assert shown == ["[REDACTED:pem_private_key]"] * 2 + lines[2:]
-    # The context says where the key is, or the line is too far away for one.
-    for context in (LogContext([_END], complete=False), LogContext(["x"])):
-        assert (await _redacted(lines, context))[0] == _BODY[0]
-    far = ["-"] * REDACTION_CONTEXT_LINES
-    assert (await _redacted([*far, _BODY[0]], LogContext(complete=False)))[-1] == _BODY[0]
-    marked = await _redacted([_BEGIN, _END, _BODY[0]], LogContext(complete=False))
-    assert marked[-1] == _BODY[0]
+def test_text_that_can_be_a_key_body_is_hidden_whatever_is_before_it() -> None:
+    mixed = "MIIEvQIBADANBgkqhkiG9w0BAQEF"
+    body = [mixed, "A" * 64, f"app: {'A' * 64}", f"app[1]: {mixed}==", "c2Vj", "aB3dE6gH8j+="]
+    shown = hide_key_text([*body[:4], "next", *body[4:]])
+    assert shown[:4] == [
+        HIDDEN_KEY_TEXT,
+        HIDDEN_KEY_TEXT,
+        f"app: {HIDDEN_KEY_TEXT}",
+        f"app[1]: {HIDDEN_KEY_TEXT}",
+    ]
+    assert shown[4] == "next" and shown[6] == HIDDEN_KEY_TEXT
+    # The short last line of a body.
+    assert hide_key_text([mixed, "c2Vj", "after it", "c2Vj"])[1:] == [
+        HIDDEN_KEY_TEXT,
+        "after it",
+        "c2Vj",
+    ]
+
+
+def test_ordinary_log_text_is_not_hidden() -> None:
+    lines = [
+        "",
+        "done",
+        "Started",
+        "1234567890",
+        "========================",
+        "/var/log/messages",
+        "open /var/lib/app/data/current failed",
+        "java.lang.IllegalArgumentException: bad value",
+        "digest sha256:" + "0123456789abcdef" * 4,
+        "trace=4bf92f3577b34da6a3ce929d0e0e4736 status=200",
+    ]
+    assert hide_key_text(lines) == lines
+
+
+async def test_hidden_key_text_is_said_in_the_answer() -> None:
+    entries = await redact_entries(
+        [LogEntry("t1", _BODY[0]), LogEntry("t2", "plain text")],
+        context=[],
+        connector=LinuxSshConnector(),
+        operator=None,
+        op_id="linux.logs.read",
+    )
+    # The filter does not see the hidden text, and the answer says so.
+    page = await take_page(entries, lines=5, needle="madeUp", keep="newest")
+    answer = build_log_answer(page, warning="from the source")
+    assert answer["rows"] == []
+    assert answer["warning"].startswith("from the source; 1 of the lines")
+    plain = await take_page(entries[1:], lines=5, needle=None, keep="newest")
+    assert "warning" not in build_log_answer(plain)
 
 
 def test_a_long_context_line_keeps_its_last_key_mark() -> None:
@@ -129,6 +174,17 @@ async def test_journal_window_inside_a_key_shows_no_part_of_it() -> None:
     _assert_hidden(await _journal(journal, until=journal_time(59), lines=5), 5)
     _assert_hidden(await _journal(journal, until=cursor(60), lines=5), 5)
     _assert_hidden(await _journal(journal, since=cursor(60), lines=5), 5)
+
+
+async def test_journal_key_that_starts_far_before_the_page_is_hidden() -> None:
+    """The first line of the key is more than 256 entries back, and its last line is not read."""
+    journal = FakeJournal([_BEGIN, *_BODY[:9], *_OTHER, *_BODY[9:20], "svc: done", _END])
+    window = {"since": journal_time(310), "until": journal_time(321)}
+    for params in (window, {"until": journal_time(321), "lines": 12}):
+        answer = await _journal(journal, **params)
+        _assert_hidden(answer, 12)
+        assert _lines_of(answer)[-1] == "svc: done" and "11 of the lines" in answer["warning"]
+        _assert_hidden(await _journal(journal, **params, filter="madeUpKeyBody"), 0)
 
 
 async def test_journal_large_entries_before_a_page_do_not_hide_the_start_of_a_key() -> None:
@@ -256,9 +312,9 @@ async def _linux_file(path: Path, **params: Any) -> dict[str, Any]:
 
 async def test_file_short_last_line_after_long_lines_is_read(tmp_path: Path) -> None:
     log = tmp_path / "app.log"
-    log.write_text(("x" * 65536 + "\n") * 256 + "last\n")
+    log.write_text(("x" * 65536 + "\n") * 256 + "the last\n")
     answer = await _linux_file(log, lines=1)
-    assert _lines_of(answer) == ["last"] and answer["truncated"] is True
+    assert _lines_of(answer) == ["the last"] and answer["truncated"] is True
     # A key mark at the end of a long line is still found.
     log.write_text("x" * 65536 + f" {_BEGIN}\n" + ("y" * 65536 + "\n") * 254 + f"{_BODY[0]}\n")
     _assert_hidden(await _linux_file(log, lines=1), 1)
@@ -271,6 +327,52 @@ async def test_file_that_ends_inside_a_key_shows_no_part_of_it(
     log = tmp_path / "app.log"
     log.write_text("\n".join(["before", *_KEY[:-1]]) + "\n")
     _assert_hidden(await _linux_file(log, **params), 0 if "filter" in params else 5)
+
+
+async def test_file_key_that_starts_far_before_the_page_is_hidden(tmp_path: Path) -> None:
+    log = tmp_path / "app.log"
+    log.write_text("\n".join([_BEGIN, _BODY[0], *_OTHER, *_BODY[1:4], "svc: done"]) + "\n")
+    answer = await _linux_file(log, lines=4)
+    _assert_hidden(answer, 4)
+    assert _lines_of(answer)[-1] == "svc: done"
+    log.write_text("\n".join([_BEGIN, *_OTHER * 34, _BODY[0], "svc: done"]) + "\n")
+    _assert_hidden(await _linux_file(log, filter="madeUpKeyBody"), 0)
+
+
+async def test_file_lone_end_line_far_behind_the_body_hides_it(tmp_path: Path) -> None:
+    log = tmp_path / "app.log"
+    log.write_text("\n".join([*_BODY[:3], *_OTHER, _END]) + "\n")
+    _assert_hidden(await _linux_file(log, lines=400), 304)
+
+
+@pytest.mark.parametrize("awk", _AWKS)
+async def test_file_lines_that_are_not_utf8_do_not_fail_the_read(tmp_path: Path, awk: str) -> None:
+    log = tmp_path / "app.log"
+    latin = "caf\u00e9 ".encode("latin-1")
+    log.write_bytes(latin + _BEGIN.encode() + b"\n" + latin + b"\xc3\xc3\xa9\xa9\nlast one\n")
+    # run_shell decodes as strictly as the SSH reader does.
+    read, _ = _read_file(log, 1, awk)
+    assert read.lines == ["last one"]
+    assert read.context == [f"caf? {_BEGIN}", "caf? ????"]
+    # Valid UTF-8 stays; what Python does not take as UTF-8 does not.
+    valid = "\u00e9 \u20ac \U0001f600 tab\t."
+    bad = [
+        b"\xe0\x80\x80",
+        b"\xed\xa0\x80",
+        b"\xf4\x90\x80\x80",
+        b"\xc0\xaf",
+        b"\xe2\xc3\xa9\x82\xac",
+    ]
+    log.write_bytes(valid.encode() + b"\n" + b"\n".join(b"x " + part for part in bad) + b"\n")
+    page, _ = _read_file(log, 10, awk)
+    assert page.lines == [valid, *("x " + "?" * len(part) for part in bad)]
+
+
+async def test_file_latin1_line_before_the_last_line_is_read(tmp_path: Path) -> None:
+    log = tmp_path / "app.log"
+    log.write_bytes(b"caf\xe9\nthe last\n")
+    assert _lines_of(await _linux_file(log, lines=1)) == ["the last"]
+    assert _lines_of(await _linux_file(log, lines=2)) == ["caf?", "the last"]
 
 
 @pytest.mark.parametrize("older", [0, 1])
@@ -304,16 +406,16 @@ def test_file_command_splits_page_and_context(tmp_path: Path, awk: str) -> None:
     long = b"\xff\xc3" * 3000 + _BEGIN.encode() + b"\xff" * 3000
     log.write_bytes(b"first\n" + long + b"\ncr\r\nno newline")
     read, out = _read_file(log, 2, awk)
-    assert read.lines == ["cr", "no newline"] and read.cut and read.context.complete
-    assert read.context.lines[0] == "first"
-    assert read.context.lines[1].endswith(_BEGIN) and len(read.context.lines[1]) < 4400
+    assert read.lines == ["cr", "no newline"] and read.cut
+    assert read.context[0] == "first"
+    assert read.context[1].endswith(_BEGIN) and len(read.context[1]) < 4400
     assert out.isascii()
     whole, _ = _read_file(tmp_path / "app.log", 1, awk, max_bytes=100)
-    assert whole.lines == ["no newline"] and len(whole.context.lines) == 3
+    assert whole.lines == ["no newline"] and len(whole.context) == 3
     log.write_text("".join(f"line {i}\n" for i in range(1000)))
     most, _ = _read_file(log, 10, awk)
     assert most.lines == [f"line {i}" for i in range(990, 1000)]
-    assert most.context.lines == [f"line {i}" for i in range(990 - 256, 990)]
+    assert most.context == [f"line {i}" for i in range(990 - 256, 990)]
 
 
 @pytest.mark.parametrize("awk", _AWKS)
@@ -322,11 +424,10 @@ def test_file_byte_caps_drop_the_oldest_lines(tmp_path: Path, awk: str) -> None:
     log.write_text("".join(f"line {i}\n" for i in range(10)))
     capped, _ = _read_file(log, 10, awk, max_bytes=14)
     assert capped.lines == ["line 8", "line 9"] and capped.cut
-    assert len(capped.context.lines) == 8 and capped.context.complete
+    assert len(capped.context) == 8
     # The host looked at 20 bytes: the first of them are inside a line.
     scanned, _ = _read_file(log, 10, awk, scan_bytes=20)
     assert scanned.lines == ["line 8", "line 9"] and scanned.cut
-    assert not scanned.context.complete
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +459,18 @@ async def test_k8s_window_inside_a_key_shows_no_part_of_it() -> None:
     _assert_hidden(await _k8s(log, since=_stamp(6000), lines=5), 5)
     after = await _k8s(log, since=_stamp(6000))
     assert _lines_of(after)[-1] == "after"
+
+
+async def test_k8s_key_that_starts_far_before_the_page_is_hidden() -> None:
+    lines = [_BEGIN, *_BODY[:9], *_OTHER, *_BODY[9:20], "svc: done", _END]
+    log = FakePodLog([f"{_stamp(i)} {line}" for i, line in enumerate(lines)])
+    window = {"since": _stamp(310), "until": _stamp(321)}
+    newest = FakePodLog(log.lines[:-1])
+    for source, params in ((log, window), (newest, {"lines": 12})):
+        answer = await _k8s(source, **params)
+        _assert_hidden(answer, 12)
+        assert _lines_of(answer)[-1] == "svc: done" and "11 of the lines" in answer["warning"]
+        _assert_hidden(await _k8s(source, **params, filter="madeUpKeyBody"), 0)
 
 
 async def test_k8s_log_that_ends_inside_a_key_shows_no_part_of_it() -> None:
@@ -411,6 +524,46 @@ async def test_k8s_newest_lines_stop_at_the_byte_cap() -> None:
     log = FakePodLog([f"{_stamp(i)} {'x ' * (_MIB // 4)}{i}" for i in range(5)])
     answer = await _k8s(log, lines=5)
     assert answer["total"] == 1 and answer["truncated"] is True
-    one = FakePodLog([f"{_stamp(0)} {'x ' * _MIB}"])
-    alone = await _k8s(one, lines=5)
-    assert alone["total"] == 1 and alone["truncated"] is False
+
+
+async def test_k8s_newest_line_over_the_byte_cap_is_an_error() -> None:
+    """The line comes in many chunks, and no more than 1 MiB of it is ever held."""
+    log = FakePodLog([f"{_stamp(0)} old", f"{_stamp(1)} {'x ' * 4 * _MIB}"])
+    held: list[int] = []
+    add = logs_read_source._LineBuffer.add
+
+    def watched(buffer: Any, part: bytes) -> None:
+        add(buffer, part)
+        held.append(len(buffer._kept))
+
+    with (
+        patch.object(logs_read_source._LineBuffer, "add", watched),
+        pytest.raises(LogReadError, match="newest log line is larger than 1 MiB"),
+    ):
+        await _k8s(log, lines=1)
+    assert len(held) > 100 and max(held) <= _MIB + 64 * 1024
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+async def test_k8s_newest_line_at_the_byte_cap_is_read(extra: int) -> None:
+    text = "x " * (_MIB // 2) + "y" * extra
+    log = FakePodLog([f"{_stamp(0)} {text}"])
+    if extra:
+        with pytest.raises(LogReadError, match="larger than 1 MiB"):
+            await _k8s(log, lines=1)
+        return
+    answer = await _k8s(log, lines=1)
+    assert answer["total"] == 1 and answer["rows"][0]["line_truncated"] is True
+
+
+async def test_k8s_line_over_the_byte_cap_before_the_newest_lines() -> None:
+    """The page ends behind it. A key mark in it, also over two chunks, still counts."""
+    for start in (2 * _MIB, 2 * _MIB - 10, 2 * _MIB - 30):
+        large = "- " * (start // 2) + _BEGIN + " -" * _MIB
+        lines = [large, "open text", "more text"]
+        log = FakePodLog([f"{_stamp(i)} {line}" for i, line in enumerate(lines)])
+        answer = await _k8s(log, lines=5)
+        assert answer["total"] == 2 and answer["truncated"] is True
+        assert "text" not in json.dumps(answer["rows"])
+        window = await _k8s(log, since=_stamp(1))
+        assert window["total"] == 2 and "text" not in json.dumps(window["rows"])

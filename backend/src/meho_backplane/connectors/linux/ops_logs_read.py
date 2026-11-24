@@ -102,10 +102,7 @@ async def _read_journal(
     boundary = query.marker
     if markers:
         boundary = markers[-1] if query.forward else markers[0]
-    answer = build_log_answer(page, source_cut=read.cut, continuation=boundary)
-    if read.warning:
-        answer["warning"] = read.warning
-    return answer
+    return build_log_answer(page, source_cut=read.cut, continuation=boundary, warning=read.warning)
 
 
 async def linux_logs_read(
@@ -164,7 +161,8 @@ _LOGS_READ_OP = LinuxOp(
             "line. With 'since' the read goes forward and keeps the oldest lines; without it, "
             "the newest. Check 'covered' and 'truncated' before you conclude that something "
             "is absent from the log. 'continuation' is the journal's own marker at the end "
-            "of the page; a file has none."
+            "of the page; a file has none. 'warning' says when text that can be a key was "
+            "hidden."
         ),
         "next_step": (
             "While 'truncated' is true, read on in the journal with the same source: after a "

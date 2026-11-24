@@ -9,12 +9,11 @@ A window is read with the window reader of ``k8s.logs``
 * :func:`read_newest` -- the newest lines. ``k8s.logs`` stops at 5000
   lines, so it cannot say whether a 5001st exists.
 * :func:`read_before` -- the lines before a window. They are for the
-  redaction only
-  (:class:`~meho_backplane.connectors.log_read.LogContext`). Kubernetes
-  cannot read backwards from a time, so this starts a while before the
+  redaction only. Kubernetes cannot read backwards from a time, so this starts a while before the
   window and starts earlier again when that gave too few lines.
 
-Both read the body as a stream and keep only what they return.
+Both read the body as a stream and keep only what they return. A line over
+1 MiB is never held whole (:class:`_LineBuffer`).
 """
 
 from __future__ import annotations
@@ -42,8 +41,9 @@ from meho_backplane.connectors.kubernetes.ops_logs_window import (
     window_query,
 )
 from meho_backplane.connectors.log_read import (
+    MAX_CONTEXT_LINE_CHARS,
     REDACTION_CONTEXT_LINES,
-    LogContext,
+    LogReadError,
     bound_context_line,
     has_key_mark,
 )
@@ -60,6 +60,11 @@ _LOOK_BACK_SECONDS: tuple[int | None, ...] = (300, 86400, None)
 
 #: The most bytes one look back reads.
 _MAX_LOOK_BACK_BYTES = 64 * 1024 * 1024
+
+#: The end of the first and of the last line of a private key, and more
+#: bytes than one of these lines has.
+_KEY_MARK_END = b"PRIVATE KEY-----"
+_KEY_MARK_BYTES = 136
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,59 @@ class ContainerLog:
         return cls(api_client, pod, namespace, container)
 
 
+@dataclass(frozen=True)
+class _Line:
+    """One line of the log body. ``cut`` is true when it is too large to be kept whole."""
+
+    text: str
+    cut: bool
+
+
+class _LineBuffer:
+    """The line that is being read, in bounded memory.
+
+    Of a line over :data:`MAX_BODY_BYTES` only the first characters and the
+    last mark of a private key are kept, the same as in
+    :func:`~meho_backplane.connectors.log_read.bound_context_line`.
+    """
+
+    def __init__(self) -> None:
+        self._kept = bytearray()
+        self._cut = False
+        self._mark = b""
+        self._end = b""
+
+    def add(self, part: bytes) -> None:
+        if self._cut:
+            self._watch(part)
+            return
+        self._kept += part
+        if len(self._kept) > MAX_BODY_BYTES:
+            self._cut = True
+            self._watch(bytes(self._kept))
+            del self._kept[MAX_CONTEXT_LINE_CHARS:]
+
+    def _watch(self, part: bytes) -> None:
+        """Remember the last key mark; it can be spread over two parts."""
+        data = self._end + part
+        at = data.rfind(_KEY_MARK_END)
+        if at >= 0:
+            stop = at + len(_KEY_MARK_END)
+            self._mark = data[max(0, stop - _KEY_MARK_BYTES) : stop]
+        self._end = data[-_KEY_MARK_BYTES:]
+
+    def __bool__(self) -> bool:
+        return bool(self._kept)
+
+    def take(self) -> _Line:
+        """Return the line and start the next one."""
+        mark = b" " + self._mark if self._mark else b""
+        line = _Line((bytes(self._kept) + mark).decode("utf-8", errors="replace"), self._cut)
+        self._kept.clear()
+        self._cut, self._mark, self._end = False, b"", b""
+        return line
+
+
 @dataclass
 class _Tail:
     """The last lines of a stream that fit, and the lines right before them."""
@@ -99,11 +157,13 @@ class _Tail:
     context: deque[str] = field(default_factory=lambda: deque(maxlen=REDACTION_CONTEXT_LINES))
     size: int = 0
 
-    def add(self, line: str) -> None:
-        self.lines.append(line)
-        self.size += len(line.encode()) + 1
-        while len(self.lines) > self.rows or (
-            len(self.lines) > 1 and self.size - 1 > self.max_bytes
+    def add(self, line: _Line) -> None:
+        self.lines.append(line.text)
+        self.size += len(line.text.encode()) + 1
+        while self.lines and (
+            line.cut
+            or len(self.lines) > self.rows
+            or (len(self.lines) > 1 and self.size - 1 > self.max_bytes)
         ):
             old = self.lines.popleft()
             self.size -= len(old.encode()) + 1
@@ -115,18 +175,18 @@ class NewestLines:
     """The newest lines, oldest first, and whether the log holds older ones."""
 
     lines: list[str]
-    context: LogContext
+    context: list[str]
     truncated: bool
 
 
 async def _lines(
     log: ContainerLog, query: dict[str, Any], max_bytes: int | None = None
-) -> AsyncGenerator[str | None]:
+) -> AsyncGenerator[_Line | None]:
     """Yield the lines of the log body; ``None`` and the end after *max_bytes*."""
     async with open_pod_log(
         log.api_client, name=log.pod, namespace=log.namespace, query=query
     ) as chunks:
-        pending = bytearray()
+        pending = _LineBuffer()
         total = 0
         async for chunk in chunks:
             total += len(chunk)
@@ -135,16 +195,19 @@ async def _lines(
                 return
             *done, rest = chunk.split(b"\n")
             for part in done:
-                pending += part
-                yield pending.decode("utf-8", errors="replace")
-                pending.clear()
-            pending += rest
+                pending.add(part)
+                yield pending.take()
+            pending.add(rest)
         if pending:
-            yield pending.decode("utf-8", errors="replace")
+            yield pending.take()
 
 
 async def read_newest(log: ContainerLog, rows: int) -> NewestLines:
-    """Read the newest *rows* lines, at most 1 MiB, and what is before them."""
+    """Read the newest *rows* lines, at most 1 MiB, and what is before them.
+
+    A line over 1 MiB ends the page like any line that does not fit. When
+    it is the newest line, no page can be built and the read fails.
+    """
     tail = _Tail(rows, MAX_BODY_BYTES)
     query = {
         "container": log.container,
@@ -154,7 +217,12 @@ async def read_newest(log: ContainerLog, rows: int) -> NewestLines:
     async for line in _lines(log, query):
         if line is not None:
             tail.add(line)
-    return NewestLines(list(tail.lines), LogContext(list(tail.context)), bool(tail.context))
+    if tail.context and not tail.lines:
+        raise LogReadError(
+            f"the newest log line is larger than {MAX_BODY_BYTES // (1024 * 1024)} MiB, the "
+            "most one answer may hold; read other lines with 'since' and 'until'"
+        )
+    return NewestLines(list(tail.lines), list(tail.context), bool(tail.context))
 
 
 async def read_window(log: ContainerLog, window: LogWindow) -> WindowPage:
@@ -179,9 +247,7 @@ def _text_before(line: str, window: LogWindow) -> str | None:
         return line
 
 
-async def _look_back(
-    log: ContainerLog, window: LogWindow, seconds: int | None
-) -> LogContext | None:
+async def _look_back(log: ContainerLog, window: LogWindow, seconds: int | None) -> list[str] | None:
     """Return the lines from *seconds* before the window, or ``None`` when they are too many."""
     query: dict[str, Any] = {"container": log.container, "previous": False, "timestamps": True}
     if seconds is not None:
@@ -192,26 +258,25 @@ async def _look_back(
         async for line in lines:
             if line is None:
                 return None
-            text = _text_before(line, window)
+            text = _text_before(line.text, window)
             if text is None:
                 break
             before.append(bound_context_line(text))
-    enough = seconds is None or len(before) == REDACTION_CONTEXT_LINES
-    return LogContext(list(before), complete=enough)
+    return list(before)
 
 
-async def read_before(log: ContainerLog, window: LogWindow) -> LogContext:
+async def read_before(log: ContainerLog, window: LogWindow) -> list[str]:
     """Read the lines right before *window*.
 
     It is called before the window is read: when the node drops old lines
     in between, they are missing in the window and not here.
     """
-    context = LogContext(complete=False)
+    context: list[str] = []
     for seconds in _LOOK_BACK_SECONDS:
         longer = await _look_back(log, window, seconds)
         if longer is None:
             break
         context = longer
-        if context.complete or any(map(has_key_mark, context.lines)):
+        if len(context) == REDACTION_CONTEXT_LINES or any(map(has_key_mark, context)):
             break
     return context

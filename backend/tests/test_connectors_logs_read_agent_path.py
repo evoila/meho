@@ -266,3 +266,32 @@ async def test_a_window_inside_a_key_shows_no_part_of_it(
         assert "madeUpKeyBody" not in text
     # Only the filter that the caller gave is in an audit row.
     assert json.dumps(audit, default=str).count("madeUpKeyBody") <= 1
+
+
+@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.product)
+async def test_a_key_that_starts_far_before_the_window_shows_no_part_of_it(
+    case: _Case, store: MemoryResultStore
+) -> None:
+    """Other messages stand between the lines of the key, and its end is not read."""
+    await case.connector.register_operations()
+    target = await _seed_target(case)
+    body = _LONG_KEY[1:-1]
+    other = [f"svc: request {i} ok" for i in range(300)]
+    lines = [_KEY[0], *other, *body[:120], "svc: done", _KEY[-1]]
+    time = journal_time if case.connector is LinuxSshConnector else _stamp
+    window = {"since": time(301), "until": time(421)}
+
+    with _source(lines):
+        answer = await _call(case, target, **window)
+        short = await _call(case, target, **window, lines=3)
+        matched = await _call(case, target, **window, filter="madeUpKeyBody")
+    assert answer["status"] == "ok", answer
+    assert "120 of the lines" in answer["result"]["warning"]
+    rows = await _stored_rows(answer["handle"], 121)
+    assert rows[-1]["line"] == "svc: done"
+    assert short["result"]["total"] == 3
+    assert matched["result"]["rows"] == [] and "warning" in matched["result"]
+
+    stored = b"".join(store.client.values.values()).decode()
+    for text in (json.dumps([answer, short, matched]), json.dumps(rows), stored):
+        assert "madeUpKeyBody" not in text

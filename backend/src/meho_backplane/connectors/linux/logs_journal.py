@@ -40,7 +40,6 @@ from meho_backplane.connectors.linux.ops_host import validate_unit_name
 from meho_backplane.connectors.linux.ops_inspect import LinuxInspectError, _journal_message
 from meho_backplane.connectors.log_read import (
     REDACTION_CONTEXT_LINES,
-    LogContext,
     LogEntry,
     LogReadError,
     bound_context_line,
@@ -109,7 +108,7 @@ class JournalEntries:
     entries: list[LogEntry]
     cut: bool
     warning: str
-    context: LogContext
+    context: list[str]
 
 
 def _is_marker(value: str | None) -> bool:
@@ -286,17 +285,16 @@ async def _read_before(
     marker: str,
     operator: Operator | None,
     rows: int,
-) -> LogContext | None:
+) -> list[str] | None:
     """Return the lines of the entry of *marker* and of *rows* entries before it.
 
     ``None`` when the journal does not give the entry of *marker*.
     """
     cmd = build_context_command(unit, marker, rows + 1)
-    entries, cut, _ = await _run(connector, target, cmd, operator)
+    entries, _, _ = await _run(connector, target, cmd, operator)
     if not entries or entries[0].marker != marker:
         return None
-    lines = [bound_context_line(entry.line) for entry in reversed(entries)]
-    return LogContext(lines, complete=not cut or len(entries) > rows)
+    return [bound_context_line(entry.line) for entry in reversed(entries)]
 
 
 _MARKER_GONE = (
@@ -313,7 +311,7 @@ async def _read_context(
     entries: list[LogEntry],
     cut: bool,
     operator: Operator | None,
-) -> LogContext:
+) -> list[str]:
     """Check the marker of *query* and return the lines before *entries* (oldest first)."""
     if query.marker is not None and query.forward:
         before = await _read_before(
@@ -327,10 +325,10 @@ async def _read_context(
     ):
         raise LinuxInspectError(_MARKER_GONE)
     if not entries or not (query.forward or cut):
-        return LogContext()
+        return []
     oldest = entries[0].marker
     if oldest is None:
-        return LogContext(complete=False)
+        return []
     before = await _read_before(
         connector, target, query.unit, oldest, operator, REDACTION_CONTEXT_LINES
     )
@@ -338,7 +336,7 @@ async def _read_context(
         raise LinuxInspectError(
             "the journal was rotated during the read, so it was not read whole; read it again"
         )
-    return LogContext(before.lines[:-1], before.complete)
+    return before[:-1]
 
 
 async def read_journal(

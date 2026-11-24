@@ -34,7 +34,6 @@ from meho_backplane.connectors.log_read import (
     MAX_LINE_CHARS,
     MAX_LOG_LINES,
     REDACTION_CONTEXT_LINES,
-    LogContext,
     LogEntry,
     LogReadError,
     build_log_answer,
@@ -266,7 +265,7 @@ async def test_the_filter_does_not_match_a_hidden_value() -> None:
 async def _redacted(lines: list[str]) -> list[str]:
     entries = await redact_entries(
         [LogEntry(None, line) for line in lines],
-        context=LogContext(),
+        context=[],
         connector=LinuxSshConnector(),
         operator=_OPERATOR,
         op_id="linux.logs.read",

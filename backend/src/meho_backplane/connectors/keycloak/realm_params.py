@@ -158,8 +158,10 @@ def check_answered_realm(op_id: str, answer: Any, target: KeycloakTargetLike) ->
     The answer's ``realm`` must be exactly the target's managed realm, with
     the same letters, case and accents. Any other name, no name, or an
     answer that is not an object raises :class:`ValueError`. The text names
-    the managed realm only. ``keycloak.realm.get`` and
-    ``keycloak.realm.update`` call it before they return or change the realm.
+    the managed realm only. Every operation that reads the realm's settings
+    calls it on the answer, and
+    :class:`~meho_backplane.connectors.keycloak.managed_realm_check.ManagedRealmChecks`
+    calls it before a request inside the realm.
     """
     managed = resolve_realm_config(target).managed_realm
     if not isinstance(answer, dict) or answer.get("realm") != managed:

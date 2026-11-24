@@ -67,6 +67,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     _realm_label,
     _realm_update_preview,
 )
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.redaction import redact_preview_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
@@ -181,6 +182,7 @@ async def _read_realm(ctx: PreviewContext) -> dict[str, Any] | None:
             fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
             operator=ctx.operator,
         )
+        check_answered_realm("keycloak.realm.update", current, ctx.target)
     except Exception:
         return None
     return current if isinstance(current, dict) else None

@@ -57,6 +57,7 @@ def answer_realm_on() -> bool:
 def _wrap(handler: Any) -> Any:
     @functools.wraps(handler)
     async def wrapper(self: Any, operator: Any, target: Any, params: Any) -> Any:
+        self._realm_checks.forget(target)
         answer = await handler(self, operator, target, params)
         if not isinstance(answer, dict) or not answer_realm_on():
             return answer

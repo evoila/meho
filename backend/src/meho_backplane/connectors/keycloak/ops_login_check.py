@@ -303,6 +303,8 @@ async def keycloak_user_check_login(
     realm = realm_param(params, "realm", CHECK_LOGIN_OP_ID, target) or managed_realm
     username = str(params["username"]).strip()
     client_id = _opt_str(params.get("client_id")) or _DEFAULT_CLIENT_ID
+    # The login request is not an admin request, so the realm is checked here.
+    await self._realm_checks.check(self, target, operator)
     password = await _read_password_from_vault(operator, target, params)
 
     client = await self._http_client(target)

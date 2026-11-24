@@ -1194,14 +1194,21 @@ changes only the shape. `k8s.logs` keeps its own parameters.
 - Without `since`: the newest `lines` lines (default 200, at most 5000),
   no times. With `since` (a span like `15m`, or an RFC 3339 time) and
   optional `until`: the window is read with `since_time` / `until_time`,
-  oldest first, each row with its time.
+  oldest first, each row with its time. Exact times go to the window
+  reader as they are, with their nanoseconds.
 - `filter` is a plain text match, case counts. Without `since` it reads
   the newest 5000 lines and filters them.
-- The answer: `rows` of `{time, line}`, `total`, `truncated`, `covered`
-  (`{from, to}`, or `null` without times) and `continuation`. In a window,
-  `continuation` is the time to pass as `since` to read on: the
-  `next_since_time` of `k8s.logs`, or the time of the first row that
-  `lines` cut off.
+- The answer: `rows` of `{time, line, line_truncated}`, `total`,
+  `truncated`, `covered` and `continuation`. `covered` is the time span
+  (`{from, to}`) of all lines the read looked at, also when none matches;
+  it is `null` without times.
+- In a window, `continuation` is the time to pass as `since` to read on:
+  the `next_since_time` of `k8s.logs`, or the time of the first line that
+  `lines` left out. A page ends only between two times, so nothing is
+  repeated and nothing is skipped. When more lines than `lines` share one
+  time, no page can be built and the read fails with an error.
+- Secrets are hidden before the filter and the line limit run, see
+  "Shared log read" in `docs/codebase/connectors-linux.md`.
 - No result handle is built here; the result reduction does it.
 
 ### Init container logs in `k8s.logs` (#3686)

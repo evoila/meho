@@ -153,7 +153,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
-| `linux.logs.read` | `logs` | `source`, `since?`, `until?`, `lines?`, `filter?` | `{rows, total, truncated, covered, continuation}`; row = `{time, line}` (see "Shared log read") |
+| `linux.logs.read` | `logs` | `source`, `since?`, `until?`, `lines?`, `filter?` | `{rows, total, truncated, covered, continuation}`; row = `{time, line, line_truncated}` (see "Shared log read") |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 | `linux.tool.which` | `system` | `names` (1 to 20 program names) | `{tools: [{name, found, path}]}` |
@@ -194,22 +194,43 @@ stay, with their own names and parameters.
 - `source` is an absolute path (a file, confined like `log.tail`),
   `journal` (the whole systemd journal) or a systemd unit name.
 - A file has no times. `since` and `until` on a file raise an error
-  instead of being ignored. For the journal and a unit, `since` is a
-  span (`15m`) or an RFC 3339 time, `until` an RFC 3339 time; both go to
-  `linux.journal.tail` as exact UTC times.
-- `lines` (default 200, at most 5000) keeps the newest lines. `filter`
-  is a plain text match, case counts. With a filter the handler reads
-  the newest 10000 lines (the cap of the older ops) and filters them.
-- The answer: `rows` of `{time, line}` (oldest first; `time` is `null`
-  for a file), `total`, `truncated`, `covered` (`{from, to}` of the rows
-  with a time, else `null`) and `continuation`. `truncated` is true when
-  lines were dropped by `lines` or when the source may hold older lines
-  than were read. The journal has no continuation marker here, so
-  `continuation` is `null`: an earlier part is read with `until`.
+  instead of being ignored. A file that is missing, cannot be opened, or
+  gives no content although it is not empty raises an error too. Only an
+  empty file gives an empty answer.
+- For the journal and a unit, `since` is a span (`15m`) or an RFC 3339
+  time, and `until` an RFC 3339 time. Both reach `journalctl` as exact
+  UTC times with microseconds, the precision of the journal. A `since`
+  with nanoseconds is rounded up, an `until` down.
+- With `since` the journal is read forward and the oldest `lines`
+  (default 200, at most 5000) stay. Without it, the newest stay.
+  `logs_journal.py` counts the lines itself: what `journalctl -n` means
+  together with `--since` differs between systemd versions.
+- `continuation` is the journal's own cursor at the end of the page. Pass
+  it as `since` after a read with `since`, and as `until` after a read
+  without it. `truncated` says whether there is more to read. The entry
+  of the cursor is not repeated. When the journal does not give that
+  entry any more, the read fails and does not start again somewhere else.
+- `filter` is a plain text match, case counts. With a filter the handler
+  reads up to 10000 lines (the cap of the older ops) and filters them.
+- The answer: `rows` of `{time, line, line_truncated}` (oldest first;
+  `time` is `null` for a file), `total`, `truncated`, `covered` and
+  `continuation` (`null` for a file), and `warning` when `journalctl`
+  printed one. `covered` is the time span (`{from, to}`) of all entries
+  the read looked at, also when none matches; `null` without times.
+- A line is returned up to 4096 characters. A longer one is cut around
+  the match, and `line_truncated` is true. The filter looks at the whole
+  line. One read takes at most 8 MiB from the journal; a single entry
+  that is larger raises an error.
+- Secrets in the lines are hidden before the filter and the line limit
+  run. The lines go through the redaction of the result boundary as one
+  text (`redact_entries` in `connectors/log_read.py`), so a private key
+  over many lines is found whole. The read takes 256 lines more than
+  `lines` for this, and a key whose first lines are not in the read is
+  found by its `END` line. The filter never matches a value that the
+  answer hides. The result boundary still redacts the answer
+  (`docs/codebase/redaction.md`).
 - The handler builds no result handle. The normal result reduction
-  makes one when the rows are many. A secret in a line is hidden by the
-  redaction of the result (`docs/codebase/redaction.md`); a test checks
-  it.
+  makes one when the rows are many.
 
 ### Journal, filesystem usage and directory listing (`ops_inspect.py`)
 

@@ -2812,6 +2812,26 @@ type BackendReadiness struct {
 	Reachable      bool                    `json:"reachable"`
 }
 
+// BlockCreate Body of “POST /api/v1/principals/blocked“.
+type BlockCreate struct {
+	Reason string `json:"reason"`
+	Sub    string `json:"sub"`
+}
+
+// BlockListResponse Response of “GET /api/v1/principals/blocked“.
+type BlockListResponse struct {
+	Blocked []BlockRead `json:"blocked"`
+}
+
+// BlockRead One block of the list.
+type BlockRead struct {
+	BlockedAt    time.Time `json:"blocked_at"`
+	BlockedBySub string    `json:"blocked_by_sub"`
+	Reason       string    `json:"reason"`
+	Scope        string    `json:"scope"`
+	Sub          string    `json:"sub"`
+}
+
 // BodyCreateUiEventSourcesPost defines model for Body__create_ui_event_sources_post.
 type BodyCreateUiEventSourcesPost struct {
 	AuthStrategy string  `json:"auth_strategy"`
@@ -5683,6 +5703,7 @@ type DashboardMemberView struct {
 	OpId            string                            `json:"op_id"`
 	Pending         bool                              `json:"pending"`
 	RawState        DashboardMemberViewRawState       `json:"raw_state"`
+	RunnerName      *string                           `json:"runner_name,omitempty"`
 	SensorId        openapi_types.UUID                `json:"sensor_id"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
@@ -9586,6 +9607,15 @@ type RefreshResult struct {
 	UpdatedNodes      int                `json:"updated_nodes"`
 }
 
+// RefusedResult A result MEHO refused, named in the answer to a result batch.
+//
+// “reason“ is “future_time“: the runner time of the result is later
+// than MEHO's clock. MEHO neither stores nor counts such a result.
+type RefusedResult struct {
+	Reason    string `json:"reason"`
+	ResultUid string `json:"result_uid"`
+}
+
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
 	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
@@ -9776,10 +9806,14 @@ type ResolvedTargetDescriptor struct {
 //
 // “accepted“ counts rows newly persisted; “duplicates“ counts rows
 // whose “result_uid“ was already ingested for this runner (a re-posted
-// spool batch). “accepted + duplicates“ equals the batch length.
+// spool batch). “refused“ names the results MEHO refused and did not
+// store (with “RUNNER_CHECKS_ENABLED“ on: a runner time later than
+// MEHO's clock). It is left out of the answer when there is none.
+// “accepted + duplicates + len(refused)“ equals the batch length.
 type ResultIngestResponse struct {
-	Accepted   int `json:"accepted"`
-	Duplicates int `json:"duplicates"`
+	Accepted   int              `json:"accepted"`
+	Duplicates int              `json:"duplicates"`
+	Refused    *[]RefusedResult `json:"refused,omitempty"`
 }
 
 // ResultQueryBody POST body for “/api/v1/operations/result-query“ (#3179).
@@ -10334,12 +10368,25 @@ type RunnerPrincipalRead struct {
 //   - “error“ — the handler raised; the exception is summarised in
 //     “error“ and never re-raised into the tick loop.
 type RunnerResult struct {
-	CheckRef  string                  `json:"check_ref"`
-	Error     *string                 `json:"error"`
-	OpId      string                  `json:"op_id"`
-	Result    *map[string]interface{} `json:"result"`
-	ResultUid string                  `json:"result_uid"`
-	Status    string                  `json:"status"`
+	CheckRef   string               `json:"check_ref"`
+	Error      *string              `json:"error"`
+	ErrorCode  *string              `json:"error_code"`
+	OpId       string               `json:"op_id"`
+	ProducedAt *time.Time           `json:"produced_at"`
+	Result     *RunnerResult_Result `json:"result"`
+	ResultUid  string               `json:"result_uid"`
+	Status     string               `json:"status"`
+}
+
+// RunnerResultResult0 defines model for .
+type RunnerResultResult0 map[string]interface{}
+
+// RunnerResultResult1 defines model for .
+type RunnerResultResult1 = []interface{}
+
+// RunnerResult_Result defines model for RunnerResult.Result.
+type RunnerResult_Result struct {
+	union json.RawMessage
 }
 
 // RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
@@ -10376,13 +10423,16 @@ type RunnerResultBatch struct {
 // the runner refuses the item when its own digest differs. “None“ for an
 // op built into MEHO.
 type RunnerWorkItem struct {
-	CheckRef   string                  `json:"check_ref"`
-	ExpiresAt  *time.Time              `json:"expires_at"`
-	HandlerRef string                  `json:"handler_ref"`
-	ImplId     *string                 `json:"impl_id,omitempty"`
-	OpId       string                  `json:"op_id"`
-	PackageSet *string                 `json:"package_set"`
-	Params     *map[string]interface{} `json:"params,omitempty"`
+	CheckRef        string                  `json:"check_ref"`
+	CronExpr        *string                 `json:"cron_expr"`
+	ExpiresAt       *time.Time              `json:"expires_at"`
+	HandlerRef      string                  `json:"handler_ref"`
+	ImplId          *string                 `json:"impl_id,omitempty"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	NextDueAt       *time.Time              `json:"next_due_at"`
+	OpId            string                  `json:"op_id"`
+	PackageSet      *string                 `json:"package_set"`
+	Params          *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
 	//
@@ -10420,6 +10470,7 @@ type RunnerWorkItem struct {
 	// is ever embedded (the runner spools assignments on disk, so a value
 	// would durably persist — a locked no-durable-artifact violation).
 	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Timezone         *string                   `json:"timezone"`
 	Version          *string                   `json:"version,omitempty"`
 }
 
@@ -11028,6 +11079,7 @@ type SensorCreate struct {
 	Params              *map[string]interface{} `json:"params,omitempty"`
 	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
 	RetryTimes          *int                    `json:"retry_times,omitempty"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -11117,6 +11169,7 @@ type SensorRead struct {
 	PendingState        *SensorReadPendingState `json:"pending_state"`
 	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
 	RetryTimes          int                     `json:"retry_times"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -12816,6 +12869,12 @@ type UISessionContext struct {
 	TenantSlug      *string                 `json:"tenant_slug"`
 }
 
+// UnblockResponse Response of “DELETE /api/v1/principals/blocked/{sub}“.
+type UnblockResponse struct {
+	Removed int    `json:"removed"`
+	Sub     string `json:"sub"`
+}
+
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
 //
 // “buckets“ is sorted by “(date, surface)“ ascending — the text
@@ -13509,6 +13568,7 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 	Runner                 string  `form:"runner" json:"runner"`
 	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	XMEHORunnerFeatures    *string `json:"X-MEHO-Runner-Features,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
@@ -14071,6 +14131,21 @@ type ValidateApiV1PolicyValidatePostParams struct {
 
 // ValidateApiV1PolicyValidatePostParamsScope defines parameters for ValidateApiV1PolicyValidatePost.
 type ValidateApiV1PolicyValidatePostParamsScope string
+
+// ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams defines parameters for ListBlockedPrincipalsApiV1PrincipalsBlockedGet.
+type ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// BlockPrincipalRouteApiV1PrincipalsBlockedPostParams defines parameters for BlockPrincipalRouteApiV1PrincipalsBlockedPost.
+type BlockPrincipalRouteApiV1PrincipalsBlockedPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams defines parameters for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete.
+type UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
 
 // ReadDocsEndpointApiV1ReadDocsPostParams defines parameters for ReadDocsEndpointApiV1ReadDocsPost.
 type ReadDocsEndpointApiV1ReadDocsPostParams struct {
@@ -15206,6 +15281,9 @@ type PreviewClassificationApiV1PolicyClassificationPreviewPostJSONRequestBody = 
 
 // ExplainApiV1PolicyExplainPostJSONRequestBody defines body for ExplainApiV1PolicyExplainPost for application/json ContentType.
 type ExplainApiV1PolicyExplainPostJSONRequestBody = PolicyExplainBody
+
+// BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody defines body for BlockPrincipalRouteApiV1PrincipalsBlockedPost for application/json ContentType.
+type BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody = BlockCreate
 
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
@@ -17328,6 +17406,68 @@ func (t *RunbookTemplateBody_Steps_Item) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsRunnerResultResult0 returns the union data inside the RunnerResult_Result as a RunnerResultResult0
+func (t RunnerResult_Result) AsRunnerResultResult0() (RunnerResultResult0, error) {
+	var body RunnerResultResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRunnerResultResult0 overwrites any union data inside the RunnerResult_Result as the provided RunnerResultResult0
+func (t *RunnerResult_Result) FromRunnerResultResult0(v RunnerResultResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRunnerResultResult0 performs a merge with any union data inside the RunnerResult_Result, using the provided RunnerResultResult0
+func (t *RunnerResult_Result) MergeRunnerResultResult0(v RunnerResultResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRunnerResultResult1 returns the union data inside the RunnerResult_Result as a RunnerResultResult1
+func (t RunnerResult_Result) AsRunnerResultResult1() (RunnerResultResult1, error) {
+	var body RunnerResultResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRunnerResultResult1 overwrites any union data inside the RunnerResult_Result as the provided RunnerResultResult1
+func (t *RunnerResult_Result) FromRunnerResultResult1(v RunnerResultResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRunnerResultResult1 performs a merge with any union data inside the RunnerResult_Result, using the provided RunnerResultResult1
+func (t *RunnerResult_Result) MergeRunnerResultResult1(v RunnerResultResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t RunnerResult_Result) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *RunnerResult_Result) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsOperationCallStep returns the union data inside the ShowTemplateResponse_Steps_Item as a OperationCallStep
 func (t ShowTemplateResponse_Steps_Item) AsOperationCallStep() (OperationCallStep, error) {
 	var body OperationCallStep
@@ -18085,6 +18225,17 @@ type ClientInterface interface {
 
 	// ValidateApiV1PolicyValidatePostWithBody request with any body
 	ValidateApiV1PolicyValidatePostWithBody(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListBlockedPrincipalsApiV1PrincipalsBlockedGet request
+	ListBlockedPrincipalsApiV1PrincipalsBlockedGet(ctx context.Context, params *ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBody request with any body
+	BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBody(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete request
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21728,6 +21879,54 @@ func (c *Client) ImportPolicyApiV1PolicyImportPostWithBody(ctx context.Context, 
 
 func (c *Client) ValidateApiV1PolicyValidatePostWithBody(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewValidateApiV1PolicyValidatePostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListBlockedPrincipalsApiV1PrincipalsBlockedGet(ctx context.Context, params *ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListBlockedPrincipalsApiV1PrincipalsBlockedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBody(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(c.Server, sub, params)
 	if err != nil {
 		return nil, err
 	}
@@ -31629,37 +31828,48 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.XMEHORunnerFeatures != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Features", runtime.ParamLocationHeader, *params.XMEHORunnerFeatures)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("X-MEHO-Runner-Features", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 		if params.XMEHORunnerWireVersion != nil {
-			var headerParam1 string
+			var headerParam2 string
 
-			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam2)
 		}
 
 		if params.XMEHORunnerPackageSet != nil {
-			var headerParam2 string
+			var headerParam3 string
 
-			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			headerParam3, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam3)
 		}
 
 	}
@@ -37115,6 +37325,152 @@ func NewValidateApiV1PolicyValidatePostRequestWithBody(server string, params *Va
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListBlockedPrincipalsApiV1PrincipalsBlockedGetRequest generates requests for ListBlockedPrincipalsApiV1PrincipalsBlockedGet
+func NewListBlockedPrincipalsApiV1PrincipalsBlockedGetRequest(server string, params *ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/principals/blocked")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequest calls the generic BlockPrincipalRouteApiV1PrincipalsBlockedPost builder with application/json body
+func NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequest(server string, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody generates requests for BlockPrincipalRouteApiV1PrincipalsBlockedPost with any type of body
+func NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody(server string, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/principals/blocked")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest generates requests for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete
+func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sub", runtime.ParamLocationPath, sub)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/principals/blocked/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -55558,6 +55914,17 @@ type ClientWithResponsesInterface interface {
 	// ValidateApiV1PolicyValidatePostWithBodyWithResponse request with any body
 	ValidateApiV1PolicyValidatePostWithBodyWithResponse(ctx context.Context, params *ValidateApiV1PolicyValidatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ValidateApiV1PolicyValidatePostResponse, error)
 
+	// ListBlockedPrincipalsApiV1PrincipalsBlockedGetWithResponse request
+	ListBlockedPrincipalsApiV1PrincipalsBlockedGetWithResponse(ctx context.Context, params *ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams, reqEditors ...RequestEditorFn) (*ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse, error)
+
+	// BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBodyWithResponse request with any body
+	BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBodyWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error)
+
+	BlockPrincipalRouteApiV1PrincipalsBlockedPostWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error)
+
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
+
 	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
 
@@ -60164,6 +60531,75 @@ func (r ValidateApiV1PolicyValidatePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ValidateApiV1PolicyValidatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *BlockListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *BlockRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *UnblockResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69232,6 +69668,41 @@ func (c *ClientWithResponses) ValidateApiV1PolicyValidatePostWithBodyWithRespons
 	return ParseValidateApiV1PolicyValidatePostResponse(rsp)
 }
 
+// ListBlockedPrincipalsApiV1PrincipalsBlockedGetWithResponse request returning *ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse
+func (c *ClientWithResponses) ListBlockedPrincipalsApiV1PrincipalsBlockedGetWithResponse(ctx context.Context, params *ListBlockedPrincipalsApiV1PrincipalsBlockedGetParams, reqEditors ...RequestEditorFn) (*ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse, error) {
+	rsp, err := c.ListBlockedPrincipalsApiV1PrincipalsBlockedGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse(rsp)
+}
+
+// BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBodyWithResponse request with arbitrary body returning *BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse
+func (c *ClientWithResponses) BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBodyWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error) {
+	rsp, err := c.BlockPrincipalRouteApiV1PrincipalsBlockedPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) BlockPrincipalRouteApiV1PrincipalsBlockedPostWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error) {
+	rsp, err := c.BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp)
+}
+
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request returning *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse
+func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx, sub, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse(rsp)
+}
+
 // ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with arbitrary body returning *ReadDocsEndpointApiV1ReadDocsPostResponse
 func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
 	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -78122,6 +78593,105 @@ func ParseValidateApiV1PolicyValidatePostResponse(rsp *http.Response) (*Validate
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PolicyValidateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse parses an HTTP response from a ListBlockedPrincipalsApiV1PrincipalsBlockedGetWithResponse call
+func ParseListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse(rsp *http.Response) (*ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest BlockListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse parses an HTTP response from a BlockPrincipalRouteApiV1PrincipalsBlockedPostWithResponse call
+func ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp *http.Response) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest BlockRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse parses an HTTP response from a UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse call
+func ParseUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse(rsp *http.Response) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UnblockResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

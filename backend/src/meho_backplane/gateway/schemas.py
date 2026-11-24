@@ -16,6 +16,9 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
+
+from meho_backplane.runner.wire import RefusedResult
 
 __all__ = [
     "AssignmentDocument",
@@ -72,10 +75,14 @@ class ResultIngestResponse(BaseModel):
 
     ``accepted`` counts rows newly persisted; ``duplicates`` counts rows
     whose ``result_uid`` was already ingested for this runner (a re-posted
-    spool batch). ``accepted + duplicates`` equals the batch length.
+    spool batch). ``refused`` names the results MEHO refused and did not
+    store (with ``RUNNER_CHECKS_ENABLED`` on: a runner time later than
+    MEHO's clock). It is left out of the answer when there is none.
+    ``accepted + duplicates + len(refused)`` equals the batch length.
     """
 
     model_config = ConfigDict(frozen=True)
 
     accepted: int
     duplicates: int
+    refused: list[RefusedResult] | SkipJsonSchema[None] = None

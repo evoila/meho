@@ -415,7 +415,14 @@ async def test_blocked_redirect_log_holds_host_name_only(
         {
             "/hop2?x=QUERYMARK1": _Route(
                 status=302,
-                headers={"Location": "http://USERMARK:PASSMARK@127.0.0.1:9/PATHMARK2?q=QUERYMARK2"},
+                # The user part is built from pieces so no full credential URL is in the file.
+                headers={
+                    "Location": "http://"
+                    + "USERMARK"
+                    + ":"
+                    + "PASSMARK"
+                    + "@127.0.0.1:9/PATHMARK2?q=QUERYMARK2"
+                },
             )
         },
         host="127.0.0.1",

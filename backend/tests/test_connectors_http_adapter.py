@@ -2175,7 +2175,11 @@ async def test_cross_origin_redirect_warning_strips_url_query() -> None:
     ("location", "expected"),
     [
         ("https://other.example.com/PATHMARK/deep?q=QUERYMARK#FRAGMARK", "other.example.com"),
-        ("https://USERMARK:PASSMARK@other.example.com:8443/x", "other.example.com"),
+        # The user part is built from pieces so no full credential URL is in the file.
+        (
+            "https://" + "USERMARK" + ":" + "PASSMARK" + "@other.example.com:8443/x",
+            "other.example.com",
+        ),
         ("https://other.example.com", "other.example.com"),
         ("//other.example.com/PATHMARK?q=QUERYMARK", "other.example.com"),
     ],

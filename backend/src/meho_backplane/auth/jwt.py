@@ -126,6 +126,7 @@ __all__ = [
     "AUDIENCE_NOT_CONFIGURED_REMEDIATION",
     "clear_jwks_cache",
     "keycloak_readiness_probe",
+    "refuse_blocked_principal",
     "verify_jwt",
     "verify_jwt_for_audience",
 ]
@@ -1880,6 +1881,40 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         raise _http_401("invalid_token") from exc
 
 
+async def refuse_blocked_principal(operator: Operator, *, check_tenant: bool = True) -> None:
+    """Raise 403 ``principal_blocked`` when an admin blocked this login.
+
+    A block in every tenant always counts. A block in one tenant counts
+    only when the login works in that tenant: the tenant is chosen
+    (``tenant_chosen``) and *check_tenant* is set. So a person with
+    several tenants can still sign in and pick a tenant where no block
+    holds; the pick itself checks the tenant it moves to.
+
+    Raises 503 ``principal_block_check_unavailable`` when the block list
+    cannot be read: an unknown state never lets the request through.
+    """
+    from meho_backplane.auth.principal_block import (
+        PRINCIPAL_BLOCKED_MESSAGE,
+        PrincipalBlockUnavailableError,
+        is_principal_blocked,
+    )
+
+    try:
+        tenant_id = operator.tenant_id if check_tenant and operator.tenant_chosen else None
+        blocked = await is_principal_blocked(operator.sub, tenant_id)
+    except PrincipalBlockUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="principal_block_check_unavailable",
+        ) from exc
+    if blocked:
+        structlog.get_logger(__name__).info("principal_blocked_refused", sub=operator.sub)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}",
+        )
+
+
 async def verify_jwt_for_audience(
     authorization: str | None,
     *,
@@ -1887,6 +1922,7 @@ async def verify_jwt_for_audience(
     requested_tenant: str | None = None,
     allow_unchosen: bool = False,
     allow_mcp_profile: bool = False,
+    check_tenant_block: bool = True,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1944,6 +1980,13 @@ async def verify_jwt_for_audience(
     login's groups against the bindings of that tenant. Two group kinds
     give 401 ``multiple_bound_kinds``. With the switch off it does nothing.
 
+    Block list: after the tenant is chosen, a login that an admin blocked
+    (everywhere or in that tenant) gets 403 ``principal_blocked``
+    (:mod:`meho_backplane.auth.principal_block`). Without a chosen tenant,
+    only a block in every tenant counts. *check_tenant_block* off does the
+    same for a chosen tenant: only the console's tenant picker and switch
+    set it, because they do not work in the session's tenant.
+
     Profile tokens (#6099): a token with the ``mcp_profile`` claim gets 403
     ``mcp_profile_scope_violation`` unless *allow_mcp_profile* is set. Only
     the MCP route sets it. So a new entrance refuses such a token unless it
@@ -1964,6 +2007,7 @@ async def verify_jwt_for_audience(
     operator = await select_current_tenant(
         operator, requested_tenant, allow_unchosen=allow_unchosen
     )
+    await refuse_blocked_principal(operator, check_tenant=check_tenant_block)
     # Imported here: the policy package imports ``meho_backplane.auth``.
     from meho_backplane.policy.bindings import BoundKindConflictError, bind_current_tenant
 

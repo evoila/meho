@@ -288,12 +288,90 @@ async def test_a_failed_claim_on_the_second_dashboard_keeps_the_result_for_the_r
     assert await _memo(first) == "ok" and await _memo(second) == "ok"
     assert (await _sensor(sensor_id)).last_state == "ok"
     assert notices == []
+    assert _outcome("counted") == counted_before  # nothing was saved, so nothing is counted
 
     retry = _post(client, _RUNNER_A_ID, "runner-a", result)  # the runner sends it again
 
     assert retry.json() == {"accepted": 1, "duplicates": 0}
+    assert _outcome("counted") - counted_before == 1
     assert await _memo(first) == "critical" and await _memo(second) == "critical"
     assert {n.dashboard_id for n in notices} == {first, second}
+
+
+# ---------------------------------------------------------------------------
+# A saved reading that could not be sent, and a newer one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_waits_behind_a_saved_critical_reading_that_could_not_be_sent(
+    switch_on: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The re-post of a saved critical reading fails; the same tick makes a recovery."""
+    await _seed_identities()
+    sensor_id = await _seed_sensor()
+    await _seed_dashboard(sensor_id, memo="ok")
+    notices: list[Any] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_kw: None)
+    monkeypatch.setattr(inv, "schedule_dashboard_notification", notices.append)
+    spool = ResultSpool(tmp_path, max_files=10)
+    critical = _wire(sensor_id, count=50, produced_at=datetime.now(UTC) - timedelta(minutes=1))
+    spool.write_batch(wire.RunnerResultBatch(runner_id="runner-a", results=[critical]))
+    item = wire.RunnerWorkItem(
+        check_ref=str(sensor_id),
+        op_id=_OP_SAFE,
+        product="net",
+        version="1.x",
+        impl_id="net-probe",
+        handler_ref="unused",
+        params={},
+        safety_level="safe",
+        principal=wire.RunnerPrincipal(
+            sub="runner-sub", tenant_id=_TENANT, tenant_role=TenantRole.READ_ONLY
+        ),
+    )
+    assignment = wire.RunnerAssignment(assignment_version="v1", items=[item])
+
+    async def recovery(work: wire.RunnerWorkItem) -> wire.RunnerResult:
+        return _wire(uuid.UUID(work.check_ref), count=1, produced_at=datetime.now(UTC))
+
+    monkeypatch.setattr(runner_loop, "execute_work_item", recovery)
+    failures_left = 1  # only the re-post of the saved reading fails
+    received: list[int] = []
+
+    async def central(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(304)
+        nonlocal failures_left
+        if failures_left:
+            failures_left -= 1
+            return httpx.Response(503)
+        batch = wire.RunnerResultBatch.model_validate_json(request.content)
+        received.extend((r.result or {})["count"] for r in batch.results)
+        await _count(batch.results, datetime.now(UTC))
+        return httpx.Response(200, json={"accepted": len(batch.results), "duplicates": 0})
+
+    runner = RunnerClient(
+        central_url="https://central.example",
+        runner_id="runner-a",
+        token="tok",
+        transport=httpx.MockTransport(central),
+    )
+    state = RunnerState(assignment=assignment, assignment_version="v1")
+    async with runner:
+        await run_one_tick(client=runner, spool=spool, state=state, runner_id="runner-a")
+        assert received == []
+        assert len(spool.load_oldest_first()) == 2  # the recovery waits behind the reading
+        await run_one_tick(client=runner, spool=spool, state=state, runner_id="runner-a")
+
+    # The critical reading, the recovery behind it, then the reading of this tick.
+    assert received == [50, 1, 1]
+    assert spool.load_oldest_first() == []
+    assert (await _sensor(sensor_id)).last_state == "ok"
+    assert [(n.previous_state, n.current_state) for n in notices] == [
+        ("ok", "critical"),
+        ("critical", "ok"),
+    ]
 
 
 # ---------------------------------------------------------------------------

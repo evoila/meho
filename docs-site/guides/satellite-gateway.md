@@ -56,7 +56,9 @@ Two properties make this safe to run in an untrusted segment:
 
 Resilience is built in for the flaky-uplink reality of a remote segment:
 results that fail to post are written to an on-disk **spool** and
-re-posted oldest-first; a failed assignment fetch keeps the **cached**
+re-posted oldest-first. While a saved batch is not yet sent, new results
+wait in the spool behind it, so MEHO gets them in the order they were
+made. A failed assignment fetch keeps the **cached**
 assignment running, so the satellite keeps evaluating its last-known
 checks while the uplink is down.
 

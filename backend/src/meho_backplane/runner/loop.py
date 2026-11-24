@@ -19,7 +19,10 @@ Each tick, in order:
    a ``304`` or a fetch failure keeps the cached assignment so the runner
    keeps executing while the uplink is down),
 3. execute each work item locally,
-4. post the result batch; on failure, spool it.
+4. post the result batch; on failure, spool it. When a saved batch could
+   not be sent in step 1, the new batch goes into the spool behind it
+   instead, so MEHO gets the results of a check in the order the runner
+   made them.
 
 A wire version refusal on **any** of these calls ends the tick: the runner
 logs both versions, drops the cached assignment and runs nothing until an
@@ -137,9 +140,9 @@ async def run_one_tick(
     """
     _log().info("runner_tick_start", cached_version=state.assignment_version)
     try:
-        await _drain_spool(client, spool)
+        spool_empty = await _drain_spool(client, spool)
         await _fetch_assignment(client, state)
-        await _execute_and_report(client, spool, state, runner_id)
+        await _execute_and_report(client, spool, state, runner_id, post_now=spool_empty)
     except RunnerWireVersionMismatchError as exc:
         # Central speaks another wire version, whichever call said so: run
         # nothing until an operator updates one side. Dropping the cache
@@ -173,8 +176,20 @@ async def _fetch_assignment(client: RunnerClient, state: RunnerState) -> None:
 
 
 async def _execute_and_report(
-    client: RunnerClient, spool: ResultSpool, state: RunnerState, runner_id: str
+    client: RunnerClient,
+    spool: ResultSpool,
+    state: RunnerState,
+    runner_id: str,
+    *,
+    post_now: bool,
 ) -> None:
+    """Run the due items and send their results.
+
+    With *post_now* false, a saved batch is still waiting in the spool. The
+    new batch then goes into the spool behind it, because MEHO keeps only the
+    newest reading of a check: a newer result sent first would make MEHO drop
+    the waiting one as old.
+    """
     assignment = state.assignment
     if assignment is None or not assignment.items:
         return
@@ -188,6 +203,10 @@ async def _execute_and_report(
         state.last_run[item.check_ref] = now
     results = [await execute_work_item(item) for item in due]
     batch = RunnerResultBatch(runner_id=runner_id, results=results)
+    if not post_now:
+        _log().info("runner_results_queued_behind_spool", results=len(results))
+        spool.write_batch(batch)
+        return
     try:
         _log_refused(await client.post_results(batch))
     except RunnerClientError as exc:
@@ -209,10 +228,11 @@ def _log_refused(refused: list[RefusedResult]) -> None:
         )
 
 
-async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
+async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> bool:
     """Re-post spooled batches oldest-first, stopping at the first failure.
 
-    A wire version refusal propagates to the tick after leaving the file in
+    Returns True when every saved batch was sent, False when one is left. A
+    wire version refusal propagates to the tick after leaving the file in
     place, so the tick ends without running cached work.
     """
     for path, batch in spool.load_oldest_first():
@@ -223,8 +243,9 @@ async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
         except RunnerClientError as exc:
             # Still down — leave this and the rest for the next tick.
             _log().warning("runner_spool_drain_failed", path=str(path), error=str(exc))
-            return
+            return False
         spool.remove(path)
+    return True
 
 
 async def _run_loop(settings: RunnerSettings) -> None:

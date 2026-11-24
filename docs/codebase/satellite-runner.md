@@ -130,6 +130,10 @@ Each tick (`run_one_tick`):
    uplink is down.
 3. **Execute** each work item through `execute_work_item`.
 4. **Post** the result batch; on POST failure, write it to the spool.
+   When step 1 left a saved batch unsent, the new batch goes into the
+   spool behind it and is not posted this tick. MEHO keeps only the newest
+   reading of a check, so it gets the results of a check in the order the
+   runner made them.
 
 A wire version refusal on any of these calls is different from a down
 uplink: the runner logs `runner_wire_version_mismatch` with both versions,

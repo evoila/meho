@@ -33,7 +33,12 @@ from meho_backplane.connectors.azure._errors import (
     azure_error_body,
     clean_azure_text,
 )
-from meho_backplane.connectors.azure._http import check_azure_url, retry_after_seconds, send
+from meho_backplane.connectors.azure._http import (
+    check_azure_url,
+    retry_after_seconds,
+    send,
+    send_single_try,
+)
 from tests._azure_fixtures import (
     ARM_BASE,
     SUBSCRIPTION_A,
@@ -251,6 +256,22 @@ async def test_a_401_logs_in_again_once_and_then_fails_clearly(clock: _Clock) ->
     assert login.call_count == 2
     assert caught.value.status_code == 401
     assert caught.value.stage == "after_relogin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 404, 429, 503])
+async def test_a_single_try_sends_once_and_returns_any_status(clock: _Clock, status: int) -> None:
+    with respx.mock() as mock:
+        login = mock.post(token_url()).respond(200, json=token_answer(login_token()))
+        arm = mock.put(GROUPS_URL).respond(status, headers={"Retry-After": "1"})
+        response = await send_single_try(
+            _connector(), AzureTargetStub(), "PUT", GROUPS_URL, operator=operator()
+        )
+
+    assert response.status_code == status
+    assert arm.call_count == 1
+    assert login.call_count == 1
+    assert clock.sleeps == []
 
 
 @pytest.mark.asyncio

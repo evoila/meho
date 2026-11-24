@@ -40,14 +40,16 @@
   hours keeps getting 200s and the ``EventSource`` never hits the
   non-200 (login redirect) that would permanently kill it.
 -#}
+{% from "_components.html" import button %}
 {% from "_icons.html" import icon %}
 {#- Standalone document: no ``{% extends "base.html" %}``, so the shared
     tenant-label macro is imported here rather than inherited (#810). -#}
 {% from "_tenant_label.html" import tenant_label %}
 <!doctype html>
-<html lang="en" data-theme="evoila" class="h-full">
+<html lang="en" data-theme="evoila-system" class="h-full">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Broadcast wall &middot; MEHO Operator Console</title>
     {# Surface JS -- the shared ``broadcastFeed`` Alpine controller.
@@ -79,7 +81,7 @@
           <h1 class="text-lg font-semibold">Broadcast wall</h1>
           <code class="badge badge-outline" title="{{ tenant_id }}">{% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}{{ tenant_id }}{% endif %}</code>
         </div>
-        <a href="/ui/broadcast" class="btn btn-ghost btn-sm"> Exit wall mode </a>
+        {{ button("Exit wall mode", variant="quiet", href="/ui/broadcast") }}
       </header>
 
       {# ---------- Maximised feed ----------

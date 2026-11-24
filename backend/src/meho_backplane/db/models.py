@@ -583,6 +583,10 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # The id (``sub``) of the login that a secret store accepted for the call
+    # (``meho`` when the store saw MEHO's own identity). NULL when the call
+    # read no secret. Never a token, a store path or a store address.
+    secret_read_as: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
     # redaction engine, and stores the raw payload here so an auditor can
@@ -7800,6 +7804,12 @@ class ApprovalRequest(Base):
             _ck_in("outcome_check_reason", _APPROVAL_OUTCOME_CHECK_REASONS),
             name="ck_approval_request_outcome_check_reason",
         ),
+        # Matches migration 0184: a request that ended without a run is
+        # never started, under any release.
+        sa.CheckConstraint(
+            "status NOT IN ('rejected', 'expired', 'withdrawn') OR resumed_at IS NULL",
+            name="ck_approval_request_ended_not_started",
+        ),
     )
 
 
@@ -7810,7 +7820,10 @@ class ApprovalRequestKey(Base):
     the waiting request of the same call that was made with key A. That
     request row holds only key A in ``idempotency_key``. This row keeps key
     B, so a later retry with key B gets the same request, also after it was
-    approved. Read by the key lookup in
+    approved. A call that gets its own request while a request of another
+    kind of login, other people behind the login or another choice to reveal
+    secret values holds its key keeps that key here too. Read by the key
+    lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
     ``0183``.
 

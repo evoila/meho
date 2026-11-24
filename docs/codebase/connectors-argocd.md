@@ -108,8 +108,10 @@ opaque string.
    handler (the operator-context Vault read).
 2. `_load_credentials(target, operator)` acquires the per-instance
    `asyncio.Lock` and checks the `_creds_cache` dict. The cache key is the
-   tenant-unique `(tenant_id, target.id)` pair from `target_cache_key`, so
-   two targets with the same name in different tenants never share a token.
+   tenant-unique `(tenant_id, target.id)` pair plus the secret reference,
+   from `target_secret_cache_key`, so two targets with the same name in
+   different tenants never share a token, and a call uses only the token
+   of the secret reference its target names.
 3. A cached token is handed to a caller only after that caller's own Vault
    read of the target's secret passed once in this process
    (`SecretReaders`). Otherwise the connector calls the loader with

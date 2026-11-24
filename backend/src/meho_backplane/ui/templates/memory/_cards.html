@@ -39,6 +39,8 @@
       DOM nesting -- HTML5 standard form-association
       (https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input#form).
 -#}
+
+{% from "_components.html" import badge %}
 <section
   id="memory-cards"
   aria-label="Memory card grid"
@@ -74,7 +76,7 @@
       {% if active_tag %}
         <input type="hidden" name="tag" value="{{ active_tag }}" />
       {% endif %}
-      <span class="text-xs opacity-70" data-bulk-summary>
+      <span class="text-xs text-muted" data-bulk-summary>
         Select rows below, then choose an action.
       </span>
       <div class="ml-auto flex flex-wrap items-center gap-2">
@@ -82,7 +84,7 @@
           <span class="sr-only">Extend duration</span>
           <select
             name="extend_duration"
-            class="select select-bordered select-sm"
+            class="select select-sm"
             aria-label="Extend duration"
           >
             {% for d in bulk_extend_durations %}
@@ -115,7 +117,7 @@
   {# ----------- Active cards ----------- #}
   {% if not entries %}
     <div class="card bg-base-100 border-base-300 border">
-      <div class="card-body text-sm opacity-70">
+      <div class="card-body text-sm text-muted">
         No memories match the current scope / tag filter.
       </div>
     </div>
@@ -147,11 +149,11 @@
                   >{{ entry.slug }}</a>
                 </h2>
               </div>
-              <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+              {{ badge(entry.scope, variant="outline", class="shrink-0") }}
             </div>
             {% if entry.countdown %}
               <div
-                class="text-xs opacity-70"
+                class="text-xs text-muted"
                 data-expires-at="{{ entry.expires_at.isoformat() }}"
                 data-countdown="{{ entry.countdown }}"
               >
@@ -159,7 +161,7 @@
               </div>
             {% elif entry.expires_at %}
               <div
-                class="text-xs opacity-70"
+                class="text-xs text-muted"
                 data-expires-at="{{ entry.expires_at.isoformat() }}"
               >
                 Expires {{ entry.expires_at.isoformat() }}
@@ -169,12 +171,12 @@
               <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
                 {% for tag in entry.tags %}
                   <li>
-                    <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                    {{ badge(tag, variant="quiet") }}
                   </li>
                 {% endfor %}
               </ul>
             {% endif %}
-            <p class="text-sm opacity-80 whitespace-pre-wrap break-words">
+            <p class="text-sm text-muted whitespace-pre-wrap break-words">
               {{ entry.preview }}
             </p>
             <div class="card-actions justify-end">
@@ -200,15 +202,15 @@
       aria-label="Recently expired memories (cleanup pending)"
     >
       <header class="flex items-baseline justify-between gap-2">
-        <h2 class="text-sm font-semibold opacity-70">
+        <h2 class="text-sm font-semibold text-muted">
           Recently expired (cleanup pending)
         </h2>
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           {{ expired_count }} expired, awaiting the next sweeper tick
         </span>
       </header>
       <ul
-        class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 opacity-60"
+        class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 text-subtle"
         aria-label="Recently expired memories"
       >
         {% for entry in expired_entries %}
@@ -238,7 +240,7 @@
                     >{{ entry.slug }}</a>
                   </h3>
                 </div>
-                <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+                {{ badge(entry.scope, variant="outline", class="shrink-0") }}
               </div>
               <div
                 class="text-xs"
@@ -250,7 +252,7 @@
                 <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
                   {% for tag in entry.tags %}
                     <li>
-                      <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                      {{ badge(tag, variant="quiet") }}
                     </li>
                   {% endfor %}
                 </ul>

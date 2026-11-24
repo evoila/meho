@@ -8,6 +8,8 @@
   ``HX-Trigger: meho:topology-edge-changed`` so an open graph view re-pulls
   and the new edge shows without a hard reload.
 -#}
+
+{% from "_components.html" import badge %}
 <div
   id="topology-edge-modal"
   class="card bg-base-100 border-success border shadow-sm"
@@ -16,20 +18,20 @@
 >
   <div class="card-body space-y-2">
     <header class="flex items-center gap-2">
-      <span class="badge badge-success badge-sm">created</span>
+      {{ badge("created", variant="success") }}
       <h2 class="card-title text-base">Curated edge created</h2>
     </header>
     <p class="flex items-center gap-2 text-sm">
       <span class="font-mono">{{ edge.from_endpoint.name }}</span>
-      <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
-      <span class="opacity-60">&rarr;</span>
-      <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
-      <span class="opacity-60">&rarr;</span>
+      {{ badge(edge.from_endpoint.kind, variant="quiet", size="xs") }}
+      <span class="text-subtle">&rarr;</span>
+      {{ badge(edge.kind, variant="outline", size="xs") }}
+      <span class="text-subtle">&rarr;</span>
       <span class="font-mono">{{ edge.to_endpoint.name }}</span>
-      <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
-      <span class="text-xs opacity-50">({{ edge.source }})</span>
+      {{ badge(edge.to_endpoint.kind, variant="quiet", size="xs") }}
+      <span class="text-xs text-subtle">({{ edge.source }})</span>
     </p>
-    <p class="text-xs opacity-60">
+    <p class="text-xs text-subtle">
       Edge id <span class="font-mono">{{ edge.id }}</span>.
     </p>
   </div>

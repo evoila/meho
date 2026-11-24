@@ -107,6 +107,7 @@ from meho_backplane.auth.principal_block_run import (
     raise_if_step_was_refused,
     request_was_sent,
 )
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations._principal_block_gate import refuse_step_if_blocked
 from meho_backplane.operations.composite_steps import (
@@ -953,17 +954,19 @@ async def enforce_subop_policy(
             journal.start(connector_id, op_id, target, params, may_send_again=True)
             mark_request_sent()
         return refused
-    gated = await _gate_subop(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        safety_level=safety_level,
-        requires_approval=requires_approval,
-        target=target,
-        params=params,
-        resume_state=resume_state,
-        after_main_effect=after_main_effect,
-    )
+    # The rows the gate writes for this step hold only what the step read.
+    with track_secret_read_as():
+        gated = await _gate_subop(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
+            resume_state=resume_state,
+            after_main_effect=after_main_effect,
+        )
     if isinstance(gated, OperationResult):
         return gated
     if journal is not None:
@@ -1053,17 +1056,18 @@ async def run_governed_subop(
             return SubopStep(stopped=refused)
         may_send_again = True
     else:
-        gated = await _gate_subop(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
-            target=target,
-            params=params,
-            resume_state=resume_state,
-            after_main_effect=after_main_effect,
-        )
+        with track_secret_read_as():
+            gated = await _gate_subop(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                target=target,
+                params=params,
+                resume_state=resume_state,
+                after_main_effect=after_main_effect,
+            )
         if isinstance(gated, OperationResult):
             return SubopStep(stopped=gated)
         may_send_again = gated is _GoAhead.NO_PERSON

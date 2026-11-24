@@ -23,7 +23,7 @@
         <td class="font-mono text-xs break-all max-w-[12rem]">{{ grant.op_pattern }}</td>
         <td class="text-xs">
           {% if grant.target_scope in (None, "*") %}
-            <span class="opacity-60">{{ grant.target_scope_display }}</span>
+            <span class="text-subtle">{{ grant.target_scope_display }}</span>
           {% else %}
             <span class="font-mono break-all">{{ grant.target_scope }}</span>
           {% endif %}
@@ -44,15 +44,15 @@
             >
               elevation
             </span>
-            <span class="block opacity-70" data-expires-at="{{ grant.expires_at.isoformat() }}">
+            <span class="block text-muted" data-expires-at="{{ grant.expires_at.isoformat() }}">
               auto-expires {{ grant.expires_at.isoformat() }}
             </span>
           {% else %}
-            <span class="opacity-60">permanent</span>
+            <span class="text-subtle">permanent</span>
           {% endif %}
         </td>
         <td class="text-xs break-all max-w-[12rem]">{{ grant.created_by_sub }}</td>
-        <td class="text-xs opacity-70" data-created-at="{{ grant.created_at.isoformat() }}">
+        <td class="text-xs text-muted" data-created-at="{{ grant.created_at.isoformat() }}">
           {{ grant.created_at.isoformat() }}
         </td>
         <td class="text-right whitespace-nowrap">
@@ -81,7 +81,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="8" class="py-10 text-center opacity-70">
+      <td colspan="8" class="py-10 text-center text-muted">
         No grants
         {%- if filter_principal_sub %} for principal
           <span class="font-mono">{{ filter_principal_sub }}</span>{% endif -%}

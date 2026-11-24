@@ -90,6 +90,7 @@ from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
@@ -202,6 +203,10 @@ async def query_audit(
         )
         .outerjoin(Tenant, AuditLog.tenant_id == Tenant.id)
         .where(AuditLog.tenant_id == tenant_id)
+        # The list never shows the stored raw answer, and one row can hold
+        # many megabytes of it (#6818). ``raiseload`` makes a read of it by
+        # mistake fail, instead of running one more query per row.
+        .options(defer(AuditLog.raw_payload, raiseload=True))
     )
 
     stmt = _scope_to_owner(stmt, owner_sub)
@@ -529,6 +534,7 @@ def _build_audit_entry(
         sandbox_mode=row.sandbox_mode,
         actor_sub=row.actor_sub,
         actor_name=_actor_name(row.actor_sub),
+        secret_read_as=row.secret_read_as,
         broadcast_event_id=None,
     )
 

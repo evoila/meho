@@ -67,14 +67,34 @@ is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
-The stored request of a `k8s.apply` of a Secret keeps its manifest only
-in the encrypted one-time handoff of the run, as a credential write does.
+The stored request of a `k8s.apply` of a Secret, or of a manifest with a
+secret-looking value, keeps its manifest only in the encrypted one-time
+handoff of the run, as a credential write does. Such a call needs
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
+(`manifest_holds_credential` in `op_classes.py`) when:
+
+- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
+  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
+  example a ConfigMap;
+- an `env` entry at any depth (the object itself, the containers and init
+  containers of a pod template) has a secret name and a value of its own; an entry that
+  reads its value from a Secret (`valueFrom`) does not count;
+- a text at any depth has a secret shape of its own: the rule of
+  `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
+  token with a known vendor prefix).
+
+The check reads each value of the manifest once, and the names of each
+`data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
+them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
+holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of
 the parent's params either. A row stored before this rule keeps its
-manifest until the run starts or the request ends; then MEHO replaces it
-with the same marker it writes for a secret-named value. A new run of a
-failed apply needs the params sent again.
+manifest until the run starts or the request ends, or until the start-up
+clean-up when it cannot run (see "Approval-TTL lifecycle" in
+`approvals.md`); then MEHO replaces it with the same marker it writes for
+a secret-named value. A new run of a failed apply needs the params sent
+again.
 
 `k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
 defines, unchanged, so the caller does not choose what runs. Writing the
@@ -164,7 +184,8 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   A Sensor on such a target gets the fit warning that names the range
   (`checks/connector_fit.py`). Caches one
   `kubernetes_asyncio.client.ApiClient` per target, keyed on the
-  target's `(tenant_id, id)` from `target_cache_key` (see
+  target's `(tenant_id, id)` and secret reference from
+  `target_secret_cache_key` (see
   [`kubernetes-connector.md`](kubernetes-connector.md) for why). The
   credential loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
@@ -522,7 +543,7 @@ Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
 through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
 connector therefore keeps a **parallel** per-target cache
 (`KubernetesConnector._ws_api_clients`, keyed on the target's
-`(tenant_id, id)` exactly like `_api_clients`), built lazily from the
+`(tenant_id, id)` and secret reference exactly like `_api_clients`), built lazily from the
 same operator-identity kubeconfig via `_get_ws_api_client` and closed
 alongside the read clients in `aclose` (no open sockets left behind).
 

@@ -18,6 +18,7 @@
   incurs provider cost -- the form surfaces the agent's turn budget so the
   operator sees the cost ceiling before pressing Run.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <div id="agent-run-console" class="space-y-4">
   <nav class="text-sm" aria-label="Breadcrumb">
@@ -33,7 +34,7 @@
       {{ icon("bot", class="size-6 opacity-80") }}
       Run <span class="font-mono">{{ agent_name }}</span>
     </h1>
-    <p class="text-sm opacity-70">
+    <p class="text-sm text-muted">
       Invoke the agent and watch it reason live. Each turn, tool call,
       tool result, and the final output stream into the transcript below.
     </p>
@@ -63,7 +64,7 @@
         <span class="text-sm font-medium">Prompt</span>
         <textarea
           name="input"
-          class="textarea textarea-bordered min-h-28 font-mono text-sm w-full"
+          class="textarea min-h-28 font-mono text-sm w-full"
           placeholder="What should this agent do?"
           required
           {% if not enabled %}disabled{% endif %}
@@ -72,23 +73,23 @@
       </label>
 
       <label class="flex flex-col gap-1 max-w-md">
-        <span class="text-sm font-medium">Work ref <span class="opacity-60 font-normal">(optional)</span></span>
+        <span class="text-sm font-medium">Work ref <span class="text-subtle font-normal">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="gh:evoila/meho#123"
           {% if not enabled %}disabled{% endif %}
           aria-label="External change-ticket reference"
         />
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           Stamps the run with an external change-ticket reference for later filtering.
         </span>
       </label>
 
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <span class="text-xs opacity-70" aria-live="polite">
-          Turn budget: <span class="badge badge-outline badge-sm font-mono">{{ turn_budget }}</span>
+        <span class="text-xs text-muted" aria-live="polite">
+          Turn budget: {{ badge(turn_budget, variant="outline", class="font-mono") }}
           &mdash; the maximum model turns this run may take.
         </span>
         <button
@@ -112,7 +113,7 @@
       {# ``?run=<id>``: follow that run's saved events, then the live ones. #}
       {% include "agents/_run_transcript.html" %}
     {% else %}
-      <p class="px-1 py-6 text-center text-sm opacity-60" data-state="idle">
+      <p class="px-1 py-6 text-center text-sm text-subtle" data-state="idle">
         Enter a prompt and press Run to start a live agent run.
       </p>
     {% endif %}

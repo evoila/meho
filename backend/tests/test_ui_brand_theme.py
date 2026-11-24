@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""One theme, from the shared package, and no way back to two.
+"""The evoila themes come from the shared package, and only from there.
 
-The console used to ship two DaisyUI themes and a switch between them.
-The evoila brand replaced both with one light theme, which now arrives
-from the ``meho-ui`` package rather than being defined here.
+The console used to ship two DaisyUI themes of its own and a switch
+between them. The evoila brand replaced both. Since meho-ui 0.9.0 the
+brand has a light and a dark theme, and every page follows the
+computer's setting with ``data-theme="evoila-system"`` -- CSS only, no
+script, no switch yet.
 
 These are guards, not examples. The removal touched a stylesheet, six
 templates, a service worker, an offline page and a syntax highlighter;
@@ -21,6 +23,9 @@ from pathlib import Path
 import pytest
 
 from meho_backplane.ui.paths import brand_css_dir, brand_fonts_dir, static_src_dir, templates_dir
+
+#: The theme names the brand package defines (meho-ui 0.9.0).
+_BRAND_THEMES = frozenset({"evoila", "evoila-dark", "evoila-system"})
 
 #: The machinery the brand replaced. None of it may come back.
 _RETIRED = ("meho-dark", "meho-light", "mehoToggleTheme", "Toggle color theme")
@@ -63,7 +68,10 @@ def test_theme_js_is_deleted_and_unreferenced() -> None:
 
 
 def test_every_hardcoded_theme_is_the_brand_theme() -> None:
-    """No document may render with a theme other than the brand one.
+    """Every document follows the computer: ``data-theme="evoila-system"``.
+
+    ``evoila`` would keep a page light on a dark computer, and any other
+    value is not a brand theme at all.
 
     Five documents still set ``data-theme`` themselves: the pages that do
     not inherit ``base.html`` -- the session-ended page, both tenant
@@ -78,9 +86,16 @@ def test_every_hardcoded_theme_is_the_brand_theme() -> None:
     """
     found = 0
     for path in _source_files():
-        for value in re.findall(r'data-theme="([^"]+)"', path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".css":
+            # A stylesheet may give its own colours a value per brand theme
+            # (the topology graph does), but only for the brand's names.
+            for value in re.findall(r'data-theme="([^"]+)"', text):
+                assert value in _BRAND_THEMES, f"{path.name} styles data-theme={value!r}"
+            continue
+        for value in re.findall(r'<html[^>]*\sdata-theme="([^"]+)"', text):
             found += 1
-            assert value == "evoila", f"{path.name} renders with data-theme={value!r}"
+            assert value == "evoila-system", f"{path.name} renders with data-theme={value!r}"
     assert found >= 5, (
         f"expected at least five standalone documents to pin the theme, found {found}"
     )
@@ -110,6 +125,10 @@ def test_base_html_gets_the_theme_from_the_shared_frame() -> None:
     # proves the shared templates are reachable at render time.
     frame = env.get_template("_page_frame.html").render()
     assert 'data-theme="evoila"' in frame, "the shared frame stopped setting the brand theme"
+
+    # base.html overrides the frame's default (always light) with the
+    # theme that follows the computer.
+    assert "{% block theme %}evoila-system{% endblock %}" in source
 
 
 def test_the_head_links_the_packaged_brand_stylesheets() -> None:
@@ -157,3 +176,63 @@ def test_the_brand_package_is_the_only_source_of_the_theme() -> None:
     assert not declared, (
         f"styles.css redefines slots the brand package owns: {sorted(set(declared))}"
     )
+
+
+def test_every_document_tells_the_browser_both_themes_exist() -> None:
+    """``<meta name="color-scheme" content="light dark">`` on every document.
+
+    The browser reads it before any stylesheet arrives, so a dark computer
+    does not get a white flash while the page loads.
+    """
+    meta = '<meta name="color-scheme" content="light dark" />'
+    documents = [
+        p
+        for p in _source_files()
+        if p.suffix == ".html" and re.search(r"<html[\s>]", p.read_text(encoding="utf-8"))
+    ]
+    assert len(documents) >= 5
+    for path in documents:
+        assert meta in path.read_text(encoding="utf-8"), path.name
+    assert meta in (templates_dir() / "base.html").read_text(encoding="utf-8")
+
+
+def test_the_brand_package_has_the_system_theme() -> None:
+    """``evoila-system`` is meho-ui's, from 0.9.0 on.
+
+    With an older meho-ui the attribute matches nothing, and every page
+    renders with DaisyUI's fallback instead of the brand.
+    """
+    css = (brand_css_dir() / "evoila-daisyui.css").read_text(encoding="utf-8")
+    assert '[data-theme="evoila-system"]' in css
+    assert "@media (prefers-color-scheme: dark)" in css
+
+
+def _graph_colour_names() -> set[str]:
+    script = (static_src_dir() / "app" / "topology-graph.js").read_text(encoding="utf-8")
+    return set(re.findall(r'graphColour\("([a-z-]+)"', script))
+
+
+def test_the_topology_graph_takes_every_colour_from_the_theme() -> None:
+    """The graph used to hard-code its colours; dark grey names on a dark
+    page were close to unreadable. Every colour now goes through
+    ``graphColour``, whose second argument is only the fallback."""
+    script = (static_src_dir() / "app" / "topology-graph.js").read_text(encoding="utf-8")
+    code = re.sub(r"//[^\n]*", "", script)
+    bare = re.findall(r'"(#[0-9a-fA-F]{3,8})"', code)
+    in_calls = re.findall(r'graphColour\("[a-z-]+", "(#[0-9a-fA-F]{3,8})"\)', code)
+    assert sorted(bare) == sorted(in_calls), "a colour bypasses graphColour"
+    assert len(_graph_colour_names()) >= 13
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [":root", '[data-theme="evoila-dark"]', '  [data-theme="evoila-system"]'],
+)
+def test_every_graph_colour_has_a_value_in_each_theme(selector: str) -> None:
+    """A colour missing from the dark blocks would fall back to its light
+    value -- the unreadable case this whole change is about."""
+    styles = (static_src_dir() / "styles.css").read_text(encoding="utf-8")
+    block = styles.split(selector + " {", 1)[1].split("}", 1)[0]
+    declared = set(re.findall(r"--meho-graph-([a-z-]+):", block))
+    missing = _graph_colour_names() - declared
+    assert not missing, f"{selector} has no value for {sorted(missing)}"

@@ -63,6 +63,8 @@
   HTML parse -- the chassis CSP posture (zero inline JS) remains
   unchanged.
 -#}
+
+{% from "_components.html" import badge, button %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
@@ -75,7 +77,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Topology{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Interactive graph view: pan, zoom, click a node to inspect.
       </p>
     </div>
@@ -125,7 +127,7 @@
           {% if overlay_mode == "dependents" %}Dependents{% else %}Dependencies{% endif %}
           of
           <span class="font-mono">{{ overlay_root_name }}</span>{% if overlay_root_kind %}
-            <span class="badge badge-ghost badge-sm">{{ overlay_root_kind }}</span>{% endif %},
+            {{ badge(overlay_root_kind, variant="quiet") }}{% endif %},
           depth {{ overlay_depth }}.
         </span>
       {% elif overlay_mode == "path" %}
@@ -139,9 +141,7 @@
           {% endif %}
         </span>
       {% endif %}
-      <a class="btn btn-xs btn-ghost ml-auto" href="/ui/topology?view=graph">
-        Clear overlay
-      </a>
+      {{ button("Clear overlay", variant="quiet", size="xs", class="ml-auto", href="/ui/topology?view=graph") }}
     </div>
   {% endif %}
 
@@ -192,7 +192,7 @@
           controls (whose columns are taller by one label row);
           ``justify-self-end`` right-aligns it and ``w-1/2`` gives it the
           requested half-column width. -#}
-      <button type="submit" class="btn btn-sm btn-primary w-1/2 self-end justify-self-end">Apply</button>
+      {{ button("Apply", variant="primary", class="w-1/2 self-end justify-self-end", type="submit") }}
     </div>
   </form>
 
@@ -200,20 +200,18 @@
      ``node_count`` / ``edge_count`` give the operator the rendered
      size at a glance; ``truncated`` flashes the cap-reached banner. -#}
   <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-    <div class="opacity-70">
+    <div class="text-muted">
       Rendering <span class="font-mono">{{ node_count }}</span> nodes /
       <span class="font-mono">{{ edge_count }}</span> edges
       {%- if truncated %}
-        <span class="badge badge-warning badge-sm ml-2">
-          Capped at {{ graph_node_cap }} -- narrow the filter or use the dependents query (T3) for larger sets.
-        </span>
+        {{ badge("Capped at " ~ graph_node_cap ~ " -- narrow the filter or use the dependents query (T3) for larger sets.", variant="warning", class="ml-2") }}
       {%- endif %}
     </div>
-    <label class="form-control flex flex-row items-center gap-2">
-      <span class="label-text whitespace-nowrap">Layout</span>
+    <label class="flex flex-row items-center gap-2">
+      <span class="whitespace-nowrap">Layout</span>
       <select
         id="topology-graph-layout"
-        class="select select-bordered select-sm"
+        class="select select-sm"
         aria-label="Graph layout algorithm"
       >
         <option value="cose-bilkent" selected>cose-bilkent (organic)</option>
@@ -269,7 +267,7 @@
     aria-live="polite"
     aria-label="Node detail drawer"
   >
-    <div class="card-body text-sm opacity-70">
+    <div class="card-body text-sm text-muted">
       Click a node in the graph to inspect it.
     </div>
   </aside>

@@ -29,6 +29,8 @@
   block is valid HTML5 and the browser applies the styles to every
   descendant element identically.
 -#}
+
+{% from "_components.html" import badge, button %}
 {% extends "base.html" %}
 
 {% block page_title %}Memory: {{ entry.slug }} &middot; MEHO Operator Console{% endblock %}
@@ -57,8 +59,8 @@
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 class="text-xl font-semibold font-mono break-all">{{ entry.slug }}</h1>
-          <div class="text-xs opacity-70">
-            <span class="badge badge-outline badge-sm mr-2">{{ entry.scope }}</span>
+          <div class="text-xs text-muted">
+            {{ badge(entry.scope, variant="outline", class="mr-2") }}
             {% if entry.user_sub %}
               <span>owner: {{ entry.user_sub }}</span>
             {% endif %}
@@ -111,7 +113,7 @@
       </div>
       {% if entry.expires_at %}
         <div
-          class="text-xs opacity-70"
+          class="text-xs text-muted"
           data-expires-at="{{ entry.expires_at.isoformat() }}"
         >
           Expires {{ entry.expires_at.isoformat() }}
@@ -121,7 +123,7 @@
         <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
           {% for tag in entry.tags %}
             <li>
-              <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+              {{ badge(tag, variant="quiet") }}
             </li>
           {% endfor %}
         </ul>
@@ -147,14 +149,14 @@
     <dialog id="memory-delete-modal" class="modal">
       <div class="modal-box">
         <h3 class="font-semibold text-lg">Delete this memory?</h3>
-        <p class="text-sm py-2 opacity-80">
+        <p class="text-sm py-2 text-muted">
           This action permanently removes
           <span class="font-mono">{{ entry.scope }}/{{ entry.slug }}</span>.
           The delete is idempotent: re-clicking on a deleted memory is a no-op.
         </p>
         <div class="modal-action">
           <form method="dialog">
-            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+            {{ button("Cancel", variant="quiet", type="submit") }}
           </form>
           <button
             type="button"

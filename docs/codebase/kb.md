@@ -1119,7 +1119,7 @@ the lesson header (`mcp/tools/_search_filters.py`):
 `search_knowledge` also takes `scope`: `all` (default), `tenant` or
 `shared`. A named filter wins over the same key in `filters`.
 
-With `KB_SEARCH_WORD_HINT` on (off by default), `search_knowledge` tells
+With `KB_SEARCH_WORD_HINT` on (Helm: `config.kbSearchWordHint`; off by default), `search_knowledge` tells
 the agent to search with a few key words, and its answer has `word_match`
 (`some` or `none`). See "MCP `search_knowledge` tool surface" in
 `retrieval.md`.
@@ -1184,7 +1184,7 @@ query and `limit`:
 2. A search with `filters`, header filters, a time window or
    `scope="shared"` (REST: `kind` or `metadata_filters`) does not search
    the wiki: the wiki cannot apply them. The switch
-   `KB_WIKI_FILTERED_SEARCH` (setting `kb_wiki_filtered_search`, off by
+   `KB_WIKI_FILTERED_SEARCH` (Helm: `config.kbWikiFilteredSearch`; setting `kb_wiki_filtered_search`, off by
    default) makes one exception, decided by
    `kb/wiki_search.py::wiki_exact_filters` for both paths: a search
    whose only filters are `product` and/or `version` (each a non-blank
@@ -1247,7 +1247,7 @@ The answer:
   answer, `wiki` included. When the answer is too large, the
   lowest-ranked hits are left out first, so wiki hits go before store
   hits.
-- With `KB_WIKI_INTERLEAVE` on (setting `kb_wiki_interleave`, off by
+- With `KB_WIKI_INTERLEAVE` on (Helm: `config.kbWikiInterleave`; setting `kb_wiki_interleave`, off by
   default), `hits` takes the two lists in turns: store hit 1, wiki hit 1,
   store hit 2, wiki hit 2, and so on; the rest of the longer list
   follows (`mcp/tools/knowledge.py::_ordered_hits`). The two engines give
@@ -1258,6 +1258,20 @@ The answer:
   described above. The REST answer does not change. The switch is
   measured with the retrieval-eval runner (off, on, off) before anyone
   asks to turn it on.
+- The tool text follows the same switch
+  (`mcp/tools/_kb_wiki_order_text.py`). With it on, the description of
+  `search_knowledge` (full and short) says "store hits and knowledge repo
+  hits in turns (each list best first)" in place of "best first". The
+  full description and the cut text say "hits at the end of the list were
+  left out" in place of "low hits" and "lower-ranked hits": a cut can drop
+  the first knowledge repo hit, the best of its list. With it off, the
+  whole `tools/list` entry is the same as before, byte for byte (a test
+  compares it with the exact bytes main sent, saved in
+  `tests/fixtures/search_knowledge_tools_list_main_full.json` and
+  `..._short.json`).
+  The text has no switch of its own: the measurement of
+  `KB_WIKI_INTERLEAVE` under #6758 measures the order and this text
+  together.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
   `wiki.hits`; `null` on every other call. `meho kb search` prints the
   wiki hits after the table, or the line that says why the wiki was not

@@ -39,7 +39,7 @@
           {{ icon("ban", class="size-6") }}
         </span>
         <h3 class="text-lg font-semibold">Request denied</h3>
-        <p class="text-sm text-base-content/60">
+        <p class="text-sm text-subtle">
           The operation for <span class="font-mono">{{ request.op_id }}</span>
           was denied and will not run.
         </p>
@@ -54,11 +54,11 @@
           the reason; absent for an ordinary decision. -#}
       {% if request.delegation %}
         <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-delegation">
-          <dt class="opacity-70">Instructed by</dt>
+          <dt class="text-muted">Instructed by</dt>
           <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.instructed_by }}</dd>
-          <dt class="opacity-70">Instruction</dt>
+          <dt class="text-muted">Instruction</dt>
           <dd class="[overflow-wrap:anywhere]">&ldquo;{{ request.delegation.instruction }}&rdquo;</dd>
-          <dt class="opacity-70">Refs</dt>
+          <dt class="text-muted">Refs</dt>
           <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.refs | join(", ") }}</dd>
         </dl>
       {% endif %}

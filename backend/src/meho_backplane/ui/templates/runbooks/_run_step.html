@@ -35,6 +35,8 @@
   ``csrf_token``; the handler refreshes the matching ``meho_csrf`` cookie on
   the same response (the #1693 desync footgun).
 -#}
+
+{% from "_components.html" import badge, button %}
 <div id="runbook-run-step" class="space-y-4">
 
   {#- Inline alert: not-the-assignee / reassigned-away, empty-reason guard,
@@ -109,12 +111,12 @@
         {% if step.type == "operation_call" %}
           <div class="bg-base-200 rounded-box space-y-1 p-3 text-sm">
             <div>
-              <span class="opacity-60">Operation:</span>
+              <span class="text-subtle">Operation:</span>
               <code class="font-mono">{{ step.op_id }}</code>
             </div>
             {% if step.params %}
               <div>
-                <span class="opacity-60">Params:</span>
+                <span class="text-subtle">Params:</span>
                 <pre class="overflow-x-auto text-xs"><code>{{ step.params | tojson(indent=2) }}</code></pre>
               </div>
             {% endif %}
@@ -124,27 +126,27 @@
         {#- Verify gate — confirm prompt OR operation_call match shape. -#}
         {%- set verify = step.verify -%}
         <div class="border-base-300 border-t pt-2">
-          <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+          <p class="text-xs font-semibold uppercase tracking-wide text-subtle">Verify</p>
           {% if verify.type == "confirm" %}
             <p class="text-sm">
-              <span class="badge badge-sm badge-outline mr-1">confirm</span>
+              {{ badge("confirm", variant="outline", class="mr-1") }}
               {{ verify.prompt }}
             </p>
           {% else %}
             <div class="space-y-1 text-sm">
               <p>
-                <span class="badge badge-sm badge-outline mr-1">operation_call</span>
+                {{ badge("operation_call", variant="outline", class="mr-1") }}
                 <code class="font-mono">{{ verify.op_id }}</code>
               </p>
               {% if verify.params %}
                 <div>
-                  <span class="opacity-60">Params:</span>
+                  <span class="text-subtle">Params:</span>
                   <pre class="overflow-x-auto text-xs"><code>{{ verify.params | tojson(indent=2) }}</code></pre>
                 </div>
               {% endif %}
               {% if verify.expect %}
                 <div>
-                  <span class="opacity-60">Expect:</span>
+                  <span class="text-subtle">Expect:</span>
                   <pre class="overflow-x-auto text-xs"><code>{{ verify.expect | tojson(indent=2) }}</code></pre>
                 </div>
               {% endif %}
@@ -194,10 +196,10 @@
             class="flex flex-wrap items-center gap-2"
           >
             <input type="hidden" name="verify_type" value="confirm" />
-            <label class="form-control">
+            <label>
               <select
                 name="answer"
-                class="select select-bordered select-sm"
+                class="select select-sm"
                 aria-label="Verify answer"
               >
                 <option value="yes" selected>Verified — yes, advance</option>
@@ -205,7 +207,7 @@
                 <option value="escalate">Escalate — fail and flag</option>
               </select>
             </label>
-            <button type="submit" class="btn btn-primary btn-sm">Advance</button>
+            {{ button("Advance", variant="primary", type="submit") }}
           </form>
         {% else %}
           <form
@@ -216,9 +218,7 @@
             hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
           >
             <input type="hidden" name="verify_type" value="operation_call" />
-            <button type="submit" class="btn btn-primary btn-sm">
-              Advance (run verify)
-            </button>
+            {{ button("Advance (run verify)", variant="primary", type="submit") }}
           </form>
         {% endif %}
       {% endif %}
@@ -237,10 +237,10 @@
           <input type="hidden" name="verify_type" value="{{ verify.type }}" />
           <input type="hidden" name="retry" value="1" />
           {% if verify.type == "confirm" %}
-            <label class="form-control">
+            <label>
               <select
                 name="answer"
-                class="select select-bordered select-sm"
+                class="select select-sm"
                 aria-label="Verify answer"
               >
                 <option value="yes" selected>Verified — yes, advance</option>
@@ -249,7 +249,7 @@
               </select>
             </label>
           {% endif %}
-          <button type="submit" class="btn btn-primary btn-sm">Try this step again</button>
+          {{ button("Try this step again", variant="primary", type="submit") }}
         </form>
       {% endif %}
 
@@ -284,7 +284,7 @@
     <dialog id="runbook-run-abort-modal" class="modal">
       <div class="modal-box">
         <h3 class="text-lg font-semibold">Abort run</h3>
-        <p class="py-2 text-sm opacity-70">
+        <p class="py-2 text-sm text-muted">
           Aborting ends the run. The reason is <strong>required</strong> and is
           recorded in the audit log.
         </p>
@@ -297,14 +297,14 @@
           hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-abort-modal').close()"
           class="space-y-3"
         >
-          <label class="form-control">
-            <div class="label"><span class="label-text">Reason</span></div>
+          <label>
+            <div class="label"><span>Reason</span></div>
             <textarea
               name="reason"
               required
               minlength="1"
               rows="3"
-              class="textarea textarea-bordered"
+              class="textarea"
               placeholder="Why is this run being aborted?"
               aria-label="Abort reason"
             ></textarea>
@@ -317,7 +317,7 @@
             >
               Cancel
             </button>
-            <button type="submit" class="btn btn-error btn-sm">Abort run</button>
+            {{ button("Abort run", variant="danger", type="submit") }}
           </div>
         </form>
       </div>
@@ -329,7 +329,7 @@
       <dialog id="runbook-run-reassign-modal" class="modal">
         <div class="modal-box">
           <h3 class="text-lg font-semibold">Reassign run</h3>
-          <p class="py-2 text-sm opacity-70">
+          <p class="py-2 text-sm text-muted">
             Transfer ownership to another operator. They become the sole
             assignee able to advance the run.
           </p>
@@ -342,14 +342,14 @@
             hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-reassign-modal').close()"
             class="space-y-3"
           >
-            <label class="form-control">
-              <div class="label"><span class="label-text">New assignee</span></div>
+            <label>
+              <div class="label"><span>New assignee</span></div>
               <input
                 type="text"
                 name="new_assignee"
                 required
                 minlength="1"
-                class="input input-bordered"
+                class="input"
                 placeholder="operator subject id"
                 aria-label="New assignee subject"
                 autocomplete="off"
@@ -363,7 +363,7 @@
               >
                 Cancel
               </button>
-              <button type="submit" class="btn btn-primary btn-sm">Reassign</button>
+              {{ button("Reassign", variant="primary", type="submit") }}
             </div>
           </form>
         </div>

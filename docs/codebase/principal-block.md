@@ -23,7 +23,7 @@ The text names no admin and no reason.
 
 ## Key types
 
-- Table `principal_block` (`PrincipalBlock`, migration `0184`): one row
+- Table `principal_block` (`PrincipalBlock`, migration `0186`): one row
   for each `(sub, scope)`. `scope` is `*` or the tenant id. It holds the
   reason, the admin's `sub` and the time.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,

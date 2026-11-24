@@ -43,16 +43,16 @@
                 <span class="badge badge-outline badge-sm" data-model-tier="{{ agent.model_tier }}">
                   {{ agent.model_tier }}
                 </span>
-                <span class="opacity-70" title="Turn budget">
+                <span class="text-muted" title="Turn budget">
                   {{ icon("activity", class="inline size-3 align-text-bottom") }}
                   {{ agent.turn_budget }} turns
                 </span>
-                <span class="opacity-70" title="Tools in toolset">
+                <span class="text-muted" title="Tools in toolset">
                   {{ agent.tool_count }} tool{{ "" if agent.tool_count == 1 else "s" }}
                 </span>
               </div>
 
-              <dl class="text-xs opacity-70 space-y-0.5">
+              <dl class="text-xs text-muted space-y-0.5">
                 <div class="flex gap-1">
                   <dt class="font-medium">identity:</dt>
                   <dd class="font-mono break-all">{{ agent.identity_ref }}</dd>
@@ -64,11 +64,11 @@
               </dl>
 
               {% if agent.system_prompt_summary %}
-                <p class="text-sm opacity-80 line-clamp-2">{{ agent.system_prompt_summary }}</p>
+                <p class="text-sm text-muted line-clamp-2">{{ agent.system_prompt_summary }}</p>
               {% endif %}
 
               <div
-                class="text-xs opacity-60"
+                class="text-xs text-subtle"
                 data-updated-at="{{ agent.updated_at.isoformat() }}"
               >
                 updated <time datetime="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
@@ -115,9 +115,9 @@
   {% else %}
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body items-center py-10 text-center">
-        <p class="opacity-70">No agents defined yet for this tenant.</p>
+        <p class="text-muted">No agents defined yet for this tenant.</p>
         {% if can_write %}
-          <p class="text-sm opacity-60">
+          <p class="text-sm text-subtle">
             Use the "New agent" button above to define one.
           </p>
         {% endif %}

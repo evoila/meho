@@ -65,6 +65,7 @@ import hvac
 import structlog
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.secret_read_as import record_caller_kv_read, record_caller_secret_read
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     strip_credential_value,
@@ -267,6 +268,7 @@ class VaultKvSecretEndpoint:
                 mount_point=self._mount,
                 raise_on_deleted_version=False,
             )
+        record_caller_kv_read(operator, payload)
         secret_data = _structural_unwrap(payload, path=self._path)
         if self._field not in secret_data:
             raise VaultSecretRefError(
@@ -343,12 +345,14 @@ class VaultKvSecretEndpoint:
         value = material.value.decode("utf-8")
         expect = _approved_sink_expectation()
         async with self._client(operator, "vault.kv.patch") as client:
-            await asyncio.to_thread(self._merge_write, client, value, expect)
+            await asyncio.to_thread(self._merge_write, client, value, expect, operator)
 
-    def _merge_write(self, client: hvac.Client, value: str, expect: _SinkExpectation) -> None:
+    def _merge_write(
+        self, client: hvac.Client, value: str, expect: _SinkExpectation, operator: Operator
+    ) -> None:
         """Blocking read-modify-write with CAS (runs in a worker thread)."""
         kv = client.secrets.kv.v2
-        body, cas = self._merge_read(kv, expect)
+        body, cas = self._merge_read(kv, expect, operator)
         body[self._field] = value
         try:
             kv.create_or_update_secret(
@@ -357,16 +361,20 @@ class VaultKvSecretEndpoint:
         except (hvac.exceptions.InvalidRequest, hvac.exceptions.Forbidden) as exc:
             # A failed check-and-set (400) or a policy that allows the read
             # but not the write (403).
-            refusal = self._merge_refusal(kv, cas)
+            refusal = self._merge_refusal(kv, cas, operator)
             if expect.secret_missing and isinstance(refusal, SecretMergeChangedError):
                 refusal = SecretSinkChangedError("the sink secret")
             raise refusal from exc
 
-    def _merge_read(self, kv: Any, expect: _SinkExpectation) -> tuple[dict[str, Any], int]:
+    def _merge_read(
+        self, kv: Any, expect: _SinkExpectation, operator: Operator
+    ) -> tuple[dict[str, Any], int]:
         """Read the sink secret for a merge: its data and the version to guard with.
 
         ``({}, 0)`` when the secret does not exist. Refuses a deleted latest
-        version and a sink that differs from what the approval said.
+        version and a sink that differs from what the approval said. A read
+        that returns the secret notes the caller's login for the audit row,
+        also when the write after it fails or is refused.
         """
         try:
             payload = kv.read_secret_version(
@@ -379,10 +387,13 @@ class VaultKvSecretEndpoint:
             if expect.secret_missing:
                 raise SecretSinkChangedError("the sink secret") from None
             raise SecretMergeDeletedVersionError from None
+        metadata = _version_metadata(payload) or {}
+        deleted = bool(metadata.get("deletion_time")) or metadata.get("destroyed") is True
+        if not deleted:
+            record_caller_secret_read(operator)
         if expect.secret_missing:
             raise SecretSinkChangedError("the sink secret")
-        metadata = _version_metadata(payload) or {}
-        if metadata.get("deletion_time") or metadata.get("destroyed") is True:
+        if deleted:
             raise SecretMergeDeletedVersionError
         body = dict(_structural_unwrap(payload, path=self._path))
         version = metadata.get("version")
@@ -395,12 +406,13 @@ class VaultKvSecretEndpoint:
             raise SecretSinkChangedError(f"the field {self._field!r} of the sink secret")
         return body, version
 
-    def _merge_refusal(self, kv: Any, cas: int) -> VaultSecretRefError:
+    def _merge_refusal(self, kv: Any, cas: int, operator: Operator) -> VaultSecretRefError:
         """Tell a changed secret from another refusal of the merge write.
 
         Reads the secret's version again. A version other than the one the
         write was guarded with means the secret changed after MEHO read it.
-        Only the version is used; the read data is dropped at once.
+        Only the version is used; the read data is dropped at once. A read
+        that returns the secret notes the caller's login for the audit row.
         """
         try:
             payload = kv.read_secret_version(
@@ -412,7 +424,10 @@ class VaultKvSecretEndpoint:
         except Exception:
             return SecretMergeRefusedError(known=False)
         else:
-            current = (_version_metadata(payload) or {}).get("version")
+            metadata = _version_metadata(payload) or {}
+            if not metadata.get("deletion_time") and metadata.get("destroyed") is not True:
+                record_caller_secret_read(operator)
+            current = metadata.get("version")
         if not isinstance(current, int) or isinstance(current, bool):
             return SecretMergeRefusedError(known=False)  # no version: MEHO cannot tell
         if current != cas:
@@ -432,7 +447,7 @@ class VaultKvSecretEndpoint:
         try:
             self.check_write_allowed(operator)
             async with self._client(operator, op_id) as client:
-                exists, field = await asyncio.to_thread(self._read_state, client)
+                exists, field = await asyncio.to_thread(self._read_state, client, operator)
         except Exception as exc:
             _log.info(
                 "secret_broker.vault.sink_state_unknown",
@@ -445,8 +460,12 @@ class VaultKvSecretEndpoint:
             state["field_exists"] = field
         return state
 
-    def _read_state(self, client: hvac.Client) -> tuple[str, str]:
-        """Blocking read of ``(secret exists, field exists)`` (runs in a worker thread)."""
+    def _read_state(self, client: hvac.Client, operator: Operator) -> tuple[str, str]:
+        """Blocking read of ``(secret exists, field exists)`` (runs in a worker thread).
+
+        A read that returns a secret that is not deleted notes the caller's
+        login for the audit row.
+        """
         kv = client.secrets.kv.v2
         try:
             payload = kv.read_secret_version(
@@ -460,6 +479,7 @@ class VaultKvSecretEndpoint:
         metadata = _version_metadata(payload) or {}
         if metadata.get("deletion_time") or metadata.get("destroyed") is True:
             return "yes", NOT_KNOWN
+        record_caller_kv_read(operator, payload)
         data = _structural_unwrap(payload, path=self._path)
         return "yes", "yes" if self._field in data else "no"
 

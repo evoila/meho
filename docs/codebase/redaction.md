@@ -723,7 +723,14 @@ Why two new columns rather than one `audit_log.payload` extension:
 - `raw_payload` is potentially **large** (a connector list response
   can be megabytes); keeping it in a dedicated column lets the
   audit-query surface skip it on list endpoints without parsing
-  JSON to find the field.
+  JSON to find the field. The list reads do skip it (#6818): the
+  audit list (`query_audit`, used by REST, CLI, MCP and the console)
+  and the recent-operations lists of the topology drawer and the
+  target page load every column except `raw_payload`
+  (`defer(AuditLog.raw_payload, raiseload=True)`, so a read of it on
+  such a row fails instead of running one more query). The row still
+  keeps the whole raw answer; the policy replay reads it with its own
+  query.
 - `redaction_manifest` is **structured** (a list of dicts with a
   fixed schema); a future GIN index on the JSONB column (e.g.
   "find every audit row where the `kubeconfig` rule fired in the
@@ -999,6 +1006,118 @@ provisioned.
   `python -m spacy download <model>`.
 
 No new runtime dependencies were added by Task #1070, #1071, or #1073.
+
+## Compare with main
+
+A pull request that changes how MEHO hides secrets is compared with the
+base branch on a fixed set of made-up inputs. The author sees a fault
+before a reviewer reads the pull request.
+
+- **The inputs.** `backend/tests/redaction_compare/inputs.py` builds about
+  1,500 texts and structures from forms (`password=`, `--password`, a URL
+  with a login, JSON, YAML, XML, a command line, a shell script, a nested
+  result), value styles (plain, quoted, with a space, empty) and
+  containers. A fixed seed makes the same inputs on every run. Each
+  planted part has an id: `s...` is a secret value, `p...` is a plain word
+  that must stay visible.
+- **The steps.** `redact` with the default policy, `scrub_content`,
+  `scrub_broadcast_params`, `redact_error_payload`, the default view of an
+  answer, `hide_command_text` and `hide_shell_script`
+  (`backend/tests/redaction_compare/answers.py`).
+- **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
+  one line for each input, sorted by id: the input id and one sha256
+  checksum (`sum`) over the full answers of all steps the input runs on.
+  It holds no lists of hidden and shown parts.
+  `backend/tests/test_redaction_compare_snapshot.py` fails on any change of
+  any answer, also when a step only starts or stops hiding a value, and
+  names the inputs that changed, are missing or are new. The same file
+  checks three properties on main: a text with no secret comes back
+  unchanged, hiding twice gives the answer of hiding once, and the time
+  grows in a straight line with the size.
+- **Write the snapshot again.** From `backend/`:
+  `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
+- **The records.** `redaction_compare.py --records FILE`, run from a
+  `backend/` folder, writes one record for each input and step: the parts
+  the step hides, the parts it shows, a hash of the whole answer (`sha`),
+  and a hash of the answer without its planted parts (`rest`). For `rest`,
+  each planted part (secret or plain) and each hiding marker becomes one
+  `<hidden>` token. A plain part counts as shown only where it stands
+  outside a hiding marker. So `--[REDACTED:password]` in place of
+  `--password <value>` hides the label `password` too, and the job sees it
+  as a plain part now hidden. `--password [REDACTED:password]` hides only
+  the value. A test checks that each planted part, labels too, stands in
+  its input with the same spelling. The records are never committed.
+- **The CI job** "Secret hiding compared with the base branch" makes a
+  second checkout of the base commit and builds the base records there,
+  with the base's own code and input set. It builds the pull request
+  records with the pull request's own code and input set in a container
+  with no mounted folder: the files go in on stdin and the records come
+  out on stdout. So the pull request's code can write only its own
+  records. Both files stay in the job's temporary folder. Then it runs
+  the rule of `scripts/ci/redaction_compare.py --judge` on the two record
+  files. It fails when a part that the base hides is now shown, when a
+  plain part that the base shows is now hidden, when the answer changed in
+  another way, or when an input of the base is missing from the pull request's
+  records. A secret part that the base showed and the pull request hides
+  passes: that is the purpose of a fix. When a part is hidden or shown,
+  the job still compares `rest`, so another change of the same answer
+  (lost quotes, a dropped field) fails as `text`, next to the part
+  difference. An approved entry for the part does not cover it: the other
+  change needs its own `text` entry.
+- **A wanted difference.** List it in
+  `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
+  the step, the part id (or `text`, or `removed` for a dropped input) and
+  a one-line reason. Only the entries that the pull request adds count:
+  the job reads the base branch's approved file with `git show` too (no
+  file counts as empty). A new entry that matches no difference fails the
+  job. An entry that is already in the base's file approves nothing and
+  never fails the job, so it can stay after the merge. To approve the same
+  input, step and part again, add a new entry (for example with a new
+  reason).
+- **The rules come from the base branch.** The job reads the rule script
+  of the base commit with `git show` and runs the judge with
+  `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The approved file is the one that the pull request commits: it is the
+  open list that a reviewer reads. The job reads it, the base's approved
+  file and the rule script from git before any code of the pull request
+  runs. The job passes with "no compare on the base branch yet" only when
+  a git lookup of the base tree succeeds and finds no rule script. When
+  the lookup fails, or the base has the script, any failed step fails the
+  job: the lookup, the second checkout, either environment sync, either
+  record build, or the judge.
+- **The job log shows no names and no numbers, on purpose.** The log of
+  a public repo is public, so the job runs the judge with
+  `--summary-only`. Then the judge prints no input id, no step, no part id
+  and no number: only one closing line, either "no difference is left that
+  is not approved" or "differences are left that are not approved". A
+  stale approved entry is still printed, because it is in the committed
+  approved file already. The exit code is the same as without the flag.
+- **See the differences locally.** Without `--summary-only` the judge
+  prints each difference that is not approved (input id, step, kind) and
+  the counts. From the repo root, with the pull request branch checked out,
+  run the block below. It works in a new private folder from `mktemp -d`,
+  stops when a step fails (also either record build), and removes the
+  folder and the second checkout when it ends, so no record file is left
+  behind or read again by a later run.
+
+  ```bash
+  (
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    git worktree add --detach "$tmp/base" origin/main
+    rules="$tmp/base/scripts/ci/redaction_compare.py"
+    (cd "$tmp/base/backend" && uv sync --frozen \
+      && uv run python "$rules" --records "$tmp/base.jsonl")
+    (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
+    git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
+      > "$tmp/base-approved.yaml"
+    python3 -I "$rules" \
+      --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      --approved backend/tests/snapshots/redaction_compare_approved.yaml \
+      --base-approved "$tmp/base-approved.yaml"
+  )
+  ```
 
 ## Known issues / future work
 

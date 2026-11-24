@@ -314,6 +314,7 @@ from meho_backplane.auth.principal_block_run import (
     raise_if_step_was_refused,
     tracking_run,
 )
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -4247,60 +4248,65 @@ async def dispatch(
     # its audit row. The reset puts the parent's rule back.
     rule_token = policy_rule_var.set(None)
     try:
-        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-            # A step of a multi-step operation: the person may be blocked
-            # since the operation started, so each step checks again, with
-            # the person who asked when an approver runs it.
-            blocked_step = await refuse_step_if_blocked(op_id, operator)
-            if blocked_step is not None:
+        # Each call notes only the secret reads it made itself, from its first
+        # check on, so a refusal row of a step never takes the parent's value.
+        with track_secret_read_as():
+            if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+                # A step of a multi-step operation: the person may be blocked
+                # since the operation started, so each step checks again, with
+                # the person who asked when an approver runs it.
+                blocked_step = await refuse_step_if_blocked(op_id, operator)
+                if blocked_step is not None:
+                    _log.info(
+                        "dispatch_step_refused_principal_blocked",
+                        op_id=op_id,
+                        operator_sub=operator.sub,
+                    )
+                    return blocked_step
+                with agent_no_grant_log_scope():
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
+            blocked_result = await refuse_if_principal_blocked(
+                op_id,
+                operator.sub,
+                operator.tenant_id,
+                # After an approval: what the run that waited had sent.
+                earlier_sent=earlier_run_sent_a_request(op_id),
+            )
+            if blocked_result is not None:
                 _log.info(
-                    "dispatch_step_refused_principal_blocked",
+                    "dispatch_refused_principal_blocked", op_id=op_id, operator_sub=operator.sub
+                )
+                return blocked_result
+            if is_draining() and not _approved:
+                _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+                return shutting_down_result(op_id)
+            with agent_no_grant_log_scope(new=True):
+                async with track_operation(
                     op_id=op_id,
+                    connector_id=connector_id,
                     operator_sub=operator.sub,
-                )
-                return blocked_step
-            with agent_no_grant_log_scope():
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
-                    op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
-        blocked_result = await refuse_if_principal_blocked(
-            op_id,
-            operator.sub,
-            operator.tenant_id,
-            # After an approval: what the run that waited had sent.
-            earlier_sent=earlier_run_sent_a_request(op_id),
-        )
-        if blocked_result is not None:
-            _log.info("dispatch_refused_principal_blocked", op_id=op_id, operator_sub=operator.sub)
-            return blocked_result
-        if is_draining() and not _approved:
-            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-            return shutting_down_result(op_id)
-        with agent_no_grant_log_scope(new=True):
-            async with track_operation(
-                op_id=op_id,
-                connector_id=connector_id,
-                operator_sub=operator.sub,
-                tenant_id=operator.tenant_id,
-                approved_run=_approved,
-            ):
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
-                    op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
+                    tenant_id=operator.tenant_id,
+                    approved_run=_approved,
+                ):
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
     finally:
         policy_rule_var.reset(rule_token)
 

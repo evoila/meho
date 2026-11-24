@@ -60,7 +60,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, defer
 
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
@@ -272,6 +272,8 @@ async def _fetch_recent_ops(
         )
         .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
         .limit(limit)
+        # The card never shows the stored raw answer (#6818).
+        .options(defer(AuditLog.raw_payload, raiseload=True))
     )
     result = await db_session.execute(stmt)
     return list(result.scalars().all())

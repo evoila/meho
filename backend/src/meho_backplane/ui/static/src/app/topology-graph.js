@@ -64,19 +64,29 @@
     }
   }
 
-  // Cytoscape style sheet. Per-kind colouring uses generic Tailwind
-  // colour values rather than DaisyUI semantic tokens because the
-  // canvas-rendered nodes can't read CSS custom properties resolved
-  // by DaisyUI's theme system. Hard-coded hex keeps the colour
-  // deterministic regardless of active theme.
+  // The graph's colours come from the ``--meho-graph-*`` CSS variables in
+  // styles.css, which have a light and a dark value. Cytoscape draws on a
+  // canvas and cannot use CSS variables itself, so this reads the
+  // computed value when it builds the style. The second argument is the
+  // colour used when a variable is missing -- the light value, which is
+  // what this script hard-coded before the dark theme.
+  function graphColour(name, fallback) {
+    const value = getComputedStyle(document.documentElement)
+      .getPropertyValue("--meho-graph-" + name)
+      .trim();
+    return value || fallback;
+  }
+
+  // Cytoscape style sheet. Per-kind colours, labels, lines and borders
+  // all go through ``graphColour`` so they follow the theme.
   function buildStyle() {
     return [
       {
         selector: "node",
         style: {
-          "background-color": "#6366f1", // indigo-500 fallback
+          "background-color": graphColour("node-fallback", "#6366f1"),
           "label": "data(name)",
-          "color": "#1f2937",
+          "color": graphColour("label", "#1f2937"),
           "font-size": 10,
           "text-valign": "bottom",
           "text-halign": "center",
@@ -84,7 +94,7 @@
           "text-wrap": "ellipsis",
           "text-max-width": 100,
           "border-width": 1,
-          "border-color": "#1f2937",
+          "border-color": graphColour("node-border", "#1f2937"),
           "width": 28,
           "height": 28,
         },
@@ -92,31 +102,31 @@
       // Per-kind shape/colour overrides. Cytoscape selectors match
       // the ``classes`` field on the element JSON
       // (see _node_to_cy_element).
-      { selector: "node.kind-target", style: { "background-color": "#0ea5e9", "shape": "round-rectangle" } },
-      { selector: "node.kind-vm", style: { "background-color": "#22c55e", "shape": "ellipse" } },
-      { selector: "node.kind-host", style: { "background-color": "#f97316", "shape": "rectangle" } },
-      { selector: "node.kind-cluster", style: { "background-color": "#a855f7", "shape": "hexagon" } },
-      { selector: "node.kind-datastore", style: { "background-color": "#facc15", "shape": "barrel" } },
-      { selector: "node.kind-network", style: { "background-color": "#14b8a6", "shape": "diamond" } },
+      { selector: "node.kind-target", style: { "background-color": graphColour("target", "#0ea5e9"), "shape": "round-rectangle" } },
+      { selector: "node.kind-vm", style: { "background-color": graphColour("vm", "#22c55e"), "shape": "ellipse" } },
+      { selector: "node.kind-host", style: { "background-color": graphColour("host", "#f97316"), "shape": "rectangle" } },
+      { selector: "node.kind-cluster", style: { "background-color": graphColour("cluster", "#a855f7"), "shape": "hexagon" } },
+      { selector: "node.kind-datastore", style: { "background-color": graphColour("datastore", "#facc15"), "shape": "barrel" } },
+      { selector: "node.kind-network", style: { "background-color": graphColour("network", "#14b8a6"), "shape": "diamond" } },
       {
         selector: "node:selected",
         style: {
           "border-width": 3,
-          "border-color": "#dc2626",
+          "border-color": graphColour("selected", "#dc2626"),
         },
       },
       {
         selector: "edge",
         style: {
           "width": 1,
-          "line-color": "#94a3b8",
-          "target-arrow-color": "#94a3b8",
+          "line-color": graphColour("edge", "#94a3b8"),
+          "target-arrow-color": graphColour("edge", "#94a3b8"),
           "target-arrow-shape": "triangle",
           "curve-style": "bezier",
           "label": "data(kind)",
           "font-size": 8,
-          "color": "#475569",
-          "text-background-color": "#f8fafc",
+          "color": graphColour("edge-label", "#475569"),
+          "text-background-color": graphColour("label-bg", "#f8fafc"),
           "text-background-opacity": 0.85,
           "text-background-padding": 2,
         },
@@ -225,8 +235,8 @@
         selector: "edge.highlight",
         style: {
           "width": 3,
-          "line-color": "#dc2626",
-          "target-arrow-color": "#dc2626",
+          "line-color": graphColour("highlight", "#dc2626"),
+          "target-arrow-color": graphColour("highlight", "#dc2626"),
         },
       },
       {
@@ -238,7 +248,7 @@
         selector: "node.highlight",
         style: {
           "border-width": 4,
-          "border-color": "#dc2626",
+          "border-color": graphColour("highlight", "#dc2626"),
           "border-opacity": 1,
         },
       },
@@ -246,7 +256,7 @@
         selector: "node.root",
         style: {
           "border-width": 3,
-          "border-color": "#dc2626",
+          "border-color": graphColour("highlight", "#dc2626"),
         },
       },
     ];
@@ -313,6 +323,15 @@
     });
 
     highlightPathNodes(cy, pathNodeIds);
+
+    // The console follows the computer's light or dark setting. When it
+    // changes while the page is open, the CSS variables change at once;
+    // the canvas does not repaint by itself, so rebuild the style.
+    if (window.matchMedia) {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+        cy.style(buildStyle().concat(buildOverlayStyle()));
+      });
+    }
 
     // Expose for debugging / a future ``/auto-implement-initiative``
     // E2E harness; non-enumerable so it stays out of the

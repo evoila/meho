@@ -37,7 +37,7 @@
           {% if row.updated_at %}
             <span class="text-xs" title="{{ row.updated_at.isoformat() }}">{{ _rel(row.updated_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
@@ -53,7 +53,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="5" class="text-center text-sm opacity-60 py-6">
+      <td colspan="5" class="text-center text-sm text-subtle py-6">
         No dashboards yet. Compose Sensors into a dashboard with
         <code>meho dashboard create</code> (or
         <code>POST /api/v1/checks/dashboards</code>).

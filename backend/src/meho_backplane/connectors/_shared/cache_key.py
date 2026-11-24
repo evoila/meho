@@ -32,6 +32,7 @@ and the shared HTTP-client pool keying differently).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Final, Protocol, runtime_checkable
 
 
@@ -102,6 +103,26 @@ def target_cache_key(target: TenantScopedTargetLike) -> tuple[str, str]:
     tenants (evoila/meho#1642).
     """
     return (str(target.tenant_id), str(target.id))
+
+
+def target_secret_cache_key(target: TenantScopedTargetLike) -> tuple[str, str, str]:
+    """Return ``(tenant_id, id, secret_ref)``: one entry per target and secret reference.
+
+    For a token or client made from the target's secret. A call uses only an
+    entry made from the secret reference its own target holds, so a call that
+    started before the reference changed never takes a login made from the
+    new secret. ``secret_ref`` is ``""`` for a target that has none.
+    """
+    return (*target_cache_key(target), str(getattr(target, "secret_ref", None) or ""))
+
+
+def target_entry_keys(cache: Mapping[Any, Any], target: TenantScopedTargetLike) -> list[Any]:
+    """Return the keys in *cache* made by :func:`target_secret_cache_key` for *target*.
+
+    All secret references count, so a caller can drop every entry of the target.
+    """
+    prefix = target_cache_key(target)
+    return [key for key in cache if key[:2] == prefix]
 
 
 def _login_host(raw: object) -> str:

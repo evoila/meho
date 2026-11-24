@@ -16,7 +16,7 @@
       they expect.
 -#}
 {% if not cron_expr %}
-  <span class="opacity-60">Enter a 5-field cron expression to preview the next fire.</span>
+  <span class="text-subtle">Enter a 5-field cron expression to preview the next fire.</span>
 {% elif error %}
   <span class="text-error" data-cron-valid="false">{{ error }}</span>
 {% elif valid %}

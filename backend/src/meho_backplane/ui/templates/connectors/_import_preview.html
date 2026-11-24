@@ -22,6 +22,8 @@
     * ``yaml_text``    -- the submitted YAML, echoed for the confirm re-post.
     * ``csrf_token``   -- the freshly-minted double-submit token.
 -#}
+
+{% from "_components.html" import badge %}
 {% if error %}
   <div class="alert alert-error" role="alert" data-import-error>
     <span>{{ error }}</span>
@@ -48,13 +50,13 @@
               <tr data-import-row data-action="{{ row.action }}" data-name="{{ row.name }}">
                 <td>
                   {% if row.action == "CREATE" %}
-                    <span class="badge badge-success badge-sm">CREATE</span>
+                    {{ badge("CREATE", variant="success") }}
                   {% else %}
-                    <span class="badge badge-info badge-sm">UPDATE</span>
+                    {{ badge("UPDATE", variant="info") }}
                   {% endif %}
                 </td>
                 <td class="font-mono">{{ row.name }}</td>
-                <td class="text-xs opacity-80">
+                <td class="text-xs text-muted">
                   {{ row.fields | join(", ") }}
                   {% for warning in row.warnings %}
                     <div class="text-warning mt-1" role="alert" data-import-warning>{{ warning }}</div>

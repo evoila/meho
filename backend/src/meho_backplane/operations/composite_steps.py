@@ -75,6 +75,7 @@ __all__ = [
     "composite_resume_steps",
     "composite_step_journal",
     "current_step_journal",
+    "earlier_run_sent_a_request",
     "is_credential_read",
     "mark_child_cleared_by_person",
     "step_target_key",
@@ -144,6 +145,8 @@ class StepJournal:
     entries: list[dict[str, Any]] = field(default_factory=list)
     #: Entries of the earlier run that this run has not reached yet.
     replay: list[dict[str, Any]] = field(default_factory=list)
+    #: True when the earlier run of this composite sent a step or a request.
+    earlier_sent: bool = False
     #: The op id of the ``dispatch_child`` read a resume sends again right now.
     sending_again: str | None = None
 
@@ -281,6 +284,7 @@ class _ResumeSteps:
 
     composite_op_id: str
     steps: list[dict[str, Any]]
+    earlier_sent: bool = False
     taken: bool = False
 
 
@@ -319,6 +323,16 @@ def child_read_sent_again(op_id: str) -> bool:
     return journal is not None and journal.sending_again == op_id
 
 
+def earlier_run_sent_a_request(op_id: str) -> bool:
+    """True when *op_id* is about to run again after an approval and had sent something.
+
+    The record of the run that waited: a step or a request of the multi-step
+    operation was sent before it waited.
+    """
+    resume = _resume_steps_var.get()
+    return resume is not None and resume.composite_op_id == op_id and resume.earlier_sent
+
+
 @contextmanager
 def composite_step_journal(op_id: str) -> Iterator[StepJournal]:
     """Bind a new journal for one run of composite *op_id*.
@@ -329,10 +343,12 @@ def composite_step_journal(op_id: str) -> Iterator[StepJournal]:
     """
     resume = _resume_steps_var.get()
     replay: list[dict[str, Any]] = []
+    earlier_sent = False
     if resume is not None and not resume.taken and resume.composite_op_id == op_id:
         resume.taken = True
         replay = [dict(entry) for entry in resume.steps if isinstance(entry, dict)]
-    journal = StepJournal(composite_op_id=op_id, replay=replay)
+        earlier_sent = resume.earlier_sent
+    journal = StepJournal(composite_op_id=op_id, replay=replay, earlier_sent=earlier_sent)
     token = _step_journal_var.set(journal)
     try:
         yield journal
@@ -341,10 +357,17 @@ def composite_step_journal(op_id: str) -> Iterator[StepJournal]:
 
 
 @contextmanager
-def composite_resume_steps(composite_op_id: str, steps: Any) -> Iterator[None]:
-    """Hand the stored *steps* of an approved request to its composite's next run."""
+def composite_resume_steps(
+    composite_op_id: str, steps: Any, *, earlier_sent: bool = False
+) -> Iterator[None]:
+    """Hand the stored *steps* of an approved request to its composite's next run.
+
+    *earlier_sent*: the run that waited had sent a step or a request.
+    """
     stored = steps if isinstance(steps, list) else []
-    token = _resume_steps_var.set(_ResumeSteps(composite_op_id=composite_op_id, steps=stored))
+    token = _resume_steps_var.set(
+        _ResumeSteps(composite_op_id=composite_op_id, steps=stored, earlier_sent=earlier_sent)
+    )
     try:
         yield
     finally:

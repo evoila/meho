@@ -171,6 +171,8 @@ a standing grant covers such an operation:
   child call: it waits for its own approval
   (`per_call_step_waits_after_approval` in `operations/composite.py`).
 
+A platform admin can turn approval off for some of these operations, for example the MSAD group membership changes, for the whole install or for one tenant's own copy. Both the console and the REST API or CLI need a written reason; the REST API and the CLI also need a fresh sign-in. The edit is written to the audit log. After it, a person in the web console runs a `caution` operation at once. A `dangerous` operation still waits because of its risk level. A standing grant or a run approval still does not cover the operation. MEHO refuses the edit for an operation registered as a change of rights (`approval_off_rights_change`, see the last item of the list below) and for a destructive operation. An operation that writes or makes a credential keeps its approval: the edit does not end its wait.
+
 Marked today:
 
 - `msad.group.add-member` and `msad.group.remove-member`. A group

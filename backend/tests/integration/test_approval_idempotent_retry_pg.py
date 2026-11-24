@@ -66,7 +66,6 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
-    IdempotencyKeyConflictError,
     approve_request,
     create_pending_request,
     reject_request,
@@ -332,7 +331,7 @@ async def test_a_late_retry_for_another_call_that_waits_on_an_approval_is_refuse
         assert not retry_task.done()
         await approver.commit()
 
-        with pytest.raises(IdempotencyKeyConflictError) as refused:
+        with pytest.raises(approval_queue_module.IdempotencyKeyConflictError) as refused:
             await asyncio.wait_for(retry_task, timeout=10)
 
     assert refused.value.request_id == original.id

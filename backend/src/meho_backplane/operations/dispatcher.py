@@ -479,6 +479,7 @@ from meho_backplane.operations._validate import (
     waits_only_for_token_call,
 )
 from meho_backplane.operations._vendor_text import (
+    hide_call_secrets_in_returned_result,
     redact_error_payload,
     redact_error_result,
     withhold_vendor_text,
@@ -557,6 +558,7 @@ from meho_backplane.redaction.call_secrets import (
     keep_call_secrets_whole,
     marked_secret_paths,
     reset_call_secrets,
+    scrub_call_secret_path,
     scrub_call_secrets,
     scrub_call_secrets_tree,
 )
@@ -1223,9 +1225,39 @@ async def _protect_secret_values(
     # above read the vendor's own field names first, and the outcome of the
     # call was decided before this step.
     stored, caller = await asyncio.to_thread(
-        scrub_call_secrets_tree, (fingerprint_hidden_values(redaction.raw, shown), caller)
+        _hide_call_secret_values,
+        redaction,
+        stored=fingerprint_hidden_values(redaction.raw, shown),
+        caller=caller,
+        keep_names=_ENVELOPE_NAMES if error_cleanup else (),
     )
     return redaction.model_copy(update={"raw": stored, "redacted": caller})
+
+
+#: The field names of a multi-step error envelope that MEHO reads to explain
+#: the failure. They stay as they are when a secret value of the call has
+#: the same text.
+_ENVELOPE_NAMES: frozenset[str] = frozenset({"status", "summary", "issues", "severity", "message"})
+
+
+def _hide_call_secret_values(
+    redaction: RedactionMiddlewareResult,
+    *,
+    stored: Any,
+    caller: Any,
+    keep_names: frozenset[str] | tuple[()],
+) -> tuple[Any, Any]:
+    """*stored* and *caller* with each secret value of the call hidden whole.
+
+    The default view and the error cleanup can change a text that holds a
+    value, after the check of the redaction pass. So each copy is first
+    compared with the text it came from (:func:`keep_call_secrets_whole`),
+    then every value left is masked.
+    """
+    stored = keep_call_secrets_whole(redaction.raw, stored)
+    caller = keep_call_secrets_whole(redaction.redacted, caller)
+    hidden: tuple[Any, Any] = scrub_call_secrets_tree((stored, caller), keep_names=keep_names)
+    return hidden
 
 
 def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView | None:
@@ -1416,7 +1448,7 @@ def _cap_issue_text(item: Any) -> Any:
     }
 
 
-def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
+def _bounded_issues(issues: list[Any], error_places: list[int]) -> dict[str, Any]:
     """A bounded inline view of a terminal-error envelope's ``issues[]``.
 
     Keeps at most :data:`_TERMINAL_ERROR_INLINE_ISSUES` entries, in their
@@ -1428,9 +1460,11 @@ def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
     The first ranked entry (the error, when there is one) is always kept so
     the reason for the failure stays visible. ``issues_total`` carries the
     full count so the caller can tell the view from the whole list.
+    *error_places* are the error issues, read before the values of the call
+    were hidden (:func:`_error_issue_indexes`).
     """
-    ranked = [i for i, item in enumerate(issues) if _is_error_issue(item)]
-    ranked += [i for i, item in enumerate(issues) if not _is_error_issue(item)]
+    errors = [index for index in error_places if index < len(issues)]
+    ranked = errors + [index for index in range(len(issues)) if index not in set(errors)]
     kept: dict[int, Any] = {}
     used = 2  # the enclosing brackets
     for index in ranked[:_TERMINAL_ERROR_INLINE_ISSUES]:
@@ -1446,12 +1480,14 @@ def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
     }
 
 
-def _terminal_error_inline_fields(envelope: dict[str, Any]) -> dict[str, Any]:
+def _terminal_error_inline_fields(
+    envelope: dict[str, Any], error_places: list[int]
+) -> dict[str, Any]:
     """The failure fields a reduced terminal-error result keeps inline."""
     inline = {key: envelope[key] for key in _TERMINAL_ERROR_INLINE_KEYS if key in envelope}
     issues = envelope.get("issues")
     if isinstance(issues, list):
-        inline.update(_bounded_issues(issues))
+        inline.update(_bounded_issues(issues, error_places))
     return inline
 
 
@@ -1487,6 +1523,7 @@ async def _reduce_composite_error_envelope(
     operator: Operator,
     target: Any,
     audit_id: uuid.UUID,
+    error_places: list[int],
 ) -> tuple[dict[str, Any] | None, ResultHandle | None, Literal["unavailable"] | None]:
     """Run the reducer over a cleaned terminal-error envelope.
 
@@ -1518,7 +1555,7 @@ async def _reduce_composite_error_envelope(
     if handle is None:
         return full_envelope, None, None
     envelope = dict(summary) if isinstance(summary, dict) else {"value": summary}
-    envelope.update(_terminal_error_inline_fields(full_envelope))
+    envelope.update(_terminal_error_inline_fields(full_envelope, error_places))
     return envelope, handle, None
 
 
@@ -1581,6 +1618,9 @@ async def _reduce_and_audit_composite_error(
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     error_places = _error_issue_indexes(redaction.redacted)
+    # The code is the envelope's own ``status``, which the handler sets: a
+    # secret value of the call in it is hidden like in any other text.
+    error_code = scrub_call_secrets(error_code)
     try:
         redaction = await _protect_secret_values(
             redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
@@ -1606,6 +1646,7 @@ async def _reduce_and_audit_composite_error(
             operator=operator,
             target=target,
             audit_id=audit_id,
+            error_places=error_places,
         )
     duration_ms = _elapsed_ms(started)
     return await _audit_error_and_return(
@@ -2278,6 +2319,9 @@ async def _audit_returned_result(
     """
     if not isinstance(raw, OperationResult):
         return raw
+    # The handler built every part of this result, also the names of its
+    # extras and its code, so a secret value of the call is hidden in all.
+    raw = hide_call_secrets_in_returned_result(raw)
     duration_ms = _elapsed_ms(started)
     if raw.status == "error":
         return await _audit_error_and_return(
@@ -2919,15 +2963,14 @@ def _apply_redaction_middleware(
     ``redacted`` copy is unchanged.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
-
-    def boundary(node: Any) -> RedactionMiddlewareResult:
-        return apply_connector_boundary_redaction(
-            node, connector_id=connector_id, tenant=tenant, op=op_id
-        )
-
     try:
-        redaction = boundary(raw)
-        redaction = _keep_call_secret_values_whole(redaction, boundary)
+        redaction = apply_connector_boundary_redaction(
+            raw,
+            connector_id=connector_id,
+            tenant=tenant,
+            op=op_id,
+        )
+        redaction = _keep_call_secret_values_whole(redaction)
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
     if classify_op(op_id) != "credential_mint":
@@ -2940,22 +2983,22 @@ def _apply_redaction_middleware(
 
 def _keep_call_secret_values_whole(
     redaction: RedactionMiddlewareResult,
-    boundary: Callable[[Any], RedactionMiddlewareResult],
 ) -> RedactionMiddlewareResult:
     """Keep each secret value of the call whole for the last pass that hides it.
 
     A rule of the policy can replace only part of a known value in a text
-    (a value with ``?token=`` in it). That text is redacted again from the
-    answer with the known values masked first, so no part of the value
-    stays. The manifest paths name keys of the answer, so a known value
-    used as a key is masked in them as in the stored answer.
+    (a value with ``?token=`` in it). Such a text keeps what the rule hid,
+    and the value becomes one marker, so no part of it stays. The manifest
+    paths name keys of the answer, so each key is named as in the stored
+    answer, with the same number when two masked keys meet.
     """
-    redacted = keep_call_secrets_whole(
-        redaction.raw, redaction.redacted, lambda node: boundary(node).redacted
-    )
+    redacted = keep_call_secrets_whole(redaction.raw, redaction.redacted)
     manifest = tuple(
         entry if path == entry.path else entry.model_copy(update={"path": path})
-        for entry, path in ((entry, scrub_call_secrets(entry.path)) for entry in redaction.manifest)
+        for entry, path in (
+            (entry, scrub_call_secret_path(redaction.raw, entry.path))
+            for entry in redaction.manifest
+        )
     )
     return redaction.model_copy(update={"redacted": redacted, "manifest": manifest})
 

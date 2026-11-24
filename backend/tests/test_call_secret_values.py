@@ -27,6 +27,7 @@ from meho_backplane.flight_recorder.store import SpanInput
 from meho_backplane.redaction import call_secrets
 from meho_backplane.redaction.call_secrets import (
     CALL_SECRET_MARKER,
+    AnyItem,
     CallSecrets,
     bind_call_secrets,
     collect_param_secret_values,
@@ -167,7 +168,7 @@ def test_the_values_come_from_secret_names_and_marked_fields() -> None:
         },
     }
     marked = marked_secret_paths(schema)
-    assert marked == frozenset({("seed",), ("other",), ("items", "seed")})
+    assert marked == frozenset({("seed",), ("other",), ("items", AnyItem(0), "seed")})
     params = {
         "plain": "keep-this-one",
         "password": "flat-secret-1",
@@ -206,7 +207,9 @@ def _scope() -> Any:
 
 def test_the_stored_trace_holds_no_value_of_the_call() -> None:
     scope = _scope()
-    token = bind_call_secrets([_SECRET])
+    # A rule of the default policy replaces the part of this value from ``token=`` on.
+    with_token = "otter-5512" + "?token=lake-key-3390"
+    token = bind_call_secrets([_SECRET, with_token])
     try:
         span = redact_span(
             op_id=READ_OP,
@@ -215,6 +218,7 @@ def test_the_stored_trace_holds_no_value_of_the_call() -> None:
             response_body={
                 "message": f"bad value {_SECRET}",
                 "errors": [{"x": _forms(_SECRET)["percent"]}],
+                "detail": f"saved {with_token} for you",
             },
             response_content_type="application/json",
         )
@@ -231,6 +235,8 @@ def test_the_stored_trace_holds_no_value_of_the_call() -> None:
     stored = json.dumps(scope.spans[0].attributes)
     assert _SECRET not in stored
     assert _forms(_SECRET)["percent"] not in stored
+    assert "otter-5512" not in stored
+    assert "lake-key-3390" not in stored
     assert CALL_SECRET_MARKER in stored
 
 

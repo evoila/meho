@@ -199,14 +199,10 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     it behind a quote.
     """
     try:
-        policy = get_default_policy()
-
-        def clean(node: Any) -> Any:
-            return redact(scrub_secret_fields_in_text(node), policy).redacted
-
+        cleaned = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
         # A rule that replaces part of a secret value of the call does not
-        # leave the rest: such a text is cleaned again with the value masked.
-        redacted = keep_call_secrets_whole(text, clean(text), clean)
+        # leave the rest, and what the rule hid stays hidden.
+        redacted = keep_call_secrets_whole(text, cleaned)
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
@@ -2173,7 +2169,9 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
         if isinstance(message, str) and message.strip():
             return _sanitize_free_text(message, cap=_UPSTREAM_MESSAGE_CAP)
     try:
-        text = (response.text or "").strip()
+        # The secret values of the call go before the trim: a value may end
+        # in a space the trim would take away.
+        text = scrub_call_secrets(response.text or "").strip()
     except httpx.StreamError:
         return None
     if not text:

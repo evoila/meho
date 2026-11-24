@@ -141,10 +141,7 @@ def clean_azure_text(message: object) -> str | None:
     if not isinstance(message, str) or not message:
         return None
     try:
-        policy = get_default_policy()
-        cleaned = keep_call_secrets_whole(
-            message, redact(message, policy).redacted, lambda text: redact(text, policy).redacted
-        )
+        cleaned = keep_call_secrets_whole(message, redact(message, get_default_policy()).redacted)
     except Exception:  # never let Azure's raw text through on the error path
         return _TEXT_WITHHELD
     if not isinstance(cleaned, str):

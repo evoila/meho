@@ -59,7 +59,9 @@ from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
 __all__ = [
     "ERROR_TEXT_WITHHELD",
+    "MEHO_RESULT_NAMES",
     "VENDOR_TEXT_WITHHELD",
+    "hide_call_secrets_in_returned_result",
     "redact_error_payload",
     "redact_error_result",
     "sends_secret",
@@ -150,15 +152,54 @@ def redact_error_payload(node: Any, policy: RedactionPolicy | None = None) -> An
     (:func:`~meho_backplane.redaction.resolver.get_default_policy`), the same
     as the error builders use, so a registered shadow-mode policy cannot turn
     it off. Raises when the redaction itself fails; the caller then withholds
-    the value. A text where a rule replaced part of a secret value of the
-    call is cleaned again with the value masked first, so no part stays.
+    the value. A text where a rule changed a secret value of the call keeps
+    what the rule hid, and the value becomes one marker, so no part stays.
     """
-    pinned = policy or get_default_policy()
+    cleaned = redact(scrub_secret_fields(node), policy or get_default_policy()).redacted
+    return keep_call_secrets_whole(node, cleaned)
 
-    def clean(tree: Any) -> Any:
-        return redact(scrub_secret_fields(tree), pinned).redacted
 
-    return keep_call_secrets_whole(node, clean(node), clean)
+#: The names in a result's ``extras`` that MEHO reads: the caller, the audit
+#: writer and the approval flow look them up. A handler's result keeps them
+#: as they are when a secret value of the call has the same text.
+MEHO_RESULT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "approval_guidance",
+        "approval_note",
+        "approval_request_id",
+        "approval_request_reused",
+        "decision",
+        "error_code",
+        "exception_class",
+        "exception_message",
+        "execution_outcome",
+        "http_status",
+        "remediation",
+        "retry",
+        "upstream_fault",
+        "upstream_message",
+        "upstream_status",
+    }
+)
+
+
+def hide_call_secrets_in_returned_result(result: OperationResult) -> OperationResult:
+    """Return a result a handler built itself with each secret value of the call hidden.
+
+    The handler sets every part of it: the ``error`` text, the ``result``,
+    the values of its ``extras``, their names and the ``error_code``. So a
+    value is hidden in all of them, and only the names in
+    :data:`MEHO_RESULT_NAMES` stay as they are. This runs before
+    :func:`redact_error_result`, which keeps the names and the code of a
+    result as they are.
+    """
+    return result.model_copy(
+        update={
+            "error": scrub_call_secrets_tree(result.error),
+            "extras": scrub_call_secrets_tree(dict(result.extras), keep_names=MEHO_RESULT_NAMES),
+            "result": scrub_call_secrets_tree(result.result),
+        }
+    )
 
 
 def redact_error_result(result: OperationResult) -> OperationResult:
@@ -170,6 +211,10 @@ def redact_error_result(result: OperationResult) -> OperationResult:
     through :func:`redact_error_payload`. If the redaction fails, the result
     keeps only its ``error_code`` and the summary :data:`ERROR_TEXT_WITHHELD`:
     ``result`` and ``handle`` are dropped and ``delivery`` is ``"unavailable"``.
+
+    The names of the extras and the ``error_code`` stay as MEHO set them. A
+    result a handler built has had them checked first
+    (:func:`hide_call_secrets_in_returned_result`).
     """
     try:
         policy = get_default_policy()

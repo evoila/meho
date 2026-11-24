@@ -426,9 +426,13 @@ of a multi-step operation starts with the values of its parent. The set holds:
   (`writeOnly` or `format: password`). The mark holds at its own path only
   (`marked_secret_paths`): marking `login.value` does not hide `display.value`.
   The mark is read on the schema at each place, also when it comes through a
-  local `$ref`, an array's `items` or a combiner. A mark on
-  `additionalProperties` holds only for keys the schema does not declare next
-  to it, so a declared `label` stays public;
+  local `$ref`, an array's `items` or a combiner. A path holds the array
+  positions too: a mark on one `prefixItems` entry holds only at that
+  position, so a public label next to it stays public. A mark on
+  `patternProperties` holds for the keys that match the name pattern. A mark
+  on `additionalProperties` holds only for keys the schema does not declare
+  next to it and that match none of its name patterns, so a declared `label`
+  stays public;
 * the values MEHO reads from the secret store for the call: the secret-named
   fields under the names the connector reads, after the target's
   `secret_field_map`, both as stored and with surrounding whitespace removed
@@ -439,18 +443,28 @@ The value pass runs last, after the rules that read the vendor's own field
 names and after MEHO decided the outcome of the call. So a vendor label that
 equals a known value cannot stop a field-name rule, and a known value cannot
 change whether a multi-step operation failed. The message of a failed
-multi-step operation is picked by the severity the step returned, before its
-values are hidden.
+multi-step operation, and the error issues kept in the short answer, are
+picked by the severity the step returned, before its values are hidden. The
+field names MEHO reads in that answer (`status`, `summary`, `issues`,
+`severity`, `message`) stay as they are, and its code (the `status` the
+step returned) is checked like any other text.
 
 A policy rule can replace only part of a known value (a value with `?token=`
-in it). Then the rest would stay. `keep_call_secrets_whole` finds each text
-where a rule cut a known value and redacts that text again from the original
-with the known values masked first. Every other text keeps its first result,
-so a label inside a text still reaches its rule. The connector-boundary
-redaction (`_apply_redaction_middleware`), `redact_error_payload`,
-`_sanitize_free_text` and the Azure error text use it. The redaction
-manifest paths name keys of the answer, so a known value used as a key is
-masked in them too.
+in it), or hide more than the value (a whole `Bearer` token when the value is
+the word `Bearer`). `keep_call_secrets_whole` compares each text that holds a
+known value with the rule's result, word by word. A part the rule changed
+shows what the rule wrote. A known value, with every change that touches it,
+becomes one mark. Every other part is the same in both texts. So the text
+keeps everything the rule hid, and no part of the value. A word is the unit,
+so a letter of a hidden word never lines up with a letter of the rule's
+label. Texts with more than 20,000 words together are not compared: such a
+text is hidden whole. The connector-boundary redaction
+(`_apply_redaction_middleware`), the default view and the error cleanup in
+`_protect_secret_values`, `redact_error_payload`, `_sanitize_free_text`, the
+Azure error text and the trace body (`redact_body`) use it. The redaction
+manifest paths name keys of the answer, so each key in them is named as in
+the stored answer (`scrub_call_secret_path`), with the same counter when two
+masked keys meet.
 
 Every place where vendor text
 leaves the connector layer replaces each known value with
@@ -468,8 +482,12 @@ The pass covers strings, keys and numbers. A key that stays as it is keeps
 its name. A key that becomes the mark gets a counter at its end when its name
 is taken, in either order, so no entry is lost. A number that holds a known
 value becomes the mark as text. The top-level names of an error's `extras`
-and its `error_code` are MEHO's own and stay as they are, so the caller and
-the audit writer can read them.
+and its `error_code` stay as MEHO set them, so the caller and the audit
+writer can read them. A result a handler returns itself is checked first
+(`hide_call_secrets_in_returned_result`): its text, its `result`, the names
+of its `extras` and its `error_code`. Only the names MEHO reads from a result
+(`MEHO_RESULT_NAMES`) stay as they are there. A connector text is checked
+before it is trimmed or cut, so a value that ends in a space is found.
 
 A value is found in the forms a vendor may send back: as it is, JSON-escaped
 (once and twice, with and without `\/` and `\u` escapes in each round), percent-encoded
@@ -488,7 +506,7 @@ with the call.
 Cost: a call with no known value does no work at all. Otherwise each string,
 key and number of the answer is scanned once, and only one with a hit is
 rewritten. There is no size cut. When a rule changed a text that holds a
-known value, the redaction of that answer runs a second time.
+known value, that text is compared word by word with the rule's result.
 
 ## Action semantics
 

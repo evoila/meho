@@ -26,8 +26,8 @@ percent-encoded (also with a plain ``/``), and base64 of the whole value
 (standard and URL-safe, with and without padding).
 
 :func:`keep_call_secrets_whole` keeps a known value whole when an earlier
-rule replaced only part of it in a text: that text is redacted again with the
-value masked first.
+rule changed a text that holds it: the text keeps everything that rule hid,
+and each known value with what touches it becomes one marker.
 
 A value shorter than :data:`MIN_VALUE_LENGTH` characters is not known: it
 would hide parts of ordinary words. Two values where one is a part of the
@@ -43,11 +43,12 @@ function returns at once.
 from __future__ import annotations
 
 import base64
+import difflib
 import importlib
 import json
 import re
 import urllib.parse
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Final
@@ -55,7 +56,9 @@ from typing import Any, Final
 __all__ = [
     "CALL_SECRET_MARKER",
     "MIN_VALUE_LENGTH",
+    "AnyItem",
     "CallSecrets",
+    "KeyPattern",
     "OtherKey",
     "PathStep",
     "bind_call_secrets",
@@ -64,6 +67,7 @@ __all__ = [
     "marked_secret_paths",
     "note_call_secrets",
     "reset_call_secrets",
+    "scrub_call_secret_path",
     "scrub_call_secrets",
     "scrub_call_secrets_tree",
 ]
@@ -75,15 +79,39 @@ CALL_SECRET_MARKER: Final[str] = "[REDACTED:call_secret]"
 MIN_VALUE_LENGTH: Final[int] = 4
 
 
+#: Two texts with more words than this together are not compared word by
+#: word: a text that holds a known value is then hidden whole.
+_DIFF_LIMIT: Final[int] = 20_000
+
+#: The words and the white space between them, in order.
+_WORDS: Final[re.Pattern[str]] = re.compile(r"\s+|\S+")
+
+
 @dataclass(frozen=True, slots=True)
 class OtherKey:
-    """A path step for any key that is not in *declared* (a schema's ``additionalProperties``)."""
+    """A path step for a key no named property or name pattern takes (``additionalProperties``)."""
 
     declared: frozenset[str]
+    patterns: tuple[str, ...] = ()
 
 
-#: One step of a path in the params: a key, or any key not declared.
-PathStep = str | OtherKey
+@dataclass(frozen=True, slots=True)
+class KeyPattern:
+    """A path step for a key that matches a name pattern (``patternProperties``)."""
+
+    pattern: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnyItem:
+    """A path step for each array item from position *start* on (``items``)."""
+
+    start: int = 0
+
+
+#: One step of a path in the params: a key, an array position, or a rule of
+#: the schema that takes several keys or positions.
+PathStep = str | int | OtherKey | KeyPattern | AnyItem
 
 _PERCENT_HEX: Final[re.Pattern[str]] = re.compile(r"%[0-9A-F]{2}")
 
@@ -200,13 +228,17 @@ class CallSecrets:
         parts.append(text[cursor:])
         return "".join(parts)
 
-    def _scrub_keys(self, keys: list[Any]) -> list[Any]:
+    def _scrub_keys(self, keys: list[Any], keep_names: Collection[str] = ()) -> list[Any]:
         """The keys of one mapping, each known value masked, no two the same.
 
-        A key that stays as it is keeps its name. A masked key gets a
-        number when its masked name is taken, so no entry replaces another.
+        A key that stays as it is, or is in *keep_names*, keeps its name. A
+        masked key gets a number when its masked name is taken, so no entry
+        replaces another.
         """
-        cleaned = [self.scrub(key) if isinstance(key, str) else key for key in keys]
+        cleaned = [
+            self.scrub(key) if isinstance(key, str) and key not in keep_names else key
+            for key in keys
+        ]
         taken = {clean for key, clean in zip(keys, cleaned, strict=True) if clean == key}
         out: list[Any] = []
         for key, clean in zip(keys, cleaned, strict=True):
@@ -220,48 +252,130 @@ class CallSecrets:
             out.append(clean)
         return out
 
-    def scrub_tree(self, node: Any, *, keep_keys: bool = False) -> Any:
+    def scrub_tree(
+        self, node: Any, *, keep_keys: bool = False, keep_names: Collection[str] = ()
+    ) -> Any:
         """Return *node* with the marker for every known value in a string, key or number.
 
         With *keep_keys*, the keys of the top mapping stay as they are: they
-        are field names MEHO sets itself.
+        are field names MEHO sets itself. A key in *keep_names* stays as it is
+        at every depth: it is a field name of MEHO's own answer, so it says
+        nothing about a value.
         """
         if isinstance(node, str):
             return self.scrub(node)
         if isinstance(node, Mapping):
             keys = list(node)
-            names = keys if keep_keys else self._scrub_keys(keys)
-            return {name: self.scrub_tree(node[key]) for name, key in zip(names, keys, strict=True)}
-        if isinstance(node, list):
-            return [self.scrub_tree(item) for item in node]
-        if isinstance(node, tuple):
-            return tuple(self.scrub_tree(item) for item in node)
+            names = keys if keep_keys else self._scrub_keys(keys, keep_names)
+            return {
+                name: self.scrub_tree(node[key], keep_names=keep_names)
+                for name, key in zip(names, keys, strict=True)
+            }
+        if isinstance(node, list | tuple):
+            items = [self.scrub_tree(item, keep_names=keep_names) for item in node]
+            return items if isinstance(node, list) else tuple(items)
         if isinstance(node, int | float) and not isinstance(node, bool):
             text = str(node)
             clean = self.scrub(text)
             return node if clean == text else clean
         return node
 
-    def scrub_strings(self, node: Any) -> Any:
-        """Return *node* with the marker for every known value in a string; keys stay."""
-        if isinstance(node, str):
-            return self.scrub(node)
-        if isinstance(node, Mapping):
-            return {key: self.scrub_strings(value) for key, value in node.items()}
-        if isinstance(node, list | tuple):
-            return type(node)(self.scrub_strings(item) for item in node)
-        return node
+    def scrub_path(self, tree: Any, path: str) -> str:
+        """The dotted *path* into *tree* with each key named as :meth:`scrub_tree` names it.
 
-    def _found(self, text: str) -> list[str]:
-        return [text[begin:end] for begin, end in self._spans(text)]
+        A key that holds a known value is masked, and gets the same number as
+        in the masked tree, so the path points at the same entry. A path that
+        does not resolve in *tree* has its known values masked as text.
+        """
+        mapped = self._mapped_path(tree, path)
+        return self.scrub(path) if mapped is None else mapped
+
+    def _mapped_path(self, node: Any, rest: str) -> str | None:
+        if rest == "":
+            return ""
+        if isinstance(node, Mapping):
+            keys = list(node)
+            for key, name in zip(keys, self._scrub_keys(keys), strict=True):
+                text = str(key)
+                if rest == text:
+                    return str(name)
+                if rest.startswith(f"{text}."):
+                    tail = self._mapped_path(node[key], rest[len(text) + 1 :])
+                    if tail is not None:
+                        return f"{name}.{tail}"
+            return None
+        if isinstance(node, list | tuple):
+            head, dot, tail_text = rest.partition(".")
+            if not (head.isdigit() and int(head) < len(node)):
+                return None
+            if not dot:
+                return head
+            tail = self._mapped_path(node[int(head)], tail_text)
+            return None if tail is None else f"{head}.{tail}"
+        return None
+
+    def _changed_spans(self, original: str, redacted: str) -> list[tuple[int, int, str]]:
+        """The parts of *original* an earlier rule changed, each with what it wrote there.
+
+        The texts are compared word by word (a word is a run of characters
+        that are not white space), so a part is always whole words: a letter
+        of a hidden word never lines up with a letter of the rule's label.
+        """
+        was = _WORDS.findall(original)
+        now = _WORDS.findall(redacted)
+        if len(was) + len(now) > _DIFF_LIMIT:
+            return [(0, len(original), CALL_SECRET_MARKER)]
+        starts = [0]
+        for word in was:
+            starts.append(starts[-1] + len(word))
+        matcher = difflib.SequenceMatcher(None, was, now, autojunk=False)
+        return [
+            (starts[i1], starts[i2], "".join(now[j1:j2]))
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+            if tag != "equal"
+        ]
+
+    def _keep_text_whole(self, original: str, redacted: str) -> str:
+        """*redacted* rebuilt from *original*: each rule's change, and one marker per known value.
+
+        A part of *original* that a rule changed shows what the rule wrote. A
+        known value, together with every change that touches it, becomes one
+        marker. Every other part is the same in both texts. So the result
+        keeps everything the rule hid and no part of a known value.
+        """
+        items: list[tuple[int, int, str | None]] = [
+            *self._changed_spans(original, redacted),
+            *((begin, end, None) for begin, end in self._spans(original)),
+        ]
+        items.sort(key=lambda item: (item[0], item[1]))
+        parts: list[str] = []
+        cursor = index = 0
+        while index < len(items):
+            start, end, written = items[index]
+            hides_value = written is None
+            texts = [written] if written is not None else []
+            index += 1
+            # A change that starts where the last one ends touches it.
+            while index < len(items) and items[index][0] <= end:
+                _, stop, more = items[index]
+                end = max(end, stop)
+                hides_value = hides_value or more is None
+                if more is not None:
+                    texts.append(more)
+                index += 1
+            parts.append(original[cursor:start])
+            parts.append(CALL_SECRET_MARKER if hides_value else "".join(texts))
+            cursor = end
+        parts.append(original[cursor:])
+        return "".join(parts)
 
     def _cut(self, original: Any, redacted: Any) -> bool:
-        """True when a rule changed a text and a known value in it is not whole now."""
+        """True when a rule changed a text that holds a known value."""
         return (
             isinstance(original, str)
             and isinstance(redacted, str)
             and original != redacted
-            and self._found(original) != self._found(redacted)
+            and next(self._spans(original), None) is not None
         )
 
     def _any_cut(self, original: Any, redacted: Any) -> bool:
@@ -275,37 +389,32 @@ class CallSecrets:
             return any(map(self._any_cut, original, redacted))
         return self._cut(original, redacted)
 
-    def _merge(self, original: Any, redacted: Any, again: Any) -> Any:
+    def _merge(self, original: Any, redacted: Any) -> Any:
         if isinstance(redacted, Mapping):
-            if not (isinstance(original, Mapping) and isinstance(again, Mapping)):
+            if not isinstance(original, Mapping):
                 return redacted
-            return {
-                key: self._merge(original.get(key), value, again.get(key))
-                for key, value in redacted.items()
-            }
+            return {key: self._merge(original.get(key), value) for key, value in redacted.items()}
         if isinstance(redacted, list):
-            if not (
-                isinstance(original, list)
-                and isinstance(again, list)
-                and len(original) == len(redacted) == len(again)
-            ):
+            if not (isinstance(original, list) and len(original) == len(redacted)):
                 return redacted
-            return [self._merge(*items) for items in zip(original, redacted, again, strict=True)]
-        return again if self._cut(original, redacted) else redacted
+            return [self._merge(*items) for items in zip(original, redacted, strict=True)]
+        if self._cut(original, redacted):
+            return self._keep_text_whole(original, redacted)
+        return redacted
 
-    def keep_whole(self, original: Any, redacted: Any, redo: Callable[[Any], Any]) -> Any:
+    def keep_whole(self, original: Any, redacted: Any) -> Any:
         """Return *redacted* with no known value cut by an earlier rule.
 
         *redacted* is *original* after rules that change only texts. When a
-        rule replaced part of a known value in a text, the rest of the value
-        would stay. For each such text, the text of ``redo`` over *original*
-        with every known value masked first is used instead. Every other
-        text keeps its own result, so the rules that read a field's name
-        from a text still see the name.
+        rule changed a text that holds a known value, it may have replaced
+        only part of the value, or hidden more than the value. Such a text
+        keeps every change of the rule, and each known value, with every
+        change that touches it, becomes one marker
+        (:meth:`_keep_text_whole`). Every other text stays as it is.
         """
         if not self._any_cut(original, redacted):
             return redacted
-        return self._merge(original, redacted, redo(self.scrub_strings(original)))
+        return self._merge(original, redacted)
 
 
 _call_secrets_var: ContextVar[CallSecrets | None] = ContextVar("call_secrets", default=None)
@@ -340,16 +449,24 @@ def scrub_call_secrets(text: str) -> str:
     return scope.scrub(text) if scope else text
 
 
-def scrub_call_secrets_tree(node: Any, *, keep_keys: bool = False) -> Any:
+def scrub_call_secrets_tree(
+    node: Any, *, keep_keys: bool = False, keep_names: Collection[str] = ()
+) -> Any:
     """:meth:`CallSecrets.scrub_tree` for the call that runs now. No-op outside a call."""
     scope = _call_secrets_var.get()
-    return scope.scrub_tree(node, keep_keys=keep_keys) if scope else node
+    return scope.scrub_tree(node, keep_keys=keep_keys, keep_names=keep_names) if scope else node
 
 
-def keep_call_secrets_whole(original: Any, redacted: Any, redo: Callable[[Any], Any]) -> Any:
+def scrub_call_secret_path(tree: Any, path: str) -> str:
+    """:meth:`CallSecrets.scrub_path` for the call that runs now. No-op outside a call."""
+    scope = _call_secrets_var.get()
+    return scope.scrub_path(tree, path) if scope else path
+
+
+def keep_call_secrets_whole(original: Any, redacted: Any) -> Any:
     """:meth:`CallSecrets.keep_whole` for the call that runs now. No-op outside a call."""
     scope = _call_secrets_var.get()
-    return scope.keep_whole(original, redacted, redo) if scope else redacted
+    return scope.keep_whole(original, redacted) if scope else redacted
 
 
 def _scalars(node: Any) -> Iterator[str]:
@@ -364,13 +481,30 @@ def _scalars(node: Any) -> Iterator[str]:
             yield str(item)
 
 
-def _step_matches(step: PathStep, key: str) -> bool:
+def _pattern_matches(pattern: str, key: str) -> bool | None:
+    """Whether *key* matches the schema name *pattern*; ``None`` when the pattern is not valid."""
+    try:
+        return re.search(pattern, key) is not None
+    except re.error:
+        return None
+
+
+def _step_matches(step: PathStep, key: str | int) -> bool:
+    if isinstance(step, AnyItem):
+        return isinstance(key, int) and key >= step.start
+    if isinstance(step, KeyPattern):
+        # A pattern Python cannot read takes every key: a mark there stays a mark.
+        return isinstance(key, str) and _pattern_matches(step.pattern, key) is not False
     if isinstance(step, OtherKey):
-        return key not in step.declared
-    return step == key
+        return (
+            isinstance(key, str)
+            and key not in step.declared
+            and not any(_pattern_matches(pattern, key) for pattern in step.patterns)
+        )
+    return step == key and type(step) is type(key)
 
 
-def _on_marked_path(path: tuple[str, ...], marked: frozenset[tuple[PathStep, ...]]) -> bool:
+def _on_marked_path(path: tuple[str | int, ...], marked: frozenset[tuple[PathStep, ...]]) -> bool:
     return any(
         len(mark) == len(path)
         and all(_step_matches(step, key) for step, key in zip(mark, path, strict=True))
@@ -385,24 +519,24 @@ def collect_param_secret_values(
 
     A scalar, or a list of scalars, is a known value under a secret name,
     as the ``value`` of a name/value pair with a secret name, or at a path in
-    *marked_paths* (the keys from the top of the params; a list adds no
-    step). A mapping under any name is walked, and the rules apply to its
-    keys.
+    *marked_paths* (the keys and array positions from the top of the params).
+    A mapping under any name is walked, and the rules apply to its keys.
     """
     from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
 
-    def walk(node: Any, path: tuple[str, ...], secret: bool) -> Iterator[str]:
+    def walk(node: Any, path: tuple[str | int, ...], secret: bool) -> Iterator[str]:
         if isinstance(node, Mapping):
             if is_secret_name_value_pair(node):
                 yield from _scalars(node["value"])
             for key, value in node.items():
                 name = str(key)
-                inner = (*path, name)
+                inner: tuple[str | int, ...] = (*path, name)
                 hidden = is_secret_param_name(name) or _on_marked_path(inner, marked_paths)
                 yield from walk(value, inner, hidden)
         elif isinstance(node, list | tuple):
-            for item in node:
-                yield from walk(item, path, secret)
+            for index, item in enumerate(node):
+                inner = (*path, index)
+                yield from walk(item, inner, secret or _on_marked_path(inner, marked_paths))
         elif secret:
             yield from _scalars(node)
 
@@ -430,6 +564,21 @@ def _marks_secret(node: Any) -> bool:
     )
 
 
+def _item_children(
+    node: Mapping[str, Any], path: tuple[PathStep, ...]
+) -> Iterator[tuple[Any, tuple[PathStep, ...]]]:
+    """The array item schemas of *node*: one per position, then one for the rest."""
+    prefix = node.get("prefixItems")
+    items = node.get("items")
+    if not isinstance(prefix, list) and isinstance(items, list):
+        # Before JSON Schema 2020-12, a list under ``items`` names each position.
+        prefix, items = items, node.get("additionalItems")
+    positions = prefix if isinstance(prefix, list) else []
+    for index, sub in enumerate(positions):
+        yield sub, (*path, index)
+    yield items, (*path, AnyItem(len(positions)))
+
+
 def _children(
     node: Mapping[str, Any], path: tuple[PathStep, ...]
 ) -> Iterator[tuple[Any, tuple[PathStep, ...]]]:
@@ -440,23 +589,33 @@ def _children(
         declared = frozenset(str(name) for name in properties)
         for name, sub in properties.items():
             yield sub, (*path, str(name))
-    for key in ("items", "prefixItems", *_COMBINERS):
+    patterns: tuple[str, ...] = ()
+    by_pattern = node.get("patternProperties")
+    if isinstance(by_pattern, Mapping):
+        patterns = tuple(str(pattern) for pattern in by_pattern)
+        for pattern, sub in by_pattern.items():
+            yield sub, (*path, KeyPattern(str(pattern)))
+    yield from _item_children(node, path)
+    for key in _COMBINERS:
         subs = node.get(key)
         for sub in subs if isinstance(subs, list) else (subs,):
             yield sub, path
     extra = node.get("additionalProperties")
     if isinstance(extra, Mapping):
-        yield extra, (*path, OtherKey(declared))
+        yield extra, (*path, OtherKey(declared, patterns))
 
 
 def marked_secret_paths(schema: Any) -> frozenset[tuple[PathStep, ...]]:
     """The paths of the properties a schema marks as secret (``writeOnly``, ``format: password``).
 
-    A path is the property names from the top of the schema. An array item
-    adds no step, ``additionalProperties`` adds an :class:`OtherKey` step
-    (any key but the declared properties next to it), and a local ``$ref``
-    is followed (each one once per path, so a schema that refers to itself
-    ends). The mark is read on the schema at each path, also when it comes
+    A path is the property names and array positions from the top of the
+    schema. A ``prefixItems`` entry adds its position, ``items`` adds an
+    :class:`AnyItem` step (every position after the ``prefixItems``),
+    ``patternProperties`` adds a :class:`KeyPattern` step, and
+    ``additionalProperties`` adds an :class:`OtherKey` step (any key that
+    is not a declared property and matches no name pattern next to it). A
+    local ``$ref`` is followed (each one once per path, so a schema that
+    refers to itself ends). The mark is read on the schema at each path, also when it comes
     through a ``$ref``, an array's ``items`` or a combiner.
     """
     paths: set[tuple[PathStep, ...]] = set()

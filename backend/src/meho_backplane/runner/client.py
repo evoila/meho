@@ -39,7 +39,11 @@ import httpx
 import structlog
 
 from meho_backplane.runner import wire
-from meho_backplane.runner.login import RunnerLoginError, SignedJwtTokenProvider
+from meho_backplane.runner.login import (
+    RunnerLoginError,
+    SignedJwtTokenProvider,
+    uses_proxy_settings,
+)
 from meho_backplane.runner.package_set import PACKAGE_SET_HEADER, local_package_set
 from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
 
@@ -149,6 +153,7 @@ class RunnerClient:
             auth=_ProviderAuth(token_provider) if token_provider is not None else None,
             timeout=httpx.Timeout(timeout),
             transport=transport,
+            trust_env=token_provider is None or uses_proxy_settings(central_url),
         )
 
     async def __aenter__(self) -> RunnerClient:

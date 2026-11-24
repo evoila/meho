@@ -107,9 +107,17 @@ python -m meho_backplane.runner
 
 Put `MEHO_RUNNER_KEY_DIR` on a volume that stays when the runner
 restarts. After the first start the runner finds its key there, so the
-code is not needed again. A runner whose key is lost needs a new
-registration. `MEHO_RUNNER_TOKEN_URL` sets the login server's token address
-when the runner must reach it under another name than central tells it.
+code is not needed again. When the answer to the first start is lost, start
+the runner again with the same code and the same key folder: it finishes the
+enrollment, also after the 30 minutes. `MEHO_RUNNER_TOKEN_URL` sets the login
+server's token address when the runner must reach it under another name than
+central tells it. Both addresses must be `https://`. Plain `http://` works only
+for an address on the same machine.
+
+A runner whose key is lost stops with an error. Put the old key file back. Or
+revoke the runner, register a new one under a new name, and start with the new
+`MEHO_RUNNER_ID` and `MEHO_RUNNER_ENROLLMENT_CODE`. The same key folder can
+stay: the runner replaces the old login there.
 
 *A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
 Keycloak client instead. The runner sends it as it is and does not renew
@@ -187,7 +195,9 @@ runner (step 4 above), for the targets central cannot reach.
 | Symptom | What it means | Fix |
 |---|---|---|
 | The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID`) is missing or malformed, or it has neither `MEHO_RUNNER_TOKEN`, nor `MEHO_RUNNER_ENROLLMENT_CODE`, nor a key in `MEHO_RUNNER_KEY_DIR`. | Set the missing one; the error names it. |
-| The runner exits 1 with `runner_login_error` and "enrollment was refused" | The enrollment code is wrong, was used, has ended, or its runner is revoked. | Register the runner again and use the new code. |
+| The runner exits 1 with `runner_login_error` and "enrollment was refused" | The enrollment code is wrong, was used, has ended, or its runner is revoked. | Start with the key file that enrolled with this code. Or revoke the runner, register a new one under a new name, and use the new name and code. |
+| The runner exits 1 with `runner_login_error` and "is missing", "does not match the saved login" or "is for runner:…" | The login saved in `MEHO_RUNNER_KEY_DIR` does not fit the key there or `MEHO_RUNNER_ID`. | Put the right key file back, or set the right `MEHO_RUNNER_ID`. Or start with a new runner's name and code. |
+| The runner exits 1 with "must start with https://" | The address of central or of the login server is plain `http://`. | Use the `https://` address. |
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. You cannot see them in MEHO yet. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |

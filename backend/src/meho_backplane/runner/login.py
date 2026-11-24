@@ -9,6 +9,7 @@ public key with the one-time enrollment code to central, which puts the key on
 the runner's Keycloak client. After that the runner signs a short login
 request (a JWT, ES256) with the private key and gets a short access token. It
 asks for a new token before the old one ends, and once more after a ``401``.
+Both requests go over https, or over plain http to this same machine only.
 The private key never leaves the site: only the public key and the signed
 login request travel, and nothing in this module logs a key or a token.
 
@@ -19,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,9 +33,11 @@ from typing import Any, Final
 import httpx
 import jwt
 import structlog
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.runner.settings import RunnerConfigError, RunnerSettings
 
 __all__ = [
@@ -40,10 +45,12 @@ __all__ = [
     "LOGIN_FILE_NAME",
     "RunnerLoginError",
     "SignedJwtTokenProvider",
+    "check_https",
     "enroll_with_code",
     "load_or_create_private_key",
     "open_signed_jwt_login",
     "public_jwk",
+    "uses_proxy_settings",
 ]
 
 #: The private key, PEM, mode ``0600``.
@@ -62,6 +69,13 @@ _RENEW_LIFETIME_SHARE: Final[float] = 0.25
 _RENEW_MIN_SECONDS: Final[float] = 30.0
 _ASSERTION_TYPE: Final[str] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
+#: What a person does when the saved login or its key is lost.
+_RECOVERY: Final[str] = (
+    "Put the right files back, or revoke this runner, register a new one under a new name "
+    "(meho runner-principal register), and start with its MEHO_RUNNER_ID and "
+    "MEHO_RUNNER_ENROLLMENT_CODE"
+)
+
 _log = structlog.get_logger(__name__)
 
 
@@ -72,31 +86,93 @@ class RunnerLoginError(RuntimeError):
     """
 
 
+class _SavedLoginError(RunnerLoginError):
+    """The saved login on disk cannot be used."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"{reason}. {_RECOVERY}")
+
+
+def check_https(what: str, url: str) -> None:
+    """Refuse *url* unless it is https, or plain http to this same machine.
+
+    *what* names the setting for the error text. The address itself is not in
+    the text.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        raise RunnerConfigError(f"{what} is not a valid address") from exc
+    if parsed.scheme == "https" and parsed.host:
+        return
+    if parsed.scheme == "http" and _is_this_machine(parsed.host):
+        return
+    raise RunnerConfigError(
+        f"{what} must start with https:// (http:// works only for an address on this machine)"
+    )
+
+
+def _is_this_machine(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def uses_proxy_settings(url: str) -> bool:
+    """Plain http goes straight to this machine, never through a proxy from the environment."""
+    return httpx.URL(url).scheme == "https"
+
+
+def _read_private_key(path: Path) -> ec.EllipticCurvePrivateKey | None:
+    """The private key in *path*, or ``None`` when there is no such file."""
+    try:
+        key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, UnsupportedAlgorithm) as exc:
+        raise RunnerLoginError(
+            f"cannot read the runner key {path}: {type(exc).__name__}. "
+            f"When the file is damaged, move it away. {_RECOVERY}"
+        ) from exc
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or key.curve.name != "secp256r1":
+        raise RunnerLoginError(
+            f"the key file {path} is not an EC P-256 key. Move it away. {_RECOVERY}"
+        )
+    return key
+
+
 def load_or_create_private_key(key_dir: str) -> ec.EllipticCurvePrivateKey:
     """Return the runner's private key; make and keep a new one on first start."""
     folder = Path(key_dir)
     path = folder / KEY_FILE_NAME
+    key = _read_private_key(path)
+    if key is not None:
+        return key
+    key = ec.generate_private_key(ec.SECP256R1())
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            key = serialization.load_pem_private_key(path.read_bytes(), password=None)
-            if not isinstance(key, ec.EllipticCurvePrivateKey):
-                raise RunnerLoginError(f"the key file {path} is not an EC key")
-            return key
-        key = ec.generate_private_key(ec.SECP256R1())
-        pem = key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(pem)
-        return key
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         raise RunnerLoginError(
-            f"cannot read or write the runner key in {key_dir}: {type(exc).__name__}"
+            f"cannot write the runner key in {key_dir}: {type(exc).__name__}"
         ) from exc
+    return key
+
+
+def _client_id(runner_id: str) -> str:
+    """The login server's name for the runner that was registered as *runner_id*."""
+    return f"runner:{runner_id}"
 
 
 def _b64url(number: int, length: int) -> str:
@@ -123,32 +199,53 @@ class _LoginRecord:
     key_id: str
     signing_alg: str
 
-    def to_json(self) -> str:
-        return json.dumps(self.__dict__)
+    def save(self, path: Path) -> None:
+        """Write the record in one step, so a stop never leaves half a file."""
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(json.dumps(self.__dict__))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     @classmethod
     def from_file(cls, path: Path) -> _LoginRecord:
         try:
             data = json.loads(path.read_text())
             return cls(**{name: str(data[name]) for name in cls.__dataclass_fields__})
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise RunnerLoginError(f"the login record {path} is not readable") from exc
+        except OSError as exc:
+            raise RunnerLoginError(
+                f"cannot read the login record {path}: {type(exc).__name__}"
+            ) from exc
+        except (ValueError, KeyError, TypeError) as exc:
+            raise _SavedLoginError(f"the login record {path} is damaged") from exc
 
 
 async def enroll_with_code(
     *,
     central_url: str,
     code: str,
+    runner_id: str,
     key: ec.EllipticCurvePrivateKey,
     key_dir: str,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> None:
-    """Send the public key and the one-time code to central; keep the answer."""
+) -> _LoginRecord:
+    """Send the public key and the one-time code to central; keep the answer.
+
+    Safe to run again with the same key: central gives the same answer, so a
+    lost answer is asked for again at the next start.
+    """
+    check_https("MEHO_RUNNER_CENTRAL_URL", central_url)
     try:
         async with httpx.AsyncClient(
             base_url=central_url.rstrip("/"),
             timeout=httpx.Timeout(_HTTP_TIMEOUT_SECONDS),
             transport=transport,
+            trust_env=uses_proxy_settings(central_url),
         ) as client:
             resp = await client.post(
                 _ENROLL_PATH,
@@ -157,7 +254,8 @@ async def enroll_with_code(
     except httpx.HTTPError as exc:
         raise RunnerLoginError(f"enrollment failed: {type(exc).__name__}") from exc
     if resp.status_code != httpx.codes.OK:
-        raise RunnerLoginError(f"enrollment was refused: HTTP {resp.status_code}")
+        hint = f". {_RECOVERY}" if resp.status_code == httpx.codes.FORBIDDEN else ""
+        raise RunnerLoginError(f"enrollment was refused: HTTP {resp.status_code}{hint}")
     try:
         body = resp.json()
         record = _LoginRecord(
@@ -169,11 +267,19 @@ async def enroll_with_code(
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise RunnerLoginError("enrollment answer is not valid") from exc
+    if record.client_id != _client_id(runner_id):
+        raise RunnerLoginError(
+            f"the enrollment code is for {record.client_id}; "
+            "set MEHO_RUNNER_ID to the name that was registered"
+        )
+    if record.key_id != ec_key_id(public_jwk(key)):
+        raise RunnerLoginError("enrollment answer is for another key")
     try:
-        (Path(key_dir) / LOGIN_FILE_NAME).write_text(record.to_json())
+        record.save(Path(key_dir) / LOGIN_FILE_NAME)
     except OSError as exc:
         raise RunnerLoginError(f"cannot write the login record: {type(exc).__name__}") from exc
     _log.info("runner_key_enrolled", client_id=record.client_id, key_id=record.key_id)
+    return record
 
 
 class SignedJwtTokenProvider:
@@ -221,7 +327,9 @@ class SignedJwtTokenProvider:
         }
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(_HTTP_TIMEOUT_SECONDS), transport=self._transport
+                timeout=httpx.Timeout(_HTTP_TIMEOUT_SECONDS),
+                transport=self._transport,
+                trust_env=uses_proxy_settings(self._token_endpoint),
             ) as client:
                 resp = await client.post(self._token_endpoint, data=form)
         except httpx.HTTPError as exc:
@@ -255,6 +363,60 @@ class SignedJwtTokenProvider:
             return self._token
 
 
+def _load_saved_login(
+    settings: RunnerSettings,
+) -> tuple[ec.EllipticCurvePrivateKey, _LoginRecord]:
+    """The saved login and its private key; check that the two belong together."""
+    folder = Path(settings.key_dir)
+    record = _LoginRecord.from_file(folder / LOGIN_FILE_NAME)
+    if record.client_id != _client_id(settings.runner_id):
+        raise _SavedLoginError(
+            f"the saved login in {settings.key_dir} is for {record.client_id}, "
+            f"and MEHO_RUNNER_ID is {settings.runner_id}"
+        )
+    key = _read_private_key(folder / KEY_FILE_NAME)
+    if key is None:
+        raise _SavedLoginError(f"the runner key {folder / KEY_FILE_NAME} is missing")
+    if ec_key_id(public_jwk(key)) != record.key_id:
+        raise _SavedLoginError(
+            f"the runner key {folder / KEY_FILE_NAME} does not match the saved login"
+        )
+    return key, record
+
+
+async def _enroll(
+    settings: RunnerSettings, transport: httpx.AsyncBaseTransport | None
+) -> tuple[ec.EllipticCurvePrivateKey, _LoginRecord]:
+    """Enroll the key on disk (a new one when there is none) with the code."""
+    assert settings.enrollment_code is not None
+    key = load_or_create_private_key(settings.key_dir)
+    record = await enroll_with_code(
+        central_url=settings.central_url,
+        code=settings.enrollment_code,
+        runner_id=settings.runner_id,
+        key=key,
+        key_dir=settings.key_dir,
+        transport=transport,
+    )
+    return key, record
+
+
+async def _saved_or_new_login(
+    settings: RunnerSettings, transport: httpx.AsyncBaseTransport | None
+) -> tuple[ec.EllipticCurvePrivateKey, _LoginRecord]:
+    """The saved login; when it cannot be used, a new one with the code that is set."""
+    try:
+        return _load_saved_login(settings)
+    except _SavedLoginError as problem:
+        if settings.enrollment_code is None:
+            raise
+        _log.warning("runner_saved_login_not_usable", reason=problem.reason)
+        try:
+            return await _enroll(settings, transport)
+        except RunnerLoginError as exc:
+            raise RunnerLoginError(f"{problem.reason}; {exc}") from exc
+
+
 async def open_signed_jwt_login(
     settings: RunnerSettings,
     *,
@@ -266,6 +428,10 @@ async def open_signed_jwt_login(
     code is set (the first start). With neither, the fixed token mode runs and
     this returns ``None``. With no token, no code and no record, the runner
     cannot log in: that is a configuration error.
+
+    A saved login is used only with the private key it was made for, and only
+    for the runner named in the settings. When they do not fit, the enrollment
+    code makes a new login, or the error says how to recover.
     """
     record_path = Path(settings.key_dir) / LOGIN_FILE_NAME
     has_record = record_path.exists()
@@ -275,17 +441,18 @@ async def open_signed_jwt_login(
                 "set MEHO_RUNNER_TOKEN, or MEHO_RUNNER_ENROLLMENT_CODE for the first start"
             )
         return None
-    key = load_or_create_private_key(settings.key_dir)
-    if not has_record:
-        assert settings.enrollment_code is not None
-        await enroll_with_code(
-            central_url=settings.central_url,
-            code=settings.enrollment_code,
-            key=key,
-            key_dir=settings.key_dir,
-            transport=transport,
+    check_https("MEHO_RUNNER_CENTRAL_URL", settings.central_url)
+    if settings.token_endpoint_override is not None:
+        check_https("MEHO_RUNNER_TOKEN_URL", settings.token_endpoint_override)
+    if has_record:
+        key, record = await _saved_or_new_login(settings, transport)
+    else:
+        key, record = await _enroll(settings, transport)
+    if settings.token_endpoint_override is None:
+        check_https(
+            "the token address from central (set MEHO_RUNNER_TOKEN_URL to use another one)",
+            record.token_endpoint,
         )
-    record = _LoginRecord.from_file(record_path)
     return SignedJwtTokenProvider(
         key=key,
         record=record,

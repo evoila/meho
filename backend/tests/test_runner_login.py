@@ -20,17 +20,26 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from meho_backplane.runner.client import RunnerClient
+from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.runner.login import (
     KEY_FILE_NAME,
     LOGIN_FILE_NAME,
     RunnerLoginError,
+    SignedJwtTokenProvider,
+    _LoginRecord,
     load_or_create_private_key,
     open_signed_jwt_login,
     public_jwk,
 )
-from meho_backplane.runner.settings import RunnerConfigError, RunnerSettings
+from meho_backplane.runner.settings import (
+    DEFAULT_KEY_DIR,
+    RunnerConfigError,
+    RunnerSettings,
+    get_runner_settings,
+)
 
 _TOKEN_URL = "https://login.test/realms/meho/protocol/openid-connect/token"
 _ISSUER = "https://login.test/realms/meho"
@@ -59,6 +68,9 @@ class _Central:
         self.reject_next_api_call = False
         self.public_key: dict[str, Any] | None = None
         self.api_auth: list[str] = []
+        self.client_id = "runner:site-a"
+        self.token_url = _TOKEN_URL
+        self.refuse_enrollment = False
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -67,18 +79,20 @@ class _Central:
         self.requests.append(request)
         if request.url.path == "/api/v1/runner-principals/enroll":
             body = json.loads(request.content)
+            if self.refuse_enrollment:
+                return httpx.Response(403, json={"detail": "enrollment_code_invalid"})
             self.public_key = body["public_key"]
             return httpx.Response(
                 200,
                 json={
-                    "client_id": "runner:site-a",
+                    "client_id": self.client_id,
                     "issuer": _ISSUER,
-                    "token_endpoint": _TOKEN_URL,
+                    "token_endpoint": self.token_url,
                     "signing_alg": "ES256",
-                    "key_id": "kid-1",
+                    "key_id": ec_key_id(body["public_key"]),
                 },
             )
-        if str(request.url) == _TOKEN_URL:
+        if request.url.path.endswith("/openid-connect/token"):
             self.token_count += 1
             return httpx.Response(
                 200,
@@ -149,7 +163,8 @@ async def test_login_request_is_signed_with_the_private_key_and_holds_no_key(
     claims = jwt.decode(assertion, public, algorithms=["ES256"], audience=_ISSUER)  # type: ignore[arg-type]
     assert claims["iss"] == claims["sub"] == "runner:site-a"
     assert claims["exp"] - claims["iat"] <= 60
-    assert jwt.get_unverified_header(assertion)["kid"] == "kid-1"
+    assert central.public_key is not None
+    assert jwt.get_unverified_header(assertion)["kid"] == ec_key_id(central.public_key)
     pem = (tmp_path / KEY_FILE_NAME).read_text()
     assert "PRIVATE KEY" not in token_request.content.decode()
     assert pem.splitlines()[1] not in token_request.content.decode()
@@ -278,3 +293,276 @@ async def test_a_runner_with_a_key_on_disk_starts_without_a_code(tmp_path: Path)
 def test_client_needs_exactly_one_login() -> None:
     with pytest.raises(ValueError, match="either"):
         RunnerClient(central_url="https://c", runner_id="r")
+
+
+# ---------------------------------------------------------------------------
+# https
+# ---------------------------------------------------------------------------
+
+_PLAIN_HTTP = [
+    "http://central.test",
+    "http://192.0.2.10:8080",
+    "http://localhost.example.test",
+    "http://user@central.test",
+    "ftp://central.test",
+    "central.test",
+    "https://",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _PLAIN_HTTP)
+async def test_central_must_be_https_before_the_code_is_sent(tmp_path: Path, url: str) -> None:
+    central = _Central()
+    settings = _settings(tmp_path, enrollment_code="c", central_url=url)
+    with pytest.raises(RunnerConfigError, match=r"MEHO_RUNNER_CENTRAL_URL must start with https"):
+        await open_signed_jwt_login(settings, transport=central.transport())
+    assert central.requests == []
+    assert not (tmp_path / KEY_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_central_must_be_https_also_with_a_saved_login(tmp_path: Path) -> None:
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    with pytest.raises(RunnerConfigError, match="MEHO_RUNNER_CENTRAL_URL"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, central_url="http://central.test"), transport=central.transport()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _PLAIN_HTTP)
+async def test_the_token_url_setting_must_be_https_before_anything_is_sent(
+    tmp_path: Path, url: str
+) -> None:
+    central = _Central()
+    settings = _settings(tmp_path, enrollment_code="c", token_endpoint_override=url)
+    with pytest.raises(RunnerConfigError, match=r"MEHO_RUNNER_TOKEN_URL must start with https"):
+        await open_signed_jwt_login(settings, transport=central.transport())
+    assert central.requests == []
+
+
+@pytest.mark.asyncio
+async def test_the_token_address_from_central_must_be_https(tmp_path: Path) -> None:
+    central = _Central()
+    central.token_url = "http://login.test/realms/meho/protocol/openid-connect/token"
+    settings = _settings(tmp_path, enrollment_code="c")
+    with pytest.raises(RunnerConfigError, match="token address"):
+        await open_signed_jwt_login(settings, transport=central.transport())
+    assert central.token_count == 0
+    # The enrollment is kept: with an https token address the runner starts.
+    provider = await open_signed_jwt_login(
+        _settings(tmp_path, token_endpoint_override=_TOKEN_URL), transport=central.transport()
+    )
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+    assert len(central.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base", ["http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"]
+)
+async def test_plain_http_to_this_machine_works(tmp_path: Path, base: str) -> None:
+    central = _Central()
+    central.token_url = f"{base}/realms/meho/protocol/openid-connect/token"
+    provider = await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c", central_url=base), transport=central.transport()
+    )
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+
+
+def test_plain_http_to_this_machine_uses_no_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.test:3128")
+    provider = SignedJwtTokenProvider(
+        key=ec.generate_private_key(ec.SECP256R1()),
+        record=_LoginRecord(
+            client_id="runner:r", issuer="i", token_endpoint="t", key_id="k", signing_alg="ES256"
+        ),
+    )
+    local = RunnerClient(
+        central_url="http://localhost:8000", runner_id="r", token_provider=provider
+    )
+    assert local._client._mounts == {}
+    remote = RunnerClient(
+        central_url="https://central.test", runner_id="r", token_provider=provider
+    )
+    assert remote._client._mounts != {}
+
+
+# ---------------------------------------------------------------------------
+# A lost or other key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_missing_key_is_reported_and_no_new_key_is_made(tmp_path: Path) -> None:
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    (tmp_path / KEY_FILE_NAME).unlink()
+    central.requests.clear()
+    with pytest.raises(RunnerLoginError, match="is missing") as caught:
+        await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    assert "runner-principal register" in str(caught.value)
+    assert "MEHO_RUNNER_ENROLLMENT_CODE" in str(caught.value)
+    assert central.requests == []
+    assert not (tmp_path / KEY_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_another_key_is_reported_and_the_old_key_put_back_works(tmp_path: Path) -> None:
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    key_file = tmp_path / KEY_FILE_NAME
+    old_key = key_file.read_bytes()
+    key_file.unlink()
+    load_or_create_private_key(str(tmp_path))
+    central.requests.clear()
+    with pytest.raises(RunnerLoginError, match="does not match the saved login"):
+        await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    assert central.requests == []
+    key_file.write_bytes(old_key)
+    provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loss", ["key-missing", "other-key", "record-damaged"])
+async def test_a_new_code_recovers_a_runner_that_lost_its_login(tmp_path: Path, loss: str) -> None:
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="old"), transport=central.transport()
+    )
+    old_key_id = json.loads((tmp_path / LOGIN_FILE_NAME).read_text())["key_id"]
+    if loss == "record-damaged":
+        (tmp_path / LOGIN_FILE_NAME).write_text('{"client_id": "run')
+    else:
+        (tmp_path / KEY_FILE_NAME).unlink()
+        if loss == "other-key":
+            load_or_create_private_key(str(tmp_path))
+    central.client_id = "runner:site-a2"
+    provider = await open_signed_jwt_login(
+        _settings(tmp_path, runner_id="site-a2", enrollment_code="new"),
+        transport=central.transport(),
+    )
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+    record = json.loads((tmp_path / LOGIN_FILE_NAME).read_text())
+    assert record["client_id"] == "runner:site-a2"
+    assert record["key_id"] == ec_key_id(public_jwk(load_or_create_private_key(str(tmp_path))))
+    assert (record["key_id"] == old_key_id) is (loss == "record-damaged")
+    # The next start needs no code.
+    again = _settings(tmp_path, runner_id="site-a2")
+    assert await open_signed_jwt_login(again, transport=central.transport()) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_missing_key_with_the_used_code_says_how_to_recover(tmp_path: Path) -> None:
+    central = _Central()
+    settings = _settings(tmp_path, enrollment_code="used")
+    await open_signed_jwt_login(settings, transport=central.transport())
+    record = (tmp_path / LOGIN_FILE_NAME).read_text()
+    (tmp_path / KEY_FILE_NAME).unlink()
+    central.refuse_enrollment = True
+    with pytest.raises(RunnerLoginError, match=r"is missing.*refused") as caught:
+        await open_signed_jwt_login(settings, transport=central.transport())
+    assert "runner-principal register" in str(caught.value)
+    assert (tmp_path / LOGIN_FILE_NAME).read_text() == record
+
+
+@pytest.mark.asyncio
+async def test_a_saved_login_of_another_runner_is_not_used(tmp_path: Path) -> None:
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    with pytest.raises(RunnerLoginError, match="is for runner:site-a"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, runner_id="site-b"), transport=central.transport()
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_code_of_another_runner_is_reported_and_not_saved(tmp_path: Path) -> None:
+    central = _Central()
+    central.client_id = "runner:site-z"
+    with pytest.raises(RunnerLoginError, match="the enrollment code is for runner:site-z"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert not (tmp_path / LOGIN_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_key_file_is_reported_and_kept(tmp_path: Path) -> None:
+    (tmp_path / KEY_FILE_NAME).write_text("")
+    central = _Central()
+    with pytest.raises(RunnerLoginError, match="move it away"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert central.requests == []
+    assert (tmp_path / KEY_FILE_NAME).read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# The settings from the environment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_reads_the_code_the_key_folder_and_the_token_url_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key_dir = tmp_path / "kept" / "keys"
+    token_url = "https://other-login.test/realms/meho/protocol/openid-connect/token"
+    monkeypatch.delenv("MEHO_RUNNER_TOKEN", raising=False)
+    monkeypatch.setenv("MEHO_RUNNER_CENTRAL_URL", "https://central.test")
+    monkeypatch.setenv("MEHO_RUNNER_ID", "site-a")
+    monkeypatch.setenv("MEHO_RUNNER_ENROLLMENT_CODE", "code-from-env")
+    monkeypatch.setenv("MEHO_RUNNER_KEY_DIR", str(key_dir))
+    monkeypatch.setenv("MEHO_RUNNER_TOKEN_URL", token_url)
+    central = _Central()
+    get_runner_settings.cache_clear()
+    try:
+        settings = get_runner_settings()
+    finally:
+        get_runner_settings.cache_clear()
+    assert "code-from-env" not in repr(settings)
+    provider = await open_signed_jwt_login(settings, transport=central.transport())
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+    enroll, token = central.requests
+    assert str(enroll.url) == "https://central.test/api/v1/runner-principals/enroll"
+    assert json.loads(enroll.content)["enrollment_code"] == "code-from-env"
+    assert str(token.url) == token_url
+    assert sorted(path.name for path in key_dir.iterdir()) == [KEY_FILE_NAME, LOGIN_FILE_NAME]
+    for path in key_dir.iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_without_a_key_folder_setting_the_default_folder_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("TOKEN", "ENROLLMENT_CODE", "KEY_DIR", "TOKEN_URL"):
+        monkeypatch.delenv(f"MEHO_RUNNER_{name}", raising=False)
+    monkeypatch.setenv("MEHO_RUNNER_CENTRAL_URL", "https://central.test")
+    monkeypatch.setenv("MEHO_RUNNER_ID", "site-a")
+    get_runner_settings.cache_clear()
+    try:
+        settings = get_runner_settings()
+    finally:
+        get_runner_settings.cache_clear()
+    assert settings.key_dir == DEFAULT_KEY_DIR
+    assert settings.enrollment_code is None
+    assert settings.token_endpoint_override is None
+    assert settings.runner_token is None

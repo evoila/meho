@@ -321,3 +321,103 @@ async def test_results_central_refused_are_logged(
 
     refused = [e for e in logs if e["event"] == "runner_result_refused_by_central"]
     assert [(e["result_uid"], e["reason"]) for e in refused] == [("u9", "future_time")]
+
+
+def _due_item(check_ref: str, next_due_at: datetime) -> RunnerWorkItem:
+    return _scheduled_item(check_ref, interval_seconds=86400, next_due_at=next_due_at)
+
+
+async def test_a_counted_check_waits_for_its_due_time_on_the_first_tick_and_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_loop, "execute_work_item", _fake_execute)
+    now = datetime.now(UTC)
+    assignment = RunnerAssignment(
+        assignment_version="v1",
+        items=[
+            _due_item("midnight", now + timedelta(hours=12)),
+            _due_item("overdue", now - timedelta(minutes=1)),
+        ],
+    )
+    posted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(304)
+        posted.append(request.content.decode())
+        return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
+
+    spool = ResultSpool(tmp_path, max_files=100)
+    await _run_tick(handler, spool, RunnerState(assignment=assignment, assignment_version="v1"))
+    # A restart: a new process has no record of its last runs.
+    await _run_tick(handler, spool, RunnerState(assignment=assignment, assignment_version="v1"))
+
+    assert _posted_refs(posted) == [["overdue"], ["overdue"]]
+
+
+async def test_run_now_and_a_waiting_state_change_bring_a_counted_check_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_loop, "execute_work_item", _fake_execute)
+    now = datetime.now(UTC)
+    ran = now - timedelta(minutes=5)
+    posted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(304)
+        posted.append(request.content.decode())
+        return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
+
+    state = RunnerState(
+        assignment=RunnerAssignment(
+            assignment_version="v2",
+            items=[
+                # meho sensor run: MEHO made the check due now.
+                _due_item("run-now", now - timedelta(seconds=1)),
+                # A waiting state change: the retry is due 30 seconds after the last run.
+                _due_item("retry", ran + timedelta(seconds=30)),
+                # The next daily run: not due yet.
+                _due_item("daily", ran + timedelta(days=1)),
+            ],
+        ),
+        assignment_version="v2",
+        last_run={"run-now": ran, "retry": ran, "daily": ran},
+    )
+    await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
+    await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
+
+    # Each ran once for its due time; the daily interval holds until MEHO sends a new one.
+    assert _posted_refs(posted) == [["run-now", "retry"]]
+
+
+async def test_the_retry_file_holds_no_secret_value_of_a_counted_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meho_backplane.runner import executor
+
+    async def answer(_operator: object, _target: object, _params: object) -> object:
+        return {"password": "hunter2xyz", "count": 3}
+
+    answer.__module__ = "meho_backplane.connectors.fake.ops"
+    monkeypatch.setattr(executor, "import_handler", lambda _ref: answer)
+    item = _due_item("sensor-1", datetime.now(UTC) - timedelta(seconds=1)).model_copy(
+        update={"handler_ref": "meho_backplane.connectors.fake.ops.read"}
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(304)
+        return httpx.Response(503)
+
+    state = RunnerState(
+        assignment=RunnerAssignment(assignment_version="v1", items=[item]),
+        assignment_version="v1",
+    )
+    spool = ResultSpool(tmp_path, max_files=100)
+    await _run_tick(handler, spool, state)
+
+    spooled = [batch.model_dump_json() for _path, batch in spool.load_oldest_first()]
+    assert spooled, "the failed post is kept in the retry file"
+    assert all("hunter2xyz" not in text for text in spooled)
+    assert all('"count":3' in text for text in spooled)

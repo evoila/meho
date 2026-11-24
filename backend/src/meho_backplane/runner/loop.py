@@ -97,11 +97,19 @@ class RunnerState:
 def _is_due(item: RunnerWorkItem, last_run: datetime | None, now: datetime) -> bool:
     """True when *item* should run at *now*.
 
-    An item without a schedule runs on every tick. A scheduled item runs on
-    its first tick, then again once its interval has passed or its cron
-    expression has a match after the last run. A cron expression the runner
-    cannot read runs the item on every tick, so the check still reports.
+    An item without a schedule runs on every tick. An item with a
+    ``next_due_at`` that this runner has not run since that time runs once
+    that time has come: on the first tick, after a restart, after
+    ``meho sensor run`` and for the shorter retry of a waiting state change.
+    After that run, and for a scheduled item without a ``next_due_at``, the
+    item runs again once its interval has passed or its cron expression has
+    a match after the last run, until MEHO sends a new due time. A cron
+    expression the runner cannot read runs the item on every tick, so the
+    check still reports.
     """
+    due_at = item.next_due_at
+    if due_at is not None and (last_run is None or last_run < due_at):
+        return due_at <= now
     if last_run is None:
         return True
     if item.cron_expr:

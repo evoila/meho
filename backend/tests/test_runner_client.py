@@ -233,3 +233,16 @@ async def test_post_results_without_a_refused_list_returns_none_refused() -> Non
 
     async with _client(httpx.MockTransport(handler)) as client:
         assert await client.post_results(RunnerResultBatch(runner_id="runner-7", results=[])) == []
+
+
+async def test_client_names_that_it_runs_counted_checks_on_their_schedule() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(304)
+
+    async with _client(httpx.MockTransport(handler)) as client:
+        await client.fetch_assignment(known_version="digest-abc")
+
+    assert captured[0].headers[wire.FEATURES_HEADER] == wire.FEATURE_SCHEDULED_CHECKS

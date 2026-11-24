@@ -119,6 +119,7 @@ class RunnerClient:
                 "Authorization": f"Bearer {token}",
                 wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
                 PACKAGE_SET_HEADER: local_package_set().digest,
+                wire.FEATURES_HEADER: wire.FEATURE_SCHEDULED_CHECKS,
             },
             timeout=httpx.Timeout(timeout),
             transport=transport,

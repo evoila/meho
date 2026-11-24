@@ -5983,8 +5983,9 @@ class RunnerCheckResult(Base):
     # ``_RUNNER_RESULT_STATUSES``.
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # The handler's structured payload (a failed probe is still a result,
-    # not a runner error). Nullable: refused/error rows carry none.
-    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+    # not a runner error); a list for an operation that answers with a list.
+    # Nullable: refused/error rows carry none.
+    result_payload: Mapped[dict[str, object] | list[object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
         default=None,

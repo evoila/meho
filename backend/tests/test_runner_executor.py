@@ -17,10 +17,13 @@ import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.checks.auth_park import AUTH_FAILED_ERROR_CODE
+from meho_backplane.runner import executor
 from meho_backplane.runner.executor import _verify_remote_write_signature, execute_work_item
 from meho_backplane.runner.wire import (
     ResolvedTargetDescriptor,
@@ -340,3 +343,96 @@ async def test_edge_allowlist_gate_crossed_when_config_matches(
     assert result.status == "refused"
     assert "allowlist" not in (result.error or "")
     assert "wrapped credential" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Checks that MEHO counts: login refusals, list answers, secret cleanup
+# ---------------------------------------------------------------------------
+
+
+def _counted_item(check_ref: str = "sensor-1") -> RunnerWorkItem:
+    """The work item of a check MEHO counts: it carries a due time."""
+    return _tcp_check_item(host="127.0.0.1", port=9, check_ref=check_ref).model_copy(
+        update={
+            "handler_ref": "meho_backplane.connectors.fake.ops.read",
+            "interval_seconds": 60,
+            "next_due_at": datetime.now(UTC),
+        }
+    )
+
+
+def _use_handler(monkeypatch: pytest.MonkeyPatch, handler: object) -> None:
+    handler.__module__ = "meho_backplane.connectors.fake.ops"  # type: ignore[attr-defined]
+    monkeypatch.setattr(executor, "import_handler", lambda _ref: handler)
+
+
+@pytest.mark.parametrize("status_code", [401, 440])
+async def test_an_http_login_refusal_gets_the_login_error_code(
+    monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    async def handler(_operator: object, _target: object, _params: object) -> object:
+        request = httpx.Request("GET", "https://site.example/api")
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+    _use_handler(monkeypatch, handler)
+
+    result = await execute_work_item(_counted_item())
+
+    assert result.status == "error"
+    assert result.error_code == AUTH_FAILED_ERROR_CODE
+
+
+async def test_another_http_error_gets_no_login_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(_operator: object, _target: object, _params: object) -> object:
+        request = httpx.Request("GET", "https://site.example/api")
+        response = httpx.Response(500, request=request)
+        raise httpx.HTTPStatusError("broken", request=request, response=response)
+
+    _use_handler(monkeypatch, handler)
+
+    result = await execute_work_item(_counted_item())
+
+    assert result.status == "error"
+    assert result.error_code is None
+
+
+async def test_a_list_answer_of_a_counted_check_is_sent_as_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(_operator: object, _target: object, _params: object) -> object:
+        return [{"name": "node-1", "running": True}, {"name": "node-2", "running": False}]
+
+    _use_handler(monkeypatch, handler)
+
+    counted = await execute_work_item(_counted_item())
+    plain = await execute_work_item(_counted_item().model_copy(update={"next_due_at": None}))
+
+    assert counted.status == "ok"
+    assert counted.result == [
+        {"name": "node-1", "running": True},
+        {"name": "node-2", "running": False},
+    ]
+    assert plain.status == "error"  # an older central MEHO accepts only an object
+
+
+async def test_the_answer_and_error_of_a_counted_check_are_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def answer(_operator: object, _target: object, _params: object) -> object:
+        return {"password": "hunter2xyz", "count": 3}
+
+    _use_handler(monkeypatch, answer)
+    ok = await execute_work_item(_counted_item())
+
+    async def fail(_operator: object, _target: object, _params: object) -> object:
+        raise RuntimeError('body {"password": "hunter2xyz"} was refused')
+
+    _use_handler(monkeypatch, fail)
+    failed = await execute_work_item(_counted_item())
+
+    assert "hunter2xyz" not in ok.model_dump_json()
+    assert isinstance(ok.result, dict) and ok.result["count"] == 3
+    assert "hunter2xyz" not in failed.model_dump_json()

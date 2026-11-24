@@ -140,8 +140,19 @@ def _made_up_part(label: str) -> str:
         ("\\", True),
         ("?", True),
         ("#", True),
+        ("%20", True),
+        ("%41", True),
     ],
-    ids=["slash", "one-part", "encoded-slash", "backslash", "question-mark", "number-sign"],
+    ids=[
+        "slash",
+        "one-part",
+        "encoded-slash",
+        "backslash",
+        "question-mark",
+        "number-sign",
+        "encoded-space",
+        "encoded-letter",
+    ],
 )
 async def test_the_warning_shows_only_the_first_part_of_the_path(
     monkeypatch: pytest.MonkeyPatch, border: str, two_parts: bool
@@ -149,6 +160,8 @@ async def test_the_warning_shows_only_the_first_part_of_the_path(
     first = _made_up_part("first")
     second = _made_up_part("second")
     ref = f"{first}{border}{second}" if two_parts else first
+    if border.startswith("%") and border != "%2F":
+        ref = f"{ref}/{_made_up_part('third')}"
 
     creds, captured = await _read(monkeypatch, _Target(secret_ref=ref), _operator())
 

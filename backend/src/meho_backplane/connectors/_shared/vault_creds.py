@@ -95,7 +95,6 @@ import re
 import time
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
-from urllib.parse import unquote
 
 import hvac.exceptions
 import requests.exceptions
@@ -881,12 +880,13 @@ _FOLDER_WARNING_PART_BORDER = re.compile(r"[/\\%?#]+")
 def _folder_warning_prefix(store_ref: str) -> str:
     """Cut *store_ref* to its first part for the folder warning.
 
-    A slash, a backslash, a percent sign, a question mark and a number sign
-    each end a part, also after one percent decoding. ``targets/vc-01``
-    becomes ``targets/…``. A path with one part becomes ``…``, so the log
-    never holds the whole secret name.
+    The path is split as it is stored, with no decoding. A slash, a
+    backslash, a percent sign, a question mark and a number sign each end a
+    part. ``targets/vc-01`` becomes ``targets/…`` and ``a%20b/c`` becomes
+    ``a/…``. A path with one part becomes ``…``, so the log never holds the
+    whole secret name.
     """
-    parts = [p for p in _FOLDER_WARNING_PART_BORDER.split(unquote(store_ref.strip())) if p]
+    parts = [p for p in _FOLDER_WARNING_PART_BORDER.split(store_ref.strip()) if p]
     return f"{parts[0]}/…" if len(parts) > 1 else "…"
 
 

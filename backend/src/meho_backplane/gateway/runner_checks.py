@@ -74,7 +74,6 @@ from meho_backplane.checks.events import publish_sensor_changed, publish_sensor_
 from meho_backplane.checks.investigate import (
     TransitionClaims,
     claim_transitions,
-    investigate_on_transition,
     is_worsening,
     send_claimed_transitions,
 )
@@ -119,8 +118,7 @@ class CountedSensor:
     """A Sensor whose state a result just set; see :func:`after_commit`.
 
     ``claims`` holds the Dashboard edges claimed in the transaction that set
-    the state. ``None`` when that claim failed: then :func:`after_commit`
-    runs the transition detector instead.
+    the state. ``None`` until :func:`_claim` sets it.
     """
 
     sensor_id: uuid.UUID
@@ -384,24 +382,18 @@ async def _claim(
 ) -> CountedSensor:
     """Claim the Dashboard edges of *counted* in the open transaction.
 
-    A failed claim is logged and leaves ``claims`` empty, so
-    :func:`after_commit` runs the transition detector after the commit.
+    A failed claim raises, so the whole transaction rolls back: the state,
+    the stored result and the claims of the other Dashboards. The runner
+    then sends the result again, and the next sweep marks a stale runner
+    again.
     """
-    try:
-        claims = await claim_transitions(
-            session,
-            sensor_id=counted.sensor_id,
-            tenant_id=tenant_id,
-            now=now,
-            acknowledgement_expired=counted.acknowledgement_expired,
-        )
-    except Exception:
-        _log.warning(
-            "runner_check_transition_claim_failed",
-            sensor_id=str(counted.sensor_id),
-            exc_info=True,
-        )
-        return counted
+    claims = await claim_transitions(
+        session,
+        sensor_id=counted.sensor_id,
+        tenant_id=tenant_id,
+        now=now,
+        acknowledgement_expired=counted.acknowledgement_expired,
+    )
     return replace(counted, claims=claims)
 
 
@@ -559,18 +551,12 @@ async def mark_runner_sensors_unknown(
 async def after_commit(tenant_id: uuid.UUID, counted: list[CountedSensor]) -> None:
     """Send the pause mails and the claimed Dashboard mails; start the investigator.
 
-    Call after the transaction that set the states has committed. A Sensor
-    whose claim failed gets the transition detector instead. Never raises.
+    Call after the transaction that set the states has committed. Never raises.
     """
     for entry in counted:
         if entry.park_notice is not None:
             schedule_sensor_parked_notification(entry.park_notice)
         if entry.claims is None:
-            await investigate_on_transition(
-                sensor_id=entry.sensor_id,
-                tenant_id=tenant_id,
-                acknowledgement_expired=entry.acknowledgement_expired,
-            )
             continue
         try:
             await send_claimed_transitions(tenant_id, entry.claims)

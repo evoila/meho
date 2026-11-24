@@ -603,7 +603,8 @@ async def _claim_dashboard_in_session(
     await _lock_dashboard_transition(
         session, _dashboard_transition_lock_key(tenant_id, dashboard_id)
     )
-    dashboard = await session.get(CheckDashboard, dashboard_id)
+    # Read fresh under the lock: the session may hold a copy loaded before it.
+    dashboard = await session.get(CheckDashboard, dashboard_id, populate_existing=True)
     if dashboard is None or dashboard.tenant_id != tenant_id:
         return _DashboardClaims(transition=None, member_notices=[])
     evaluations: list[_MemberRow] = [
@@ -941,6 +942,7 @@ async def _member_rows(
         .join(Sensor, Sensor.id == CheckDashboardSensor.sensor_id)
         .where(CheckDashboardSensor.dashboard_id == dashboard_id)
         .order_by(Sensor.name, Sensor.id)
+        .execution_options(populate_existing=True)
     )
     result = await session.execute(stmt)
     return [(link, sensor) for link, sensor in result.all()]

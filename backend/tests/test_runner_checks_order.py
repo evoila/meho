@@ -34,7 +34,12 @@ from meho_backplane.checks.dashboard_file_schemas import (
     DashboardImportRequest,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerCheckResult, Sensor
+from meho_backplane.db.models import (
+    CheckDashboard,
+    CheckDashboardSensor,
+    RunnerCheckResult,
+    Sensor,
+)
 from meho_backplane.gateway.assignment_service import materialize_assignment
 from meho_backplane.runner import wire
 from meho_backplane.settings import get_settings
@@ -94,10 +99,12 @@ def _wire(sensor_id: uuid.UUID, *, count: int, produced_at: datetime) -> wire.Ru
     )
 
 
-async def _count(results: list[wire.RunnerResult], received_at: datetime) -> None:
-    screened = runner_checks.screen_batch(results, received_at, runner_name="runner-a")
+async def _count(
+    results: list[wire.RunnerResult], received_at: datetime, *, runner_name: str = "runner-a"
+) -> None:
+    screened = runner_checks.screen_batch(results, received_at, runner_name=runner_name)
     await runner_checks.ingest_and_count(
-        tenant_id=_TENANT, runner_name="runner-a", screened=screened, received_at=received_at
+        tenant_id=_TENANT, runner_name=runner_name, screened=screened, received_at=received_at
     )
 
 
@@ -178,6 +185,108 @@ async def test_a_recovery_that_commits_before_the_first_mail_keeps_both_mails(
     assert (await _sensor(sensor_id)).last_state == "ok"
     assert len(investigations) == 1  # the warning starts the investigator
     assert len(notices) == 2  # the warning mail and the recovery mail
+
+
+# ---------------------------------------------------------------------------
+# Two runners on one dashboard, and a failed dashboard claim
+# ---------------------------------------------------------------------------
+
+
+async def _add_member(dashboard_id: uuid.UUID, sensor_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(CheckDashboardSensor(dashboard_id=dashboard_id, sensor_id=sensor_id))
+        await session.commit()
+
+
+async def _memo(dashboard_id: uuid.UUID) -> str | None:
+    async with get_sessionmaker()() as session:
+        row = await session.get(CheckDashboard, dashboard_id)
+        assert row is not None
+        return row.last_rollup_state
+
+
+@pytest.mark.asyncio
+async def test_two_runners_move_one_dashboard_from_green_to_degraded_to_critical(
+    switch_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runner B moves the dashboard to degraded while runner A holds an older copy of it."""
+    await _seed_identities()
+    sensor_a = await _seed_sensor(name="site-a")
+    sensor_b = await _seed_sensor(name="site-b", runner_name="runner-b")
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(Sensor)
+            .where(Sensor.id == sensor_b)
+            .values(
+                assertion={
+                    "select": {"path": "$.count"},
+                    "compare": {"type": "threshold", "op": "gt", "degraded": 10},
+                }
+            )
+        )
+        await session.commit()
+    dashboard_id = await _seed_dashboard(sensor_a, memo="ok")
+    await _add_member(dashboard_id, sensor_b)
+    notices: list[Any] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_kw: None)
+    monkeypatch.setattr(inv, "schedule_dashboard_notification", notices.append)
+    now = datetime.now(UTC)
+    real_runner_sensor = runner_checks._runner_sensor
+    held: list[Any] = []  # the session keeps only the copies something holds
+
+    async def b_counts_first(session: Any, **kwargs: Any) -> Any:
+        held.append(await session.get(CheckDashboard, dashboard_id))  # A's copy: still green
+        monkeypatch.setattr(runner_checks, "_runner_sensor", real_runner_sensor)
+        b_result = _wire(sensor_b, count=50, produced_at=now - timedelta(seconds=1))
+        await _count([b_result], now, runner_name="runner-b")
+        return await real_runner_sensor(session, **kwargs)
+
+    monkeypatch.setattr(runner_checks, "_runner_sensor", b_counts_first)
+    await _count([_wire(sensor_a, count=50, produced_at=now - timedelta(seconds=1))], now)
+
+    assert await _memo(dashboard_id) == "critical"
+    assert [(n.previous_state, n.current_state) for n in notices] == [
+        ("ok", "degraded"),
+        ("degraded", "critical"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_claim_on_the_second_dashboard_keeps_the_result_for_the_retry(
+    client: TestClient, switch_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_identities()
+    sensor_id = await _seed_sensor()
+    first = await _seed_dashboard(sensor_id, memo="ok")
+    second = await _seed_dashboard(sensor_id, memo="ok", name="site-two")
+    notices: list[Any] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_kw: None)
+    monkeypatch.setattr(inv, "schedule_dashboard_notification", notices.append)
+    real_claim = inv._claim_dashboard_in_session
+    calls = 0
+
+    async def second_claim_fails(session: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("claim failed")
+        return await real_claim(session, **kwargs)
+
+    monkeypatch.setattr(inv, "_claim_dashboard_in_session", second_claim_fails)
+    result = _result(sensor_id, payload={"count": 50})
+
+    with pytest.raises(RuntimeError, match="claim failed"):
+        _post(client, _RUNNER_A_ID, "runner-a", result)
+
+    assert await _memo(first) == "ok" and await _memo(second) == "ok"
+    assert (await _sensor(sensor_id)).last_state == "ok"
+    assert notices == []
+
+    retry = _post(client, _RUNNER_A_ID, "runner-a", result)  # the runner sends it again
+
+    assert retry.json() == {"accepted": 1, "duplicates": 0}
+    assert await _memo(first) == "critical" and await _memo(second) == "critical"
+    assert {n.dashboard_id for n in notices} == {first, second}
 
 
 # ---------------------------------------------------------------------------

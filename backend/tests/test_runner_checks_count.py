@@ -186,14 +186,16 @@ async def _stored_count() -> int:
         return len((await session.execute(select(RunnerCheckResult))).scalars().all())
 
 
-async def _seed_dashboard(sensor_id: uuid.UUID, *, memo: str | None) -> uuid.UUID:
+async def _seed_dashboard(
+    sensor_id: uuid.UUID, *, memo: str | None, name: str = "site"
+) -> uuid.UUID:
     dashboard_id = uuid.uuid4()
     async with get_sessionmaker()() as session:
         session.add(
             CheckDashboard(
                 id=dashboard_id,
                 tenant_id=_TENANT,
-                name="site",
+                name=name,
                 description=None,
                 last_rollup_state=memo,
                 notify_email="ops@example.test",

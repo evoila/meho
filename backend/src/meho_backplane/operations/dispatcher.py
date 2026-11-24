@@ -554,7 +554,7 @@ from meho_backplane.redaction import (
 from meho_backplane.redaction.call_secrets import (
     bind_call_secrets,
     collect_param_secret_values,
-    marked_secret_names,
+    marked_secret_paths,
     reset_call_secrets,
     scrub_call_secrets_tree,
 )
@@ -1217,9 +1217,13 @@ async def _protect_secret_values(
         mark_answer_holds_secret()
     else:
         caller = redacted
-    return redaction.model_copy(
-        update={"raw": fingerprint_hidden_values(redaction.raw, shown), "redacted": caller}
+    # Last: the values of the call, hidden by value. The secret-field rules
+    # above read the vendor's own field names first, and the outcome of the
+    # call was decided before this step.
+    stored, caller = await asyncio.to_thread(
+        scrub_call_secrets_tree, (fingerprint_hidden_values(redaction.raw, shown), caller)
     )
+    return redaction.model_copy(update={"raw": stored, "redacted": caller})
 
 
 def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView | None:
@@ -2908,12 +2912,6 @@ def _apply_redaction_middleware(
         )
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
-    redaction = redaction.model_copy(
-        update={
-            "raw": scrub_call_secrets_tree(redaction.raw),
-            "redacted": scrub_call_secrets_tree(redaction.redacted),
-        }
-    )
     if classify_op(op_id) != "credential_mint":
         return redaction
     # An op that makes a new credential returns it to the caller, but the
@@ -4444,7 +4442,7 @@ async def _dispatch_now(
     # answer is replaced by value; the store reads of the call add to the set.
     _call_secrets_token = bind_call_secrets(
         collect_param_secret_values(
-            params, marked_names=marked_secret_names(descriptor.parameter_schema)
+            params, marked_paths=marked_secret_paths(descriptor.parameter_schema)
         )
     )
     # #3980: a person approved this run, so the internal steps of a

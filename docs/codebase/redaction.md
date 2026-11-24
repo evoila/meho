@@ -419,34 +419,55 @@ A call has a set of known secret values. The dispatcher opens the set when
 the call starts (`bind_call_secrets`) and closes it when the call ends. A step
 of a multi-step operation starts with the values of its parent. The set holds:
 
-* the values of the params under a secret name, at any depth, and under a
-  property that the operation's parameter schema marks as secret (`writeOnly`
-  or `format: password`);
+* the values of the params under a secret name, at any depth;
+* the `value` of a name/value pair whose `name` is a secret name
+  (`{"name": "PASSWORD", "value": "..."}`), the same rule the answer walk uses;
+* the values at a place the operation's parameter schema marks as secret
+  (`writeOnly` or `format: password`). The mark holds at its own path only
+  (`marked_secret_paths`): marking `login.value` does not hide `display.value`.
+  Local `$ref` links are followed;
 * the values MEHO reads from the secret store for the call: the secret-named
-  fields of the target's secret (`_resolve_and_load` in
-  `connectors/_shared/vault_creds.py`). A user name is not one of them.
+  fields under the names the connector reads, after the target's
+  `secret_field_map`, both as stored and with surrounding whitespace removed
+  (`_note_secret_fields` in `connectors/_shared/vault_creds.py`). A user name
+  is not one of them.
 
-Every place where vendor text leaves the connector layer replaces each known
-value with `[REDACTED:call_secret]`:
+The value pass runs last, after the rules that read the vendor's own field
+names and after MEHO decided the outcome of the call. So a vendor label that
+equals a known value cannot stop a field-name rule, and a known value cannot
+change whether a multi-step operation failed. Every place where vendor text
+leaves the connector layer replaces each known value with
+`[REDACTED:call_secret]`:
 
 | Place | Where |
 | --- | --- |
-| The answer and the audit row of a success | `_apply_redaction_middleware` (the raw copy and the redacted copy) |
+| The answer and the audit row of a success, and of a multi-step error | end of `_protect_secret_values` |
 | The error text, `extras` (with `upstream_message`) and `result` of an error | `redact_error_result` |
-| The request and response bodies and headers of a stored trace | `redact_span` |
+| A vendor or exception text that is cut to a length | `_sanitize_free_text` and the Vault error texts, before the cut |
+| The `audit_*` fields a handler adds to the audit row | `_add_handler_extras_and_error` |
+| The whole stored span: name, status and every attribute (URL, headers, bodies, reasons) | `_CaptureScope.add` |
+
+The pass covers strings, keys and numbers. A key that becomes the mark gets a
+counter at its end when it would match another key, so no entry is lost. A
+number that holds a known value becomes the mark as text.
 
 A value is found in the forms a vendor may send back: as it is, JSON-escaped
 (once and twice, with and without `\/` and `\u` escapes), percent-encoded
-(`%20` and `+`, upper and lower case), and as base64 of the whole value
-(standard and URL-safe, with and without padding). Where two values overlap,
-or one is a part of the other, the matching spans are merged first, so no
-part of either value stays. A value shorter than four characters is not
-known: it would hide parts of ordinary words.
+(`%20` and `+`, with `/` encoded or kept, upper and lower case), and as base64
+of the whole value (standard and URL-safe, with and without padding). A value
+shorter than four characters is not known: it would hide parts of ordinary
+words.
 
-Cost: a call with no known value does no work at all. Otherwise each string
-of the answer is searched once with one pattern, and only a string with a hit
-is rewritten. Only strings are searched; a number or a key is not. There is
-no size cut.
+Matcher: one pattern holds every form, longest first, inside a look-ahead,
+so one scan finds each place where a form starts, also inside an earlier hit.
+The spans are merged as the scan goes, so two values that overlap, or where
+one is a part of the other, leave no part. The pattern is built without
+Python's pattern cache (`re._compiler.compile`), so the values leave memory
+with the call.
+
+Cost: a call with no known value does no work at all. Otherwise each string,
+key and number of the answer is scanned once, and only one with a hit is
+rewritten. There is no size cut.
 
 ## Action semantics
 

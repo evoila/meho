@@ -59,6 +59,7 @@ from meho_backplane.operations.audit_row_safe import (
 )
 from meho_backplane.operations.caller_gone import caller_gone_at
 from meho_backplane.policy.stamp import RuleStamp
+from meho_backplane.redaction.call_secrets import scrub_call_secrets_tree
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
@@ -691,7 +692,9 @@ def _add_handler_extras_and_error(
     # a default (e.g. a future per-op result_status override); the
     # default keys are documented + load-bearing for audit consumers,
     # so this layering is the explicit knob, not an accidental coupling.
-    payload.update(_resolve_audit_extras_from_contextvars())
+    # A handler can put vendor text here (a file before and after a change),
+    # so the secret values of the call are hidden in it too.
+    payload.update(scrub_call_secrets_tree(_resolve_audit_extras_from_contextvars()))
     # The op that ran, not a route's own label (e.g. agent.run) still bound.
     payload.update(op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor))
     # #2680: the structured error envelope is authoritative for an error

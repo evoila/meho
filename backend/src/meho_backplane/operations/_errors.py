@@ -67,6 +67,7 @@ from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
 )
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -203,6 +204,8 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
         return _TEXT_WITHHELD
+    # The secret values of the call go before the cut, so no part of one stays.
+    redacted = scrub_call_secrets(redacted)
     if len(redacted) > cap:
         return redacted[:cap] + "...<truncated>"
     return redacted
@@ -3062,7 +3065,7 @@ def result_connector_vault_forbidden(
             "convention."
         )
         # Target-less denial: the raw Vault text is the only detail.
-        msg = str(exc)
+        msg = scrub_call_secrets(str(exc))
         if len(msg) > _EXC_MESSAGE_CAP:
             msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
         if msg:
@@ -3154,7 +3157,7 @@ def result_connector_vault_write_forbidden(
     secret material — and tails the operator-facing string under the
     :data:`_EXC_MESSAGE_CAP` discipline.
     """
-    msg = str(exc)
+    msg = scrub_call_secrets(str(exc))
     if len(msg) > _EXC_MESSAGE_CAP:
         msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
     path_clause = f" on {write_path!r}" if write_path else ""

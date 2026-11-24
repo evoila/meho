@@ -16,44 +16,38 @@ import base64
 import json
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import UTC, datetime
-from typing import Any, ClassVar
-from uuid import UUID
+from collections.abc import Callable
+from typing import Any
 
-import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared import credential_backend, vault_creds
-from meho_backplane.connectors.adapters import HttpConnector
-from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.flight_recorder import capture
+from meho_backplane.flight_recorder.store import SpanInput
 from meho_backplane.redaction import call_secrets
 from meho_backplane.redaction.call_secrets import (
     CALL_SECRET_MARKER,
     CallSecrets,
     bind_call_secrets,
     collect_param_secret_values,
-    marked_secret_names,
+    marked_secret_paths,
     reset_call_secrets,
     scrub_call_secrets,
 )
 from meho_backplane.redaction.flight_recorder import redact_span
-from meho_backplane.settings import get_settings
+from tests._call_secret_dispatch import (
+    READ_OP,
+    WRITE_OP,
+    http_error,
+    operator,
+    required_settings_env,
+    reset_module_state,
+    run_dispatch,
+)
+
+__all__ = ["required_settings_env", "reset_module_state"]
 
 _SECRET = "quokka-" + "7781-zebra-pass"
-_PRODUCT = "echodemo"
-_VERSION = "1"
-_TENANT = UUID("00000000-0000-0000-0000-00000000b787")
-_WRITE_OP = "POST:/api/v1/accounts"
-_READ_OP = "GET:/api/v1/accounts"
 
 
 def _forms(value: str) -> dict[str, str]:
@@ -142,14 +136,14 @@ def test_outside_a_call_nothing_is_hidden() -> None:
 
 def test_a_call_with_no_secret_value_does_no_scanning(monkeypatch: pytest.MonkeyPatch) -> None:
     searches = 0
-    real = CallSecrets.has_value_in
+    real = CallSecrets.scrub
 
-    def counting(self: CallSecrets, text: str) -> bool:
+    def counting(self: CallSecrets, text: str) -> str:
         nonlocal searches
         searches += 1
         return real(self, text)
 
-    monkeypatch.setattr(CallSecrets, "has_value_in", counting)
+    monkeypatch.setattr(CallSecrets, "scrub", counting)
     token = bind_call_secrets(collect_param_secret_values({"name": "demo", "size": 3}))
     try:
         out = call_secrets.scrub_call_secrets_tree({"a": ["x", "y"], "b": "z"})
@@ -166,10 +160,14 @@ def test_the_values_come_from_secret_names_and_marked_fields() -> None:
             "seed": {"type": "string", "writeOnly": True},
             "other": {"type": "string", "format": "password"},
             "plain": {"type": "string"},
+            "items": {"type": "array", "items": {"$ref": "#/components/schemas/Item"}},
+        },
+        "components": {
+            "schemas": {"Item": {"properties": {"seed": {"type": "string", "writeOnly": True}}}}
         },
     }
-    marked = marked_secret_names(schema)
-    assert marked == frozenset({"seed", "other"})
+    marked = marked_secret_paths(schema)
+    assert marked == frozenset({("seed",), ("other",), ("items", "seed")})
     params = {
         "plain": "keep-this-one",
         "password": "flat-secret-1",
@@ -178,7 +176,7 @@ def test_the_values_come_from_secret_names_and_marked_fields() -> None:
         "flag": True,
         "other": 123456,
     }
-    values = set(collect_param_secret_values(params, marked_names=marked))
+    values = set(collect_param_secret_values(params, marked_paths=marked))
     assert values == {"flat-secret-1", "nested-secret-2", "marked-secret-3", "123456"}
 
 
@@ -202,11 +200,16 @@ def test_a_step_starts_with_the_values_of_its_parent() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _scope() -> Any:
+    return capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+
+
 def test_the_stored_trace_holds_no_value_of_the_call() -> None:
+    scope = _scope()
     token = bind_call_secrets([_SECRET])
     try:
         span = redact_span(
-            op_id=_READ_OP,
+            op_id=READ_OP,
             method="POST",
             request_body={"note": "ok"},
             response_body={
@@ -215,17 +218,26 @@ def test_the_stored_trace_holds_no_value_of_the_call() -> None:
             },
             response_content_type="application/json",
         )
+        scope.add(
+            SpanInput(
+                span_kind="vendor_call",
+                name="POST /api",
+                started_at=capture.now_utc(),
+                attributes={"response_body": span.response_body},
+            )
+        )
     finally:
         reset_call_secrets(token)
-    assert _SECRET not in json.dumps(span.response_body)
-    assert _forms(_SECRET)["percent"] not in json.dumps(span.response_body)
-    assert CALL_SECRET_MARKER in json.dumps(span.response_body)
+    stored = json.dumps(scope.spans[0].attributes)
+    assert _SECRET not in stored
+    assert _forms(_SECRET)["percent"] not in stored
+    assert CALL_SECRET_MARKER in stored
 
 
 def test_the_trace_is_unchanged_without_a_value() -> None:
     body = {"message": "bad value", "n": 3}
     span = redact_span(
-        op_id=_READ_OP, method="POST", response_body=body, response_content_type="application/json"
+        op_id=READ_OP, method="POST", response_body=body, response_content_type="application/json"
     )
     assert span.response_body == body
 
@@ -256,7 +268,7 @@ async def test_values_read_from_the_store_are_known_for_the_call(
     assert credential_backend is not None
     token = bind_call_secrets([])
     try:
-        creds = await vault_creds.load_basic_credentials(_StoreTarget(), _operator())  # type: ignore[arg-type]
+        creds = await vault_creds.load_basic_credentials(_StoreTarget(), operator())  # type: ignore[arg-type]
         assert creds["password"] == _SECRET
         out = scrub_call_secrets(f"{_SECRET} service-account-user store-note-text")
     finally:
@@ -270,140 +282,7 @@ async def test_values_read_from_the_store_are_known_for_the_call(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _reset_module_state() -> Iterator[None]:
-    reset_dispatcher_caches()
-    clear_registry()
-    yield
-    reset_dispatcher_caches()
-    clear_registry()
-
-
-@pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    async with get_sessionmaker()() as s:
-        yield s
-
-
-def _http_error(status: int, body: Any) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://appliance.example.test/api/v1/accounts")
-    if isinstance(body, str):
-        response = httpx.Response(status, text=body, request=request)
-    else:
-        response = httpx.Response(status, json=body, request=request)
-    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
-
-
-class _EchoConnector(HttpConnector):
-    """Every call fails with, or answers with, what :attr:`behave` returns."""
-
-    product = _PRODUCT
-    accepts_ingested_operations = True
-    version = _VERSION
-    impl_id = "echodemo-rest"
-    supported_version_range = ">=1,<2"
-    priority = 1
-
-    behave: ClassVar[Callable[[], Any]]
-
-    def _go(self) -> Any:
-        outcome = type(self).behave()
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome
-
-    async def _request_json(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
-        return self._go()
-
-    async def _post_json(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
-        return self._go()
-
-    async def fingerprint(  # type: ignore[override]
-        self, target: Any, operator: Operator | None = None
-    ) -> FingerprintResult:
-        raise NotImplementedError
-
-    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
-        raise NotImplementedError
-
-    async def execute(  # type: ignore[override]
-        self, target: Any, op_id: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-
-class _Fingerprint:
-    version = _VERSION
-
-
-class _DispatchTarget:
-    def __init__(self) -> None:
-        self.product = _PRODUCT
-        self.fingerprint = _Fingerprint()
-        self.preferred_impl_id: str | None = None
-        self.id = uuid.uuid4()
-        self.name = "appliance-a"
-        self.host = "appliance.example.test"
-        self.port = 443
-        self.auth_model = "shared_service_account"
-        self.secret_ref: str | None = None
-
-
-def _operator() -> Operator:
-    return Operator(
-        sub="op-echo",
-        name="Test Operator",
-        email=None,
-        raw_jwt="<test-raw-jwt>",
-        tenant_id=_TENANT,
-        tenant_role=TenantRole.OPERATOR,
-    )
-
-
-async def _seed(session: AsyncSession, op_id: str, method: str, schema: dict[str, Any]) -> None:
-    session.add(
-        EndpointDescriptor(
-            id=uuid.uuid4(),
-            tenant_id=None,
-            product=_PRODUCT,
-            version=_VERSION,
-            impl_id=_EchoConnector.impl_id,
-            op_id=op_id,
-            source_kind="ingested",
-            method=method,
-            path="/api/v1/accounts",
-            handler_ref=None,
-            summary="Made-up op.",
-            description="Made-up op with no masking code of its own.",
-            tags=["accounts"],
-            parameter_schema=schema,
-            response_schema=None,
-            llm_instructions=None,
-            safety_level="safe",
-            requires_approval=False,
-            is_enabled=True,
-            embedding=[0.1] * 384,
-            custom_description=None,
-            custom_notes=None,
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
-        )
-    )
-    await session.commit()
-
-
 async def _run(
-    session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     *,
     op_id: str,
@@ -411,24 +290,10 @@ async def _run(
     params: dict[str, Any],
     schema: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    monkeypatch.setattr(_EchoConnector, "behave", staticmethod(behave), raising=False)
-    register_connector_v2(
-        product=_PRODUCT, version=_VERSION, impl_id=_EchoConnector.impl_id, cls=_EchoConnector
+    result, row = await run_dispatch(
+        monkeypatch, op_id=op_id, behave=behave, params=params, schema=schema
     )
-    method = "GET" if op_id.startswith("GET") else "POST"
-    await _seed(session, op_id, method, schema or {"type": "object", "additionalProperties": True})
-    result = await dispatch(
-        operator=_operator(),
-        connector_id=f"{_EchoConnector.impl_id}-{_VERSION}",
-        op_id=op_id,
-        target=_DispatchTarget(),
-        params=params,
-    )
-    assert get_or_create_connector_instance(_EchoConnector) is not None
-    async with get_sessionmaker()() as fresh:
-        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
-    assert len(rows) == 1
-    return result, rows[0].payload
+    return result, {"payload": row.payload, "raw_payload": row.raw_payload}
 
 
 def _everything(result: Any, payload: dict[str, Any]) -> str:
@@ -454,16 +319,15 @@ _SCHEMA = {
     "additionalProperties": True,
 }
 _FAILS: list[tuple[str, Callable[[], Any]]] = [
-    ("403-json", lambda: _http_error(403, _echo_body())),
-    ("400-json", lambda: _http_error(400, _echo_body())),
-    ("403-text", lambda: _http_error(403, f"Forbidden: {_SECRET} / {_forms(_SECRET)['percent']}")),
+    ("403-json", lambda: http_error(403, _echo_body())),
+    ("400-json", lambda: http_error(400, _echo_body())),
+    ("403-text", lambda: http_error(403, f"Forbidden: {_SECRET} / {_forms(_SECRET)['percent']}")),
 ]
 
 
 @pytest.mark.parametrize(("_shape", "params"), _PARAM_SHAPES, ids=[n for n, _ in _PARAM_SHAPES])
 @pytest.mark.parametrize(("_name", "fail"), _FAILS, ids=[n for n, _ in _FAILS])
 async def test_an_error_that_repeats_the_value_shows_it_nowhere(
-    session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     _shape: str,
     params: dict[str, Any],
@@ -471,7 +335,7 @@ async def test_an_error_that_repeats_the_value_shows_it_nowhere(
     fail: Callable[[], Any],
 ) -> None:
     result, payload = await _run(
-        session, monkeypatch, op_id=_WRITE_OP, behave=fail, params=params, schema=_SCHEMA
+        monkeypatch, op_id=WRITE_OP, behave=fail, params=params, schema=_SCHEMA
     )
     assert result.status == "error"
     text = _everything(result, payload)
@@ -482,13 +346,12 @@ async def test_an_error_that_repeats_the_value_shows_it_nowhere(
 
 
 async def test_a_query_value_under_a_secret_name_is_hidden_on_a_read(
-    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, payload = await _run(
-        session,
         monkeypatch,
-        op_id=_READ_OP,
-        behave=lambda: _http_error(400, _echo_body()),
+        op_id=READ_OP,
+        behave=lambda: http_error(400, _echo_body()),
         params={"api_key": _SECRET},
     )
     assert result.status == "error"
@@ -496,12 +359,11 @@ async def test_a_query_value_under_a_secret_name_is_hidden_on_a_read(
 
 
 async def test_a_success_answer_that_repeats_the_value_shows_it_nowhere(
-    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, payload = await _run(
-        session,
         monkeypatch,
-        op_id=_WRITE_OP,
+        op_id=WRITE_OP,
         behave=lambda: {"echo": {"note": f"saved {_SECRET}"}, "id": 7},
         params={"password": _SECRET},
     )
@@ -511,13 +373,12 @@ async def test_a_success_answer_that_repeats_the_value_shows_it_nowhere(
 
 
 async def test_an_answer_with_no_secret_value_is_the_same(
-    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answer = {"items": [{"name": "alpha", "size": 3}], "note": "all good"}
     result, _ = await _run(
-        session,
         monkeypatch,
-        op_id=_WRITE_OP,
+        op_id=WRITE_OP,
         behave=lambda: dict(answer),
         params={"password": _SECRET},
     )
@@ -525,12 +386,11 @@ async def test_an_answer_with_no_secret_value_is_the_same(
 
 
 async def test_a_mapping_under_a_secret_name_is_walked_by_its_keys(
-    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, _ = await _run(
-        session,
         monkeypatch,
-        op_id=_WRITE_OP,
+        op_id=WRITE_OP,
         behave=lambda: {"stored_path": "labs/gen-user", "note": f"saved {_SECRET}"},
         params={"generate_password": {"path": "labs/gen-user", "password": _SECRET}},
     )

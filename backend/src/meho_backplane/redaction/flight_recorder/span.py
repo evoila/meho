@@ -28,7 +28,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from meho_backplane.redaction.call_secrets import scrub_call_secrets_tree
 from meho_backplane.redaction.flight_recorder.bodies import redact_body
 from meho_backplane.redaction.flight_recorder.families import classify_body_exclusion
 from meho_backplane.redaction.flight_recorder.headers import redact_headers
@@ -131,10 +130,10 @@ def redact_span(
     uncertain, reasons = merge_uncertainty(req_headers, resp_headers, req_body, resp_body)
 
     return SpanRedaction(
-        request_headers=scrub_call_secrets_tree(req_headers.value),
-        response_headers=scrub_call_secrets_tree(resp_headers.value),
-        request_body=scrub_call_secrets_tree(req_body.value),
-        response_body=scrub_call_secrets_tree(resp_body.value),
+        request_headers=req_headers.value,
+        response_headers=resp_headers.value,
+        request_body=req_body.value,
+        response_body=resp_body.value,
         body_recorded=body_recorded,
         uncertain=uncertain,
         reasons=reasons,

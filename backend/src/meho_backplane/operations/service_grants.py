@@ -119,7 +119,7 @@ from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 if TYPE_CHECKING:
-    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
     "CREDENTIAL_CARD_LINE",
@@ -438,7 +438,7 @@ def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
     A stored risk level outside the four ingest levels is left out (the
     shape's default is used), so such a row still gets its correction.
     """
-    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
     level = getattr(descriptor, "safety_level", "safe")
     return EndpointDescriptorProto(
@@ -450,7 +450,7 @@ def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
         tags=list(getattr(descriptor, "tags", None) or []),
         parameter_schema=dict(getattr(descriptor, "parameter_schema", None) or {}),
         response_schema=getattr(descriptor, "response_schema", None),
-        safety_level=cast("SafetyLevel", level if level in _PROTO_SAFETY_LEVELS else "safe"),
+        safety_level=cast(SafetyLevel, level if level in _PROTO_SAFETY_LEVELS else "safe"),
         requires_approval=bool(getattr(descriptor, "requires_approval", False)),
         op_class=getattr(descriptor, "op_class", None),
         llm_instructions=getattr(descriptor, "llm_instructions", None),

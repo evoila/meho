@@ -1059,10 +1059,11 @@ register_mcp_tool(
             "a `preview_hash`. It shows the plan as `proposed_effect` only "
             "when the plan can be built without contacting the target; "
             "otherwise `plan_shown` is false and `plan_note` says the plan "
-            "is shown on the approval request instead. An approval-gated op "
-            "that writes a credential (for example `vault.kv.put`) is NOT "
-            'previewable and stays `status="unavailable"`, so its secret '
-            "params never surface. Every preview whose op resolves (ok, "
+            "is shown on the approval request instead. An approval-gated "
+            "typed/composite op that writes a credential and is not "
+            "destructive (for example `vault.kv.put`) is NOT previewable and "
+            'stays `status="unavailable"`, so its secret params never '
+            "surface. Every preview whose op resolves (ok, "
             "unavailable, and the error statuses after the op lookup) also "
             "says the risk level and whether this call will wait for "
             "approval: `safety_level`, `requires_approval`, and "

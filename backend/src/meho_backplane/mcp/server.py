@@ -78,7 +78,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -1361,10 +1362,20 @@ def _note_request_usage_outcome(response: Response) -> None:
     note_request_fallback_status(_JSONRPC_ERROR_STATUS.get(code, 500))
 
 
+async def _until_answer_sent() -> AsyncIterator[AsyncExitStack[bool | None]]:
+    """Give the route a stack of blocks that stay open until the answer is sent.
+
+    FastAPI ends a ``scope="request"`` dependency after it sent the response.
+    """
+    async with AsyncExitStack() as stack:
+        yield stack
+
+
 @router.post("")
 async def mcp_dispatch(
     request: Request,
     operator: Operator = Depends(verify_mcp_jwt_and_bind),
+    until_sent: AsyncExitStack[bool | None] = Depends(_until_answer_sent, scope="request"),
 ) -> Response:
     """Dispatch a single JSON-RPC 2.0 request or notification.
 
@@ -1410,7 +1421,7 @@ async def mcp_dispatch(
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
-    response = await _dispatch_mcp_request(request, operator)
+    response = await _dispatch_mcp_request(request, operator, until_sent)
     _note_request_usage_outcome(response)
     return response
 
@@ -1460,7 +1471,9 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     return operator.model_copy(update=update) if update else operator
 
 
-async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
+async def _dispatch_mcp_request(
+    request: Request, operator: Operator, until_sent: AsyncExitStack[bool | None]
+) -> Response:
     """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
     # use it for RBAC filtering on tools/list / resources/templates/list
@@ -1523,46 +1536,54 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # method is not in the route catalog, so it is stored as unmatched.
     note_request_route(f"method:{jrpc.method}")
     # #3696: the body is fully read here, so the watcher can notice a
-    # caller that disconnects while a long tool call runs.
-    response = await _dispatch_watching_caller(request, jrpc, is_notification, operator)
+    # caller that disconnects while a long tool call runs. It watches until
+    # the answer is sent.
+    await until_sent.enter_async_context(_watch_call(request, jrpc))
+    response = await _dispatch_no_store(jrpc, is_notification, operator)
     issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return await _audit_session_open(request, jrpc, operator, response, issued=issued)
 
 
-async def _dispatch_watching_caller(
-    request: Request,
-    jrpc: JsonRpcRequest,
-    is_notification: bool,
-    operator: Operator,
-) -> Response:
-    """Run the handler while watching the caller; log a call that gets no answer.
+@asynccontextmanager
+async def _watch_call(request: Request, jrpc: JsonRpcRequest) -> AsyncIterator[None]:
+    """Watch the caller while the block runs; log a call that gets no answer.
 
-    The log line ``mcp_call_ended_without_answer`` is written once when the
-    call is cancelled, or when it ends after the caller has already gone.
-    A cancel is raised again after the log line.
+    The block covers the handler, the steps after it and the sending of the
+    answer. The log line ``mcp_call_ended_without_answer`` is written once
+    when the call is cancelled, or when it ends after the caller has already
+    gone. A cancel is raised again after the log line.
     """
     async with watch_caller(request.receive):
+        cancelled = False
         try:
-            response = await _dispatch_no_store(jrpc, is_notification, operator)
+            yield
         except asyncio.CancelledError:
-            _log_call_without_answer(
-                request, jrpc, "caller_gone" if caller_gone_at() else "cancelled"
-            )
+            cancelled = True
             raise
-        if caller_gone_at() is not None:
-            _log_call_without_answer(request, jrpc, "caller_gone")
-        return response
+        finally:
+            # No await between the end of the send and this check: the
+            # server also reports a disconnect once the answer is complete.
+            if caller_gone_at() is not None:
+                _log_call_without_answer(request, jrpc, "caller_gone")
+            elif cancelled:
+                _log_call_without_answer(request, jrpc, "cancelled")
 
 
 def _log_call_without_answer(request: Request, jrpc: JsonRpcRequest, reason: str) -> None:
     """Write the one log line for an MCP call that ended with no answer sent."""
     params = jrpc.params or {}
     tool = params.get("name") if jrpc.method == "tools/call" else None
-    session_id = request.headers.get("mcp-session-id")
+    # ``initialize`` carries no id yet; the id it was given is in the log context.
+    session_id = request.headers.get(
+        _MCP_SESSION_HEADER
+    ) or structlog.contextvars.get_contextvars().get("mcp_session_id")
+    short_id = session_id[:8] if session_id else None
     # The logger is resolved per call, so a test can capture the line.
     structlog.get_logger().warning(
         "mcp_call_ended_without_answer",
-        session=session_id[:8] if session_id else None,
+        session=short_id,
+        # Wins over the full id that the log context would add to this line.
+        mcp_session_id=short_id,
         method=jrpc.method,
         tool=tool if isinstance(tool, str) else None,
         reason=reason,

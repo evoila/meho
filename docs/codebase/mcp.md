@@ -2551,26 +2551,32 @@ with the test login override, so a closed connection can really show up:
   for each call and a pool of kept-open connections, and three pauses before
   the first calls (none, a short random one, and one just around the idle
   limit of a kept-open connection). It counts answers, JSON-RPC errors, HTTP
-  errors and closed connections. CI runs a small size. The big run is
+  errors and closed connections. Only a JSON-RPC response with the id of the
+  request counts as an answer or an error. CI runs a small size. The big run is
   `MEHO_MCP_PARALLEL_FULL=1 uv run pytest -s tests/test_mcp_parallel_first_calls.py`.
 * `backend/tests/test_mcp_parallel_first_calls_cases.py` checks the odd
   cases: a call refused by policy, a call that waits for approval, a call
-  that returns a result handle, and a client that closes during one call.
+  that returns a result handle, and a client that closes during one call
+  while another call still runs.
 
 The test found one cause. uvicorn closes an idle kept-open connection
 after 5 seconds, and a client that keeps connections for 5 seconds idle
 (httpx does) can send a new call just as the server closes it. The client
 then sees "Connection closed". The image now starts uvicorn with
 `--timeout-keep-alive 75`, so the client closes first. The test reads that
-value from `backend/Dockerfile`.
+value from the start command (`CMD`) in `backend/Dockerfile`.
 
 When the server stops a call before it sent the answer, it writes one log
 line, `mcp_call_ended_without_answer`. It holds the session id cut to its
-first 8 characters, the JSON-RPC method, the tool name (for `tools/call`),
+first 8 characters (also in the `mcp_session_id` field, which holds the full
+id on other lines), the JSON-RPC method, the tool name (for `tools/call`),
 and the reason: `cancelled`, or `caller_gone` when the client had already
 left. A cancel is raised again after the line. The line is written by
-`_dispatch_watching_caller` in `mcp/server.py`. The older
-`caller_gone_during_request` line is unchanged.
+`_watch_call` in `mcp/server.py`. It watches from the moment the request is
+read until the answer is sent, so it also covers the steps after the handler
+(for example the audit row of a new session). The older
+`caller_gone_during_request` line has the same form as before; on `/mcp` it
+now covers the same time.
 
 ## Request-size bounds
 

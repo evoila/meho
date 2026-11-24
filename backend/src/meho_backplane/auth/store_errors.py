@@ -11,6 +11,7 @@ replaced by a mark (:func:`store_text_for_log`, :func:`log_store_error`).
 from __future__ import annotations
 
 import re
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -28,6 +29,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "HEADER_ERROR_TEXT",
+    "HEADER_ERROR_UNSURE_TEXT",
     "STORE_ADDRESS_MARK",
     "STORE_FAILED_TEXT",
     "STORE_REFUSED_TEXT",
@@ -56,6 +58,11 @@ STORE_FAILED_TEXT: Final = "The secret store returned an error."
 #: What an answer says for an HTTP header error: its text can hold a token.
 HEADER_ERROR_TEXT: Final = "The request was not sent: an HTTP header value is not valid."
 
+#: What an answer says for a header error that may come after the request was sent.
+HEADER_ERROR_UNSURE_TEXT: Final = (
+    "An HTTP header is not valid. The request may have reached the server."
+)
+
 _TEXT_WITHHELD: Final = "<store text withheld>"
 
 #: A longer store text is withheld from the log, so the cleaning stays cheap.
@@ -72,6 +79,12 @@ _HOST_END: Final = r"(?![\w-]|\.[\w-])"
 
 #: A text that quotes an HTTP header: its value can be a store token.
 _HEADER_TEXT: Final = re.compile(r"\bheader (?:name|value)\b|\bheader part\b", re.IGNORECASE)
+
+#: The calls that check a header before anything is sent: Requests checks the
+#: headers when it prepares the request, ``http.client`` when it adds each one.
+_BEFORE_SEND_CALLS: Final = frozenset(
+    {"prepare_headers", "check_header_validity", "_validate_header_part", "putheader"}
+)
 
 _LOG_INPUT_LIMIT: Final = 8192
 _LOG_TEXT_CAP: Final = 2048
@@ -351,6 +364,16 @@ def _quotes_header(exc: BaseException) -> bool:
     return isinstance(exc, requests.exceptions.InvalidHeader) or bool(_HEADER_TEXT.search(str(exc)))
 
 
+def _header_error_before_send(exc: BaseException) -> bool:
+    """Say whether *exc* is a header error raised before the request was sent."""
+    if _HEADER_TEXT.search(str(exc)):
+        return True
+    return any(
+        frame.f_code.co_name in _BEFORE_SEND_CALLS
+        for frame, _ in traceback.walk_tb(exc.__traceback__)
+    )
+
+
 def has_store_detail(exc: BaseException) -> bool:
     """Say whether a traceback of *exc* would show the store's text, address or token."""
     for link in _chain(exc):
@@ -386,14 +409,17 @@ def text_without_store_detail(exc: BaseException) -> str:
     A store error becomes the sentence. So does the part of a wrapper's text
     that repeats the store error behind it. An HTTP header error, or an error
     caused by one, becomes a fixed sentence too, since its text can hold the
-    header's value. The store address is replaced in what is left. The caller
-    still runs its own redaction.
+    header's value. The sentence says the request was not sent only when the
+    header check that failed runs before sending. The store address is
+    replaced in what is left. The caller still runs its own redaction.
     """
     if _is_store_answer(exc):
         return _store_sentence(exc)
     links = _chain(exc)
-    if any(_quotes_header(link) for link in links):
-        return HEADER_ERROR_TEXT
+    header_errors = [link for link in links if _quotes_header(link)]
+    if header_errors:
+        before_send = any(_header_error_before_send(link) for link in header_errors)
+        return HEADER_ERROR_TEXT if before_send else HEADER_ERROR_UNSURE_TEXT
     text = str(exc)
     for link in links[1:]:
         if _is_store_answer(link):

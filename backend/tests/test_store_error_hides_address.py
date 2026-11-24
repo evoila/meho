@@ -9,7 +9,9 @@ import contextlib
 import json
 import re
 import secrets
+import socket
 import string
+import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -25,6 +27,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.store_errors import (
     _KNOWN_REASONS,
     HEADER_ERROR_TEXT,
+    HEADER_ERROR_UNSURE_TEXT,
     has_store_detail,
     hide_store_address,
     log_without_store_text,
@@ -1002,6 +1005,51 @@ async def test_a_header_error_through_the_dispatcher_answers_without_the_token()
     assert result.extras["error_code"] == "connector_error", result
     assert result.extras["exception_message"] == HEADER_ERROR_TEXT
     _assert_clean(result)
+
+
+def _answer_header_error() -> requests.exceptions.InvalidHeader:
+    """A real header error that Requests raises while it reads the server's answer."""
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def _answer() -> None:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 7\r\n\r\nhello"
+                )
+
+        thread = threading.Thread(target=_answer, daemon=True)
+        thread.start()
+        port = server.getsockname()[1]
+        try:
+            requests.post(f"http://127.0.0.1:{port}/v1/secret/data/x", data="{}", timeout=5)
+        except requests.exceptions.InvalidHeader as exc:
+            return exc
+        finally:
+            thread.join(timeout=5)
+    raise AssertionError("the answer was read")
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_header_error_in_the_answer_does_not_say_the_request_was_not_sent(
+    wrapped: bool,
+) -> None:
+    exc: BaseException = _answer_header_error()
+    if wrapped:
+        try:
+            raise RuntimeError("the store call failed") from exc
+        except RuntimeError as outer:
+            exc = outer
+
+    result = result_connector_error("vault.kv.write", exc, 1.0)
+
+    assert result.extras["exception_message"] == HEADER_ERROR_UNSURE_TEXT
+    assert "not sent" not in json.dumps(result.extras, default=str)
+    assert HEADER_ERROR_UNSURE_TEXT in preview_failure_reason(exc)
+    assert has_store_detail(exc)
 
 
 def test_a_traceback_stays_for_an_error_without_a_header() -> None:

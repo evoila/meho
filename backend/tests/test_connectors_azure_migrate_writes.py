@@ -42,6 +42,7 @@ from meho_backplane.connectors.azure.migrate_csv import MAX_CSV_BYTES, MAX_CSV_R
 from meho_backplane.connectors.azure.migrate_jobs import default_site_name, site_param
 from meho_backplane.connectors.azure.migrate_write_ops import WRITE_OPS
 from meho_backplane.connectors.azure.migrate_writes import MAX_MACHINES_PER_CALL
+from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.operations._validate import validate_params
 from tests._azure_fixtures import (
     ARM_HOST,
@@ -63,7 +64,7 @@ SITE = default_site_name(PROJECT)
 JOB = "example-job-01"
 BLOB_HOST = "example-import.blob.core.windows.net"
 #: The made-up upload link. Its signature must never leave MEHO.
-SIGNATURE = "MADEUPSIGNATUREVALUE"
+SIGNATURE = "madeup7value9q"
 LINK = f"https://{BLOB_HOST}/import-container/servers.csv?sv=2024-01-01&sig={SIGNATURE}"
 
 RG_PATH = f"/subscriptions/{SUB}/resourceGroups/{RG}"
@@ -1319,8 +1320,24 @@ def _shared_site(mock: respx.MockRouter, site_tags: dict[str, str]) -> _Import:
 
 
 def _error_fields(error: AzureRequestError) -> str:
-    """Every text an upload error carries: message, remediation and each field."""
-    return json.dumps([str(error), error.remediation, vars(error)], default=str)
+    """Every text an upload error carries: its own texts and the dispatcher's answer."""
+    answer = result_connector_error("azure.migrate.import.start", error, 1.0)
+    return json.dumps(
+        [str(error), error.remediation, vars(error), answer.model_dump(mode="json")],
+        default=str,
+    )
+
+
+#: A made-up Azure Storage error code for the refused upload answer.
+STORAGE_ERROR_CODE = "ExampleRefusal7"
+
+
+def _refused_upload_body() -> str:
+    """An Azure Storage refusal that names every part of the made-up upload link."""
+    return (
+        f"<Error><Code>{STORAGE_ERROR_CODE}</Code><Message>Refused {BLOB_HOST} "
+        f"import-container servers.csv {SIGNATURE}</Message></Error>"
+    )
 
 
 @pytest.mark.asyncio
@@ -1331,7 +1348,11 @@ async def test_every_refused_upload_is_sent_once_and_gives_the_fixed_upload_erro
     site_tags = {"owner": "example-team"}
     with respx.mock(assert_all_called=False) as mock:
         routes = _shared_site(mock, site_tags)
-        routes.upload.respond(status, headers={"Retry-After": "1"}, text="<Error/>")
+        routes.upload.respond(
+            status,
+            headers={"Retry-After": "1", "x-ms-error-code": STORAGE_ERROR_CODE},
+            text=_refused_upload_body(),
+        )
         with pytest.raises(AzureRequestError) as caught:
             await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
 
@@ -1343,7 +1364,14 @@ async def test_every_refused_upload_is_sent_once_and_gives_the_fixed_upload_erro
         )
         assert error.http_status == status
         text = _error_fields(error)
-        for part in (BLOB_HOST, "example-import", "import-container", "servers.csv", SIGNATURE):
+        for part in (
+            BLOB_HOST,
+            "example-import",
+            "import-container",
+            "servers.csv",
+            SIGNATURE,
+            STORAGE_ERROR_CODE,
+        ):
             assert part not in text
         assert SITE_PATH not in text
         assert _patch_bodies(routes.site_patch) == [

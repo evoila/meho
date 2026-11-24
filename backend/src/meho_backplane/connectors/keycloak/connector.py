@@ -112,7 +112,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.answer_realm import name_the_realm, with_realm_scalar
+from meho_backplane.connectors.keycloak.answer_realm import name_the_realm
 from meho_backplane.connectors.keycloak.managed_realm_check import ManagedRealmChecks
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
@@ -1558,7 +1558,7 @@ class KeycloakConnector(HttpConnector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
-                llm_instructions=with_realm_scalar(op.llm_instructions),
+                llm_instructions=op.llm_instructions,
             )
 
         _log.info(

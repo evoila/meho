@@ -20,11 +20,14 @@ operations that read or change one realm use the managed realm, so the field
 is always the managed realm. A target without a managed realm never gets
 here: the handler refuses it before it returns.
 
-A long list answer is reduced to a short summary and a link to the stored
-rows. :func:`with_realm_scalar` adds the field to the op's
-``result_scalars`` hint, so the summary keeps it whole, also when the name
-is long. With the switch off the answer has no such field, and the hint
-keeps nothing.
+A long answer is reduced to a short summary and a link to the stored result.
+The summary keeps the field whole, also when the name is long
+(:mod:`~meho_backplane.operations.required_fields`). With the switch off the
+summary is as before.
+
+The wrapper also makes every run check the realm's name anew
+(:mod:`~meho_backplane.connectors.keycloak.managed_realm_check`), in both
+states of the switch.
 """
 
 from __future__ import annotations
@@ -35,9 +38,10 @@ import os
 from typing import Any, Final
 
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.operations.required_fields import register_required_fields
 from meho_backplane.settings import parse_bool_env
 
-__all__ = ["REALM_FIELD", "answer_realm_on", "name_the_realm", "with_realm_scalar"]
+__all__ = ["REALM_FIELD", "answer_realm_on", "name_the_realm"]
 
 #: The field every Keycloak answer carries: the realm the call acted on.
 REALM_FIELD: Final = "managed_realm"
@@ -76,18 +80,9 @@ def name_the_realm[C: type](cls: C) -> C:
     return cls
 
 
-def with_realm_scalar(llm_instructions: dict[str, Any] | None) -> dict[str, Any]:
-    """Return *llm_instructions* with :data:`REALM_FIELD` in its ``result_scalars`` keys.
+def _required_fields() -> tuple[str, ...]:
+    """The field every shortened answer keeps while the switch is on."""
+    return (REALM_FIELD,) if answer_realm_on() else ()
 
-    The result reducer keeps the keys of this hint in the summary of a
-    reduced answer, outside the size limit of the other plain values. The
-    input is not changed.
-    """
-    instructions = dict(llm_instructions or {})
-    hint = dict(instructions.get("result_scalars") or {})
-    keys = list(hint.get("keys") or [])
-    if REALM_FIELD not in keys:
-        keys.append(REALM_FIELD)
-    hint["keys"] = keys
-    instructions["result_scalars"] = hint
-    return instructions
+
+register_required_fields("keycloak", _required_fields)

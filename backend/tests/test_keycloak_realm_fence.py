@@ -51,7 +51,7 @@ from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
-from meho_backplane.operations.meta_tools import list_operation_groups
+from meho_backplane.operations.meta_tools import describe_descriptor, list_operation_groups
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
@@ -522,12 +522,7 @@ async def test_a_reduced_list_keeps_the_realm_in_the_summary_only_with_the_switc
     if not switch_on:
         monkeypatch.delenv("KEYCLOAK_ANSWER_REALM")
         get_settings.cache_clear()
-    async with get_sessionmaker()() as session:
-        row = (
-            await session.execute(select(TargetORM).where(TargetORM.name == _TARGET_NAME))
-        ).scalar_one()
-        row.extras = {"managed_realm": _LONG_REALM}
-        await session.commit()
+    await _use_long_realm()
     users = [{"id": f"u-{i}", "username": f"user-{i}", "enabled": True} for i in range(80)]
     set_default_reducer(JsonFluxReducer(store=MemoryResultStore()))
     try:
@@ -547,6 +542,105 @@ async def test_a_reduced_list_keeps_the_realm_in_the_summary_only_with_the_switc
     else:
         assert REALM_FIELD not in result.result
         assert "omitted_scalar_count" not in result.result
+
+
+async def _use_long_realm() -> None:
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(TargetORM).where(TargetORM.name == _TARGET_NAME))
+        ).scalar_one()
+        row.extras = {"managed_realm": _LONG_REALM}
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_large_realm_answer_keeps_the_realm_only_with_the_switch_on(
+    operator: Operator, switch_on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large answer with no list is stored as a document; its summary keeps the field."""
+    if not switch_on:
+        monkeypatch.delenv("KEYCLOAK_ANSWER_REALM")
+        get_settings.cache_clear()
+    await _use_long_realm()
+    body = {"id": "r", "realm": _LONG_REALM, "attributes": {f"k{i}": "v" * 100 for i in range(80)}}
+    set_default_reducer(JsonFluxReducer(store=MemoryResultStore()))
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            _mount_token(mock)
+            mock.get(url__regex=r"/admin/realms/[^/]+$").respond(200, json=body)
+            result = await _dispatch(operator, "keycloak.realm.get", {}, approved=False)
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", result.error
+    assert result.handle is not None
+    assert result.result["result_record"] == "document"
+    assert "omitted_scalar_count" not in result.result
+    if switch_on:
+        assert result.result[REALM_FIELD] == _LONG_REALM
+        assert next(iter(result.result)) == REALM_FIELD
+    else:
+        assert REALM_FIELD not in result.result
+
+
+@pytest.mark.asyncio
+async def test_a_reduced_list_of_an_edited_operation_keeps_the_realm(operator: Operator) -> None:
+    """An admin edited the instructions: a new registration keeps them, and so the field stays."""
+    edited = {"when_to_call": "An admin wrote this."}
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "keycloak.user.list")
+            )
+        ).scalar_one()
+        row.llm_instructions = edited
+        row.admin_edited_fields = ["llm_instructions"]
+        await session.commit()
+    await KeycloakConnector.register_operations()
+    reset_dispatcher_caches()
+    connector = KeycloakConnector(credentials_loader=_stub_loader)
+    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+
+    _CONNECTOR_INSTANCE_CACHE[KeycloakConnector] = connector  # type: ignore[assignment]
+    assert (await _described("keycloak.user.list")).llm_instructions == edited
+    await _use_long_realm()
+    users = [{"id": f"u-{i}", "username": f"user-{i}"} for i in range(80)]
+    set_default_reducer(JsonFluxReducer(store=MemoryResultStore()))
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            _mount_token(mock)
+            mock.get(url__regex=r"/admin/realms/[^/]+/users").respond(200, json=users)
+            result = await _dispatch(operator, "keycloak.user.list", {}, approved=False)
+    finally:
+        set_default_reducer(PassThroughReducer())
+        await connector.aclose()
+
+    assert result.status == "ok", result.error
+    assert result.result["row_count"] == 80
+    assert result.result[REALM_FIELD] == _LONG_REALM
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [True, False], ids=["switch-on", "switch-off"])
+async def test_the_operation_detail_has_no_realm_hint(
+    operator: Operator, switch_on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a tenant admin reads from the operation detail, for every Keycloak operation."""
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true" if switch_on else "false")
+    get_settings.cache_clear()
+    await KeycloakConnector.register_operations()
+    async with get_sessionmaker()() as session:
+        found = await session.execute(
+            select(EndpointDescriptor.id).where(EndpointDescriptor.product == "keycloak")
+        )
+        ids = list(found.scalars().all())
+    assert ids
+    for descriptor_id in ids:
+        detail = await describe_descriptor(operator, descriptor_id)
+        assert detail is not None
+        hint = (detail.llm_instructions or {}).get("result_scalars")
+        assert REALM_FIELD not in json.dumps(hint)
 
 
 #: Agent-visible texts with the switch off, as release v0.48.0 has them. Each

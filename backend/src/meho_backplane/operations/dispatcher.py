@@ -520,6 +520,10 @@ from meho_backplane.operations.reducer import (
     full_result_capture_var,
     handle_owner_sub_var,
 )
+from meho_backplane.operations.required_fields import (
+    REQUIRED_FIELDS_CONTEXT_KEY,
+    required_fields,
+)
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_AUDIT_VALUE,
@@ -3315,6 +3319,12 @@ def _build_reducer_context(
     result_handle = _result_handle_from_descriptor(descriptor)
     if result_handle is not None:
         reducer_context["result_handle"] = result_handle
+    # The fields a connector keeps in every shortened answer. They do not come
+    # from ``llm_instructions``: an admin can edit those, and the operation
+    # detail shows them.
+    kept = required_fields(descriptor.product)
+    if kept:
+        reducer_context[REQUIRED_FIELDS_CONTEXT_KEY] = kept
     return reducer_context
 
 

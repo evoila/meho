@@ -76,6 +76,7 @@ from ._result_store_helpers import MemoryResultStore
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000c4e1")
 _HOST = "spec-trace-appliance.test.invalid"
+_ORIGIN = f"https://{_HOST}"
 _PRODUCT = "specdeploy"
 _VERSION = "1.x"
 _IMPL_ID = "specdeploy-rest"
@@ -409,13 +410,20 @@ async def _stored_trace(audit_id: UUID) -> tuple[DispatchTrace, list[DispatchTra
 
 
 def _vendor_spans(spans: list[DispatchTraceSpan], case: _Case) -> list[DispatchTraceSpan]:
-    """The spans of the case's vendor call."""
+    """The spans of the case's vendor call.
+
+    With the tag, the operation sends a secret, so its address keeps only the
+    scheme, host and port. Without the tag it keeps its path.
+    """
     return [
         span
         for span in spans
         if span.span_kind == "vendor_call"
         and span.attributes.get("method") == case.call.method
-        and str(span.attributes.get("url", "")).endswith(case.call.path)
+        and (
+            str(span.attributes.get("url", "")).endswith(case.call.path)
+            or span.attributes.get("url") == _ORIGIN
+        )
     ]
 
 
@@ -451,6 +459,8 @@ async def test_the_trace_and_the_agent_copy_hold_no_body(
     vendor_spans = _vendor_spans(spans, case)
     assert len(vendor_spans) == 1, "the trace should hold the vendor call"
     span = vendor_spans[0]
+    assert span.attributes["url"] == _ORIGIN
+    assert case.call.path not in _as_text(spans)
     assert span.attributes["body_recorded"] is False
     assert span.attributes["request_body"] == SECRET_FAMILY_OMITTED_MARKER
     assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
@@ -459,7 +469,7 @@ async def test_the_trace_and_the_agent_copy_hold_no_body(
     # The trace is still certain, so the agent gets its copy, without the bodies.
     assert trace.redaction_uncertain is False
     agent_copy = await _agent_copy(result)
-    assert case.call.path in agent_copy, "the agent copy should hold the vendor call"
+    assert _ORIGIN in agent_copy, "the agent copy should hold the vendor call"
     _assert_no_made_up_value("the agent copy", agent_copy)
     stored = b"".join(result_store.client.values.values()).decode()
     _assert_no_made_up_value("the result store", stored)
@@ -497,7 +507,9 @@ async def test_without_the_tag_the_trace_would_hold_the_body(
 
     assert result.audit_id is not None
     _, spans = await _stored_trace(result.audit_id)
-    assert all(span.attributes["body_recorded"] for span in _vendor_spans(spans, case))
+    vendor_spans = _vendor_spans(spans, case)
+    assert all(span.attributes["body_recorded"] for span in vendor_spans)
+    assert all(str(span.attributes["url"]).endswith(case.call.path) for span in vendor_spans)
     assert "[REDACTED:param_name]" in _as_text(spans)
     assert _PASSWORD not in _as_text(spans)
     assert _PASSWORD not in await _agent_copy(result)

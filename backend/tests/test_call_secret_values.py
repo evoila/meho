@@ -262,9 +262,7 @@ async def test_values_read_from_the_store_are_known_for_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(vault_creds, "resolve_credential_backend", lambda kind: _FakeBackend())
-    monkeypatch.setattr(
-        vault_creds, "get_settings", lambda: type("S", (), {"credential_backend": "vault"})()
-    )
+    monkeypatch.setattr(vault_creds, "get_settings", type("S", (), {"credential_backend": "vault"}))
     assert credential_backend is not None
     token = bind_call_secrets([])
     try:

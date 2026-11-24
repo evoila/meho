@@ -261,9 +261,7 @@ class _MappedTarget:
 
 async def test_a_mapped_and_trimmed_store_value_is_known(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vault_creds, "resolve_credential_backend", lambda kind: _MappedBackend())
-    monkeypatch.setattr(
-        vault_creds, "get_settings", lambda: type("S", (), {"credential_backend": "vault"})()
-    )
+    monkeypatch.setattr(vault_creds, "get_settings", type("S", (), {"credential_backend": "vault"}))
     token = bind_call_secrets([])
     try:
         creds = await vault_creds.load_basic_credentials(_MappedTarget(), operator())  # type: ignore[arg-type]

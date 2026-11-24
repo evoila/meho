@@ -135,11 +135,11 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
 
 
 class RunnerPrincipalExistsError(Exception):
-    """Raised when register collides with an existing (tenant_id, name)."""
+    """Raised when register finds the name (its Keycloak client id) already taken."""
 
     def __init__(self, name: str) -> None:
         self.name = name
-        super().__init__(f"runner principal {name!r} already exists for this tenant")
+        super().__init__(f"runner principal {name!r} already exists")
 
 
 class RunnerPrincipalNotFoundError(Exception):
@@ -231,7 +231,9 @@ class RunnerPrincipalService:
         ValueError
             When *name* contains characters outside the safe alphabet.
         RunnerPrincipalExistsError
-            Duplicate ``(tenant_id, name)`` (DB unique-index or Keycloak 409).
+            A row with the same Keycloak client id exists (active or revoked,
+            any tenant), checked before anything is made; or a DB unique-index
+            or Keycloak 409.
         KeycloakAdminNotConfiguredError / KeycloakAdminError
             Keycloak admin unconfigured / any Admin API failure.
         SchedulerVaultBrokerError
@@ -250,6 +252,10 @@ class RunnerPrincipalService:
         # the Keycloak hardcoded-claim mapper and as the row's explicit id
         # (token claim == row id is the guard's binding invariant).
         runner_id = uuid.uuid4()
+
+        # The client id is the name, across all tenants. A revoked row keeps
+        # its name taken, so check before anything is made in Keycloak or Vault.
+        await self._ensure_client_id_free(client_id, tenant_id=tenant_id, name=payload.name)
 
         # Phase 1: create the Keycloak client + capture its generated secret.
         # Any failure after create_client rolls the just-created client back
@@ -305,6 +311,27 @@ class RunnerPrincipalService:
             enrollment_code=code,
             enrollment_code_expires_at=code_expires_at,
         )
+
+    async def _ensure_client_id_free(
+        self, client_id: str, *, tenant_id: uuid.UUID, name: str
+    ) -> None:
+        """Raise :class:`RunnerPrincipalExistsError` when a row holds *client_id*.
+
+        Looks at every row: active or revoked, of any tenant.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            taken = await session.scalar(
+                select(RunnerPrincipal.id).where(RunnerPrincipal.keycloak_client_id == client_id)
+            )
+        if taken is not None:
+            self._log.info(
+                "runner_principal_register_name_taken",
+                tenant_id=str(tenant_id),
+                name=name,
+                keycloak_client_id=client_id,
+            )
+            raise RunnerPrincipalExistsError(name)
 
     async def _provision_keycloak_client(
         self,

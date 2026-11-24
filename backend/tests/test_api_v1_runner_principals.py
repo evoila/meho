@@ -937,3 +937,141 @@ async def test_runner_cannot_widen_its_own_allowlist(client: TestClient) -> None
         )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "runner_scope_violation"
+
+
+# ---------------------------------------------------------------------------
+# Register: only a person, and a taken name is refused before anything is made
+# ---------------------------------------------------------------------------
+
+
+def _recording_vault_write(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace the Vault write with one that records the client ids it gets."""
+    writes: list[str] = []
+
+    async def _write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
+        writes.append(identity_ref)
+        return f"secret/data/runners/{identity_ref}/credentials"
+
+    monkeypatch.setattr("meho_backplane.auth.runner_principals.write_agent_secret", _write)
+    return writes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["service", "agent"])
+async def test_machine_tenant_admin_cannot_register_a_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A service or agent login with tenant_admin gets 403 and nothing is made."""
+    await _seed_tenants()
+    writes = _recording_vault_write(monkeypatch)
+    key = make_rsa_keypair(f"kid-machine-runner-{kind}")
+    tok = mint_token(
+        key,
+        sub=f"machine-{kind}",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+    factory = _mock_kc_ok()
+    with (
+        patch("meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings", factory),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": f"machine-made-{kind}"},
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("human_principal_required")
+    assert "meho runner-principal register" in detail
+    assert "enrollment_code" not in resp.text
+    factory.return_value.create_client.assert_not_awaited()
+    assert writes == []
+    assert await _fetch_principals(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_person_tenant_admin_with_platform_admin_still_gets_the_code(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_tenants()
+    writes = _recording_vault_write(monkeypatch)
+    key = make_rsa_keypair("kid-person-runner")
+    tok = mint_token(
+        key,
+        sub="person-admin",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+        platform_admin=True,
+    )
+    with (
+        patch(
+            "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+            _mock_kc_ok(),
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": "person-made"},
+            headers={"Authorization": f"Bearer {tok}"},
+        )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["enrollment_code"]
+    assert writes == ["runner:person-made"]
+
+
+@pytest.mark.asyncio
+async def test_register_of_a_revoked_name_is_409_before_anything_is_made(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoked name stays taken, in its own tenant and in every other tenant."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-revoked-name")
+    with (
+        patch(
+            "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+            _mock_kc_ok(),
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        assert (
+            client.post(
+                "/api/v1/runner-principals", json={"name": "gone-runner"}, headers=headers
+            ).status_code
+            == 201
+        )
+        assert (
+            client.delete(
+                "/api/v1/runner-principals/gone-runner/revoke", headers=headers
+            ).status_code
+            == 200
+        )
+
+    writes = _recording_vault_write(monkeypatch)
+    for tenant in (_TENANT_A, _TENANT_B):
+        factory = _mock_kc_ok()
+        with (
+            patch(
+                "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+                factory,
+            ),
+            respx.mock as r,
+        ):
+            mock_discovery_and_jwks(r, public_jwks(key))
+            resp = client.post(
+                "/api/v1/runner-principals",
+                json={"name": "gone-runner"},
+                headers={"Authorization": f"Bearer {_token(key, tenant_id=tenant)}"},
+            )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == "runner_principal_already_exists"
+        factory.return_value.create_client.assert_not_awaited()
+    assert writes == []
+    assert await _fetch_principals(_TENANT_B) == []

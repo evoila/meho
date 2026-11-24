@@ -230,7 +230,8 @@ def test_the_value_check_reads_the_names_of_a_shared_env_list_once(
     )
 
     assert manifest_holds_credential({"manifest": manifest}) is False
-    assert len(checked) <= 1_000
+    # Two keys for each of the 1,000 entries, once; not once for each container.
+    assert len(checked) <= 3_000
 
 
 def test_the_value_check_reads_the_keys_of_a_shared_data_map_once(
@@ -245,7 +246,8 @@ def test_the_value_check_reads_the_keys_of_a_shared_data_map_once(
     manifest = f"apiVersion: v1\nkind: List\nshared: &data {{{keys}}}\nitems:\n{items}\n"
 
     assert manifest_holds_credential({"manifest": manifest}) is False
-    assert len(checked) <= 1_000
+    # The 1,000 keys are read as a data map once and as a map once.
+    assert len(checked) <= 3_000
 
 
 # ---------------------------------------------------------------------------

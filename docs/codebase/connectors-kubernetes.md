@@ -71,20 +71,36 @@ The stored request of a `k8s.apply` of a Secret, or of a manifest with a
 secret-looking value, keeps its manifest only in the encrypted one-time
 handoff of the run, as a credential write does. Such a call needs
 `APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
-(`manifest_holds_credential` in `op_classes.py`) when:
+(`manifest_holds_credential` in `op_classes.py`) when the check finds a
+secret in any key or value, at any depth, with one set of rules. There is
+no list of parent keys:
 
-- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
-  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
-  example a ConfigMap;
-- an `env` entry at any depth (the object itself, the containers and init
-  containers of a pod template) has a secret name and a value of its own; an entry that
+- a key of a `data`, `stringData` or `binaryData` map has a secret name
+  (the name rule of `scrub_secret_named_values` in `broadcast/events.py`),
+  in any kind and at any depth;
+- any other key has a secret name and a value of its own (a text or a
+  number): a custom kind, an annotation, a label, a chart value;
+- an `env` entry at any depth has a secret-shaped name and a value of its
+  own. A secret word may sit inside a longer name (`is_secret_shaped_name`
+  in `redaction/command_line.py`: `PGPASSWORD`, `DB_PASS`). An entry that
   reads its value from a Secret (`valueFrom`) does not count;
+- a `command` or `args` item has a secret flag or a secret-named
+  assignment (`hide_command_text` in `redaction/command_line.py`);
+- a line of a text in a `data` or `stringData` value names a secret and
+  gives it a value (a file kept in a ConfigMap);
+- an annotation value that is JSON (the last applied object) is parsed and
+  read with the same rules;
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
   token with a known vendor prefix).
 
-The check reads each value of the manifest once, and the names of each
-`data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
+A value of another type than a rule expects never raises an error and
+never ends the walk. The wider name rule also counts a plain value under a
+name that holds a secret word (`KEYBOARD_LAYOUT`, `passwordSecretRef`); such
+a call needs the encryption key too.
+
+The check reads each value of the manifest once, and the keys of each
+`data`, `stringData` and `binaryData` map once, also when YAML aliases name
 them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
 holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is

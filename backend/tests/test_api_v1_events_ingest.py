@@ -152,9 +152,13 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(
         "meho_backplane.events.ingest.secret_cache.get_broadcast_client", lambda: fake
     )
-    # One fixed rate-limit window, so a test gives the same result when the
-    # wall clock passes a full minute while it runs.
-    monkeypatch.setattr("meho_backplane.events.ingest.rate_limit.current_window", lambda: 1_000)
+    # One fixed clock for the rate-limit module, so all its counters stay in
+    # one window when the wall clock passes a full minute while a test runs.
+    # Signature timestamps still use the real clock.
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.rate_limit.time",
+        SimpleNamespace(time=lambda: 60_030.0),
+    )
     clear_secret_cache()
     yield
     clear_secret_cache()

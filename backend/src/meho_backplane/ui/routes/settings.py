@@ -34,12 +34,16 @@ forms into the page, and shows a fixed error text for an answer that is not
 HTML.
 
 Audit: the apply binds the ``settings.import`` audit op id, the same as the
-REST route. The apply owns its transaction: it adds its
-``operation_execution`` audit row to the same transaction as the settings
-and the revision, and commits all of them together. When that write fails,
-MEHO rolls everything back and answers 500 with an error text. The audit
-middleware sees the committed row and adds no row of its own after the
-cutover; before the cutover it adds its request row with a new id. The
+REST route. The apply owns its transaction:
+:func:`~meho_backplane.audit.commit_with_request_audit_row` adds the
+request's one audit row to the same transaction as the settings and the
+revision, and commits all of them together. The row is the one the audit
+middleware would write (``legacy_request``, or ``operation_execution``
+with ``AUDIT_WRAPPER_ROWS_RETIRED=true``), with the target, the login
+details and the duration; the middleware then writes no row of its own.
+When the commit fails, MEHO rolls everything back, takes the revision id
+and the change summary out of the request's audit keys, and answers 500
+with an error text; the middleware records that failed request. The
 preview is marked as a preview, so it writes no execution row; a refused
 preview leaves its refusal row.
 """
@@ -48,9 +52,6 @@ from __future__ import annotations
 
 import base64
 import json
-import uuid
-from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any, Final
 
 import structlog
@@ -60,12 +61,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
-from meho_backplane.audit import _PREALLOCATED_AUDIT_ID_KEY, _resolve_audit_payload
+from meho_backplane.audit import _PREALLOCATED_AUDIT_ID_KEY, commit_with_request_audit_row
 from meho_backplane.audit_cutover import note_preview
-from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_raw_session, get_session
-from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.instance_settings.console_only import CONSOLE_ONLY_POLICIES, SETTINGS_PAGE
 from meho_backplane.instance_settings.diff import SECTIONS
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
@@ -75,7 +74,6 @@ from meho_backplane.instance_settings.service import (
     apply_import,
     build_plan,
 )
-from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.targets.schemas import TargetCreate
 from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -322,31 +320,13 @@ async def _preview_handler(
     return _render(request, session_ctx, "settings/_preview.html", _preview_context(plan, content))
 
 
-async def _add_audit_row(
-    session: AsyncSession, request: Request, operator: Operator, audit_id: uuid.UUID
-) -> None:
-    """Add the apply's audit row to *session*, so it commits with the settings.
-
-    The payload is the one the audit middleware would write (op id, op
-    class, the ``settings_*`` keys that ``apply_import`` bound).
-    """
-    session.add(
-        AuditLog(
-            id=audit_id,
-            event_class=AuditEventClass.OPERATION_EXECUTION,
-            occurred_at=datetime.now(UTC),
-            operator_sub=operator.sub,
-            actor_sub=resolve_actor_sub(),
-            tenant_id=operator.tenant_id,
-            method=request.method,
-            path=request.url.path,
-            status_code=status.HTTP_200_OK,
-            request_id=current_request_id(),
-            duration_ms=Decimal("0"),
-            payload=_resolve_audit_payload(),
-        )
-    )
-    await session.flush()
+#: The audit keys of ``apply_import`` that describe what it wrote. A rolled
+#: back apply wrote nothing, so its failure record must not carry them.
+_ROLLED_BACK_AUDIT_KEYS: Final[tuple[str, ...]] = (
+    "audit_settings_revision_id",
+    "audit_settings_summary",
+    "audit_settings_failed",
+)
 
 
 async def _apply_handler(
@@ -382,11 +362,11 @@ async def _apply_handler(
         # The middleware must not write a second row with this id.
         structlog.contextvars.unbind_contextvars(_PREALLOCATED_AUDIT_ID_KEY)
         try:
-            await _add_audit_row(db_session, request, operator, result.audit_id)
-            await db_session.commit()
+            await commit_with_request_audit_row(db_session, request.scope, result.audit_id)
         except SQLAlchemyError:
             _log.exception("ui_settings_apply_audit_failed")
             await db_session.rollback()
+            structlog.contextvars.unbind_contextvars(*_ROLLED_BACK_AUDIT_KEYS)
             return _refused(
                 request,
                 session_ctx,

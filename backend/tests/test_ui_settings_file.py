@@ -35,7 +35,10 @@ from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 from starlette.middleware import Middleware
 
+from meho_backplane import audit as audit_module
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.audit_query.query import query_audit
+from meho_backplane.audit_query.schemas import AuditQueryFilters
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
@@ -547,7 +550,18 @@ def _audit_rows(op_id: str) -> list[AuditLog]:
     return [row for row in rows if row.payload.get("op_id") == op_id]
 
 
-def test_one_audit_row_per_apply_with_the_revision_id() -> None:
+_CUTOVER = pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
+_ROW_CLASS = {False: AuditEventClass.LEGACY_REQUEST, True: AuditEventClass.OPERATION_EXECUTION}
+
+
+@_CUTOVER
+def test_one_audit_row_per_apply_with_the_revision_id(
+    cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    monkeypatch.setenv("AUDIT_CLIENT_IDENTITY", "true")
+    get_settings.cache_clear()
     _seed_tenants()
     client, mock, csrf = _client()
     try:
@@ -557,21 +571,75 @@ def test_one_audit_row_per_apply_with_the_revision_id() -> None:
         mock.stop()
 
     assert applied.status_code == 200, applied.text
-    (row,) = [
-        r
-        for r in _audit_rows("settings.import")
-        if r.event_class == AuditEventClass.OPERATION_EXECUTION
-    ]
+    (row,) = _audit_rows("settings.import")
     (revision,) = asyncio.run(_all(InstanceSettingsRevision))
+    assert row.event_class == _ROW_CLASS[cutover]
     assert row.id == revision.audit_id
+    assert applied.headers["meho-audit-id"] == str(row.id)
     assert row.operator_sub == "op-alice"
+    assert row.tenant_id == _TENANT_A
+    assert row.path == _APPLY
+    assert row.duration_ms > 0
     assert row.payload["op_class"] == "write"
     assert row.payload["settings_revision_id"] == str(revision.id)
+    assert row.payload["client"]["channel"] == "web"
     assert all(r.payload["op_class"] == "read" for r in _audit_rows("settings.import.preview"))
 
 
+@_CUTOVER
+def test_the_apply_answers_with_its_own_audit_row_only(
+    cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The middleware writes no second row, so a failure there cannot follow a saved apply."""
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+
+    async def _no_second_row(**_kwargs: Any) -> None:
+        raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
+
+    monkeypatch.setattr(audit_module, "_write_audit_row", _no_second_row)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "MEHO applied the file." in applied.text
+    assert _state() == (False, True, 0, 1)
+    assert len(asyncio.run(_all(AuditLog))) == 1
+
+
+@pytest.mark.usefixtures("cutover_on")
+def test_a_target_search_finds_the_apply_that_changed_the_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_vault(monkeypatch)
+    _seed_tenants()
+    stored = {"name": "app-01", "product": "linux", "host": "h1"}
+    client, mock, csrf = _client()
+    try:
+        assert _apply(client, csrf, _file(_KEEP, targets=[stored])).status_code == 200
+        changed = _apply(client, csrf, _file(_KEEP, targets=[{**stored, "host": "h2"}]))
+    finally:
+        mock.stop()
+
+    assert changed.status_code == 200, changed.text
+    revision = max(asyncio.run(_all(InstanceSettingsRevision)), key=lambda r: r.ts)
+
+    async def _search() -> list[uuid.UUID]:
+        async with get_sessionmaker()() as session:
+            found = await query_audit(
+                AuditQueryFilters(target="app-01"), tenant_id=_TENANT_A, session=session
+            )
+        return [entry.id for entry in found.rows]
+
+    assert revision.audit_id in asyncio.run(_search())
+
+
 @pytest.mark.usefixtures("sqlite_transactions")
-@pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
+@_CUTOVER
 def test_a_failed_audit_write_saves_nothing(
     cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -582,7 +650,7 @@ def test_a_failed_audit_write_saves_nothing(
     async def _broken(*_args: Any, **_kwargs: Any) -> None:
         raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
 
-    monkeypatch.setattr(settings_routes, "_add_audit_row", _broken)
+    monkeypatch.setattr(settings_routes, "commit_with_request_audit_row", _broken)
     client, mock, csrf = _client()
     try:
         applied = _apply(client, csrf, _LOOSEN)
@@ -593,8 +661,10 @@ def test_a_failed_audit_write_saves_nothing(
     assert "MEHO could not write the audit record of this import." in applied.text
     assert "MEHO applied the file." not in applied.text
     assert _state() == _UNCHANGED
-    assert not [
-        r
-        for r in _audit_rows("settings.import")
-        if r.event_class == AuditEventClass.OPERATION_EXECUTION and r.status_code == 200
-    ]
+    (failure,) = _audit_rows("settings.import")
+    assert failure.event_class == _ROW_CLASS[cutover]
+    assert failure.status_code == 500
+    assert failure.payload["settings_import"] is True
+    assert "settings_revision_id" not in failure.payload
+    assert "settings_summary" not in failure.payload
+    assert "settings_failed" not in failure.payload

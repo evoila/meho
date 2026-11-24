@@ -459,14 +459,19 @@ The upload is multipart (the CSRF middleware caps a url-encoded body at
 256 KiB). The preview keeps no state: its apply form sends the same file
 bytes as base64, and the apply checks the file again before it writes.
 The apply binds `op_id=settings.import` and owns its transaction
-(`get_raw_session`). It adds its `operation_execution` audit row, with the
-id that the revision keeps, to the same transaction as the settings and
-the revision, and commits them together. When that write fails, MEHO
-rolls back and answers 500 with an error text: nothing is saved. A
-refusal, a file with mistakes and a file that changes nothing roll back.
-After the audit cutover the middleware sees the committed row and writes
-none of its own; before it, the middleware adds its request row with a
-new id. Tests: `tests/test_ui_settings_file.py`,
+(`get_raw_session`). `audit.commit_with_request_audit_row` adds the
+request's one audit row, with the id that the revision keeps, to the same
+transaction as the settings and the revision, and commits them together.
+The row is the one the audit middleware would write: `legacy_request`, or
+`operation_execution` with `AUDIT_WRAPPER_ROWS_RETIRED=true`, with the
+`target_id` of a changed target, the `client` block of the login
+(`AUDIT_CLIENT_IDENTITY`) and the time since the request started. The
+middleware then writes no row of its own in either mode, and sends this
+id in the `Meho-Audit-Id` header. When the commit fails, MEHO rolls back,
+drops the revision id, the change summary and the failed count from the
+request's audit keys, and answers 500 with an error text: nothing is
+saved, and the middleware records the failed request. A refusal, a file
+with mistakes and a file that changes nothing roll back. Tests: `tests/test_ui_settings_file.py`,
 `tests/test_ui_settings_file_js.py`.
 
 ### `POST /api/v1/settings/conventions-drift`

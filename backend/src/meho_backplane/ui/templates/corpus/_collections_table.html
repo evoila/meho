@@ -41,7 +41,7 @@
           {% if row.products %}
             {{ row.products | join(", ") }}
           {% else %}
-            <span class="opacity-50">&mdash;</span>
+            <span class="text-subtle">&mdash;</span>
           {% endif %}
         </td>
         <td>
@@ -61,7 +61,7 @@
           {% if row.doc_count is not none %}
             {{ row.doc_count }}
           {% else %}
-            <span class="opacity-50">&mdash;</span>
+            <span class="text-subtle">&mdash;</span>
           {% endif %}
         </td>
         <td class="text-xs">
@@ -70,7 +70,7 @@
               {{ row.last_ingested_at.strftime("%Y-%m-%d") }}
             </span>
           {% else %}
-            <span class="opacity-50">never</span>
+            <span class="text-subtle">never</span>
           {% endif %}
         </td>
         <td>
@@ -86,7 +86,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+      <td colspan="7" class="text-center text-sm text-subtle py-6">
         No collections registered for this tenant yet.
       </td>
     </tr>

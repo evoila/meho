@@ -70,7 +70,7 @@
     <div class="flex items-start justify-between gap-4 px-6 py-4 border-b border-base-300">
       <div>
         <h3 class="text-lg font-semibold" id="corpus-register-modal-title">Register collection</h3>
-        <p class="text-sm opacity-70 mt-1">
+        <p class="text-sm text-muted mt-1">
           The collection starts at <code>provisioning</code>; probe it after
           registering to make it searchable.
         </p>
@@ -102,12 +102,12 @@
       <div class="flex-1 min-h-0 overflow-y-auto">
         {# ----- Identity section ----- #}
         <div class="px-6 pt-4 pb-4 border-b border-base-300">
-          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Identity</div>
+          <div class="text-xs font-medium text-subtle uppercase tracking-wide mb-3">Identity</div>
 
           <label class="form-control">
             <div class="label py-0">
               <span class="label-text font-medium">Collection key</span>
-              <span class="label-text-alt opacity-60">required</span>
+              <span class="label-text-alt text-subtle">required</span>
             </div>
             <input
               type="text"
@@ -127,7 +127,7 @@
             <label class="form-control flex-1 min-w-48">
               <div class="label py-0">
                 <span class="label-text font-medium">Vendor</span>
-                <span class="label-text-alt opacity-60">required</span>
+                <span class="label-text-alt text-subtle">required</span>
               </div>
               <input
                 type="text"
@@ -146,7 +146,7 @@
             <label class="form-control flex-1 min-w-48">
               <div class="label py-0">
                 <span class="label-text font-medium">Products</span>
-                <span class="label-text-alt opacity-60">comma-separated, optional</span>
+                <span class="label-text-alt text-subtle">comma-separated, optional</span>
               </div>
               <input
                 type="text"
@@ -164,13 +164,13 @@
 
         {# ----- Metadata section ----- #}
         <div class="px-6 pt-4 pb-4 border-b border-base-300">
-          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Metadata</div>
+          <div class="text-xs font-medium text-subtle uppercase tracking-wide mb-3">Metadata</div>
 
           <div class="flex flex-wrap gap-4">
             <label class="form-control flex-1 min-w-48">
               <div class="label py-0">
                 <span class="label-text font-medium">Description</span>
-                <span class="label-text-alt opacity-60">optional</span>
+                <span class="label-text-alt text-subtle">optional</span>
               </div>
               <textarea
                 name="description"
@@ -185,7 +185,7 @@
             <label class="form-control flex-1 min-w-48">
               <div class="label py-0">
                 <span class="label-text font-medium">When to use</span>
-                <span class="label-text-alt opacity-60">optional</span>
+                <span class="label-text-alt text-subtle">optional</span>
               </div>
               <textarea
                 name="when_to_use"
@@ -201,12 +201,12 @@
 
         {# ----- Backend section ----- #}
         <div class="px-6 pt-4 pb-4">
-          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Backend</div>
+          <div class="text-xs font-medium text-subtle uppercase tracking-wide mb-3">Backend</div>
 
           <label class="form-control">
             <div class="label py-0">
               <span class="label-text font-medium">Backend type</span>
-              <span class="label-text-alt opacity-60">required</span>
+              <span class="label-text-alt text-subtle">required</span>
             </div>
             <input
               type="text"
@@ -220,7 +220,7 @@
               placeholder="corpus-http"
               aria-describedby="corpus-backend-type-hint"
             />
-            <span id="corpus-backend-type-hint" class="text-xs opacity-60 mt-1">
+            <span id="corpus-backend-type-hint" class="text-xs text-subtle mt-1">
               The search backend this collection routes to (validated against
               the registered backends).
             </span>
@@ -230,7 +230,7 @@
           <label class="form-control mt-3">
             <div class="label py-0">
               <span class="label-text font-medium">Backend ref</span>
-              <span class="label-text-alt opacity-60">JSON, optional</span>
+              <span class="label-text-alt text-subtle">JSON, optional</span>
             </div>
             <textarea
               name="backend_ref"
@@ -240,7 +240,7 @@
               placeholder='{"endpoint": "https://corpus/v1/search"}'
               aria-describedby="corpus-backend-ref-hint"
             >{{ field_value('backend_ref') }}</textarea>
-            <span id="corpus-backend-ref-hint" class="text-xs opacity-60 mt-1">
+            <span id="corpus-backend-ref-hint" class="text-xs text-subtle mt-1">
               Per-collection backend config the resolved adapter reads. Leave
               blank for a backend that needs none.
             </span>

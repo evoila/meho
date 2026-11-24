@@ -152,7 +152,7 @@
          UTC so the conversion is visible, not silent (#2339). #}
       <div x-show="kind === 'one_off'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Fire at <span class="opacity-60 font-normal">(your local time)</span></span>
+          <span class="text-sm font-medium">Fire at <span class="text-subtle font-normal">(your local time)</span></span>
           <input
             type="datetime-local"
             name="fire_at"
@@ -163,7 +163,7 @@
           />
           <span
             id="scheduler-fire-at-hint"
-            class="text-xs opacity-60"
+            class="text-xs text-subtle"
             data-fire-at-hint
             aria-live="polite"
           >Enter your local wall-clock time — it is converted to UTC on submit.</span>
@@ -214,7 +214,7 @@
         </div>
         {% endif %}
         <label class="flex flex-col gap-1" x-show="startOn === 'custom'" x-cloak>
-          <span class="text-sm font-medium">Event filter <span class="opacity-60 font-normal">(JSON object)</span></span>
+          <span class="text-sm font-medium">Event filter <span class="text-subtle font-normal">(JSON object)</span></span>
           <textarea
             name="event_filter"
             class="textarea textarea-bordered textarea-sm font-mono w-full"
@@ -233,10 +233,10 @@
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">
           Run inputs (JSON object)<span
-            class="opacity-60 font-normal"
+            class="text-subtle font-normal"
             x-show="kind !== 'event'"
           > — required, must render a prompt</span><span
-            class="opacity-60 font-normal"
+            class="text-subtle font-normal"
             x-cloak
             x-show="kind === 'event'"
           > — optional</span>
@@ -269,7 +269,7 @@
       </fieldset>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Change ticket <span class="opacity-60 font-normal">(work_ref, optional)</span></span>
+        <span class="text-sm font-medium">Change ticket <span class="text-subtle font-normal">(work_ref, optional)</span></span>
         <input
           type="text"
           name="work_ref"

@@ -68,7 +68,7 @@
           <span class="badge badge-ghost badge-sm">{{ node.kind }}</span>
           <span class="font-mono">{{ node.name }}</span>
         </h2>
-        <p class="text-xs opacity-70">Node detail</p>
+        <p class="text-xs text-muted">Node detail</p>
       </div>
       {#-
         Close button -- pure client-side reset of the drawer slot. We
@@ -134,7 +134,7 @@
           onclick="
             const el = document.getElementById('node-drawer');
             if (el) {
-              el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Click <strong>View</strong> on any row for details.</div></aside>';
+              el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm text-muted\'>Click <strong>View</strong> on any row for details.</div></aside>';
             }
             return false;
           "
@@ -161,32 +161,32 @@
 
     {# ---------- Properties ---------- #}
     <section aria-label="Node properties">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Properties</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Properties</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">Kind</dt>
+        <dt class="text-subtle">Kind</dt>
         <dd>{{ node.kind }}</dd>
-        <dt class="opacity-60">Name</dt>
+        <dt class="text-subtle">Name</dt>
         <dd class="font-mono">{{ node.name }}</dd>
-        <dt class="opacity-60">Discovered by</dt>
+        <dt class="text-subtle">Discovered by</dt>
         <dd>{{ node.discovered_by }}</dd>
         {#- Console-standard timestamp format (matches the table surface):
             the machine-readable ISO stays in the ``datetime`` attribute; the
             display uses ``%Y-%m-%d %H:%M UTC``. Timestamps are stored
             tz-aware UTC. -#}
-        <dt class="opacity-60">First seen</dt>
+        <dt class="text-subtle">First seen</dt>
         <dd>
           <time datetime="{{ node.first_seen.isoformat() }}">{{ node.first_seen.strftime("%Y-%m-%d %H:%M UTC") }}</time>
         </dd>
-        <dt class="opacity-60">Last seen</dt>
+        <dt class="text-subtle">Last seen</dt>
         <dd>
           {% if node.last_seen %}
             <time datetime="{{ node.last_seen.isoformat() }}">{{ node.last_seen.strftime("%Y-%m-%d %H:%M UTC") }}</time>
-          {% else %}<span class="opacity-50">—</span>{% endif %}
+          {% else %}<span class="text-subtle">—</span>{% endif %}
         </dd>
       </dl>
       {% if node.properties %}
         <details class="mt-2">
-          <summary class="cursor-pointer text-xs opacity-70">Raw properties JSON</summary>
+          <summary class="cursor-pointer text-xs text-muted">Raw properties JSON</summary>
           <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ node.properties | tojson(indent=2) }}</pre>
         </details>
       {% endif %}
@@ -194,7 +194,7 @@
 
     {# ---------- Outgoing edges ---------- #}
     <section aria-label="Outgoing edges">
-      <h3 class="text-sm font-semibold uppercase opacity-60">
+      <h3 class="text-sm font-semibold uppercase text-subtle">
         Outgoing edges ({{ outgoing_edges | length }})
       </h3>
       {% if outgoing_edges %}
@@ -202,10 +202,10 @@
           {% for edge in outgoing_edges %}
             <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
               <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
-              <span class="opacity-60">&rarr;</span>
+              <span class="text-subtle">&rarr;</span>
               <span class="font-mono">{{ edge.to_endpoint.name }}</span>
               <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
-              <span class="text-xs opacity-50">({{ edge.source }})</span>
+              <span class="text-xs text-subtle">({{ edge.source }})</span>
               {% if is_tenant_admin and edge.source == "curated" %}
                 {{ _edge_remove_control(edge, csrf_token) }}
               {% endif %}
@@ -213,13 +213,13 @@
           {% endfor %}
         </ul>
       {% else %}
-        <p class="text-sm opacity-60">No outgoing edges.</p>
+        <p class="text-sm text-subtle">No outgoing edges.</p>
       {% endif %}
     </section>
 
     {# ---------- Incoming edges ---------- #}
     <section aria-label="Incoming edges">
-      <h3 class="text-sm font-semibold uppercase opacity-60">
+      <h3 class="text-sm font-semibold uppercase text-subtle">
         Incoming edges ({{ incoming_edges | length }})
       </h3>
       {% if incoming_edges %}
@@ -228,9 +228,9 @@
             <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
               <span class="font-mono">{{ edge.from_endpoint.name }}</span>
               <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
-              <span class="opacity-60">&rarr;</span>
+              <span class="text-subtle">&rarr;</span>
               <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
-              <span class="text-xs opacity-50">({{ edge.source }})</span>
+              <span class="text-xs text-subtle">({{ edge.source }})</span>
               {% if is_tenant_admin and edge.source == "curated" %}
                 {{ _edge_remove_control(edge, csrf_token) }}
               {% endif %}
@@ -238,32 +238,32 @@
           {% endfor %}
         </ul>
       {% else %}
-        <p class="text-sm opacity-60">No incoming edges.</p>
+        <p class="text-sm text-subtle">No incoming edges.</p>
       {% endif %}
     </section>
 
     {# ---------- Recent operations ---------- #}
     <section aria-label="Recent operations">
-      <h3 class="text-sm font-semibold uppercase opacity-60">
+      <h3 class="text-sm font-semibold uppercase text-subtle">
         Recent operations ({{ recent_ops | length }})
       </h3>
       {% if recent_ops %}
         <ul class="space-y-1 text-sm">
           {% for op in recent_ops %}
             <li class="flex items-center gap-2">
-              <time class="text-xs opacity-70" datetime="{{ op.occurred_at.isoformat() }}">
+              <time class="text-xs text-muted" datetime="{{ op.occurred_at.isoformat() }}">
                 {{ op.occurred_at.isoformat() }}
               </time>
               <span class="badge badge-outline badge-xs">{{ op.method }}</span>
               <span class="font-mono text-xs">{{ op.path }}</span>
-              <span class="text-xs opacity-50">{{ op.status_code }}</span>
+              <span class="text-xs text-subtle">{{ op.status_code }}</span>
             </li>
           {% endfor %}
         </ul>
       {% elif node.target_id %}
-        <p class="text-sm opacity-60">No operations recorded yet.</p>
+        <p class="text-sm text-subtle">No operations recorded yet.</p>
       {% else %}
-        <p class="text-sm opacity-60">
+        <p class="text-sm text-subtle">
           Inner graph node (no <code>target_id</code>); operations are tracked at the
           target level only.
         </p>

@@ -25,9 +25,9 @@
         <span class="badge badge-ghost badge-sm align-middle">{{ node_kind or "node" }}</span>
         <span class="font-mono text-lg align-middle">{{ node_name }}</span>
       </h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Chronological snapshots of this resource (newest first).
-        <span class="font-mono text-xs opacity-50">anchor: {{ anchor_node_id }}</span>
+        <span class="font-mono text-xs text-subtle">anchor: {{ anchor_node_id }}</span>
       </p>
     </div>
     <a class="btn btn-sm join-item" href="/ui/topology" aria-label="Back to topology inventory">
@@ -41,7 +41,7 @@
         {% for row in rows %}
           <li class="border-base-300 border-b pb-1" data-test="history-row">
             <div class="flex flex-wrap items-center gap-2">
-              <time class="text-xs opacity-70 font-mono" datetime="{{ row.valid_from.isoformat() }}">
+              <time class="text-xs text-muted font-mono" datetime="{{ row.valid_from.isoformat() }}">
                 {{ row.valid_from.isoformat() }}
               </time>
               <span class="badge badge-outline badge-xs">{{ row.source }}</span>
@@ -49,7 +49,7 @@
             </div>
             {% if row.snapshot %}
               <details class="mt-1">
-                <summary class="cursor-pointer text-xs opacity-70">Snapshot JSON</summary>
+                <summary class="cursor-pointer text-xs text-muted">Snapshot JSON</summary>
                 <pre class="mt-1 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ row.snapshot | tojson(indent=2) }}</pre>
               </details>
             {% endif %}
@@ -57,7 +57,7 @@
         {% endfor %}
       </ul>
     {% else %}
-      <p class="text-sm opacity-60" data-test="history-empty">
+      <p class="text-sm text-subtle" data-test="history-empty">
         No history recorded for this resource in the retention window.
       </p>
     {% endif %}

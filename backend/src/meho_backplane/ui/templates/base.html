@@ -75,7 +75,7 @@
 {% macro approvals_bell(id_prefix) -%}
 <button
   type="button"
-  class="btn btn-ghost btn-square btn-sm relative text-base-content/70"
+  class="btn btn-ghost btn-square btn-sm relative text-muted"
   aria-label="Open approvals"
   hx-get="/ui/approvals"
   hx-target="#meho-approvals-modal-container"
@@ -122,6 +122,12 @@
    own children without the two colliding. -#}
 
 {% block page_title %}MEHO Operator Console{% endblock %}
+
+{#- Follow the computer's light or dark setting. ``evoila-system`` is
+   meho-ui's theme that is light by default and dark when the computer
+   asks for dark -- CSS only, so a page never flashes the wrong theme.
+   The frame's own default stays ``evoila`` (always light). -#}
+{% block theme %}evoila-system{% endblock %}
 
 {#- The frame renders ``head_scripts`` BEFORE ``head_assets``, which is
    the ordering this file used to own directly. The ``component_scripts``
@@ -174,6 +180,8 @@
 {% endblock %}
 
 {% block head_assets %}
+    {#- Tells the browser both themes exist before any stylesheet arrives. -#}
+    <meta name="color-scheme" content="light dark" />
     {% include "_head_assets.html" %}
 {% endblock %}
 
@@ -317,7 +325,7 @@
                 {% if session_tenant is not none and session_tenant.can_switch %}
                 <a
                   href="/ui/tenant"
-                  class="flex items-center justify-between gap-2 truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/70 hover:border-primary/40 hover:text-base-content"
+                  class="flex items-center justify-between gap-2 truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-muted hover:border-primary/40 hover:text-base-content"
                   aria-label="Active tenant, switch tenant"
                   title="Switch tenant"
                   data-testid="tenant-switch"
@@ -327,7 +335,7 @@
                 </a>
                 {% else %}
                 <div
-                  class="truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/55"
+                  class="truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-subtle"
                   {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
                   title="{% if session_tenant is not none %}Active tenant{% else %}Sign in to choose a tenant{% endif %}"
                 >
@@ -363,8 +371,8 @@
                         session context is bound. The live role lives on
                         ``/ui/account`` (a fresh JWT verify) -- the chip
                         does not pay a per-page token verify to label it. -#}
-                    <span class="grid size-7 shrink-0 place-items-center rounded-full bg-base-content/8 font-mono text-[0.62rem] font-medium text-base-content/70 ring-1 ring-base-content/15">{% if session_operator_sub is not none %}{{ session_operator_sub[:2] | upper }}{% else %}OP{% endif %}</span>
-                    <span class="min-w-0 max-w-[7.5rem] truncate font-mono text-xs font-medium text-base-content/70" title="{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}">{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}</span>
+                    <span class="grid size-7 shrink-0 place-items-center rounded-full bg-base-content/8 font-mono text-[0.62rem] font-medium text-muted ring-1 ring-base-content/15">{% if session_operator_sub is not none %}{{ session_operator_sub[:2] | upper }}{% else %}OP{% endif %}</span>
+                    <span class="min-w-0 max-w-[7.5rem] truncate font-mono text-xs font-medium text-muted" title="{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}">{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}</span>
                     {{ icon("chevron-down", class="size-3 shrink-0 rotate-180 text-base-content/40") }}
                   </button>
                   <ul
@@ -407,7 +415,7 @@
                  ``v`` prefix when it is a release version, so none is
                  hardcoded here (#1698). #}
               <div
-                class="flex items-center gap-2 px-0.5 font-mono text-[0.68rem] text-base-content/50"
+                class="flex items-center gap-2 px-0.5 font-mono text-[0.68rem] text-subtle"
                 title="MEHO backplane {{ app_version }}"
               >
                 <span

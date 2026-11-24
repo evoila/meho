@@ -47,30 +47,30 @@
     {% if target.fingerprint %}
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
         {% if target.fingerprint.get("product") %}
-          <dt class="opacity-60">product</dt>
+          <dt class="text-subtle">product</dt>
           <dd>{{ target.fingerprint.product }}</dd>
         {% endif %}
         {% if target.fingerprint.get("version") %}
-          <dt class="opacity-60">version</dt>
+          <dt class="text-subtle">version</dt>
           <dd class="font-mono">{{ target.fingerprint.version }}</dd>
         {% endif %}
         {% if target.fingerprint.get("build") %}
-          <dt class="opacity-60">build</dt>
+          <dt class="text-subtle">build</dt>
           <dd class="font-mono text-xs">{{ target.fingerprint.build }}</dd>
         {% endif %}
         {% if target.fingerprint.get("captured_at") %}
-          <dt class="opacity-60">captured_at</dt>
+          <dt class="text-subtle">captured_at</dt>
           <dd class="text-xs">{{ target.fingerprint.captured_at }}</dd>
         {% endif %}
-        <dt class="opacity-60">last_probed_at</dt>
+        <dt class="text-subtle">last_probed_at</dt>
         <dd class="text-xs">{{ target.updated_at.isoformat() }}</dd>
       </dl>
       <details class="mt-2">
-        <summary class="cursor-pointer text-xs opacity-70">Raw fingerprint JSON</summary>
+        <summary class="cursor-pointer text-xs text-muted">Raw fingerprint JSON</summary>
         <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ target.fingerprint | tojson(indent=2) }}</pre>
       </details>
     {% else %}
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         No fingerprint captured yet.
         {% if is_tenant_admin %}
           Click <strong>Re-probe</strong> to invoke the connector probe and

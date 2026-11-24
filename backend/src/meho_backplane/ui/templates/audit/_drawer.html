@@ -72,7 +72,7 @@
           <span class="badge badge-sm {{ badge_class }}">{{ op_class }}</span>
           <span class="font-mono text-sm break-all">{{ op_id }}</span>
         </h2>
-        <p class="text-xs opacity-70">Audit row detail</p>
+        <p class="text-xs text-muted">Audit row detail</p>
       </div>
       <button
         type="button"
@@ -89,39 +89,39 @@
 
     {# ---------- Operation ---------- #}
     <section aria-label="Operation">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Operation</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Operation</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">Tenant</dt>
+        <dt class="text-subtle">Tenant</dt>
         <dd data-tenant>{{ tenant_label }}</dd>
-        <dt class="opacity-60">Principal</dt>
+        <dt class="text-subtle">Principal</dt>
         <dd>{{ principal_chip(references.principal) }}</dd>
         {% if via_label %}
-          <dt class="opacity-60">Via</dt>
+          <dt class="text-subtle">Via</dt>
           <dd data-via>{{ via_label }}</dd>
         {% endif %}
         {% if secret_read_as %}
-          <dt class="opacity-60">Secret read as</dt>
+          <dt class="text-subtle">Secret read as</dt>
           <dd data-secret-read-as class="font-mono text-xs break-all">{{ secret_read_as }}</dd>
         {% endif %}
-        <dt class="opacity-60">Operation</dt>
+        <dt class="text-subtle">Operation</dt>
         <dd>{{ operation_ref(references.operation) }}</dd>
         {% if references.target.present %}
-          <dt class="opacity-60">Target</dt>
+          <dt class="text-subtle">Target</dt>
           <dd>{{ target_ref(references.target) }}</dd>
         {% endif %}
-        <dt class="opacity-60">Method</dt>
+        <dt class="text-subtle">Method</dt>
         <dd>
           <span class="badge badge-outline badge-xs">{{ row.method }}</span>
           <span class="font-mono text-xs break-all">{{ row.path }}</span>
         </dd>
-        <dt class="opacity-60">Record type</dt>
+        <dt class="text-subtle">Record type</dt>
         <dd data-event-class="{{ row.event_class }}">{{ event_class_label }}</dd>
-        <dt class="opacity-60">Status</dt>
+        <dt class="text-subtle">Status</dt>
         <dd>{{ status_badge(references.status) }}</dd>
-        <dt class="opacity-60">Occurred</dt>
+        <dt class="text-subtle">Occurred</dt>
         <dd>{{ timestamp(references.time) }}</dd>
         {% if row.duration_ms is not none %}
-          <dt class="opacity-60">Duration (ms)</dt>
+          <dt class="text-subtle">Duration (ms)</dt>
           <dd>{{ row.duration_ms }}</dd>
         {% endif %}
       </dl>
@@ -133,7 +133,7 @@
     {# ---------- Stored session (#4904; only for a viewer who may read sessions) ---------- #}
     {% if stored_session %}
       <section aria-label="Stored session" data-stored-session>
-        <h3 class="text-sm font-semibold uppercase opacity-60">Stored session</h3>
+        <h3 class="text-sm font-semibold uppercase text-subtle">Stored session</h3>
         {% if stored_session.href %}
           <a
             class="btn btn-ghost btn-xs gap-1"
@@ -146,7 +146,7 @@
             This call is part of the stored session
             <span class="font-mono break-all">{{ stored_session.session_id }}</span>.
           </p>
-          <p class="text-sm opacity-60">
+          <p class="text-sm text-subtle">
             Read it with <code class="font-mono break-all">{{ stored_session.command }}</code>.
           </p>
         {% endif %}
@@ -155,13 +155,13 @@
 
     {# ---------- Flight recorder trace (operator read surface, #3215) ---------- #}
     <section aria-label="Flight recorder trace">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Flight recorder</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Flight recorder</h3>
       {% if not is_execution %}
-        <p class="text-sm opacity-60" data-trace-not-applicable>
+        <p class="text-sm text-subtle" data-trace-not-applicable>
           This record is not an operation run, so it has no trace.
         </p>
       {% elif not trace.present %}
-        <p class="text-sm opacity-60">
+        <p class="text-sm text-subtle">
           No trace captured for this dispatch (capture is per-tenant opt-in and best-effort).
         </p>
       {% else %}
@@ -175,13 +175,13 @@
           </p>
         {% endif %}
         <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-          <dt class="opacity-60">Spans</dt>
+          <dt class="text-subtle">Spans</dt>
           <dd>{{ trace.span_count }}</dd>
-          <dt class="opacity-60">Captured</dt>
+          <dt class="text-subtle">Captured</dt>
           <dd><time datetime="{{ trace.created_at }}">{{ trace.created_at }} UTC</time></dd>
-          <dt class="opacity-60">Expires</dt>
+          <dt class="text-subtle">Expires</dt>
           <dd><time datetime="{{ trace.expires_at }}">{{ trace.expires_at }} UTC</time></dd>
-          <dt class="opacity-60">Trace ID</dt>
+          <dt class="text-subtle">Trace ID</dt>
           <dd class="font-mono break-all">{{ trace.trace_id }}</dd>
         </dl>
         {% if trace.spans %}
@@ -190,14 +190,14 @@
               <li class="border-base-300 rounded border p-2">
                 <details>
                   <summary class="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
-                    <span class="font-mono text-xs opacity-50">#{{ span.seq }}</span>
+                    <span class="font-mono text-xs text-subtle">#{{ span.seq }}</span>
                     <span class="badge badge-sm {{ span.kind_badge }}">{{ span.span_kind }}</span>
                     <span class="font-mono text-xs break-all">{{ span.name }}</span>
                     {% if span.status %}
                       <span class="badge badge-sm {{ span.status_tone }}">{{ span.status }}</span>
                     {% endif %}
                     {% if span.duration_ms is not none %}
-                      <span class="text-xs opacity-60">{{ span.duration_ms }} ms</span>
+                      <span class="text-xs text-subtle">{{ span.duration_ms }} ms</span>
                     {% endif %}
                     {% if span.truncated %}
                       <span
@@ -209,31 +209,31 @@
                   <div class="mt-2 space-y-2 text-xs">
                     <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
                       {% if span.method %}
-                        <dt class="opacity-60">Method</dt>
+                        <dt class="text-subtle">Method</dt>
                         <dd><span class="badge badge-outline badge-xs">{{ span.method }}</span></dd>
                       {% endif %}
                       {% if span.url %}
-                        <dt class="opacity-60">URL</dt>
+                        <dt class="text-subtle">URL</dt>
                         <dd class="font-mono break-all">{{ span.url }}</dd>
                       {% endif %}
                       {% if span.op_id %}
-                        <dt class="opacity-60">Operation</dt>
+                        <dt class="text-subtle">Operation</dt>
                         <dd class="font-mono break-all">{{ span.op_id }}</dd>
                       {% endif %}
                       {% if span.connector_id %}
-                        <dt class="opacity-60">Connector</dt>
+                        <dt class="text-subtle">Connector</dt>
                         <dd class="font-mono break-all">{{ span.connector_id }}</dd>
                       {% endif %}
                       {% if span.source_kind %}
-                        <dt class="opacity-60">Source kind</dt>
+                        <dt class="text-subtle">Source kind</dt>
                         <dd>{{ span.source_kind }}</dd>
                       {% endif %}
-                      <dt class="opacity-60">Started</dt>
+                      <dt class="text-subtle">Started</dt>
                       <dd><time datetime="{{ span.started_at }}">{{ span.started_at }}</time></dd>
                     </dl>
 
                     {% if span.collapsed %}
-                      <p class="opacity-60">
+                      <p class="text-subtle">
                         Collapsed group of {{ span.collapsed_count }} spans (capture cap reached).
                       </p>
                     {% endif %}
@@ -241,21 +241,21 @@
                     {% if span.input_rows is not none or span.handle %}
                       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
                         {% if span.input_rows is not none %}
-                          <dt class="opacity-60">Input rows</dt>
+                          <dt class="text-subtle">Input rows</dt>
                           <dd>
                             {{ span.input_rows }}{% if span.total_rows is not none %} / {{ span.total_rows }} total{% endif %}
                           </dd>
                         {% endif %}
                         {% if span.kept_fields %}
-                          <dt class="opacity-60">Kept fields</dt>
+                          <dt class="text-subtle">Kept fields</dt>
                           <dd class="font-mono break-all">{{ span.kept_fields | join(", ") }}</dd>
                         {% endif %}
                         {% if span.output_bytes is not none %}
-                          <dt class="opacity-60">Output bytes</dt>
+                          <dt class="text-subtle">Output bytes</dt>
                           <dd>{{ span.output_bytes }}</dd>
                         {% endif %}
                         {% if span.handle %}
-                          <dt class="opacity-60">Handle</dt>
+                          <dt class="text-subtle">Handle</dt>
                           <dd class="font-mono break-all">{{ span.handle }}</dd>
                         {% endif %}
                       </dl>
@@ -263,7 +263,7 @@
 
                     {% if span.redaction_reasons %}
                       <div>
-                        <p class="opacity-60">Redaction notes</p>
+                        <p class="text-subtle">Redaction notes</p>
                         <ul class="list-disc pl-4">
                           {% for reason in span.redaction_reasons %}
                             <li>{{ reason }}</li>
@@ -274,7 +274,7 @@
 
                     {% if span.request_headers %}
                       <details>
-                        <summary class="cursor-pointer opacity-60">
+                        <summary class="cursor-pointer text-subtle">
                           Request headers ({{ span.request_headers | length }})
                         </summary>
                         <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.request_headers | tojson(indent=2) }}</pre>
@@ -282,14 +282,14 @@
                     {% endif %}
                     {% if span.request_body_present %}
                       <details>
-                        <summary class="cursor-pointer opacity-60">Request body (redacted)</summary>
+                        <summary class="cursor-pointer text-subtle">Request body (redacted)</summary>
                         <pre class="bg-base-200 mt-1 max-h-72 overflow-auto rounded p-2">{{ span.request_body | tojson(indent=2) }}</pre>
                       </details>
                     {% endif %}
 
                     {% if span.response_headers %}
                       <details>
-                        <summary class="cursor-pointer opacity-60">
+                        <summary class="cursor-pointer text-subtle">
                           Response headers ({{ span.response_headers | length }})
                         </summary>
                         <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.response_headers | tojson(indent=2) }}</pre>
@@ -297,16 +297,16 @@
                     {% endif %}
                     {% if span.response_body_present %}
                       <details>
-                        <summary class="cursor-pointer opacity-60">Response body (redacted)</summary>
+                        <summary class="cursor-pointer text-subtle">Response body (redacted)</summary>
                         <pre class="bg-base-200 mt-1 max-h-72 overflow-auto rounded p-2">{{ span.response_body | tojson(indent=2) }}</pre>
                       </details>
                     {% elif not span.body_recorded %}
-                      <p class="opacity-60">Body not recorded (secret-bearing op family).</p>
+                      <p class="text-subtle">Body not recorded (secret-bearing op family).</p>
                     {% endif %}
 
                     {% if span.other_attributes %}
                       <details>
-                        <summary class="cursor-pointer opacity-60">Other attributes</summary>
+                        <summary class="cursor-pointer text-subtle">Other attributes</summary>
                         <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.other_attributes | tojson(indent=2) }}</pre>
                       </details>
                     {% endif %}
@@ -321,22 +321,22 @@
 
     {# ---------- Identifiers (raw ids, always reachable) ---------- #}
     <section aria-label="Identifiers">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Identifiers</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Identifiers</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">Audit ID</dt>
+        <dt class="text-subtle">Audit ID</dt>
         <dd class="font-mono break-all">{{ references.audit_id }}</dd>
-        <dt class="opacity-60">Request ID</dt>
+        <dt class="text-subtle">Request ID</dt>
         <dd class="font-mono break-all">
-          {% if references.request_id %}{{ references.request_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
+          {% if references.request_id %}{{ references.request_id }}{% else %}<span class="text-subtle">—</span>{% endif %}
         </dd>
-        <dt class="opacity-60">Work ref</dt>
+        <dt class="text-subtle">Work ref</dt>
         <dd class="break-all">{{ work_ref_ref(references.work_ref) }}</dd>
       </dl>
     </section>
 
     {# ---------- Payload (decision #3 aggregate-only gate) ---------- #}
     <section aria-label="Payload">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Payload</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Payload</h3>
       {% if aggregate_only %}
         <p class="flex items-center gap-1 text-sm text-warning">
           <span aria-hidden="true">&#x1F512;</span>
@@ -348,7 +348,7 @@
       {% elif request_payload %}
         <pre class="mt-1 max-h-72 overflow-auto rounded bg-base-200 p-2 text-xs">{{ request_payload | tojson(indent=2) }}</pre>
       {% else %}
-        <p class="text-sm opacity-60">No request payload recorded.</p>
+        <p class="text-sm text-subtle">No request payload recorded.</p>
       {% endif %}
     </section>
   </div>

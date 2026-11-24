@@ -617,9 +617,9 @@ def test_register_modal_matches_kb_editor_form_language() -> None:
     # kb-style label rows: label py-0 + font-medium label-text + alt hint.
     assert 'class="label py-0"' in body
     assert 'class="label-text font-medium"' in body
-    assert 'class="label-text-alt opacity-60"' in body
+    assert 'class="label-text-alt text-subtle"' in body
     # Section grouping into Identity / Metadata / Backend, kb column-header style.
-    assert "text-xs font-medium opacity-60 uppercase tracking-wide" in body
+    assert "text-xs font-medium text-subtle uppercase tracking-wide" in body
     for section in ("Identity", "Metadata", "Backend"):
         assert f">{section}</div>" in body
     # Bordered footer holding the actions (kb editor line 181).

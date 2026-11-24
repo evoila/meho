@@ -293,8 +293,14 @@ async def _record(
     sensor: Sensor,
     outcome: AssertionOutcome,
     evaluated_at: datetime,
+    *,
+    advance_due_time: bool = True,
 ) -> CountedSensor:
-    """Record one outcome on *sensor*, like the central check loop does."""
+    """Record one outcome on *sensor*, like the central check loop does.
+
+    Without *advance_due_time* the next due time stays: the runner did not
+    run the check, so it keeps its scheduled run.
+    """
     settings = get_settings()
     previous_state = sensor.last_state
     recorded = await record_sensor_result(
@@ -306,7 +312,8 @@ async def _record(
         evaluated_at=evaluated_at,
         record_history=settings.checks_evidence_retention_days > 0,
     )
-    await _advance_next_fire(session, sensor, evaluated_at)
+    if advance_due_time:
+        await _advance_next_fire(session, sensor, evaluated_at)
     if settings.checks_agent_events and recorded.changed:
         await publish_sensor_changed(
             session,
@@ -517,7 +524,8 @@ async def mark_runner_sensors_unknown(
 
     A Sensor that confirms a change only after a few readings gets as many
     ``unknown`` readings, so a stale runner never leaves a check green. The
-    Dashboard edge of each Sensor is claimed in the same transaction. Does
+    next due time of each Sensor stays, so a runner that comes back runs
+    the check at its scheduled time. The Dashboard edge of each Sensor is claimed in the same transaction. Does
     not commit. The caller holds the lock of the runner's assignment row.
     """
     sensors = (
@@ -540,7 +548,7 @@ async def mark_runner_sensors_unknown(
         evaluated_at = now
         for step in range(sensor.retry_times + 1):
             evaluated_at = _evaluation_time(sensor, now + timedelta(microseconds=step))
-            last = await _record(session, sensor, outcome, evaluated_at)
+            last = await _record(session, sensor, outcome, evaluated_at, advance_due_time=False)
         if last is not None:
             marked.append(
                 await _claim(session, tenant_id=tenant_id, counted=last, now=evaluated_at)

@@ -492,11 +492,14 @@ async def test_stale_runner_makes_its_sensors_unknown_never_green(switch_on: Non
         )
         await session.commit()
 
+    due_at = (await _sensor(sensor_id)).next_fire_at
+
     await _run_one_tick()
 
     row = await _sensor(sensor_id)
     assert row.last_state == "unknown"
     assert row.last_evidence is not None and row.last_evidence["reason"] == "runner_stale"
+    assert row.next_fire_at == due_at  # a runner that comes back keeps the scheduled run
     assert (await _sensor(other)).last_state == "ok"
 
 

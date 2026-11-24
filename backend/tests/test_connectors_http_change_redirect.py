@@ -11,10 +11,13 @@ on the same origin. Names and addresses are made up; the transport is mocked.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import types
+import uuid
+from collections.abc import Iterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import httpx
@@ -34,6 +37,7 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakClientCredentials,
     KeycloakTargetLike,
 )
+from meho_backplane.flight_recorder import capture
 from meho_backplane.operations._errors import is_redirect_on_change
 from meho_backplane.operations.dispatcher import _classify_http_status_error
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
@@ -253,11 +257,34 @@ async def test_log_line_of_a_change_redirect_keeps_only_the_origin(location: str
 async def test_a_repeat_after_login_sends_a_change_once_more_at_most() -> None:
     # The change was sent once before the login ended. Its repeat is the
     # second and last send: a 307 to the same path is not followed.
-    server = _Server(_redirect(307, "/items/7/"))
+    conn = _Conn()
     with change_sent_once_before():
-        resp = await _send(server, "PUT", "/items/7")
-    assert resp.status_code == 307
-    assert server.seen == [("PUT", "/items/7")]
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            first = mock.put("/items/7").respond(307, headers={"Location": "/items/7/"})
+            second = mock.put("/items/7/").respond(200, json={"ok": True})
+            with pytest.raises(httpx.HTTPStatusError) as caught:
+                await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
+    await conn.aclose()
+
+    assert caught.value.response.status_code == 307
+    assert first.call_count == 1
+    assert second.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_login_during_a_repeat_keeps_its_usual_redirect_rule() -> None:
+    # A fresh login before the repeat is a direct client call. Its 307 to its
+    # own path with a trailing slash is followed, as it is outside a repeat.
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/session":
+            return httpx.Response(307, headers={"Location": "/api/session/"})
+        return httpx.Response(200, json={"token": "made-up"})
+
+    server = _Server(answer)
+    with change_sent_once_before():
+        resp = await _send(server, "POST", "/api/session")
+    assert resp.status_code == 200
+    assert server.seen == [("POST", "/api/session"), ("POST", "/api/session/")]
 
 
 @pytest.mark.asyncio
@@ -438,6 +465,131 @@ async def test_trace_of_a_keycloak_write_has_each_request_and_no_login() -> None
         ("PUT", 307, "/admin/realms/demo/groups/7"),
         ("PUT", 204, "/admin/realms/demo/groups/7/"),
     ]
+
+
+def _real_capture(op_id: str, tags: tuple[str, ...] = ()) -> Any:
+    """Turn on the real trace recorder for one operation; yield its stored entries."""
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    op = capture._OpContext(
+        op_id=op_id,
+        connector_id="svc-test",
+        impl_id=None,
+        product=None,
+        tags=tags,
+        body_paths=(),
+        # Set (not None) so the classifier does not read app settings.
+        delete_shaped_patterns=(),
+    )
+
+    @contextlib.contextmanager
+    def running() -> Iterator[list[Any]]:
+        scope_token = capture._active_capture_var.set(scope)
+        op_token = capture._op_context_var.set(op)
+        try:
+            yield scope.spans
+        finally:
+            capture._op_context_var.reset(op_token)
+            capture._active_capture_var.reset(scope_token)
+
+    return running()
+
+
+def _dumped(spans: list[Any]) -> str:
+    """Every stored entry as one text, to look for a value that must be hidden."""
+    return json.dumps(
+        [{"name": span.name, "attributes": span.attributes} for span in spans], default=str
+    )
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_operation_that_sends_a_secret_keeps_only_the_origin() -> None:
+    conn = _Conn()
+    with _real_capture("PUT:/keys/{name}", tags=("secret",)) as spans:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.put("/keys/sent-secret-value").respond(
+                307, headers={"Location": "/keys/sent-secret-value/"}
+            )
+            mock.put("/keys/sent-secret-value/").respond(200, json={"ok": True})
+            await conn._post_json(
+                _target(), "/keys/sent-secret-value", operator=_operator(), verb="PUT"
+            )
+    await conn.aclose()
+
+    assert [(span.name, span.status) for span in spans] == [
+        (f"PUT {_BASE}", "307"),
+        (f"PUT {_BASE}", "200"),
+    ]
+    assert [span.attributes["url"] for span in spans] == [_BASE, _BASE]
+    assert "sent-secret-value" not in _dumped(spans)
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_operation_that_sends_a_secret_keeps_only_the_origin_on_error() -> None:
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    conn = _Conn()
+    with _real_capture("PUT:/keys/{name}", tags=("secret",)) as spans:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.put("/keys/sent-secret-value").mock(side_effect=fail)
+            with (
+                patch("asyncio.sleep", new=AsyncMock()),
+                pytest.raises(httpx.ConnectError),
+            ):
+                await conn._post_json(
+                    _target(), "/keys/sent-secret-value", operator=_operator(), verb="PUT"
+                )
+    await conn.aclose()
+
+    assert spans
+    assert {span.attributes["url"] for span in spans} == {_BASE}
+    assert "sent-secret-value" not in _dumped(spans)
+
+
+@pytest.mark.asyncio
+async def test_trace_of_another_operation_keeps_the_path() -> None:
+    conn = _Conn()
+    with _real_capture("PUT:/items/{id}") as spans:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.put("/items/7").respond(307, headers={"Location": "/items/7/"})
+            mock.put("/items/7/").respond(200, json={"ok": True})
+            await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
+    await conn.aclose()
+
+    assert [span.attributes["url"] for span in spans] == [f"{_BASE}/items/7", f"{_BASE}/items/7/"]
+
+
+@pytest.mark.asyncio
+async def test_stored_redirect_entry_of_a_keycloak_write_has_no_body() -> None:
+    # The 307 body holds a value that Keycloak's own masking hides. The
+    # redirect entry records no body, so the value stays out of the trace.
+    conn = KeycloakConnector(credentials_loader=_kc_loader)
+    with _real_capture("keycloak.group.update") as spans:
+        async with respx.mock(base_url=_KC_BASE) as mock:
+            mock.post(url__regex=r".*/openid-connect/token$").respond(
+                200, json={"access_token": "made-up-token", "expires_in": 60}
+            )
+            mock.put("/admin/realms/demo/groups/7").respond(
+                307,
+                headers={"Location": "/admin/realms/demo/groups/7/"},
+                json={"type": "password", "value": "kc-hidden-value"},
+            )
+            mock.put("/admin/realms/demo/groups/7/").respond(204)
+            await conn._write_admin(
+                _kc_target(),
+                "PUT",
+                "/admin/realms/demo/groups/7",
+                operator=_operator(),
+                json={"name": "widgets"},
+            )
+    await conn.aclose()
+
+    assert [(span.attributes["method"], span.status) for span in spans] == [
+        ("PUT", "307"),
+        ("PUT", "204"),
+    ]
+    assert not spans[0].attributes["response_body"]
+    assert "kc-hidden-value" not in _dumped(spans)
 
 
 def _status_error(method: str, status: int, location: str | None) -> httpx.HTTPStatusError:

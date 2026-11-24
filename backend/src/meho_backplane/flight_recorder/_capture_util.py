@@ -38,6 +38,7 @@ __all__ = [
     "now_utc",
     "request_id",
     "response_content",
+    "safe_origin",
     "safe_url",
     "serialize",
     "transport_fault_phase",
@@ -152,6 +153,20 @@ def safe_url(url: Any) -> str:
         return f"{text[:scheme_end]}://{host}{path}"
     except Exception:
         return "?"
+
+
+def safe_origin(url: Any) -> str:
+    """Return ``scheme://host[:port]`` only: the :func:`safe_url` without its path.
+
+    Used for a call that sends a secret, where a path parameter can carry
+    the secret.
+    """
+    text = safe_url(url)
+    scheme_end = text.find("://")
+    if scheme_end == -1:
+        return "?"
+    path_start = text.find("/", scheme_end + 3)
+    return text if path_start == -1 else text[:path_start]
 
 
 def coerce_uuid(value: Any) -> uuid.UUID | None:

@@ -12,7 +12,8 @@ address of an operation that sends a secret, stay out of the result and the
 audit row, and the log lines. A change sent twice after a 307 is not sent a
 third time after "the login ended", and a change sent once before the login
 ended follows no redirect on its repeat. A login that gets a redirect is
-reported as the login, also for an operation that sends a secret.
+reported as the login, also for an operation that sends a secret. A fresh
+login during that repeat keeps its usual redirect rule.
 Names and addresses are made up.
 """
 
@@ -83,7 +84,8 @@ class _RedirectingConnector(_NoHook403Connector):
         async with _SameOriginRedirectClient(
             base_url="https://vcfops.example.test", transport=httpx.MockTransport(answer)
         ) as client:
-            resp = await client.request(method, path, json={"name": "widget"})
+            # The operation's own request, sent the way an operation sends it.
+            resp = await self._send_traced(client, method, path, headers={}, json={"name": "w"})
         resp.raise_for_status()
         return {"ok": True}
 
@@ -430,3 +432,70 @@ async def test_login_redirect_message_stays_for_an_operation_that_sends_a_secret
     rows = await _audit_rows()
     assert len(rows) == 1
     assert "did not send the operation" in json.dumps(rows[0].payload)
+
+
+class _LoginRedirectedOnRecoveryConnector(_RedirectingConnector):
+    """401 on the first send. The fresh login then gets a 307 to its own path.
+
+    The login is a direct client call, as a real login is. Its 307 to the
+    same path with a trailing slash is followed. The operation is then sent
+    once more.
+    """
+
+    impl_id = "vcfops-rest-login-redirect-on-recovery"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[tuple[str, str]] = []
+        self.logged_out = False
+
+    def answer(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append((request.method, request.url.path))
+        if request.url.path == "/api/session":
+            return httpx.Response(307, headers={"Location": "/api/session/"})
+        if request.url.path == "/api/session/":
+            return httpx.Response(200, json={"token": "made-up"})
+        if len([r for r in self.requests if r[1] == "/api/v2/events"]) == 1:
+            return httpx.Response(401)
+        return httpx.Response(200, json={"ok": True})
+
+    async def _send(self, method: str, path: str) -> dict[str, Any]:
+        async with _SameOriginRedirectClient(
+            base_url="https://vcfops.example.test", transport=httpx.MockTransport(self.answer)
+        ) as client:
+            if self.logged_out:
+                login = await client.request("POST", "/api/session", json={"user": "made-up"})
+                login.raise_for_status()
+                self.logged_out = False
+            resp = await self._send_traced(client, method, path, headers={}, json={"name": "w"})
+        resp.raise_for_status()
+        return {"ok": True}
+
+    async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
+        await super().invalidate_session(target, rejected=rejected)
+        self.logged_out = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "safety_level"), [("GET", "safe"), ("PUT", "caution")])
+async def test_login_redirected_during_recovery_is_followed_and_the_call_runs_again(
+    stub_embedding_service: AsyncMock, session: AsyncSession, method: str, safety_level: str
+) -> None:
+    result, connector = await _run(
+        _LoginRedirectedOnRecoveryConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method=method,
+        safety_level=safety_level,
+    )
+
+    assert isinstance(connector, _LoginRedirectedOnRecoveryConnector)
+    assert result.status == "ok", result.error
+    assert connector.requests == [
+        (method, "/api/v2/events"),
+        ("POST", "/api/session"),
+        ("POST", "/api/session/"),
+        (method, "/api/v2/events"),
+    ]
+    assert connector.invalidations == 1

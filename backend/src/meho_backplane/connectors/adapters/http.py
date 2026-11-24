@@ -832,12 +832,15 @@ def _scrub_location_header(location: str | None) -> str | None:
 _MAX_CHANGE_REDIRECTS = 1
 
 
-#: Set while :meth:`HttpConnector._request_json` or
-#: :meth:`HttpConnector._post_json` sends its request: only then does the
-#: client put each followed redirect into the trace. A direct client call (a
-#: login, for example) stays out of the trace, as it does without a redirect.
-_trace_redirect_hops: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "meho_trace_redirect_hops", default=False
+#: Set while :meth:`HttpConnector._request_json`,
+#: :meth:`HttpConnector._post_json` or :meth:`HttpConnector._send_traced`
+#: sends the operation's own request. Only then does the client put each
+#: followed redirect into the trace, and only then does the repeat limit of
+#: :func:`change_sent_once_before` apply. A direct client call (a login, for
+#: example) stays out of the trace, as it does without a redirect, and keeps
+#: its usual redirect rules.
+_operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_operation_request", default=False
 )
 
 
@@ -869,8 +872,9 @@ def change_sent_once_before() -> Iterator[None]:
 
     A change is sent at most twice. The dispatcher sends an operation again
     after "the login ended" only when its first send was one request. Inside
-    this block a change follows no redirect, so the repeat is the second and
-    last send. Reads keep following redirects.
+    this block the operation's own change request follows no redirect, so
+    the repeat is the second and last send. The fresh login inside the block
+    and every read keep their usual redirect rules.
     """
     token = _change_sent_before.set(True)
     try:
@@ -965,7 +969,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     @staticmethod
     def _hop_span_start() -> flight_recorder_capture.SpanStart | None:
         """A trace start for a redirect hop, only inside a traced helper."""
-        return flight_recorder_capture.span_start() if _trace_redirect_hops.get() else None
+        return flight_recorder_capture.span_start() if _operation_request.get() else None
 
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
@@ -976,7 +980,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # ``follow_redirects=True`` slipping through a convenience method.
         is_change = request.method.upper() not in _IDEMPOTENT_METHODS
         if is_change:
-            max_hops = 0 if _change_sent_before.get() else _MAX_CHANGE_REDIRECTS
+            # Only the repeated operation request follows no redirect; a
+            # fresh login before it keeps the usual rule.
+            repeat = _change_sent_before.get() and _operation_request.get()
+            max_hops = 0 if repeat else _MAX_CHANGE_REDIRECTS
         else:
             max_hops = _MAX_SAME_ORIGIN_REDIRECTS
         sent_urls = {_sent_address(request.url)}
@@ -1040,11 +1047,15 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 )
             # One trace entry per request that was really sent, with its own
             # method: the helper that sent the request records the last one.
+            # The body of a followed redirect is not recorded: it skips the
+            # connector's own masking (``trace_response_body``), so it could
+            # hold a secret in a field the shared redaction does not know.
             flight_recorder_capture.record_vendor_call(
                 hop_start,
                 method=request.method,
                 request_headers=request.headers,
                 response=response,
+                response_body=b"",
             )
             await response.aclose()
             history.append(response)
@@ -1437,7 +1448,7 @@ class HttpConnector(Connector):
         # response, so it records an error span and re-raises (#3408). Each
         # retry attempt is its own vendor call and gets its own span.
         _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _trace_redirect_hops.set(True)
+        trace_hops = _operation_request.set(True)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1452,7 +1463,7 @@ class HttpConnector(Connector):
             flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
             raise
         finally:
-            _trace_redirect_hops.reset(trace_hops)
+            _operation_request.reset(trace_hops)
         # After a followed redirect the last request can have another method
         # (an OPTIONS answered with a 303 is followed by a GET).
         flight_recorder_capture.record_vendor_call(
@@ -1555,7 +1566,7 @@ class HttpConnector(Connector):
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
         _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _trace_redirect_hops.set(True)
+        trace_hops = _operation_request.set(True)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1572,7 +1583,7 @@ class HttpConnector(Connector):
             flight_recorder_capture.record_vendor_call_error(_fr_start, method=verb, exc=exc)
             raise
         finally:
-            _trace_redirect_hops.reset(trace_hops)
+            _operation_request.reset(trace_hops)
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=resp.request.method,
@@ -1604,14 +1615,14 @@ class HttpConnector(Connector):
         returned as it is; the caller checks its status.
         """
         _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _trace_redirect_hops.set(True)
+        trace_hops = _operation_request.set(True)
         try:
             resp = await client.request(method, path, json=json, headers=headers)
         except httpx.TransportError as exc:
             flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
             raise
         finally:
-            _trace_redirect_hops.reset(trace_hops)
+            _operation_request.reset(trace_hops)
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=resp.request.method,

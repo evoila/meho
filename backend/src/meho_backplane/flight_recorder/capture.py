@@ -64,6 +64,7 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.flight_recorder._capture_util import (
     approx_bytes,
     approx_span_bytes,
@@ -75,12 +76,14 @@ from meho_backplane.flight_recorder._capture_util import (
     now_utc,
     request_id,
     response_content,
+    safe_origin,
     safe_url,
     transport_fault_phase,
 )
 from meho_backplane.flight_recorder.config import should_capture
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
 from meho_backplane.redaction.flight_recorder import redact_span
+from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 
 __all__ = [
     "CaptureHandle",
@@ -408,7 +411,7 @@ def record_vendor_call_error(start: SpanStart | None, *, method: str, exc: BaseE
         return
     try:
         try:
-            url = safe_url(exc.request.url)  # type: ignore[attr-defined]
+            url = _span_url(exc.request.url)  # type: ignore[attr-defined]
         except Exception:
             url = "?"
         op = _op_context_var.get()
@@ -470,7 +473,26 @@ def _redact_vendor_call(
         body_paths=op.body_paths if op else (),
         delete_shaped_patterns=op.delete_shaped_patterns if op else None,
     )
-    return redaction, safe_url(request_url), req_truncated or resp_truncated
+    return redaction, _span_url(request_url), req_truncated or resp_truncated
+
+
+def _span_url(url: Any) -> str:
+    """The address put on a vendor-call span.
+
+    For an operation that sends a secret, only the scheme, host and port are
+    kept: a path parameter of the call can carry the secret. The test is the
+    one the error results use (``operations._vendor_text.sends_secret``).
+    """
+    op = _op_context_var.get()
+    if op is not None and _op_sends_secret(op):
+        return safe_origin(url)
+    return safe_url(url)
+
+
+def _op_sends_secret(op: _OpContext) -> bool:
+    if secret_tag_tokens(op.tags):
+        return True
+    return op.op_id is not None and classify_op(op.op_id) == "credential_write"
 
 
 def _vendor_attributes(redaction: Any, method: str, url: str, truncated: bool) -> dict[str, Any]:

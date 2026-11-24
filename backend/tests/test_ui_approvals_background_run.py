@@ -513,7 +513,9 @@ def test_notice_shows_when_the_run_has_ended() -> None:
         run_id = _runs_of(client, rid)[0].id
         while_running = _notices(client, run_id)
         operation.release.set()
-        _ask_until(client, f"/ui/approvals/{rid}/run", _has_ended)
+        # The notice shows only once the run row is marked as ended, a moment
+        # after the card already shows the stored result.
+        _runs_until_ended(client, rid)
         ended = _notices(client, run_id)
 
     assert "data-run-ended" not in while_running
@@ -546,6 +548,7 @@ def test_notice_when_another_caller_runs_the_operation() -> None:
         # The person moved to another page: only the notice route is asked.
         while_running = _notices(client, run_id)
         _in_loop(client, lambda: persist_resume_result(rid, _OK, parked_op_id=_OP_ID))
+        _runs_until_ended(client, rid)
         ended = _notices(client, run_id)
 
     assert 'data-result-state="started"' in card

@@ -75,6 +75,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -128,7 +129,7 @@ from meho_backplane.mcp.structured_results import (
 )
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
-from meho_backplane.operations.caller_gone import watch_caller
+from meho_backplane.operations.caller_gone import caller_gone_at, watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
@@ -1523,10 +1524,49 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     note_request_route(f"method:{jrpc.method}")
     # #3696: the body is fully read here, so the watcher can notice a
     # caller that disconnects while a long tool call runs.
-    async with watch_caller(request.receive):
-        response = await _dispatch_no_store(jrpc, is_notification, operator)
+    response = await _dispatch_watching_caller(request, jrpc, is_notification, operator)
     issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return await _audit_session_open(request, jrpc, operator, response, issued=issued)
+
+
+async def _dispatch_watching_caller(
+    request: Request,
+    jrpc: JsonRpcRequest,
+    is_notification: bool,
+    operator: Operator,
+) -> Response:
+    """Run the handler while watching the caller; log a call that gets no answer.
+
+    The log line ``mcp_call_ended_without_answer`` is written once when the
+    call is cancelled, or when it ends after the caller has already gone.
+    A cancel is raised again after the log line.
+    """
+    async with watch_caller(request.receive):
+        try:
+            response = await _dispatch_no_store(jrpc, is_notification, operator)
+        except asyncio.CancelledError:
+            _log_call_without_answer(
+                request, jrpc, "caller_gone" if caller_gone_at() else "cancelled"
+            )
+            raise
+        if caller_gone_at() is not None:
+            _log_call_without_answer(request, jrpc, "caller_gone")
+        return response
+
+
+def _log_call_without_answer(request: Request, jrpc: JsonRpcRequest, reason: str) -> None:
+    """Write the one log line for an MCP call that ended with no answer sent."""
+    params = jrpc.params or {}
+    tool = params.get("name") if jrpc.method == "tools/call" else None
+    session_id = request.headers.get("mcp-session-id")
+    # The logger is resolved per call, so a test can capture the line.
+    structlog.get_logger().warning(
+        "mcp_call_ended_without_answer",
+        session=session_id[:8] if session_id else None,
+        method=jrpc.method,
+        tool=tool if isinstance(tool, str) else None,
+        reason=reason,
+    )
 
 
 async def _audit_session_open(

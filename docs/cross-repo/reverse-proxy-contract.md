@@ -46,8 +46,11 @@ The backplane Pod's container CMD includes the uvicorn
 `--proxy-headers` flag:
 
 ```dockerfile
-CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--timeout-keep-alive", "75"]
 ```
+
+`--timeout-keep-alive 75` keeps an idle connection open for 75 seconds, so a
+client or proxy with a shorter idle limit closes first.
 
 `--proxy-headers` installs uvicorn's `ProxyHeadersMiddleware` at the
 ASGI server layer (before FastAPI sees the request). The middleware

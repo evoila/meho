@@ -45,6 +45,7 @@ from __future__ import annotations
 import calendar
 import re
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -61,6 +62,7 @@ __all__ = [
     "LogWindowError",
     "WindowPage",
     "collect_window",
+    "open_pod_log",
     "parse_rfc3339",
     "read_pod_log_window",
     "window_from_params",
@@ -199,25 +201,19 @@ def window_from_params(params: dict[str, Any]) -> LogWindow | None:
     return LogWindow(since=since_key, until=until_key)
 
 
-async def read_pod_log_window(
-    api_client: client.ApiClient,
-    *,
-    name: str,
-    namespace: str,
-    query: dict[str, Any],
-    window: LogWindow,
-    cap_bytes: int,
-) -> WindowPage:
-    """``GET /api/v1/namespaces/{ns}/pods/{name}/log`` with extra query params.
+@asynccontextmanager
+async def open_pod_log(
+    api_client: client.ApiClient, *, name: str, namespace: str, query: dict[str, Any]
+) -> AsyncIterator[AsyncIterator[bytes]]:
+    """``GET /api/v1/namespaces/{ns}/pods/{name}/log`` as a stream of chunks.
 
     Builds the same request the generated ``read_namespaced_pod_log``
     does, with the same ``Accept`` header (:data:`WINDOW_HEADERS`), but
     with the query params given here, so ``sinceTime`` can be sent.
     The body is not loaded at once: it is read in chunks of
-    :data:`WINDOW_CHUNK_BYTES` and handed to :func:`collect_window`,
-    which stops reading once the page is full. ``aiohttp`` closes a
-    connection whose body was not read to the end instead of reusing
-    it, so an early stop is safe.
+    :data:`WINDOW_CHUNK_BYTES`. ``aiohttp`` closes a connection whose
+    body was not read to the end instead of reusing it, so an early stop
+    is safe.
     """
     response = await api_client.call_api(
         "/api/v1/namespaces/{namespace}/pods/{name}/log",
@@ -241,11 +237,26 @@ async def read_pod_log_window(
             error.headers = response.headers
             error.body = raw.decode("utf-8", errors="replace")  # type: ignore[assignment]
             raise error
-        return await collect_window(
-            response.content.iter_chunked(WINDOW_CHUNK_BYTES), window, cap_bytes=cap_bytes
-        )
+        yield response.content.iter_chunked(WINDOW_CHUNK_BYTES)
     finally:
         response.release()
+
+
+async def read_pod_log_window(
+    api_client: client.ApiClient,
+    *,
+    name: str,
+    namespace: str,
+    query: dict[str, Any],
+    window: LogWindow,
+    cap_bytes: int,
+) -> WindowPage:
+    """Read one page of the window from the stream of :func:`open_pod_log`.
+
+    :func:`collect_window` stops reading once the page is full.
+    """
+    async with open_pod_log(api_client, name=name, namespace=namespace, query=query) as chunks:
+        return await collect_window(chunks, window, cap_bytes=cap_bytes)
 
 
 def window_query(

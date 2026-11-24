@@ -6,8 +6,8 @@
 One read over the two places a Linux host keeps logs: an allow-listed log
 file, and the systemd journal. It takes the shared parameters of
 :mod:`meho_backplane.connectors.log_read` and answers with the shared
-shape. A file goes through the confined read of ``linux.log.tail``; the
-journal is read by :mod:`.logs_journal`. Both older ops stay.
+shape. A file is read by :mod:`.logs_file`, confined like in
+``linux.log.tail``; the journal is read by :mod:`.logs_journal`. Both older ops stay.
 
 ``source`` is an absolute path (a file), ``journal`` (the whole journal)
 or a systemd unit name. A file has no times, so ``since`` and ``until``
@@ -20,27 +20,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.linux.logs_file import read_log_file
 from meho_backplane.connectors.linux.logs_journal import (
     JOURNAL_MARKER_PATTERN,
     journal_query,
     read_journal,
 )
-from meho_backplane.connectors.linux.ops import (
-    MAX_TAIL_LINES,
-    SSH_TRANSPORT_NOTE,
-    LinuxOp,
-    confine_read_path,
-)
-from meho_backplane.connectors.linux.ops_file import (
-    ReadOutput,
-    _read_opened_file,
-    build_log_tail_command,
-)
+from meho_backplane.connectors.linux.ops import MAX_TAIL_LINES, SSH_TRANSPORT_NOTE, LinuxOp
 from meho_backplane.connectors.linux.ops_inspect import LinuxInspectError
 from meho_backplane.connectors.log_read import (
     DEFAULT_LOG_LINES,
     LOG_READ_RESPONSE_SCHEMA,
-    REDACTION_CONTEXT_LINES,
     LogEntry,
     build_log_answer,
     log_read_parameter_schema,
@@ -60,19 +50,7 @@ def _window(params: dict[str, Any]) -> int:
     """Return how many entries to read from the host."""
     if params.get("filter"):
         return MAX_TAIL_LINES
-    return min(
-        int(params.get("lines", DEFAULT_LOG_LINES)) + REDACTION_CONTEXT_LINES, MAX_TAIL_LINES
-    )
-
-
-def _check_file_was_read(output: ReadOutput, path: str) -> None:
-    """Raise when the file gave no content because it was not read."""
-    if not output.exists:
-        raise LinuxInspectError(f"log file {path!r} does not exist; nothing was read")
-    if output.real_path is None:
-        raise LinuxInspectError(f"log file {path!r} could not be opened; nothing was read")
-    if not output.content and output.size_bytes != 0:
-        raise LinuxInspectError(f"log file {path!r} gave no content and is not an empty file")
+    return int(params.get("lines", DEFAULT_LOG_LINES))
 
 
 async def _read_file(
@@ -86,14 +64,10 @@ async def _read_file(
             "a log file has no times, so 'since' and 'until' cannot be used with a file; "
             "use the journal, or leave them out"
         )
-    window = _window(params)
-    confined = confine_read_path(params["source"])
-    cmd = build_log_tail_command(confined, window)
-    output = await _read_opened_file(connector, target, cmd, confined, operator)
-    _check_file_was_read(output, confined)
-    raw = output.content.splitlines()
+    read = await read_log_file(connector, target, params["source"], _window(params), operator)
     entries = await redact_entries(
-        [LogEntry(time=None, line=line) for line in raw],
+        [LogEntry(time=None, line=line) for line in read.lines],
+        context=read.context,
         connector=connector,
         operator=operator,
         op_id=OP_ID,
@@ -104,7 +78,7 @@ async def _read_file(
         needle=params.get("filter"),
         keep="newest",
     )
-    return build_log_answer(page, source_cut=len(raw) >= window)
+    return build_log_answer(page, source_cut=read.cut)
 
 
 async def _read_journal(
@@ -116,7 +90,7 @@ async def _read_journal(
     query = journal_query(params)
     read = await read_journal(connector, target, query, _window(params), operator)
     entries = await redact_entries(
-        read.entries, connector=connector, operator=operator, op_id=OP_ID
+        read.entries, context=read.context, connector=connector, operator=operator, op_id=OP_ID
     )
     page = await take_page(
         entries,

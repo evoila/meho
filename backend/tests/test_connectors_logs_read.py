@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,13 +18,9 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.kubernetes import KubernetesConnector
+from meho_backplane.connectors.kubernetes import KubernetesConnector, logs_read_source
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_logs_read import k8s_logs_read
-from meho_backplane.connectors.kubernetes.ops_logs_window import (
-    collect_window,
-    window_from_params,
-)
 from meho_backplane.connectors.linux import LINUX_OPS, LinuxSshConnector
 from meho_backplane.connectors.linux.logs_journal import build_journal_command, journal_query
 from meho_backplane.connectors.linux.ops_file import (
@@ -38,6 +33,8 @@ from meho_backplane.connectors.log_read import (
     LOG_READ_RESPONSE_SCHEMA,
     MAX_LINE_CHARS,
     MAX_LOG_LINES,
+    REDACTION_CONTEXT_LINES,
+    LogContext,
     LogEntry,
     LogReadError,
     build_log_answer,
@@ -45,6 +42,14 @@ from meho_backplane.connectors.log_read import (
     parse_until,
     redact_entries,
     take_page,
+)
+from tests._log_read_helpers import (
+    START,
+    FakeJournal,
+    FakePodLog,
+    cursor,
+    journal_line,
+    proc,
 )
 
 _PASSWORD = "made-up-pw-4711"
@@ -63,63 +68,25 @@ _OPERATOR = Operator(
 )
 
 
-def _proc(stdout: str, exit_status: int = 0) -> Any:
-    proc = MagicMock()
-    proc.stdout = stdout
-    proc.stderr = ""
-    proc.exit_status = exit_status
-    return proc
-
-
-def _file_output(lines: list[str], path: str = "/var/log/app.log", size: int = 100) -> str:
+def _file_output(
+    lines: list[str],
+    path: str = "/var/log/app.log",
+    size: int = 100,
+    before: list[str] | None = None,
+    short: int = 0,
+) -> str:
     hex_path = (path + "\n").encode().hex()
-    text = "".join(f"{line}\n" for line in lines)
-    return f"{hex_path}\n{size}\n{CONTENT_MARKER}\n{text}"
+    before = before or []
+    text = "".join(f"{line}\n" for line in [*before, *lines])
+    header = f"MEHO_LOG_LINES {len(before)} {short}"
+    return f"{hex_path}\n{size}\n{CONTENT_MARKER}\n{header}\n{text}"
 
 
-_T0 = 1_790_000_000_000_000
-_BOOT = "b" * 32
+def _journal_output(entries: list[tuple[int, str]]) -> str:
+    return "\n".join(journal_line(*entry) for entry in entries) + "\nMEHO_JOURNAL_RC=0\n"
 
 
-def _cursor(number: int) -> str:
-    return f"s={'a' * 32};i={number:x};b={_BOOT};m=1;t=2;x=3"
-
-
-def _journal_output(entries: list[tuple[int, str]], *, cut: bool = False) -> str:
-    """What the host prints; the number of an entry is its offset from ``_T0``."""
-    rows = [
-        json.dumps(
-            {
-                "__CURSOR": _cursor(number),
-                "__REALTIME_TIMESTAMP": str(_T0 + number),
-                "MESSAGE": message,
-            }
-        )
-        for number, message in entries
-    ]
-    return "\n".join(rows) + ("\nMEHO_JOURNAL_CUT\n" if cut else "\nMEHO_JOURNAL_RC=0\n")
-
-
-class _Journal:
-    """A host whose journal holds *messages*; it answers the built command like journalctl."""
-
-    def __init__(self, messages: list[str]) -> None:
-        self.entries = list(enumerate(messages))
-        self.commands: list[str] = []
-
-    async def run(self, _target: Any, cmd: str, **_: Any) -> Any:
-        self.commands.append(cmd)
-        entries = self.entries
-        marker = re.search(r"--cursor='?(s=[^ ']+)'?", cmd)
-        if "--reverse" in cmd:
-            entries = entries[::-1]
-        if marker is not None:
-            numbers = [_cursor(number) for number, _ in entries]
-            if marker.group(1) in numbers:
-                entries = entries[numbers.index(marker.group(1)) :]
-        rows = int(re.search(r"-v rows=(\d+)", cmd).group(1))  # type: ignore[union-attr]
-        return _proc(_journal_output(entries[:rows], cut=len(entries) > rows))
-
+class _Journal(FakeJournal):
     async def read(self, **params: Any) -> dict[str, Any]:
         connector = LinuxSshConnector()
         with patch.object(connector, "_run_command", side_effect=self.run):
@@ -133,9 +100,12 @@ def _lines_of(answer: dict[str, Any]) -> list[str]:
 
 
 async def _linux(params: dict[str, Any], stdout: str) -> tuple[dict[str, Any], str]:
+    """Run the read; the read of what is before the page finds only the page's first entry."""
+    first = re.search(r"^\{.*\}$", stdout, re.MULTILINE)
+    context = f"{first.group(0) if first else ''}\nMEHO_JOURNAL_RC=0\n"
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as run:
-        run.return_value = _proc(stdout)
+        run.side_effect = [proc(stdout), proc(context)]
         result = await connector.logs_read(_LINUX_TARGET, params)
     return result, run.await_args_list[0].args[1]
 
@@ -181,11 +151,11 @@ def test_schema_rejects_bad_since_and_extra_keys() -> None:
     assert not validator.is_valid({"source": "journal", "lines": 5001})
     assert not validator.is_valid({"source": "journal", "path": "/x"})
     assert not validator.is_valid({"since": "15m"})
-    assert validator.is_valid({"source": "journal", "since": _cursor(1)})
-    assert validator.is_valid({"source": "journal", "until": _cursor(1)})
+    assert validator.is_valid({"source": "journal", "since": cursor(1)})
+    assert validator.is_valid({"source": "journal", "until": cursor(1)})
     k8s = next(op for op in KUBERNETES_OPS if op.op_id == "k8s.logs.read")
     assert not Draft202012Validator(k8s.parameter_schema).is_valid(
-        {"source": "n/p", "since": _cursor(1)}
+        {"source": "n/p", "since": cursor(1)}
     )
 
 
@@ -296,6 +266,7 @@ async def test_the_filter_does_not_match_a_hidden_value() -> None:
 async def _redacted(lines: list[str]) -> list[str]:
     entries = await redact_entries(
         [LogEntry(None, line) for line in lines],
+        context=LogContext(),
         connector=LinuxSshConnector(),
         operator=_OPERATOR,
         op_id="linux.logs.read",
@@ -338,7 +309,7 @@ async def test_linux_file_read_returns_rows_without_times() -> None:
     result, cmd = await _linux(
         {"source": "/var/log/app.log", "lines": 10}, _file_output(["a", "b"])
     )
-    assert "tail -n 266" in cmd
+    assert "tail -n 266 " in cmd and "-v rows=10 " in cmd
     assert result["rows"] == [
         {"time": None, "line": "a", "line_truncated": False},
         {"time": None, "line": "b", "line_truncated": False},
@@ -350,7 +321,7 @@ async def test_linux_file_read_returns_rows_without_times() -> None:
 
 async def test_linux_file_read_marks_truncated_when_older_lines_are_left() -> None:
     result, _ = await _linux(
-        {"source": "/var/log/app.log", "lines": 2}, _file_output(["a", "b", "c"])
+        {"source": "/var/log/app.log", "lines": 2}, _file_output(["b", "c"], before=["a"])
     )
     assert _lines_of(result) == ["b", "c"] and result["truncated"] is True
     exact, _ = await _linux({"source": "/var/log/app.log", "lines": 2}, _file_output(["a", "b"]))
@@ -368,8 +339,11 @@ async def test_linux_file_that_is_empty_is_an_empty_answer() -> None:
         (MISSING_MARKER + "\n", "does not exist"),
         (UNREADABLE_MARKER + "\n", "could not be opened"),
         (_file_output([], size=4096), "gave no content"),
+        (_file_output([]).split("MEHO_LOG_LINES")[0], "did not finish cleanly"),
+        (_file_output([], before=["x"]).replace("x\n", ""), "did not finish cleanly"),
+        (_file_output([], before=["x"]), "larger than 8 MiB"),
     ],
-    ids=["missing", "unreadable", "opened but not read"],
+    ids=["missing", "unreadable", "opened but not read", "no header", "cut off", "big line"],
 )
 async def test_linux_file_that_was_not_read_is_an_error(stdout: str, message: str) -> None:
     with pytest.raises(LinuxInspectError, match=message):
@@ -379,7 +353,7 @@ async def test_linux_file_that_was_not_read_is_an_error(stdout: str, message: st
 async def test_linux_file_filter_reads_wide_window_and_keeps_matches() -> None:
     out = _file_output(["ok", "ERROR one", "ok", "ERROR two"])
     result, cmd = await _linux({"source": "/var/log/app.log", "lines": 1, "filter": "ERROR"}, out)
-    assert "tail -n 10000" in cmd
+    assert "-v rows=10000 " in cmd
     assert [r["line"] for r in result["rows"]] == ["ERROR two"]
     assert result["truncated"] is True
 
@@ -411,7 +385,7 @@ async def test_linux_journal_unit_with_window_has_times_and_covered() -> None:
         "from": "2026-09-21T14:13:20+00:00",
         "to": "2026-09-21T14:14:20+00:00",
     }
-    assert result["continuation"] == _cursor(60_000_000)
+    assert result["continuation"] == cursor(60_000_000)
 
 
 async def test_linux_journal_keeps_the_fraction_of_both_times() -> None:
@@ -429,16 +403,16 @@ async def test_linux_journal_keeps_the_fraction_of_both_times() -> None:
 
 async def test_linux_journal_forward_pages_read_every_entry_once() -> None:
     journal = _Journal([f"m{i}" for i in range(7)])
-    page = await journal.read(since="1h", lines=3)
+    page = await journal.read(since=START, lines=3)
     seen = _lines_of(page)
     assert seen == ["m0", "m1", "m2"] and page["truncated"] is True
-    assert page["continuation"] == _cursor(2)
+    assert page["continuation"] == cursor(2)
     while page["truncated"]:
         page = await journal.read(since=page["continuation"], lines=3)
         seen += _lines_of(page)
     assert seen == [f"m{i}" for i in range(7)]
-    assert f"--cursor='{_cursor(2)}'" in journal.commands[1]
-    assert "--since" not in journal.commands[1]
+    second = next(cmd for cmd in journal.commands if f"--after-cursor='{cursor(2)}'" in cmd)
+    assert "--since" not in second
     # The last marker stays usable: later entries follow it.
     journal.entries.append((7, "m7"))
     assert _lines_of(await journal.read(since=page["continuation"])) == ["m7"]
@@ -448,7 +422,7 @@ async def test_linux_journal_reads_back_from_the_newest_page() -> None:
     journal = _Journal([f"m{i}" for i in range(5)])
     newest = await journal.read(lines=2)
     assert _lines_of(newest) == ["m3", "m4"] and newest["truncated"] is True
-    assert newest["continuation"] == _cursor(3)
+    assert newest["continuation"] == cursor(3)
     older = await journal.read(until=newest["continuation"], lines=10)
     assert _lines_of(older) == ["m0", "m1", "m2"] and older["truncated"] is False
     assert all("--reverse" in cmd for cmd in journal.commands)
@@ -456,35 +430,35 @@ async def test_linux_journal_reads_back_from_the_newest_page() -> None:
 
 async def test_linux_journal_marker_stays_when_nothing_follows() -> None:
     journal = _Journal(["m0"])
-    answer = await journal.read(since=_cursor(0))
+    answer = await journal.read(since=cursor(0))
     assert answer["rows"] == [] and answer["truncated"] is False
-    assert answer["continuation"] == _cursor(0) and answer["covered"] is None
+    assert answer["continuation"] == cursor(0) and answer["covered"] is None
 
 
 async def test_linux_journal_marker_that_is_gone_is_an_error() -> None:
     journal = _Journal(["m0", "m1"])
     with pytest.raises(LinuxInspectError, match="marker"):
-        await journal.read(since=_cursor(99))
+        await journal.read(since=cursor(99))
 
 
 async def test_linux_journal_until_marker_needs_a_read_without_since() -> None:
     with pytest.raises(LogReadError, match="without 'since'"):
-        journal_query({"source": "journal", "since": "15m", "until": _cursor(1)})
+        journal_query({"source": "journal", "since": "15m", "until": cursor(1)})
 
 
 async def test_linux_journal_filter_without_a_match_says_what_was_searched() -> None:
     journal = _Journal([f"m{i}" for i in range(4)])
-    answer = await journal.read(since="1h", filter="absent")
+    answer = await journal.read(since=START, filter="absent")
     assert answer["rows"] == [] and answer["truncated"] is False
     assert answer["covered"]["from"].endswith("14:13:20+00:00")
     assert answer["covered"]["to"].endswith("14:13:20.000003+00:00")
-    one = await journal.read(since="1h", filter="m2")
+    one = await journal.read(since=START, filter="m2")
     assert _lines_of(one) == ["m2"] and one["covered"] == answer["covered"]
 
 
 async def test_linux_journal_filter_matches_behind_the_cut_of_a_long_message() -> None:
     journal = _Journal(["short", "x" * 6000 + " needle"])
-    answer = await journal.read(since="1h", filter="needle")
+    answer = await journal.read(since=START, filter="needle")
     assert answer["total"] == 1
     assert answer["rows"][0]["line_truncated"] is True
     assert "needle" in answer["rows"][0]["line"]
@@ -498,22 +472,22 @@ async def test_linux_journal_entry_over_the_byte_cap_is_an_error() -> None:
 async def test_linux_journal_key_over_entries_is_hidden_on_every_page() -> None:
     journal = _Journal(["before", *_KEY, "after"])
     shown: list[str] = []
-    page = await journal.read(since="1h", lines=4)
+    page = await journal.read(since=START, lines=4)
     shown += _lines_of(page)
     while page["truncated"]:
         page = await journal.read(since=page["continuation"], lines=4)
         shown += _lines_of(page)
     assert len(shown) == len(_KEY) + 2 and shown[0] == "before" and shown[-1] == "after"
     assert not any(part in "\n".join(shown) for part in _KEY_BODY)
-    matched = await journal.read(since="1h", filter="madeUpKeyBody")
+    matched = await journal.read(since=START, filter="madeUpKeyBody")
     assert matched["rows"] == []
 
 
 async def test_linux_journal_keeps_the_warning_of_journalctl() -> None:
     connector = LinuxSshConnector()
-    proc = _proc(_journal_output([(0, "x")]))
-    proc.stderr = "Hint: some messages are not shown"
-    with patch.object(connector, "_run_command", new_callable=AsyncMock, return_value=proc):
+    result = proc(_journal_output([(0, "x")]))
+    result.stderr = "Hint: some messages are not shown"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock, return_value=result):
         answer = await connector.logs_read(_LINUX_TARGET, {"source": "journal"})
     assert answer["warning"] == "Hint: some messages are not shown"
 
@@ -566,7 +540,7 @@ async def test_linux_journal_span_becomes_exact_start_time() -> None:
 async def test_linux_journal_failure_is_an_error_not_an_empty_answer() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as run:
-        run.return_value = _proc("\nMEHO_JOURNAL_RC=1\n")
+        run.return_value = proc("\nMEHO_JOURNAL_RC=1\n")
         with pytest.raises(LinuxInspectError):
             await connector.logs_read(_LINUX_TARGET, {"source": "journal"})
 
@@ -584,9 +558,12 @@ async def test_password_in_a_log_line_comes_back_hidden() -> None:
 
 
 async def test_linux_file_key_over_lines_is_hidden_also_with_a_filter_and_a_line_cut() -> None:
-    out = _file_output(["before", *_KEY, "after"])
+    lines = ["before", *_KEY, "after"]
     for extra in ({}, {"lines": 4}, {"filter": "madeUpKeyBody"}, {"filter": "e"}):
+        page = lines[-extra.get("lines", len(lines)) :]
+        out = _file_output(page, before=lines[: len(lines) - len(page)])
         result, _ = await _linux({"source": "/var/log/app.log", **extra}, out)
+        assert result["rows"] or "filter" in extra
         assert not any(part in json.dumps(result) for part in _KEY_BODY)
 
 
@@ -595,42 +572,69 @@ async def test_linux_file_key_over_lines_is_hidden_also_with_a_filter_and_a_line
 # ---------------------------------------------------------------------------
 
 
-async def _k8s(
-    params: dict[str, Any], page: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    inner = AsyncMock(return_value={"pod": "p", "namespace": "n", "container": "c", **page})
-    with patch("meho_backplane.connectors.kubernetes.ops_logs_read.k8s_logs", inner):
-        result = await k8s_logs_read(KubernetesConnector(), MagicMock(), _OPERATOR, params)
-    return result, inner.await_args.args[3]
+async def _k8s(params: dict[str, Any], lines: list[str]) -> tuple[dict[str, Any], FakePodLog]:
+    """Read a log whose *lines* start with their time, at the one that *params* ask for."""
+    log = FakePodLog(lines)
+    with log.patched():
+        answer = await k8s_logs_read(
+            KubernetesConnector(), MagicMock(), _OPERATOR, {"source": "n/p", **params}
+        )
+    Draft202012Validator(LOG_READ_RESPONSE_SCHEMA).validate(answer)
+    return answer, log
 
 
-async def test_k8s_tail_read_maps_source_and_filter() -> None:
-    result, inner = await _k8s(
-        {"source": "prod/web-1/app", "lines": 2, "filter": "boom"},
-        {"lines": ["ok", "boom 1", "boom 2", "boom 3"], "truncated": False},
-    )
-    assert inner == {"pod_name": "web-1", "namespace": "prod", "container": "app", "tail": 5000}
-    assert [r["line"] for r in result["rows"]] == ["boom 2", "boom 3"]
+def _stamped(lines: list[str]) -> list[str]:
+    return [f"2026-11-10T08:{i // 60:02d}:{i % 60:02d}Z {line}" for i, line in enumerate(lines)]
+
+
+async def test_k8s_source_names_the_container() -> None:
+    find = AsyncMock(side_effect=LookupError("stop"))
+    with patch.object(logs_read_source.ContainerLog, "find", find):
+        for source in ("prod/web-1/app", "prod/web-1"):
+            with pytest.raises(LookupError):
+                await k8s_logs_read(
+                    KubernetesConnector(), MagicMock(), _OPERATOR, {"source": source}
+                )
+    assert [call.args[3:] for call in find.await_args_list] == [
+        ("prod", "web-1", "app"),
+        ("prod", "web-1", None),
+    ]
+
+
+async def test_k8s_source_is_resolved_like_in_k8s_logs() -> None:
+    pod = MagicMock()
+    pod.metadata.name = "web-1-abc"
+    pod.spec.containers = [MagicMock()]
+    pod.spec.containers[0].name = "app"
+    pod.spec.init_containers = []
+    core = MagicMock(list_namespaced_pod=AsyncMock(return_value=MagicMock(items=[pod])))
+    log = FakePodLog(_stamped(["a"]))
+    connector = MagicMock(_get_api_client=AsyncMock(return_value=log.api_client))
+    with patch.object(logs_read_source.client, "CoreV1Api", return_value=core):
+        found = await logs_read_source.ContainerLog.find(
+            connector, MagicMock(), _OPERATOR, "prod", "web-1", None
+        )
+    assert (found.pod, found.namespace, found.container) == ("web-1-abc", "prod", "app")
+    assert (await logs_read_source.read_newest(found, 5)).lines == ["a"]
+
+
+async def test_k8s_tail_read_filters_the_newest_lines() -> None:
+    lines = _stamped(["ok", "boom 1", "boom 2", "boom 3"])
+    result, log = await _k8s({"lines": 2, "filter": "boom"}, lines)
+    assert log.queries[0]["tailLines"] == MAX_LOG_LINES + REDACTION_CONTEXT_LINES
+    assert _lines_of(result) == ["boom 2", "boom 3"]
     assert result["truncated"] is True
 
 
-async def test_k8s_source_without_container() -> None:
-    _, inner = await _k8s({"source": "prod/web-1"}, {"lines": [], "truncated": False})
-    assert "container" not in inner and inner["tail"] == 456
-    _, most = await _k8s(
-        {"source": "prod/web-1", "lines": MAX_LOG_LINES}, {"lines": [], "truncated": False}
-    )
-    assert most["tail"] == 5000
-
-
 async def test_k8s_since_reads_a_window_with_times_and_keeps_the_marker() -> None:
-    page = {
-        "lines": ["2026-11-10T08:00:00.1Z first", "2026-11-10T08:00:01.2Z second"],
-        "truncated": True,
-        "next_since_time": "2026-11-10T08:00:02.3Z",
-    }
-    result, inner = await _k8s({"source": "n/p", "since": "2026-11-10T08:00:00Z"}, page)
-    assert inner["since_time"] == "2026-11-10T08:00:00Z" and "tail" not in inner
+    lines = [
+        "2026-11-10T08:00:00.1Z first",
+        "2026-11-10T08:00:01.2Z second",
+        "2026-11-10T08:00:02.3Z " + "x" * 1024 * 1024,
+    ]
+    result, log = await _k8s({"since": "2026-11-10T08:00:00Z"}, lines)
+    assert log.queries[-1]["sinceTime"] == "2026-11-10T08:00:00Z"
+    assert "tailLines" not in log.queries[-1]
     assert result["rows"][0] == {
         "time": "2026-11-10T08:00:00.1Z",
         "line": "first",
@@ -642,141 +646,105 @@ async def test_k8s_since_reads_a_window_with_times_and_keeps_the_marker() -> Non
 
 
 async def test_k8s_lines_cut_in_a_window_continues_at_first_dropped_row() -> None:
-    page = {
-        "lines": [f"2026-11-10T08:00:0{i}Z l{i}" for i in range(4)],
-        "truncated": False,
-    }
-    result, _ = await _k8s({"source": "n/p", "since": "2026-11-10T08:00:00Z", "lines": 2}, page)
-    assert [r["line"] for r in result["rows"]] == ["l0", "l1"]
+    result, _ = await _k8s(
+        {"since": "2026-11-10T08:00:00Z", "lines": 2}, _stamped(["l0", "l1", "l2", "l3"])
+    )
+    assert _lines_of(result) == ["l0", "l1"]
     assert result["continuation"] == "2026-11-10T08:00:02Z"
     assert result["truncated"] is True
 
 
-async def test_k8s_exact_times_go_to_the_reader_as_they_are() -> None:
-    since, until = "2026-11-10T08:00:00.123456789Z", "2026-11-10T09:00:00.9+01:00"
-    _, inner = await _k8s(
-        {"source": "n/p", "since": since, "until": until}, {"lines": [], "truncated": False}
+async def test_k8s_times_are_read_exactly() -> None:
+    lines = [f"2026-11-10T08:00:00.{n}Z l{n}" for n in ("123456788", "123456789", "900000000")]
+    result, _ = await _k8s(
+        {"since": "2026-11-10T08:00:00.123456789Z", "until": "2026-11-10T09:00:00.9+01:00"},
+        [*lines, "2026-11-10T08:00:00.900000001Z late"],
     )
-    assert inner["since_time"] == since and inner["until_time"] == until
-    _, span = await _k8s({"source": "n/p", "since": "15m"}, {"lines": [], "truncated": False})
-    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", span["since_time"])
+    assert _lines_of(result) == ["l123456789", "l900000000"]
+    _, span = await _k8s({"since": "15m"}, [])
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", span.queries[-1]["sinceTime"])
 
 
-class _PodLog:
-    """A container log, read with the real window code of ``k8s.logs``."""
-
-    def __init__(self, lines: list[str]) -> None:
-        self.body = "".join(f"{line}\n" for line in lines).encode()
-
-    async def _chunks(self) -> AsyncIterator[bytes]:
-        yield self.body
-
-    async def _logs(self, *args: Any) -> dict[str, Any]:
-        window = window_from_params(args[3])
-        assert window is not None
-        page = await collect_window(self._chunks(), window, cap_bytes=1024 * 1024)
-        answer: dict[str, Any] = {"lines": page.lines, "truncated": page.truncated}
-        if page.truncated:
-            answer["next_since_time"] = page.next_time
-        return answer
-
-    async def read(self, **params: Any) -> dict[str, Any]:
-        path = "meho_backplane.connectors.kubernetes.ops_logs_read.k8s_logs"
-        with patch(path, self._logs):
-            answer = await k8s_logs_read(
-                KubernetesConnector(), MagicMock(), _OPERATOR, {"source": "n/p", **params}
-            )
-        Draft202012Validator(LOG_READ_RESPONSE_SCHEMA).validate(answer)
-        return answer
-
-    async def read_all(self, **params: Any) -> list[str]:
-        seen: list[str] = []
-        for _ in range(50):
-            page = await self.read(**params)
-            seen += _lines_of(page)
-            if not page["truncated"]:
-                return seen
-            assert page["continuation"] != params["since"], "the read does not move on"
-            params["since"] = page["continuation"]
-        raise AssertionError("the read does not end")
+async def _read_all(log_lines: list[str], **params: Any) -> list[str]:
+    seen: list[str] = []
+    for _ in range(50):
+        page, _log = await _k8s(params, log_lines)
+        seen += _lines_of(page)
+        if not page["truncated"]:
+            return seen
+        assert page["continuation"] != params["since"], "the read does not move on"
+        params["since"] = page["continuation"]
+    raise AssertionError("the read does not end")
 
 
 async def test_k8s_pages_inside_one_second_read_every_line_once() -> None:
-    log = _PodLog([f"2026-11-10T08:00:00.{i}00000001Z l{i}" for i in range(10)])
-    first = await log.read(since="2026-11-10T08:00:00Z", lines=3)
+    lines = [f"2026-11-10T08:00:00.{i}00000001Z l{i}" for i in range(10)]
+    first, _ = await _k8s({"since": "2026-11-10T08:00:00Z", "lines": 3}, lines)
     assert first["continuation"] == "2026-11-10T08:00:00.300000001Z"
-    assert await log.read_all(since="2026-11-10T08:00:00Z", lines=3) == [f"l{i}" for i in range(10)]
-    some = await log.read(
-        since="2026-11-10T08:00:00.200000001Z", until="2026-11-10T08:00:00.400000001Z"
+    seen = await _read_all(lines, since="2026-11-10T08:00:00Z", lines=3)
+    assert seen == [f"l{i}" for i in range(10)]
+    some, _ = await _k8s(
+        {"since": "2026-11-10T08:00:00.200000001Z", "until": "2026-11-10T08:00:00.400000001Z"},
+        lines,
     )
     assert _lines_of(some) == ["l2", "l3", "l4"]
 
 
 async def test_k8s_page_ends_between_two_times() -> None:
     stamps = ["01", "02", "02", "02", "03"]
-    log = _PodLog([f"2026-11-10T08:00:{s}Z l{i}" for i, s in enumerate(stamps)])
-    first = await log.read(since="2026-11-10T08:00:00Z", lines=3)
+    lines = [f"2026-11-10T08:00:{s}Z l{i}" for i, s in enumerate(stamps)]
+    first, _ = await _k8s({"since": "2026-11-10T08:00:00Z", "lines": 3}, lines)
     assert _lines_of(first) == ["l0"] and first["truncated"] is True
     assert first["continuation"] == "2026-11-10T08:00:02Z"
-    second = await log.read(since=first["continuation"], lines=3)
+    second, _ = await _k8s({"since": first["continuation"], "lines": 3}, lines)
     assert _lines_of(second) == ["l1", "l2", "l3"]
-    third = await log.read(since=second["continuation"], lines=3)
+    third, _ = await _k8s({"since": second["continuation"], "lines": 3}, lines)
     assert _lines_of(third) == ["l4"] and third["truncated"] is False
 
 
 async def test_k8s_more_lines_at_one_time_than_lines_is_an_error() -> None:
-    log = _PodLog(["2026-11-10T08:00:01Z a", "2026-11-10T08:00:01Z b"])
+    lines = ["2026-11-10T08:00:01Z a", "2026-11-10T08:00:01Z b"]
+    params = {"since": "2026-11-10T08:00:00Z", "lines": 1}
     with pytest.raises(LogReadError, match="share the time 2026-11-10T08:00:01Z"):
-        await log.read(since="2026-11-10T08:00:00Z", lines=1)
-    assert _lines_of(await log.read(since="2026-11-10T08:00:00Z", lines=1, filter="b")) == ["b"]
+        await _k8s(params, lines)
+    assert _lines_of((await _k8s({**params, "filter": "b"}, lines))[0]) == ["b"]
 
 
 async def test_k8s_filter_pages_and_says_what_was_searched() -> None:
-    log = _PodLog([f"2026-11-10T08:00:0{i}Z {'hit' if i in (2, 7) else 'x'}{i}" for i in range(9)])
-    none = await log.read(since="2026-11-10T08:00:00Z", filter="absent")
+    lines = [f"2026-11-10T08:00:0{i}Z {'hit' if i in (2, 7) else 'x'}{i}" for i in range(9)]
+    none, _ = await _k8s({"since": "2026-11-10T08:00:00Z", "filter": "absent"}, lines)
     whole = {"from": "2026-11-10T08:00:00Z", "to": "2026-11-10T08:00:08Z"}
     assert none["rows"] == [] and none["covered"] == whole
-    first = await log.read(since="2026-11-10T08:00:00Z", filter="hit", lines=1)
+    params = {"since": "2026-11-10T08:00:00Z", "filter": "hit", "lines": 1}
+    first, _ = await _k8s(params, lines)
     assert first["covered"] == {"from": whole["from"], "to": "2026-11-10T08:00:06Z"}
     assert first["continuation"] == "2026-11-10T08:00:07Z"
-    assert await log.read_all(since="2026-11-10T08:00:00Z", filter="hit", lines=1) == [
-        "hit2",
-        "hit7",
-    ]
+    assert await _read_all(lines, **params) == ["hit2", "hit7"]
 
 
 async def test_k8s_key_over_lines_is_hidden_on_every_page_and_in_the_newest_lines() -> None:
-    stamped = [f"2026-11-10T08:00:{i:02d}Z {line}" for i, line in enumerate(["before", *_KEY, "z"])]
-    log = _PodLog(stamped)
-    shown = await log.read_all(since="2026-11-10T08:00:00Z", lines=1)
-    assert len(shown) == len(stamped) and shown[0] == "before" and shown[-1] == "z"
+    lines = _stamped(["before", *_KEY, "z"])
+    shown = await _read_all(lines, since="2026-11-10T08:00:00Z", lines=1)
+    assert len(shown) == len(lines) and shown[0] == "before" and shown[-1] == "z"
     assert not any(part in "\n".join(shown) for part in _KEY_BODY)
-    assert (await log.read(since="2026-11-10T08:00:00Z", filter="madeUpKeyBody"))["rows"] == []
-    newest, _ = await _k8s(
-        {"source": "n/p", "lines": 4}, {"lines": ["before", *_KEY, "z"], "truncated": False}
-    )
+    matched, _ = await _k8s({"since": "2026-11-10T08:00:00Z", "filter": "madeUpKeyBody"}, lines)
+    assert matched["rows"] == []
+    newest, _ = await _k8s({"lines": 4}, lines)
+    assert newest["total"] == 4
     assert not any(part in json.dumps(newest) for part in _KEY_BODY)
 
 
-async def test_k8s_until_is_passed_on_and_needs_since() -> None:
-    _, inner = await _k8s(
-        {"source": "n/p", "since": "2026-11-10T08:00:00Z", "until": "2026-11-10T09:00:00Z"},
-        {"lines": [], "truncated": False},
-    )
-    assert inner["until_time"] == "2026-11-10T09:00:00Z"
+async def test_k8s_until_needs_since() -> None:
     with pytest.raises(LogReadError):
-        await _k8s({"source": "n/p", "until": "2026-11-10T09:00:00Z"}, {"lines": []})
+        await _k8s({"until": "2026-11-10T09:00:00Z"}, [])
 
 
 @pytest.mark.parametrize("source", ["nopod", "a//b", "a/b/c/d", "/b"])
 async def test_k8s_bad_source_is_refused(source: str) -> None:
     with pytest.raises(LogReadError):
-        await _k8s({"source": source}, {"lines": []})
+        await _k8s({"source": source}, [])
 
 
 async def test_k8s_password_in_a_log_line_comes_back_hidden() -> None:
-    result, _ = await _k8s(
-        {"source": "n/p"},
-        {"lines": ["start", f"connect password={_PASSWORD}"], "truncated": False},
-    )
-    assert _PASSWORD not in json.dumps(result)
+    result, _ = await _k8s({}, _stamped(["start", f"connect password={_PASSWORD}"]))
+    assert result["total"] == 2 and _PASSWORD not in json.dumps(result)

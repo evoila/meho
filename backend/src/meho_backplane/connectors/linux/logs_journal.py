@@ -16,10 +16,14 @@ counted here instead.
   entry first, and the entries are turned round afterwards. So the byte
   cap drops the oldest entries, not the newest.
 
-A marker starts the read *at* its entry (``--cursor``). That entry was
-returned before, so it is dropped here. When the journal does not give it
-first, the journal no longer holds the place, and the read fails: it
-never starts again somewhere else without a word.
+A marker starts the read *behind* its entry (``--after-cursor``), so the
+entry takes nothing from the byte cap of the page. A read of its own then
+asks for the entry itself. When the journal does not give it, the journal
+no longer holds the place, and the read fails: it never starts again
+somewhere else without a word.
+
+The entries before the page are read too (:func:`build_context_command`),
+for the redaction only. They have their own byte cap.
 """
 
 from __future__ import annotations
@@ -34,7 +38,15 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.linux.ops_host import validate_unit_name
 from meho_backplane.connectors.linux.ops_inspect import LinuxInspectError, _journal_message
-from meho_backplane.connectors.log_read import LogEntry, LogReadError, parse_since, parse_until
+from meho_backplane.connectors.log_read import (
+    REDACTION_CONTEXT_LINES,
+    LogContext,
+    LogEntry,
+    LogReadError,
+    bound_context_line,
+    parse_since,
+    parse_until,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.linux.connector import LinuxSshConnector, Target
@@ -44,6 +56,7 @@ __all__ = [
     "JOURNAL_SOURCE",
     "JournalEntries",
     "JournalQuery",
+    "build_context_command",
     "build_journal_command",
     "journal_query",
     "parse_journal_entries",
@@ -58,6 +71,17 @@ _MARKER_RE = re.compile(JOURNAL_MARKER_PATTERN)
 
 #: Byte cap of the journal output read from the host.
 _MAX_JOURNAL_BYTES = 8 * 1024 * 1024
+
+#: Caps of the read of the entries before a page: the bytes the host looks
+#: at, the bytes it sends, and the size from which an entry is sent short.
+_MAX_CONTEXT_SCAN_BYTES = 64 * 1024 * 1024
+_MAX_CONTEXT_BYTES = 12 * 1024 * 1024
+_MAX_CONTEXT_ENTRY_BYTES = 16 * 1024
+
+#: More than the line with the exit code has.
+_EXIT_LINE_BYTES = 64
+
+_NO_ENTRIES = "-- No entries --"
 _NO_BINARY_EXIT = 127
 _RC_PREFIX = "MEHO_JOURNAL_RC="
 _CUT_MARKER = "MEHO_JOURNAL_CUT"
@@ -77,11 +101,15 @@ class JournalQuery:
 
 @dataclass(frozen=True)
 class JournalEntries:
-    """The entries read, oldest first, and whether the journal holds more."""
+    """The entries read, oldest first, and whether the journal holds more.
+
+    ``context`` are the lines of the entries before them.
+    """
 
     entries: list[LogEntry]
     cut: bool
     warning: str
+    context: LogContext
 
 
 def _is_marker(value: str | None) -> bool:
@@ -109,10 +137,42 @@ def _journal_time(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S.%f UTC")
 
 
+def _journalctl(query: JournalQuery, *cursor_options: str) -> str:
+    parts = ["journalctl", "-o", "json", "--all", "--no-pager"]
+    if not query.forward:
+        parts.append("--reverse")
+    if query.unit is not None:
+        parts += ["-u", shlex.quote(validate_unit_name(query.unit))]
+    parts += cursor_options
+    if query.since is not None:
+        parts.append("--since=" + shlex.quote(_journal_time(query.since)))
+    if query.until is not None:
+        parts.append("--until=" + shlex.quote(_journal_time(query.until)))
+    return " ".join(parts)
+
+
+def _capped(journalctl: str, *, scan_bytes: int, max_bytes: int, rows: int, short: str) -> str:
+    # Each entry is one line that starts with "{", and only entries count.
+    # head passes more than scan_bytes, so awk sees entries over it and the
+    # exit code line fits behind entries under it. In the C locale awk
+    # counts bytes. *short* may make an entry shorter before it is sent.
+    awk = (
+        f"LC_ALL=C awk -v scan={scan_bytes} -v max={max_bytes} -v rows={rows} "
+        f'\'substr($0, 1, 1) == "{{" {{ k++; s += length($0) + 1; {short}n += length($0) + 1; '
+        f'if (s > scan || n > max || k > rows) {{ print "{_CUT_MARKER}"; exit }} }} '
+        f"{{ print }}'"
+    )
+    return (
+        f"command -v journalctl >/dev/null 2>&1 || exit {_NO_BINARY_EXIT}; "
+        f"{{ {journalctl}; printf '\\n{_RC_PREFIX}%s\\n' \"$?\"; }} "
+        f"| head -c {scan_bytes + _EXIT_LINE_BYTES} | {awk}"
+    )
+
+
 def build_journal_command(
     query: JournalQuery, rows: int, max_bytes: int = _MAX_JOURNAL_BYTES
 ) -> str:
-    """Build the fixed ``journalctl -o json`` command.
+    """Build the fixed ``journalctl -o json`` command of a page.
 
     Every value is checked and ``shlex.quote``d, in the same word as its
     option, so it can never be read as an option. ``--all`` keeps long
@@ -120,30 +180,39 @@ def build_journal_command(
     bytes, always at a whole line, and a cut ends with the cut marker.
     Otherwise the last line is the exit code of ``journalctl``.
     """
-    parts = ["journalctl", "-o", "json", "--all", "--no-pager"]
-    if not query.forward:
-        parts.append("--reverse")
-    if query.unit is not None:
-        parts += ["-u", shlex.quote(validate_unit_name(query.unit))]
-    if query.marker is not None:
-        parts.append("--cursor=" + shlex.quote(query.marker))
-    if query.since is not None:
-        parts.append("--since=" + shlex.quote(_journal_time(query.since)))
-    if query.until is not None:
-        parts.append("--until=" + shlex.quote(_journal_time(query.until)))
-    cap = int(max_bytes)
-    # head passes one byte more than the cap, so awk sees an output over
-    # the cap. In the C locale awk counts bytes. Each entry is one line
-    # that starts with "{".
-    cut = (
-        f"LC_ALL=C awk -v max={cap} -v rows={int(rows)} "
-        f'\'{{ n += length($0) + 1; if (substr($0, 1, 1) == "{{") k++; '
-        f'if (n > max || k > rows) {{ print "{_CUT_MARKER}"; exit }} print }}\''
+    cursor = () if query.marker is None else ("--after-cursor=" + shlex.quote(query.marker),)
+    return _capped(
+        _journalctl(query, *cursor),
+        scan_bytes=int(max_bytes),
+        max_bytes=int(max_bytes),
+        rows=int(rows),
+        short="",
     )
-    return (
-        f"command -v journalctl >/dev/null 2>&1 || exit {_NO_BINARY_EXIT}; "
-        f"{{ {' '.join(parts)}; printf '\\n{_RC_PREFIX}%s\\n' \"$?\"; }} "
-        f"| head -c {cap + 1} | {cut}"
+
+
+def build_context_command(unit: str | None, marker: str, rows: int) -> str:
+    """Build the command that reads the entry of *marker* and those before it.
+
+    The newest comes first. A large entry is sent short: its cursor, and
+    the last mark of a private key in it. (A message in the form of a list
+    of bytes is sent whole: a mark in it is not text.) So large entries
+    before a page cannot fill the output.
+    """
+    query = JournalQuery(unit, None, None, None, forward=False)
+    short = (
+        f'if (length($0) > {_MAX_CONTEXT_ENTRY_BYTES} && !/"MESSAGE" ?: ?\\[/) {{ '
+        'c = match($0, /"__CURSOR" ?: ?"[^"]*"/) ? substr($0, RSTART, RLENGTH) : "\\"x\\":0"; '
+        'm = ""; p = split($0, q, /PRIVATE KEY-----/); if (p > 1) { '
+        "m = q[p - 1]; if (length(m) > 120) m = substr(m, length(m) - 119); "
+        'gsub(/[^A-Za-z0-9 -]/, " ", m); m = m "PRIVATE KEY-----" } '
+        '$0 = "{" c ",\\"MESSAGE\\":\\"" m "\\"}" } '
+    )
+    return _capped(
+        _journalctl(query, "--cursor=" + shlex.quote(marker)),
+        scan_bytes=_MAX_CONTEXT_SCAN_BYTES,
+        max_bytes=_MAX_CONTEXT_BYTES,
+        rows=int(rows),
+        short=short,
     )
 
 
@@ -176,7 +245,7 @@ def parse_journal_entries(stdout: str) -> tuple[list[LogEntry], bool]:
     The output ends with the cut marker or with exit code ``0``. Anything
     else raises: a failed read is never served as entries.
     """
-    lines = [line for line in stdout.split("\n") if line.strip()]
+    lines = [line for line in stdout.split("\n") if line.strip() and line != _NO_ENTRIES]
     last = lines.pop() if lines else ""
     if last == _CUT_MARKER:
         return [_entry(line) for line in lines], True
@@ -189,26 +258,10 @@ def parse_journal_entries(stdout: str) -> tuple[list[LogEntry], bool]:
     return [_entry(line) for line in lines], False
 
 
-def _drop_marker_entry(entries: list[LogEntry], marker: str) -> list[LogEntry]:
-    if not entries or entries[0].marker != marker:
-        raise LinuxInspectError(
-            "the journal does not give the entry of this marker (it was rotated away, belongs "
-            "to another source, or lies after 'until'), so the read cannot go on from it; "
-            "start again with a time, and entries between may be missing"
-        )
-    return entries[1:]
-
-
-async def read_journal(
-    connector: LinuxSshConnector,
-    target: Target,
-    query: JournalQuery,
-    rows: int,
-    operator: Operator | None,
-) -> JournalEntries:
-    """Read at most *rows* entries, or raise when the journal could not be read."""
-    wanted = rows + (1 if query.marker is not None else 0)
-    cmd = build_journal_command(query, wanted)
+async def _run(
+    connector: LinuxSshConnector, target: Target, cmd: str, operator: Operator | None
+) -> tuple[list[LogEntry], bool, str]:
+    """Run *cmd* and return ``(entries, cut, warning)``, in the order of the output."""
     proc = await connector._run_command(target, cmd, operator=operator)
     status = getattr(proc, "exit_status", 0)
     if status == _NO_BINARY_EXIT:
@@ -219,17 +272,93 @@ async def read_journal(
     warning = stderr.strip()[:500] if isinstance(stderr, str) else ""
     try:
         entries, cut = parse_journal_entries(stdout if isinstance(stdout, str) else "")
-        if query.marker is not None:
-            entries = _drop_marker_entry(entries, query.marker)
-        elif warning and not entries:
-            raise LinuxInspectError("journalctl returned no entries")
     except LinuxInspectError as exc:
         if warning:
             raise LinuxInspectError(f"{exc}; journalctl said: {warning}") from None
         raise
+    return entries, cut, warning
+
+
+async def _read_before(
+    connector: LinuxSshConnector,
+    target: Target,
+    unit: str | None,
+    marker: str,
+    operator: Operator | None,
+    rows: int,
+) -> LogContext | None:
+    """Return the lines of the entry of *marker* and of *rows* entries before it.
+
+    ``None`` when the journal does not give the entry of *marker*.
+    """
+    cmd = build_context_command(unit, marker, rows + 1)
+    entries, cut, _ = await _run(connector, target, cmd, operator)
+    if not entries or entries[0].marker != marker:
+        return None
+    lines = [bound_context_line(entry.line) for entry in reversed(entries)]
+    return LogContext(lines, complete=not cut or len(entries) > rows)
+
+
+_MARKER_GONE = (
+    "the journal does not give the entry of this marker (it was rotated away or belongs "
+    "to another source), so the read cannot go on from it; start again with a time, and "
+    "entries between may be missing"
+)
+
+
+async def _read_context(
+    connector: LinuxSshConnector,
+    target: Target,
+    query: JournalQuery,
+    entries: list[LogEntry],
+    cut: bool,
+    operator: Operator | None,
+) -> LogContext:
+    """Check the marker of *query* and return the lines before *entries* (oldest first)."""
+    if query.marker is not None and query.forward:
+        before = await _read_before(
+            connector, target, query.unit, query.marker, operator, REDACTION_CONTEXT_LINES
+        )
+        if before is None:
+            raise LinuxInspectError(_MARKER_GONE)
+        return before
+    if query.marker is not None and (
+        await _read_before(connector, target, query.unit, query.marker, operator, 0) is None
+    ):
+        raise LinuxInspectError(_MARKER_GONE)
+    if not entries or not (query.forward or cut):
+        return LogContext()
+    oldest = entries[0].marker
+    if oldest is None:
+        return LogContext(complete=False)
+    before = await _read_before(
+        connector, target, query.unit, oldest, operator, REDACTION_CONTEXT_LINES
+    )
+    if before is None:
+        raise LinuxInspectError(
+            "the journal was rotated during the read, so it was not read whole; read it again"
+        )
+    return LogContext(before.lines[:-1], before.complete)
+
+
+async def read_journal(
+    connector: LinuxSshConnector,
+    target: Target,
+    query: JournalQuery,
+    rows: int,
+    operator: Operator | None,
+) -> JournalEntries:
+    """Read at most *rows* entries, or raise when the journal could not be read."""
+    cmd = build_journal_command(query, rows)
+    entries, cut, warning = await _run(connector, target, cmd, operator)
+    if query.marker is None and warning and not entries and not cut:
+        raise LinuxInspectError(f"journalctl returned no entries; journalctl said: {warning}")
+    if not query.forward:
+        entries.reverse()
+    context = await _read_context(connector, target, query, entries, cut, operator)
     if cut and not entries:
         raise LinuxInspectError(
             f"the next journal entry is larger than {_MAX_JOURNAL_BYTES // (1024 * 1024)} MiB, "
             "the most one read may hold; read behind it with a later 'since' or an earlier 'until'"
         )
-    return JournalEntries(entries if query.forward else entries[::-1], cut, warning)
+    return JournalEntries(entries, cut, warning, context)

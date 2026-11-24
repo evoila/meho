@@ -7,7 +7,7 @@ For each connector: ``search_operations`` finds the read with the query
 ``logs``, ``call_operation`` runs it and writes one audit row, and
 ``result_query`` reads the rows behind the result handle. A private key
 that spans log lines is hidden in the inline answer, in the stored rows
-and in the audit row.
+and in the audit row, also when the read holds only the middle of it.
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ import re
 import uuid
 import zlib
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -37,6 +38,7 @@ from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation, search_operations
 from meho_backplane.settings import get_settings
+from tests._log_read_helpers import FakeJournal, FakePodLog, cursor, journal_time
 from tests._result_store_helpers import MemoryResultStore
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000057a1")
@@ -54,11 +56,9 @@ _KEY = [
     *_KEY_BODY,
     "-----END RSA " + "PRIVATE KEY-----",
 ]
+_LONG_KEY = [_KEY[0], *[f"madeUpKeyBody{i:03d}" for i in range(180)], _KEY[-1]]
 #: The key is in the inline sample (the first rows) and behind it.
 _LINES = ["first", *_KEY, *[f"line {i:03d}" for i in range(100)], *_KEY, "last"]
-_MARKER = "s=" + "a" * 32 + ";i={};b=" + "b" * 32 + ";m=1;t=2;x=3"
-
-
 _DIMENSION = 384
 
 
@@ -70,27 +70,8 @@ async def _word_vector(text: str, **_: Any) -> list[float]:
     return vector
 
 
-async def _journal(_self: Any, _target: Any, _cmd: str, **_kwargs: Any) -> Any:
-    entries = [
-        json.dumps(
-            {
-                "__CURSOR": _MARKER.format(number),
-                "__REALTIME_TIMESTAMP": str(1_790_000_000_000_000 + number),
-                "MESSAGE": line,
-            }
-        )
-        for number, line in enumerate(_LINES)
-    ]
-    proc = MagicMock()
-    proc.stdout = "\n".join(entries) + "\nMEHO_JOURNAL_RC=0\n"
-    proc.stderr = ""
-    proc.exit_status = 0
-    return proc
-
-
-async def _pod_log(*_args: Any) -> dict[str, Any]:
-    lines = [f"2026-11-10T08:00:00.{i:09d}Z {line}" for i, line in enumerate(_LINES)]
-    return {"lines": lines, "truncated": False}
+def _stamp(number: int) -> str:
+    return f"2026-09-21T14:13:20.{number:09d}Z"
 
 
 @dataclass(frozen=True)
@@ -114,7 +95,7 @@ _CASES = [
         "linux-ssh",
         "linux.logs.read",
         "app.service",
-        _MARKER.format(len(_LINES) - 1),
+        cursor(len(_LINES) - 1),
     ),
     _Case(KubernetesConnector, "k8s", "k8s", "k8s.logs.read", "prod/web-1/app", None),
 ]
@@ -145,9 +126,20 @@ def store(monkeypatch: pytest.MonkeyPatch) -> MemoryResultStore:
         "meho_backplane.operations.typed_register.encode_endpoint_text", _word_vector
     )
     monkeypatch.setattr("meho_backplane.operations._search.get_embedding_service", lambda: service)
-    monkeypatch.setattr(LinuxSshConnector, "_run_command", _journal)
-    monkeypatch.setattr("meho_backplane.connectors.kubernetes.ops_logs_read.k8s_logs", _pod_log)
     return memory
+
+
+@contextmanager
+def _source(lines: list[str]) -> Iterator[None]:
+    """A journal and a container log that hold *lines*."""
+    journal = FakeJournal(list(lines))
+    pod = FakePodLog([f"{_stamp(number)} {line}" for number, line in enumerate(lines)])
+
+    async def run(_self: Any, target: Any, cmd: str, **kwargs: Any) -> Any:
+        return await journal.run(target, cmd, **kwargs)
+
+    with patch.object(LinuxSshConnector, "_run_command", run), pod.patched():
+        yield
 
 
 async def _seed_target(case: _Case) -> str:
@@ -178,6 +170,30 @@ async def _audit_rows(op_id: str) -> list[AuditLog]:
         return list(rows.scalars().all())
 
 
+async def _call(case: _Case, target: str, **params: Any) -> dict[str, Any]:
+    return await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": case.connector_id,
+            "op_id": case.op_id,
+            "target": target,
+            "params": {"source": case.source, **params},
+        },
+    )
+
+
+async def _stored_rows(handle: dict[str, Any], total: int) -> list[dict[str, Any]]:
+    """Read all rows behind the handle with ``result_query``."""
+    rows: list[dict[str, Any]] = []
+    while len(rows) < total:
+        page = await _result_query_handler(
+            _OPERATOR, {"handle_id": handle["handle_id"], "offset": len(rows), "limit": 50}
+        )
+        assert page["rows"]
+        rows += page["rows"]
+    return rows
+
+
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.product)
 async def test_agent_finds_runs_and_pages_the_log_read(
     case: _Case, store: MemoryResultStore
@@ -192,15 +208,8 @@ async def test_agent_finds_runs_and_pages_the_log_read(
     assert hit["group_key"] == "logs" and hit["safety_level"] == "safe"
     assert hit["requires_approval"] is False
 
-    answer = await call_operation(
-        _OPERATOR,
-        {
-            "connector_id": case.connector_id,
-            "op_id": hit["op_id"],
-            "target": target,
-            "params": {"source": case.source, "since": "2026-01-01T00:00:00Z"},
-        },
-    )
+    with _source(_LINES):
+        answer = await _call(case, target, since="2026-01-01T00:00:00Z")
     assert answer["status"] == "ok", answer
     assert answer["result"]["truncated"] is False
     assert answer["result"]["covered"]["from"] < answer["result"]["covered"]["to"]
@@ -212,13 +221,7 @@ async def test_agent_finds_runs_and_pages_the_log_read(
     handle = answer["handle"]
     assert handle["total_rows"] == len(_LINES)
     sample = json.dumps(answer["result"]) + json.dumps(handle)
-    rows: list[dict[str, Any]] = []
-    while len(rows) < len(_LINES):
-        page = await _result_query_handler(
-            _OPERATOR, {"handle_id": handle["handle_id"], "offset": len(rows), "limit": 50}
-        )
-        assert page["rows"]
-        rows += page["rows"]
+    rows = await _stored_rows(handle, len(_LINES))
     assert rows[0]["line"] == "first" and rows[-1]["line"] == "last"
     assert [row["line"] for row in rows if row["line"].startswith("line ")] == [
         line for line in _LINES if line.startswith("line ")
@@ -228,3 +231,38 @@ async def test_agent_finds_runs_and_pages_the_log_read(
     stored = b"".join(store.client.values.values()).decode()
     for text in (sample, json.dumps(rows), stored, json.dumps(audit[0].payload, default=str)):
         assert not any(part in text for part in _KEY_BODY)
+
+
+@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.product)
+async def test_a_window_inside_a_key_shows_no_part_of_it(
+    case: _Case, store: MemoryResultStore
+) -> None:
+    """The window starts and ends between the first and the last line of the key."""
+    await case.connector.register_operations()
+    target = await _seed_target(case)
+    lines = ["first", *_LONG_KEY, "last"]
+    # One line apart: a microsecond in the journal, a nanosecond in the container log.
+    time = journal_time if case.connector is LinuxSshConnector else _stamp
+    window = {"since": time(30), "until": time(149)}
+
+    with _source(lines):
+        answer = await _call(case, target, **window)
+        short = await _call(case, target, **window, lines=3)
+        matched = await _call(case, target, **window, filter="madeUpKeyBody")
+        behind = await _call(case, target, since=time(30))
+    assert answer["status"] == "ok", answer
+    handle = answer["handle"]
+    assert handle["total_rows"] == 120
+    rows = await _stored_rows(handle, 120)
+    assert all(row["time"] and row["line"] for row in rows)
+    assert short["result"]["total"] == 3 and short["result"]["truncated"] is True
+    assert matched["result"]["rows"] == [] and matched["result"]["truncated"] is False
+    assert behind["status"] == "ok"
+    assert (await _stored_rows(behind["handle"], len(lines) - 30))[-1]["line"] == "last"
+
+    stored = b"".join(store.client.values.values()).decode()
+    audit = [row.payload for row in await _audit_rows(case.op_id)]
+    for text in (json.dumps([answer, short, behind]), json.dumps(rows), stored):
+        assert "madeUpKeyBody" not in text
+    # Only the filter that the caller gave is in an audit row.
+    assert json.dumps(audit, default=str).count("madeUpKeyBody") <= 1

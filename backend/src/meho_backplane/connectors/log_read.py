@@ -14,7 +14,9 @@ This module holds what the connectors share: the schemas, the time
 parsing, and the steps from source entries to the answer, in this order:
 
 1. :func:`redact_entries` hides secrets in the entries as one text, so a
-   secret that spans lines (a PEM key) is found whole.
+   secret that spans lines (a PEM key) is found whole. The connector gives
+   it the lines before the entries too (:class:`LogContext`): an entry can
+   be in the middle of a key that started earlier.
 2. :func:`take_page` applies the text filter and the line limit. It also
    says which entries were looked at.
 3. :func:`build_log_answer` builds the answer.
@@ -27,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -40,13 +42,17 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_LOG_LINES",
     "LOG_READ_RESPONSE_SCHEMA",
+    "MAX_CONTEXT_LINE_CHARS",
     "MAX_LINE_CHARS",
     "MAX_LOG_LINES",
     "REDACTION_CONTEXT_LINES",
+    "LogContext",
     "LogEntry",
     "LogPage",
     "LogReadError",
+    "bound_context_line",
     "build_log_answer",
+    "has_key_mark",
     "is_span",
     "log_read_parameter_schema",
     "parse_since",
@@ -62,10 +68,13 @@ MAX_LOG_LINES = 5000
 #: Most characters of one returned line. The filter looks at the whole line.
 MAX_LINE_CHARS = 4096
 
-#: How many lines more than ``lines`` a connector reads, so a private key
-#: that the line limit cuts in two is still found. A PEM block of a
-#: 16384-bit RSA key has about 200 lines.
+#: How many lines before the first entry a connector reads, so a private
+#: key that started there is still found. A PEM block of a 16384-bit RSA
+#: key has about 200 lines.
 REDACTION_CONTEXT_LINES = 256
+
+#: How much of one line before the first entry is kept.
+MAX_CONTEXT_LINE_CHARS = 4096
 
 _SPAN_RE = re.compile(r"^(\d+)([smhd])$")
 _SPAN_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -73,6 +82,12 @@ _TIME_PATTERN = r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:[Zz]|[+
 _FRACTION_RE = re.compile(r"\.(\d+)")
 
 _PEM_MARK_RE = re.compile(r"-----(BEGIN|END) ((?:[A-Z0-9]+ )*)PRIVATE KEY-----")
+_PEM_MARK_END = "PRIVATE KEY-----"
+_PEM_MARK_CHARS = 120
+
+#: A line that can be part of a key body: only base64 text, or a long piece of it.
+_KEY_BODY_RE = re.compile(r"\A\s*[A-Za-z0-9+/=]+\s*\Z|[A-Za-z0-9+/=]{16}")
+_HIDDEN_KEY_LINE = "[REDACTED:pem_private_key]"
 
 
 class LogReadError(ValueError):
@@ -220,6 +235,18 @@ class LogEntry:
 
 
 @dataclass(frozen=True)
+class LogContext:
+    """The lines right before the first entry, oldest first. They are never returned.
+
+    ``complete`` is true when they reach back
+    :data:`REDACTION_CONTEXT_LINES` lines or to the start of the log.
+    """
+
+    lines: list[str] = field(default_factory=list)
+    complete: bool = True
+
+
+@dataclass(frozen=True)
 class LogPage:
     """What :func:`take_page` took from the entries.
 
@@ -260,29 +287,74 @@ def _close_cut_keys(lines: list[str]) -> list[tuple[int, str]]:
     return added
 
 
-def _redact_lines(lines: list[str], labels: dict[str, str | None]) -> list[str]:
-    starts = _close_cut_keys(lines)
+def has_key_mark(line: str) -> bool:
+    """Say whether *line* holds the first or the last line of a private key."""
+    return _PEM_MARK_RE.search(line) is not None
+
+
+def bound_context_line(line: str) -> str:
+    """Shorten a line of the context; the last key mark in it is kept."""
+    if len(line) <= MAX_CONTEXT_LINE_CHARS:
+        return line
+    head = line[:MAX_CONTEXT_LINE_CHARS]
+    mark = line.rfind(_PEM_MARK_END)
+    if mark < 0:
+        return head
+    return f"{head} {line[max(0, mark - _PEM_MARK_CHARS) : mark + len(_PEM_MARK_END)]}"
+
+
+def _unclear_key_lines(lines: list[str], context: LogContext) -> set[int]:
+    """Return the lines that can belong to a key whose start was not read.
+
+    Only when the context ends early and holds no key mark: then nothing
+    says whether the first lines stand inside a key.
+    """
+    if context.complete or any(map(has_key_mark, context.lines)):
+        return set()
+    unclear: set[int] = set()
+    for index, line in enumerate(lines[: REDACTION_CONTEXT_LINES - len(context.lines)]):
+        if has_key_mark(line):
+            break
+        if _KEY_BODY_RE.search(line):
+            unclear.add(index)
+    return unclear
+
+
+def _redact_lines(
+    lines: list[str], context: LogContext, labels: dict[str, str | None]
+) -> list[str]:
+    everything = context.lines + lines
+    starts = _close_cut_keys(everything)
     text: list[str] = []
     real: list[bool] = []
-    for index, line in enumerate(lines):
+    for index, line in enumerate(everything):
         while starts and starts[0][0] == index:
             text.append(starts.pop(0)[1])
             real.append(False)
         text.append(line)
-        real.append(True)
+        real.append(index >= len(context.lines))
     result = apply_connector_boundary_redaction(text, **labels)
-    return [line for line, keep in zip(result.redacted, real, strict=True) if keep]
+    shown = [line for line, keep in zip(result.redacted, real, strict=True) if keep]
+    for index in _unclear_key_lines(lines, context):
+        shown[index] = _HIDDEN_KEY_LINE
+    return shown
 
 
 async def redact_entries(
-    entries: list[LogEntry], *, connector: Any, operator: Operator | None, op_id: str
+    entries: list[LogEntry],
+    *,
+    context: LogContext,
+    connector: Any,
+    operator: Operator | None,
+    op_id: str,
 ) -> list[LogEntry]:
     """Return *entries* with the secrets in their lines hidden.
 
-    The lines go through the redaction of the result boundary as one
-    text, under the same policy. This runs before the filter and the line
-    limit: they can take the ``BEGIN`` and ``END`` lines of a key away.
-    The result boundary still redacts the answer.
+    The lines of *context* and of the entries go through the redaction of
+    the result boundary as one text, under the same policy. This runs
+    before the filter and the line limit: they can take the ``BEGIN`` and
+    ``END`` lines of a key away. The result boundary still redacts the
+    answer.
     """
     tenant_id = None if operator is None else operator.tenant_id
     labels = {
@@ -290,7 +362,9 @@ async def redact_entries(
         "tenant": None if tenant_id is None else str(tenant_id),
         "op": op_id,
     }
-    lines = await asyncio.to_thread(_redact_lines, [entry.line for entry in entries], labels)
+    lines = await asyncio.to_thread(
+        _redact_lines, [entry.line for entry in entries], context, labels
+    )
     return [replace(entry, line=line) for entry, line in zip(entries, lines, strict=True)]
 
 

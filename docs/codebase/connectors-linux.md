@@ -207,9 +207,11 @@ stay, with their own names and parameters.
   together with `--since` differs between systemd versions.
 - `continuation` is the journal's own cursor at the end of the page. Pass
   it as `since` after a read with `since`, and as `until` after a read
-  without it. `truncated` says whether there is more to read. The entry
-  of the cursor is not repeated. When the journal does not give that
-  entry any more, the read fails and does not start again somewhere else.
+  without it. `truncated` says whether there is more to read: the read
+  saw more. Reaching a limit alone does not make it true. The entry of
+  the cursor is not repeated and takes nothing from the byte limit of the
+  page. When the journal does not give that entry any more, the read
+  fails and does not start again somewhere else.
 - `filter` is a plain text match, case counts. With a filter the handler
   reads up to 10000 lines (the cap of the older ops) and filters them.
 - The answer: `rows` of `{time, line, line_truncated}` (oldest first;
@@ -219,16 +221,24 @@ stay, with their own names and parameters.
   the read looked at, also when none matches; `null` without times.
 - A line is returned up to 4096 characters. A longer one is cut around
   the match, and `line_truncated` is true. The filter looks at the whole
-  line. One read takes at most 8 MiB from the journal; a single entry
-  that is larger raises an error.
+  line. One read returns at most 8 MiB of the journal or of the file. The
+  rest stays for another read of the journal; a file read keeps the newest
+  lines. A single entry or last line that is larger raises an error.
 - Secrets in the lines are hidden before the filter and the line limit
   run. The lines go through the redaction of the result boundary as one
   text (`redact_entries` in `connectors/log_read.py`), so a private key
-  over many lines is found whole. The read takes 256 lines more than
-  `lines` for this, and a key whose first lines are not in the read is
-  found by its `END` line. The filter never matches a value that the
-  answer hides. The result boundary still redacts the answer
-  (`docs/codebase/redaction.md`).
+  over many lines is found whole. The read also takes up to 256 lines from
+  before the first line (`LogContext`), because a page or a time window
+  can start inside a key. They are only for the redaction and are never
+  returned. The host sends long ones cut short, with the last `BEGIN` or
+  `END` mark in them, so they do not fill the output limit of SSH.
+- The file is read in one pass (`logs_file.py`). The journal takes a
+  second command for the lines before the page (`logs_journal.py`).
+- When the lines before could not all be read and hold no mark, the first
+  lines that can be part of a key body (base64 text) are hidden. A key
+  whose first lines are not there is also found by its `END` line.
+- The filter never matches a value that the answer hides. The result
+  boundary still redacts the answer (`docs/codebase/redaction.md`).
 - The handler builds no result handle. The normal result reduction
   makes one when the rows are many.
 

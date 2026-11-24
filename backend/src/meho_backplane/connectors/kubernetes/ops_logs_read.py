@@ -4,36 +4,43 @@
 """``k8s.logs.read`` -- the governed log read of Kubernetes (group ``logs``).
 
 The same parameters and the same answer as the log read of every other
-connector (:mod:`meho_backplane.connectors.log_read`). It sits on top of
-``k8s.logs``: it maps ``source`` to the pod, the namespace and the
+connector (:mod:`meho_backplane.connectors.log_read`). It uses the parts
+of ``k8s.logs``: it maps ``source`` to the pod, the namespace and the
 container, maps ``since`` / ``until`` to the time window of ``k8s.logs``,
-runs it, and adds the text filter and the shared answer shape.
-``k8s.logs`` keeps its own parameters and answer.
+reads it (:mod:`.logs_read_source`), and adds the text filter and the
+shared answer shape. ``k8s.logs`` keeps its own parameters and answer.
 
 ``source`` is ``<namespace>/<pod>`` or ``<namespace>/<pod>/<container>``.
 The pod may be a unique prefix, as in ``k8s.logs``. With ``since`` the
 rows carry their time, oldest first, and ``continuation`` is the time to
 give as ``since`` to read on, with no repeat and no gap: the exact
-nanosecond times go to ``k8s.logs`` as they are, and a page ends only
+nanosecond times go to the window reader as they are, and a page ends only
 between two times. Without ``since`` the newest lines are read and have
 no time.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.kubernetes.logs_read_source import (
+    ContainerLog,
+    read_before,
+    read_newest,
+    read_window,
+)
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
-from meho_backplane.connectors.kubernetes.ops_logs import (
-    MAX_TAIL_LINES,
-    LogWindowError,
-    k8s_logs,
+from meho_backplane.connectors.kubernetes.ops_logs import MAX_TAIL_LINES, LogWindowError
+from meho_backplane.connectors.kubernetes.ops_logs_window import (
+    LogWindow,
     parse_rfc3339,
+    window_from_params,
 )
 from meho_backplane.connectors.log_read import (
     DEFAULT_LOG_LINES,
     LOG_READ_RESPONSE_SCHEMA,
-    REDACTION_CONTEXT_LINES,
+    LogContext,
     LogEntry,
     LogReadError,
     build_log_answer,
@@ -86,6 +93,36 @@ def _timed_entries(lines: list[str]) -> list[LogEntry]:
     return entries
 
 
+def _window(params: dict[str, Any]) -> LogWindow | None:
+    """Check the times of the read, or raise before any call to the cluster."""
+    since, until = params.get("since"), params.get("until")
+    if since is None:
+        if until is not None:
+            raise LogReadError("'until' needs 'since'")
+        return None
+    return window_from_params({"since_time": _exact_since(since), "until_time": until})
+
+
+@dataclass(frozen=True)
+class _Read:
+    """What one read gave: the entries, what is before them, and what is left."""
+
+    entries: list[LogEntry]
+    context: LogContext
+    truncated: bool
+    next_time: str | None = None
+
+
+async def _read(log: ContainerLog, window: LogWindow | None, rows: int) -> _Read:
+    if window is None:
+        newest = await read_newest(log, rows)
+        entries = [LogEntry(time=None, line=text) for text in newest.lines]
+        return _Read(entries, newest.context, newest.truncated)
+    context = await read_before(log, window)
+    page = await read_window(log, window)
+    return _Read(_timed_entries(page.lines), context, page.truncated, page.next_time)
+
+
 async def k8s_logs_read(
     connector: Any,
     target: KubernetesTargetLike,
@@ -96,37 +133,20 @@ async def k8s_logs_read(
     namespace, pod, container = _split_source(params["source"])
     lines = int(params.get("lines", DEFAULT_LOG_LINES))
     needle = params.get("filter")
-    since, until = params.get("since"), params.get("until")
-    if until is not None and since is None:
-        raise LogReadError("'until' needs 'since'")
+    window = _window(params)
 
-    inner: dict[str, Any] = {"pod_name": pod, "namespace": namespace}
-    if container is not None:
-        inner["container"] = container
-    if since is not None:
-        inner["since_time"] = _exact_since(since)
-        if until is not None:
-            inner["until_time"] = until
-    else:
-        wide = MAX_TAIL_LINES if needle else lines + REDACTION_CONTEXT_LINES
-        inner["tail"] = min(wide, MAX_TAIL_LINES)
-
-    answer = await k8s_logs(connector, target, operator, inner)
-    raw: list[str] = answer["lines"]
-    source_cut = bool(answer["truncated"])
-    if since is not None:
-        entries = _timed_entries(raw)
-    else:
-        entries = [LogEntry(time=None, line=text) for text in raw]
-        source_cut = source_cut or len(raw) >= inner["tail"]
-    entries = await redact_entries(entries, connector=connector, operator=operator, op_id=OP_ID)
-    page = await take_page(
-        entries, lines=lines, needle=needle, keep="newest" if since is None else "oldest"
+    log = await ContainerLog.find(connector, target, operator, namespace, pod, container)
+    read = await _read(log, window, MAX_TAIL_LINES if needle else lines)
+    entries = await redact_entries(
+        read.entries, context=read.context, connector=connector, operator=operator, op_id=OP_ID
     )
-    continuation: str | None = answer.get("next_since_time")
-    if since is not None and page.rest:
+    page = await take_page(
+        entries, lines=lines, needle=needle, keep="newest" if window is None else "oldest"
+    )
+    continuation = read.next_time
+    if window is not None and page.rest:
         continuation = page.rest[0].time
-    return build_log_answer(page, source_cut=source_cut, continuation=continuation)
+    return build_log_answer(page, source_cut=read.truncated, continuation=continuation)
 
 
 _LOGS_READ_OP = KubernetesOp(

@@ -1187,8 +1187,9 @@ the result.
 
 `k8s.logs.read` (group `logs`, risk level `safe`) takes the parameters
 that every connector's log read shares (`connectors/log_read.py`):
-`source`, `since`, `until`, `lines`, `filter`. It calls `k8s_logs` and
-changes only the shape. `k8s.logs` keeps its own parameters.
+`source`, `since`, `until`, `lines`, `filter`. It uses the pod lookup and
+the window reader of `k8s.logs` (`logs_read_source.py`). `k8s.logs` keeps
+its own parameters.
 
 - `source` is `<namespace>/<pod>` or `<namespace>/<pod>/<container>`.
 - Without `since`: the newest `lines` lines (default 200, at most 5000),
@@ -1196,6 +1197,8 @@ changes only the shape. `k8s.logs` keeps its own parameters.
   optional `until`: the window is read with `since_time` / `until_time`,
   oldest first, each row with its time. Exact times go to the window
   reader as they are, with their nanoseconds.
+- Without `since`, `truncated` is true only when an older line exists or
+  the 1 MiB limit left lines out: the read asks for 256 lines more.
 - `filter` is a plain text match, case counts. Without `since` it reads
   the newest 5000 lines and filters them.
 - The answer: `rows` of `{time, line, line_truncated}`, `total`,
@@ -1208,7 +1211,12 @@ changes only the shape. `k8s.logs` keeps its own parameters.
   repeated and nothing is skipped. When more lines than `lines` share one
   time, no page can be built and the read fails with an error.
 - Secrets are hidden before the filter and the line limit run, see
-  "Shared log read" in `docs/codebase/connectors-linux.md`.
+  "Shared log read" in `docs/codebase/connectors-linux.md`. For a window,
+  the 256 lines before it are read first (`read_before`). Kubernetes
+  cannot read backwards, so the read starts five minutes before the
+  window, then one day before it, then at the start of the log, and stops
+  when it has enough lines or a `BEGIN` or `END` mark. One such read takes
+  at most 64 MiB from the stream and keeps only the last 256 lines.
 - No result handle is built here; the result reduction does it.
 
 ### Init container logs in `k8s.logs` (#3686)

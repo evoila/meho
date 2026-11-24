@@ -39,13 +39,13 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Agents{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Tenant agent definitions: identity, model tier, system prompt,
         toolset, and run budget.
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-sm opacity-70" aria-live="polite">
+      <span class="text-sm text-muted" aria-live="polite">
         {{ agent_count }} agent{{ "" if agent_count == 1 else "s" }}
       </span>
       <a href="/ui/agents/principals" class="btn btn-sm btn-ghost" data-action="open-principals">

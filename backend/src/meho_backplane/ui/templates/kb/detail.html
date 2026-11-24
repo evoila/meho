@@ -80,34 +80,34 @@
       aria-label="Entry metadata"
     >
       <div class="card-body">
-        <h2 class="card-title text-sm font-semibold uppercase opacity-60 tracking-wider">
+        <h2 class="card-title text-sm font-semibold uppercase text-subtle tracking-wider">
           Metadata
         </h2>
         <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm mt-2">
-          <dt class="opacity-60 whitespace-nowrap">Slug</dt>
+          <dt class="text-subtle whitespace-nowrap">Slug</dt>
           <dd class="font-mono break-all">{{ entry.slug }}</dd>
 
-          <dt class="opacity-60 whitespace-nowrap">Kind</dt>
+          <dt class="text-subtle whitespace-nowrap">Kind</dt>
           <dd>{{ entry.metadata.get("kind", "kb-entry") }}</dd>
 
           {% if source_path %}
-            <dt class="opacity-60 whitespace-nowrap">Source</dt>
+            <dt class="text-subtle whitespace-nowrap">Source</dt>
             <dd class="font-mono text-xs break-all">{{ source_path }}</dd>
           {% endif %}
 
-          <dt class="opacity-60 whitespace-nowrap">Indexed&nbsp;at</dt>
+          <dt class="text-subtle whitespace-nowrap">Indexed&nbsp;at</dt>
           <dd class="text-xs">{{ entry.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
 
           {% if body_hash %}
-            <dt class="opacity-60 whitespace-nowrap">Body&nbsp;hash</dt>
-            <dd class="font-mono text-xs break-all opacity-70" title="{{ body_hash }}">
+            <dt class="text-subtle whitespace-nowrap">Body&nbsp;hash</dt>
+            <dd class="font-mono text-xs break-all text-muted" title="{{ body_hash }}">
               {{ body_hash[:12] }}&hellip;
             </dd>
           {% endif %}
         </dl>
 
         {% if header_rows %}
-          <h2 class="card-title text-sm font-semibold uppercase opacity-60 tracking-wider mt-4">
+          <h2 class="card-title text-sm font-semibold uppercase text-subtle tracking-wider mt-4">
             Lesson header
           </h2>
           <dl
@@ -115,7 +115,7 @@
             aria-label="Lesson header"
           >
             {% for name, value in header_rows %}
-              <dt class="opacity-60 whitespace-nowrap font-mono text-xs">{{ name }}</dt>
+              <dt class="text-subtle whitespace-nowrap font-mono text-xs">{{ name }}</dt>
               <dd class="break-words">{{ value }}</dd>
             {% endfor %}
           </dl>

@@ -39,7 +39,7 @@
   <tr>
     <td class="font-medium">{{ label }}</td>
     {% if rank is none %}
-      <td colspan="2" class="opacity-60 italic">
+      <td colspan="2" class="text-subtle italic">
         absent from this signal&rsquo;s top-{{ candidate_limit }}
       </td>
     {% else %}
@@ -56,13 +56,13 @@
     <div class="alert alert-error" role="alert" aria-live="assertive">
       <div>
         <h3 class="font-semibold">Diagnostics query failed</h3>
-        <p class="text-sm opacity-90">{{ error_message }}</p>
+        <p class="text-sm text-muted">{{ error_message }}</p>
       </div>
     </div>
 
   {% elif hits %}
     {# ---------- Hit cards ---------- #}
-    <p class="text-sm opacity-70" aria-live="polite">
+    <p class="text-sm text-muted" aria-live="polite">
       {{ hits | length }} hit{% if hits | length != 1 %}s{% endif %}
       for <em>&ldquo;{{ query }}&rdquo;</em>{% if duration_ms is not none %}
       &middot; <span class="font-mono">{{ "%.2f" | format(duration_ms) }}&nbsp;ms</span>{% endif %}
@@ -80,11 +80,11 @@
                 the id as plain, selectable monospace text -- never a dead
                 link (#2457). -#}
             <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Hit provenance">
-              <span class="opacity-60">Source</span>
+              <span class="text-subtle">Source</span>
               <span class="badge badge-ghost badge-outline" title="Source namespace">{{ hit.source }}</span>
-              <span class="opacity-60">Kind</span>
+              <span class="text-subtle">Kind</span>
               <span class="badge badge-ghost badge-outline" title="Document kind">{{ hit.kind }}</span>
-              <span class="opacity-60">Source id</span>
+              <span class="text-subtle">Source id</span>
               {% if hit.source == "kb" %}
                 <a
                   href="/ui/kb/{{ hit.source_id }}"
@@ -156,8 +156,8 @@
     {# ---------- No-matches state (a query ran, zero hits, not an error) ---------- #}
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body text-center py-10">
-        <p class="text-lg opacity-60">No hits for &ldquo;{{ query }}&rdquo;</p>
-        <p class="text-sm opacity-40">
+        <p class="text-lg text-subtle">No hits for &ldquo;{{ query }}&rdquo;</p>
+        <p class="text-sm text-subtle">
           Neither retrieval signal returned a candidate. Try a different query,
           source, or kind.
         </p>
@@ -168,7 +168,7 @@
     {# ---------- Initial prompt (no query submitted yet) ---------- #}
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
       <div class="card-body text-center py-10">
-        <p class="text-base opacity-50">
+        <p class="text-base text-subtle">
           Enter a query to run retrieval and inspect the per-signal breakdown.
         </p>
       </div>

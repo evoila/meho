@@ -688,6 +688,36 @@ def test_detail_full_page_renders_markdown_body() -> None:
     assert "<code>code</code>" in text
 
 
+def test_detail_style_block_keeps_the_dark_theme_selectors() -> None:
+    """The code CSS reaches the page unescaped, so dark mode applies.
+
+    Escaped to ``&#34;``, the quotes in ``[data-theme="evoila-dark"]``
+    make every dark selector match nothing, and a highlighted function
+    name keeps its light colour on the dark block (review of #6824).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_memory(
+        tenant_id=_TENANT_A,
+        scope=MemoryScope.USER,
+        slug="code-note",
+        body="```python\ndef reconcile():\n    pass\n```",
+        user_sub=_OP_A,
+    )
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/memory/user/code-note")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    style = response.text.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert "&#34;" not in style and "&quot;" not in style
+    assert '[data-theme="evoila-dark"] .memory-code .nf' in style
+    assert '[data-theme="evoila-system"] .memory-code .nf' in style
+    assert '<span class="nf">reconcile</span>' in response.text
+
+
 def test_detail_strips_attribute_injection_from_fenced_code_lang() -> None:
     """A crafted fenced-code lang token cannot escape the ``class="..."`` attribute.
 

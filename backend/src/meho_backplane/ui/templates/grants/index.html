@@ -11,7 +11,7 @@
   <header class="flex flex-wrap items-start justify-between gap-4">
     <div class="max-w-3xl space-y-1">
       <h1 class="text-2xl font-semibold">Permission grants</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Review the explicit permission rules for agent and service principals.
       </p>
     </div>
@@ -47,7 +47,7 @@
   <section class="space-y-3" aria-labelledby="service-grants-heading">
     <div>
       <h2 id="service-grants-heading" class="text-lg font-semibold">Service-principal grants</h2>
-      <p class="text-sm opacity-70">Exact operation and connector grants. Include revoked history from the filter above when needed.</p>
+      <p class="text-sm text-muted">Exact operation and connector grants. Include revoked history from the filter above when needed.</p>
     </div>
     <div class="overflow-x-auto rounded-box border border-base-300">
       <table class="table table-sm">
@@ -69,7 +69,7 @@
               {% endif %}
             </tr>
           {% else %}
-            <tr><td colspan="{% if can_write %}8{% else %}7{% endif %}" class="py-8 text-center opacity-70">No service-principal grants match this filter.</td></tr>
+            <tr><td colspan="{% if can_write %}8{% else %}7{% endif %}" class="py-8 text-center text-muted">No service-principal grants match this filter.</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -91,7 +91,7 @@
     <section class="space-y-3" aria-labelledby="agent-grants-heading">
       <div>
         <h2 id="agent-grants-heading" class="text-lg font-semibold">Agent grants</h2>
-        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data. Need a time-bounded change window? <button type="button" class="link link-primary" hx-get="/ui/agents/grants/elevate" hx-target="#grants-modal-container" hx-swap="innerHTML" data-action="open-elevate-modal">Elevate an agent grant</button>.</p>
+        <p class="text-sm text-muted">Agent grants are tenant-admin governance data. Need a time-bounded change window? <button type="button" class="link link-primary" hx-get="/ui/agents/grants/elevate" hx-target="#grants-modal-container" hx-swap="innerHTML" data-action="open-elevate-modal">Elevate an agent grant</button>.</p>
       </div>
       {% if agent_offset > 0 or agent_has_next %}
         <nav class="flex justify-end gap-2" aria-label="Agent grant pages">
@@ -114,7 +114,7 @@
                 <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
               </tr>
             {% else %}
-              <tr><td colspan="7" class="py-8 text-center opacity-70">No agent grants match this filter.</td></tr>
+              <tr><td colspan="7" class="py-8 text-center text-muted">No agent grants match this filter.</td></tr>
             {% endfor %}
           </tbody>
         </table>

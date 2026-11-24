@@ -57,7 +57,7 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
           Run {{ descriptor.op_id }}
         </h3>
         {% if descriptor.summary %}
-          <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
+          <p class="mt-0.5 text-sm text-muted">{{ descriptor.summary }}</p>
         {% endif %}
       </div>
       <form method="dialog">
@@ -148,7 +148,7 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
       <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Target <span class="opacity-50">(name; leave blank for a target-less op)</span></span>
+        <span class="label-text mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
         <input
           type="text"
           name="target"
@@ -162,7 +162,7 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Params <span class="opacity-50">(JSON object)</span></span>
+        <span class="label-text mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
         <textarea
           name="params"
           rows="5"
@@ -175,8 +175,8 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">
-          Work ref <span class="opacity-50">(optional change-ticket reference, e.g. gh:evoila/meho#7)</span>
+        <span class="label-text mb-1 text-xs text-muted">
+          Work ref <span class="text-subtle">(optional change-ticket reference, e.g. gh:evoila/meho#7)</span>
         </span>
         <input
           type="text"
@@ -195,7 +195,7 @@ htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort')
           the Run. -#}
       {% if safety == "destructive" %}
         <div class="rounded border border-base-300 p-3" data-run-preview-step>
-          <p class="mb-2 text-xs opacity-70">
+          <p class="mb-2 text-xs text-muted">
             Step 1: preview this exact call. Nothing is sent. If you change the
             target or the params, preview again.
           </p>

@@ -22,8 +22,8 @@
 -#}
 <div id="audit-my-recent" class="space-y-3">
   <header class="flex items-center justify-between gap-2">
-    <h2 class="text-sm font-semibold uppercase opacity-60">My recent activity</h2>
-    <span class="text-xs opacity-50">last 24h &middot; <span class="font-mono break-all">{{ operator_sub }}</span></span>
+    <h2 class="text-sm font-semibold uppercase text-subtle">My recent activity</h2>
+    <span class="text-xs text-subtle">last 24h &middot; <span class="font-mono break-all">{{ operator_sub }}</span></span>
   </header>
   {% if rows %}
     <ul
@@ -37,7 +37,7 @@
   {% else %}
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
       <div class="card-body items-center py-8 text-center">
-        <p class="text-sm opacity-60">No activity in the last 24 hours</p>
+        <p class="text-sm text-subtle">No activity in the last 24 hours</p>
       </div>
     </div>
   {% endif %}

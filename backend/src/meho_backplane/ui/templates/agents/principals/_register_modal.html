@@ -38,7 +38,7 @@
       Register agent principal
     </h3>
 
-    <p class="py-2 text-sm opacity-80">
+    <p class="py-2 text-sm text-muted">
       Creates a Keycloak OAuth client for this identity and stores its
       generated credential. The agent authenticates as
       <span class="font-mono">agent:&lt;name&gt;</span> via the
@@ -83,7 +83,7 @@
       </label>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Owner <span class="opacity-60 font-normal">(optional)</span></span>
+        <span class="text-sm font-medium">Owner <span class="text-subtle font-normal">(optional)</span></span>
         <input
           type="text"
           name="owner_sub"
@@ -94,7 +94,7 @@
           placeholder="defaults to you"
           aria-describedby="principal-owner-hint"
         />
-        <span id="principal-owner-hint" class="text-xs opacity-60">
+        <span id="principal-owner-hint" class="text-xs text-subtle">
           Keycloak <span class="font-mono">sub</span> of the owning
           operator. Defaults to the registering operator if left blank.
         </span>

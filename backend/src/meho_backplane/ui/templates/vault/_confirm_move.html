@@ -39,7 +39,7 @@
         <h3 class="truncate font-mono text-lg font-semibold" id="vault-move-title">
           Move secret
         </h3>
-        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+        <p class="mt-0.5 text-sm text-muted">{{ op_id }}</p>
       </div>
       <form method="dialog">
         <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
@@ -102,8 +102,8 @@
         data-vault-write-form="move"
       >
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            From <span class="opacity-50">(source <code>&lt;kind&gt;:&lt;ref&gt;</code>, e.g. vault:secret/db/prod#password)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            From <span class="text-subtle">(source <code>&lt;kind&gt;:&lt;ref&gt;</code>, e.g. vault:secret/db/prod#password)</span>
           </span>
           <input
             type="text"
@@ -118,8 +118,8 @@
         </label>
 
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            To <span class="opacity-50">(destination <code>&lt;kind&gt;:&lt;ref&gt;</code>)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            To <span class="text-subtle">(destination <code>&lt;kind&gt;:&lt;ref&gt;</code>)</span>
           </span>
           <input
             type="text"
@@ -134,8 +134,8 @@
         </label>
 
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            Reason <span class="opacity-50">(optional; recorded for the approver -- must not contain a secret value)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            Reason <span class="text-subtle">(optional; recorded for the approver -- must not contain a secret value)</span>
           </span>
           <input
             type="text"

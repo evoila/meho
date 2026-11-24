@@ -2831,8 +2831,12 @@ for approval.
   The answer keeps its `status` and `extras`, but its text is
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
-  secret value. A retry of a waiting request keeps the text
-  "requires approval before execution".
+  secret value. When the request has the rights note (a change of rights in
+  a tenant with one admin), the note follows this text. On an approved
+  request, the note leaves out "This change needs a second admin to approve
+  it." and keeps "This tenant has only one admin." and the guide link, also
+  in `extras.approval_note`. A retry of a waiting request keeps the text
+  "requires approval before execution" and the full note.
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be

@@ -5,7 +5,8 @@ and on a 3xx answer before the next hop. A stop from outside can come during
 that close. These tests run many rounds of this against a local stand-in
 server. A hook in the network layer signals when the close starts and holds
 it until the stop is sent, so the stop lands in the close in every round.
-Then the tests check:
+The time between the start of the close and the stop changes from round to
+round. Then the tests check:
 
 * the caller got the stop in every round,
 * the server holds no connection open,
@@ -13,7 +14,10 @@ Then the tests check:
 * a normal request on the same client gets an answer at once.
 
 The cases: a streamed read after a time limit, a direct ``client.request``
-after a time limit, and the close of a 3xx answer before the next hop.
+after a time limit, the close of a 3xx answer before the next hop, and a
+direct ``client.stream`` whose caller is stopped while it closes the answer.
+One more case stops a direct ``client.stream`` right after the answer
+arrives, before the caller gets it.
 """
 
 from __future__ import annotations
@@ -199,6 +203,42 @@ async def _direct(client: httpx.AsyncClient, url: str, timeout: Any) -> httpx.Re
     return await client.request("GET", url, timeout=timeout)
 
 
+async def _direct_stream(client: httpx.AsyncClient, url: str, timeout: Any) -> httpx.Response:
+    # Only the status is read, like the readiness check of a connector; the
+    # close at the end of the block runs in the caller.
+    async with client.stream("GET", url, timeout=timeout) as resp:
+        return resp
+
+
+async def _wait_before_stop(round_no: int) -> None:
+    """Wait a different time in each round, while the close is held open."""
+    step = round_no % 4
+    if step == 1:
+        await asyncio.sleep(0)
+    elif step == 2:
+        for _ in range(round_no % 7 + 2):
+            await asyncio.sleep(0)
+    elif step == 3:
+        await asyncio.sleep((round_no % 5 + 1) / 10_000)
+
+
+async def _assert_nothing_left_open(client: httpx.AsyncClient, server: _StallServer) -> None:
+    # Let the server see the closes. Idle keep-alive connections stay open on
+    # both sides on purpose; any other open connection was never closed.
+    idle = _pool_idle(client)
+    for _ in range(200):
+        if server.open_connections <= idle:
+            break
+        await asyncio.sleep(0.01)
+    assert server.open_connections == idle
+    assert _pool_active(client) == 0
+    assert _pool_waiting(client) == 0
+    started = time.monotonic()
+    resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(1.0))
+    assert resp.status_code == 200
+    assert time.monotonic() - started < 1.0
+
+
 async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> None:
     server = _StallServer()
     await server.start()
@@ -220,6 +260,8 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
             async with asyncio.timeout(10):
                 await hook.started.wait()
             # The close has started and waits for this stop.
+            await _wait_before_stop(round_no)
+            assert not task.done()
             task.cancel()
             hook.stop_sent.set()
             try:
@@ -228,20 +270,7 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
                 stops_seen += 1
         assert hook.fired == _ROUNDS
         assert stops_seen == _ROUNDS
-        # Let the server see the closes. Idle keep-alive connections stay open on
-        # both sides on purpose; any other open connection is a leak.
-        idle = _pool_idle(client)
-        for _ in range(200):
-            if server.open_connections <= idle:
-                break
-            await asyncio.sleep(0.01)
-        assert server.open_connections == idle
-        assert _pool_active(client) == 0
-        assert _pool_waiting(client) == 0
-        started = time.monotonic()
-        resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(1.0))
-        assert resp.status_code == 200
-        assert time.monotonic() - started < 1.0
+        await _assert_nothing_left_open(client, server)
     finally:
         await conn.aclose()
         await server.stop()
@@ -269,3 +298,53 @@ async def test_stop_during_close_of_redirect_answer_leaves_nothing_open(
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
     await _run_rounds(_streamed, "/redirect", read_timeout=None)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_close_of_direct_stream_leaves_nothing_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    await _run_rounds(_direct_stream, "/slow", read_timeout=None)
+
+
+@pytest.mark.asyncio
+async def test_stop_right_after_direct_stream_answer_leaves_nothing_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer is ready, but the stop reaches the caller before the answer does."""
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    server = _StallServer()
+    await server.start()
+    conn = _PlainHttpConnector()
+    client = await conn._http_client(_make_target(host="127.0.0.1", port=server.port))
+    callers: list[asyncio.Future[Any]] = []
+
+    async def _stop_caller(response: httpx.Response) -> None:
+        # Runs in the read, right after the head of the answer arrived. The
+        # read returns the open answer without another wait, so the stop
+        # reaches the caller after the read ended.
+        if response.request.url.path == "/slow":
+            callers[-1].cancel()
+
+    client.event_hooks["response"].append(_stop_caller)
+    stops_seen = 0
+    try:
+        for round_no in range(_ROUNDS):
+            await asyncio.gather(*(_ok(client) for _ in range(2)))
+            callers.append(
+                asyncio.ensure_future(
+                    _direct_stream(client, f"/slow?round={round_no}", httpx.USE_CLIENT_DEFAULT)
+                )
+            )
+            try:
+                async with asyncio.timeout(10):
+                    await callers[-1]
+            except asyncio.CancelledError:
+                stops_seen += 1
+        assert stops_seen == _ROUNDS
+        client.event_hooks["response"].remove(_stop_caller)
+        await _assert_nothing_left_open(client, server)
+    finally:
+        await conn.aclose()
+        await server.stop()

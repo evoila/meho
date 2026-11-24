@@ -656,6 +656,7 @@
   "tests/test_docs_upstream_answer.py": 2.03,
   "tests/test_docs_upstream_answer_faces.py": 62.52,
   "tests/test_effect_ingest.py": 0.94,
+  "tests/test_embedding_model_health_check.py": 41.0,
   "tests/test_event_matcher.py": 10.81,
   "tests/test_event_normalizers.py": 1.14,
   "tests/test_event_outbox.py": 3.51,

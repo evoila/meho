@@ -1092,6 +1092,10 @@ until the entry is deleted.
    once its entry has passages, so no entry shows twice. The time
    window is checked in the same SQL, before the `LIMIT` (see
    [Search filters](#search-filters-5726)).
+   With the switch `KB_SEARCH_PLAIN_SENTENCES` on, a question that
+   no passage matches word for word, in the own tenant or in the shared
+   scope, gets a word search in all of them where a passage needs only one
+   of the first 32 different words of the question ([retrieval.md](./retrieval.md#any-word-fallback-for-the-knowledge-search-6784)).
 3. Unless `scope="tenant"`, add the hits of the shared scope
    (`add_shared_hits`, with the same filters and time window). With
    `scope="shared"` the own tenant is searched only for its `shared`
@@ -1179,7 +1183,30 @@ query and `limit`:
 1. The caller needs the docs add-on (`meho-docs` capability).
 2. A search with `filters`, header filters, a time window or
    `scope="shared"` (REST: `kind` or `metadata_filters`) does not search
-   the wiki: the wiki cannot apply them.
+   the wiki: the wiki cannot apply them. The switch
+   `KB_WIKI_FILTERED_SEARCH` (setting `kb_wiki_filtered_search`, off by
+   default) makes one exception, decided by
+   `kb/wiki_search.py::wiki_exact_filters` for both paths: a search
+   whose only filters are `product` and/or `version` (each a non-blank
+   string of at most 128 characters, the longest value `read_docs`
+   takes, so each wiki hit can be read; named filters, or the same keys in `filters` /
+   `metadata_filters`), with no time window, not `scope="shared"` and
+   no `kind`, still searches the wiki. `search_wiki` then sends
+   `product` and `version` exactly as given, with any spaces at their
+   ends kept (not through `build_docs_scope`, which strips): the index
+   gets the same string the store filters by. The page read for the
+   copy check uses the same values, and `read_docs` (MCP and REST)
+   reads such a hit when the caller sends the same values
+   (`docs/codebase/docs-search.md`, `exact_read_scope`). It searches
+   only when the collection sends them to its index as exact filters
+   (`backend.ref["scope_filters"] is True` and no soft `scope`, the
+   result of `forwarded_scope`). Otherwise the wiki is not searched,
+   `reason` is `filtered`, and the message says the index does not apply
+   product and version as exact filters. Any other filter gives
+   `filtered` as before. With the switch off, every filter skips the
+   wiki, and the answer and the audit fields are as before. The
+   off/on/off measurement is tracked on the Initiative of the knowledge
+   search work (#6758).
 3. The same entitlement and readiness check as `search_docs`
    (`resolve_entitled_ready_collection`, capability
    `meho-docs:<collection>`), then the same docs search service

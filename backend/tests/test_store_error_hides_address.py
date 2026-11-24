@@ -16,12 +16,15 @@ from unittest.mock import AsyncMock
 
 import hvac.exceptions
 import pytest
+import requests
+import structlog
 from structlog.testing import capture_logs
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.store_errors import (
     _KNOWN_REASONS,
+    has_store_detail,
     hide_store_address,
     log_without_store_text,
     store_text_for_log,
@@ -186,6 +189,49 @@ def test_a_one_word_host_in_a_name_or_path_stays(
 ) -> None:
     monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
     get_settings.cache_clear()
+    assert _sanitize_free_text(text) == text
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hostname 'vault' doesn't match 'other.example'",
+        "certificate verify failed: Hostname mismatch, certificate is not valid for 'vault'.",
+        "login as meho@vault.",
+    ],
+)
+def test_a_one_word_host_in_a_certificate_error_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    for shown in (
+        hide_store_address(text),
+        _sanitize_free_text(text),
+        store_text_for_log(hvac.exceptions.InvalidRequest(text)),
+    ):
+        assert "<secret store>" in shown
+        assert "'vault'" not in shown
+        assert "@vault" not in shown
+
+
+@pytest.mark.parametrize(
+    ("store_addr", "text"),
+    [
+        ("http://vault:8200", "GET https://vault.other.example/v1/x failed"),
+        ("http://vault:8200", "login as meho@vault.other.example failed"),
+        ("http://vault:8200", "hostname 'vault.other.example' doesn't match 'x'"),
+        ("http://vault:8200", "Failed to resolve 'vault-2.example' (no such host)"),
+        (_ADDR, f"GET https://{_HOST}.other.example/v1/x failed"),
+    ],
+)
+def test_a_longer_host_name_that_starts_with_the_store_host_stays(
+    monkeypatch: pytest.MonkeyPatch, store_addr: str, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", store_addr)
+    get_settings.cache_clear()
+    assert hide_store_address(text) == text
     assert _sanitize_free_text(text) == text
     assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
 
@@ -705,9 +751,9 @@ def test_the_log_keeps_a_listed_reason_after_token(phrase: str) -> None:
     "text",
     [
         "error validating token: invalid audience (aud) claim: "
-        "audience claim does not match any expected audience",
+        + "audience claim does not match any expected audience",
         "error validating token: error verifying token signature: oidc: malformed jwt: "
-        "go-jose/go-jose: compact JWS format must have three parts",
+        + "go-jose/go-jose: compact JWS format must have three parts",
         "jwt: signature is invalid",
     ],
 )
@@ -811,3 +857,70 @@ async def test_the_preflight_log_has_a_traceback_only_without_store_detail(
     else:
         assert event.get("exc_info") is None
         assert _HOST not in json.dumps(event, default=str)
+
+
+def _header_error(token: str) -> requests.exceptions.InvalidHeader:
+    try:
+        requests.Request(
+            "GET",
+            "https://example.invalid/v1/sys/capabilities-self",
+            headers={"X-Vault-Token": token},
+        ).prepare()
+    except requests.exceptions.InvalidHeader as exc:
+        return exc
+    raise AssertionError("the request was prepared")
+
+
+def _rendered(event: dict[str, Any]) -> str:
+    """The event as the server log writes it, with any traceback as text."""
+    rendered = structlog.processors.format_exc_info(None, "warning", dict(event))
+    return json.dumps(rendered, default=str)
+
+
+async def test_the_preflight_log_holds_no_token_from_a_header_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "hvs." + _random_value(24) + " \n"
+    exc = _header_error(token)
+    assert token.strip() in str(exc)
+
+    @contextlib.asynccontextmanager
+    async def _client(*_: Any, **__: Any) -> AsyncIterator[_FailingCapabilities]:
+        yield _FailingCapabilities(exc)
+
+    monkeypatch.setattr(vault_ops, "vault_client_for_target", _client)
+    with capture_logs() as logs:
+        result = await vault_ops.vault_capabilities_preflight(
+            _operator(), "op", [("secret/data/x", frozenset({"create"}))], object()
+        )
+
+    assert result is None
+    (event,) = [e for e in logs if e["event"] == "vault_capability_preflight_failed"]
+    assert event.get("exc_info") is None
+    assert event["error_class"] == "InvalidHeader"
+    assert token.strip() not in _rendered(event)
+
+
+@pytest.mark.parametrize("kind", ["requests", "http.client", "wrapped"])
+def test_a_header_error_is_withheld_from_the_log(kind: str) -> None:
+    value = "s." + _random_value(30)
+    exc: BaseException
+    if kind == "requests":
+        exc = _header_error(value + "\r")
+    elif kind == "http.client":
+        exc = ValueError(f"Invalid header value {(value + chr(10)).encode()!r}")
+    else:
+        try:
+            try:
+                raise _header_error(value + "\r")
+            except requests.exceptions.InvalidHeader as inner:
+                raise RuntimeError("the store call failed") from inner
+        except RuntimeError as outer:
+            exc = outer
+    assert has_store_detail(exc)
+    assert value not in store_text_for_log(exc)
+
+
+def test_a_traceback_stays_for_an_error_without_a_header() -> None:
+    assert not has_store_detail(KeyError("made-up-key"))
+    assert not has_store_detail(TypeError("unsupported operand"))

@@ -17,6 +17,7 @@ from contextvars import ContextVar
 from typing import Final
 
 import hvac.exceptions
+import requests.exceptions
 import structlog
 
 from meho_backplane.redaction.engine import redact
@@ -54,9 +55,19 @@ STORE_FAILED_TEXT: Final = "The secret store returned an error."
 _TEXT_WITHHELD: Final = "<store text withheld>"
 
 #: A longer store text is withheld from the log, so the cleaning stays cheap.
-#: Where a one-word host stands as an address: after ``//`` or ``@``, and in
-#: the ``host='...'`` and ``resolve '...'`` forms of the HTTP client.
-_ADDRESS_LEAD: Final = r"(?:(?<=//)|(?<=@)|(?<=host=')|(?<=host=\")|(?<=resolve ')|(?<=resolve \"))"
+#: Where a one-word host stands as an address: after ``//`` or ``@``, in the
+#: ``host='...'`` and ``resolve '...'`` forms of the HTTP client, and in the
+#: ``hostname '...'`` and ``not valid for '...'`` forms of a certificate error.
+_ADDRESS_LEAD: Final = (
+    r"(?:(?<=//)|(?<=@)|(?<=host=')|(?<=host=\")|(?<=resolve ')|(?<=resolve \")"
+    r"|(?<=hostname ')|(?<=hostname \")|(?<=not valid for ')|(?<=not valid for \"))"
+)
+#: The end of a host name: no letter, digit, ``_`` or ``-`` follows, and no
+#: dot that starts a longer name.
+_HOST_END: Final = r"(?![\w-]|\.[\w-])"
+
+#: A text that quotes an HTTP header: its value can be a store token.
+_HEADER_TEXT: Final = re.compile(r"\bheader (?:name|value)\b|\bheader part\b", re.IGNORECASE)
 
 _LOG_INPUT_LIMIT: Final = 8192
 _LOG_TEXT_CAP: Final = 2048
@@ -185,10 +196,11 @@ def hide_store_address(text: str) -> str:
 
     The full address, the host with its port and the bare host are replaced.
     A one-word host (``vault``) is replaced only where it is used as an
-    address (after ``//`` or ``@``, and in ``host='...'`` and
-    ``resolve '...'``), so the same word in a sentence, a path, a quoted
-    name or a field name stays. ``text``
-    is returned unchanged when no address is configured.
+    address (after ``//`` or ``@``, in ``host='...'``, ``resolve '...'``,
+    ``hostname '...'`` and ``not valid for '...'``), so the same word in a
+    sentence, a path, a quoted name or a field name stays. A longer host name
+    that starts with the store's host stays too. ``text`` is returned
+    unchanged when no address is configured.
     """
     try:
         addr = get_settings().vault_addr
@@ -202,9 +214,9 @@ def hide_store_address(text: str) -> str:
         if addr.port:
             patterns.append(rf"{host}:{addr.port}(?!\d)")
         if "." in addr.host or ":" in addr.host:
-            patterns.append(rf"(?<![\w-]){host}(?![\w-]|\.\d)")
+            patterns.append(rf"(?<![\w-]){host}{_HOST_END}")
         else:
-            patterns.append(rf"{_ADDRESS_LEAD}{host}(?![\w-])")
+            patterns.append(rf"{_ADDRESS_LEAD}{host}{_HOST_END}")
     for pattern in patterns:
         text = re.sub(pattern, STORE_ADDRESS_MARK, text, flags=re.IGNORECASE)
     return text
@@ -238,7 +250,7 @@ def store_text_for_log(exc: BaseException) -> str:
             text = str(exc.args[0] or "") if exc.args else ""
         else:
             text = str(exc)
-        if len(text) > _LOG_INPUT_LIMIT:
+        if len(text) > _LOG_INPUT_LIMIT or _quotes_header(exc):
             return _TEXT_WITHHELD
         text = hide_store_address(text)
         reason = _known_reason(text)
@@ -329,10 +341,15 @@ def _chain(exc: BaseException) -> list[BaseException]:
     return links
 
 
+def _quotes_header(exc: BaseException) -> bool:
+    """Say whether *exc* is an HTTP header error, whose text holds the header."""
+    return isinstance(exc, requests.exceptions.InvalidHeader) or bool(_HEADER_TEXT.search(str(exc)))
+
+
 def has_store_detail(exc: BaseException) -> bool:
-    """Say whether a traceback of *exc* would show the store's text or address."""
+    """Say whether a traceback of *exc* would show the store's text, address or token."""
     for link in _chain(exc):
-        if _is_store_answer(link):
+        if _is_store_answer(link) or _quotes_header(link):
             return True
         text = str(link)
         if hide_store_address(text) != text:

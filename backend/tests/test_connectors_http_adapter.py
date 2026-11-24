@@ -2214,6 +2214,7 @@ async def test_cross_origin_redirect_warning_logs_location_host_only(
         "/PATHMARK?q=QUERYMARK",
         "https://[::1/PATHMARK?q=QUERYMARK",
         "https://xn--a.example.com/PATHMARK?q=QUERYMARK",
+        "https:PATHMARK?q=QUERYMARK",
     ],
 )
 def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
@@ -2228,22 +2229,30 @@ def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
     [
         "https://[::1/PATHMARK?q=QUERYMARK",
         "https://xn--a.example.com/PATHMARK?q=QUERYMARK",
+        "https:PATHMARK?q=QUERYMARK",
     ],
 )
 async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) -> None:
-    """A Location that httpx cannot read is not followed and is logged as one fixed mark."""
+    """A Location httpx cannot read is logged as one fixed mark; httpx's own error is raised."""
     from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": location})
 
+    async with httpx.AsyncClient(
+        base_url="https://vc.example.com", transport=httpx.MockTransport(handler)
+    ) as plain_client:
+        with pytest.raises(Exception) as plain_error:
+            await plain_client.get("/guestFile")
+
     async with _SameOriginRedirectClient(
         base_url="https://vc.example.com", transport=httpx.MockTransport(handler)
     ) as client:
-        with capture_logs() as captured:
-            resp = await client.get("/guestFile")
+        with capture_logs() as captured, pytest.raises(Exception) as error:
+            await client.get("/guestFile")
 
-    assert resp.status_code == 302
+    assert type(error.value) is type(plain_error.value)
+    assert str(error.value) == str(plain_error.value)
     warning = next(
         e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
     )

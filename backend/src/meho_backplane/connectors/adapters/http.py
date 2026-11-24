@@ -103,7 +103,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
-from meho_backplane.connectors._shared.log_host import host_for_log
+from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -778,6 +778,17 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
+def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> None:
+    """Warn that MEHO does not follow a redirect; *location* is a host name or a fixed mark."""
+    logger.warning(
+        "connector_redirect_not_followed_cross_origin",
+        method=request.method,
+        # Vendor-supplied addresses are logged as host name only.
+        from_url=host_for_log(request.url),
+        location=location,
+    )
+
+
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -822,17 +833,17 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             response.stream = _StopSafeCloseStream(response.stream)
         return response
 
-    def _build_redirect_request(  # type: ignore[override]
+    def _build_redirect_request(
         self, request: httpx.Request, response: httpx.Response
-    ) -> httpx.Request | None:
+    ) -> httpx.Request:
         # httpx builds the next request inside ``send`` and raises (closing the
-        # answer) when it cannot read the Location address. Give ``None``
-        # instead, so :meth:`_send_same_origin` returns the 3xx unfollowed and
-        # logs the fixed mark. This client never lets httpx follow a redirect.
+        # answer) when it cannot read the Location address. Log the fixed mark
+        # for that address, then raise the same error to the caller.
         try:
             return super()._build_redirect_request(request, response)
-        except (httpx.RemoteProtocolError, UnicodeError):
-            return None
+        except (httpx.RemoteProtocolError, httpx.InvalidURL, UnicodeError):
+            _log_redirect_not_followed(request, UNPARSEABLE_ADDRESS)
+            raise
 
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
@@ -854,16 +865,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 # follow. Returning the 3xx unfollowed means no header or
                 # body — and so no ``X-XSRF-TOKEN`` / credential — is ever
                 # replayed to the off-origin ``Location``.
-                logger.warning(
-                    "connector_redirect_not_followed_cross_origin",
-                    method=request.method,
-                    # Vendor-supplied addresses are logged as host name only.
-                    from_url=host_for_log(request.url),
-                    location=(
-                        host_for_log(location_header)
-                        if (location_header := response.headers.get("Location")) is not None
-                        else None
-                    ),
+                location_header = response.headers.get("Location")
+                _log_redirect_not_followed(
+                    request,
+                    host_for_log(location_header) if location_header is not None else None,
                 )
                 return response
             await response.aclose()

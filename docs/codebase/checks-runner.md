@@ -179,11 +179,12 @@ non-`safe` operation for approval. See `sensor.md`, step 4 of
 
 - `RUNNER_CHECKS_ENABLED` (default `false`) — results of a runner count
   as check results (`docs/codebase/satellite-runner.md`).
-- `RUNNER_CHECK_RESULTS_RETENTION_DAYS` (default 7, `0` keeps) — the
-  evidence prune tick (`checks/evidence_retention.py`) also deletes raw
-  `runner_check_results` rows older than this. It runs while
-  `CHECKS_EVIDENCE_PRUNE_ENABLED` is on, also when
-  `CHECKS_EVIDENCE_RETENTION_DAYS` is `0`.
+- `RUNNER_CHECK_RESULTS_RETENTION_DAYS` (default 7, `0` keeps) — while
+  `RUNNER_CHECKS_ENABLED` is on, the evidence prune tick
+  (`checks/evidence_retention.py`) also deletes raw `runner_check_results`
+  rows older than this. It runs while `CHECKS_EVIDENCE_PRUNE_ENABLED` is on,
+  also when `CHECKS_EVIDENCE_RETENTION_DAYS` is `0`. With
+  `RUNNER_CHECKS_ENABLED` off it deletes none.
 
 ## Log lines
 

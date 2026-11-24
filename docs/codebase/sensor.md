@@ -216,13 +216,20 @@ with a `runner_name` runs on that runner, never in the central check loop
 while `RUNNER_CHECKS_ENABLED` is on (`claim_due_sensors` then leaves it out;
 with the switch off the central loop runs it). Create accepts `runner_name` only when
 `RUNNER_CHECKS_ENABLED` is on and the runner exists, is not revoked and
-belongs to the tenant (`checks/runner_binding.py`, 422
-`sensor_runner_checks_disabled` or `sensor_runner_unknown`). The runner's
+belongs to the tenant, and the op is one the runner can run unattended
+(`checks/runner_binding.py`, 422 `sensor_runner_checks_disabled`,
+`sensor_runner_unknown` or `sensor_runner_op_unsupported`). An edit, and a
+Dashboard file import, of a bound Sensor refuse such an op too. The REST
+body field is not nullable in the schema, so a typed client leaves it out
+when unset. `meho sensor create --runner` and the MCP tool (input shown only
+while the switch is on) set it. The runner's
 results set the state through `record_sensor_result`, the same write path as
 the central loop: see `docs/codebase/satellite-runner.md`, "Checks that run
 at a site". The dashboard member view carries `runner_name`, and the console
-row says "runs at: runner <name>". With the switch off the column is only
-stored. The MCP sensor answers leave `runner_name` out when it is `null`.
+row says "runs at: runner <name>". Every answer (REST, MCP, CLI JSON, the
+dashboard member view) leaves `runner_name` out unless it is set and the
+switch is on, so with the switch off the answers keep their old shape and
+the console names no runner.
 
 ### Connector fit (#5858)
 

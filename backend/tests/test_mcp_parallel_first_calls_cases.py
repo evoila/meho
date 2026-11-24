@@ -435,17 +435,32 @@ async def test_client_that_leaves_during_the_send_leaves_the_log_line(
     assert line["session"] is None
 
 
+def _after_turns(turns: int, callback: Callable[[], None]) -> None:
+    """Run *callback* after *turns* loop turns, as a chain of queued callbacks."""
+    loop = asyncio.get_running_loop()
+    if turns == 0:
+        callback()
+    else:
+        loop.call_soon(_after_turns, turns - 1, callback)
+
+
 @pytest.mark.usefixtures("_login")
+@pytest.mark.parametrize(
+    "turns",
+    # 0: marked in the same turn. 1: uvicorn's ``connection_lost`` is queued.
+    # 3: the socket reports the close first, then the transport queues it.
+    [0, 1, 3],
+)
 async def test_client_gone_when_the_handler_returns_leaves_the_log_line(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, turns: int
 ) -> None:
     """The server notes the disconnect as the handler returns, before the watcher ran."""
     gone = asyncio.Event()
     written: list[Any] = []
 
     async def _answers(*_args: Any) -> dict[str, Any]:
-        # Like the server: the connection is marked closed in the same turn.
-        gone.set()
+        # Like the server: the connection is marked closed as the handler returns.
+        _after_turns(turns, gone.set)
         return {}
 
     async def _send(message: Any) -> None:
@@ -497,3 +512,37 @@ async def test_cancel_while_a_refusal_is_sent_writes_the_log_line(
     assert line["reason"] == "cancelled"
     assert line["tool"] == "list_targets"
     assert line["session"] is None
+
+
+@pytest.mark.usefixtures("_login")
+async def test_caller_gone_line_keeps_the_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The line the watcher writes when the client leaves carries the session id."""
+    session_id = str(uuid.uuid4())
+    started, gone = asyncio.Event(), asyncio.Event()
+
+    async def _slow(*_args: Any) -> dict[str, Any]:
+        started.set()
+        await _wait_until(caller_gone_at)
+        return {}
+
+    async def _send(_message: Any) -> None:
+        return None
+
+    async def _disconnect() -> dict[str, Any]:
+        await started.wait()
+        gone.set()
+        return {"type": "http.disconnect"}
+
+    monkeypatch.setitem(mcp_server._DISPATCH, "tools/call", _slow)
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        await asyncio.wait_for(
+            _post_to_app(tool_call("list_targets"), _send, _disconnect, session_id), 10
+        )
+
+    [gone_line] = [e for e in logs if e["event"] == "caller_gone_during_request"]
+    assert gone_line["mcp_session_id"] == session_id
+    [line] = _lines(logs)
+    assert line["reason"] == "caller_gone"
+    assert line["session"] == session_id[:8]

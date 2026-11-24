@@ -130,7 +130,11 @@ from meho_backplane.mcp.structured_results import (
 )
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
-from meho_backplane.operations.caller_gone import caller_gone_at, watch_caller
+from meho_backplane.operations.caller_gone import (
+    caller_gone_at,
+    let_watcher_see_disconnect,
+    watch_caller,
+)
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
@@ -1501,36 +1505,35 @@ async def _dispatch_mcp_request(
             f"invalid request: {exc.error_count()} validation error(s)",
         )
 
-    # #3696: the body is fully read here, so the watcher can notice a
-    # caller that disconnects. It watches until the answer is sent, also
-    # when the answer is one of the refusals below.
-    await until_sent.enter_async_context(_watch_call(request, jrpc))
-    response = await _dispatch_parsed(request, jrpc, payload, operator)
-    # Let a disconnect that the server noticed before the send reach the
-    # watcher. After the send the server reports a disconnect for every
-    # answer, so the watcher must see this one first.
-    await asyncio.sleep(0)
-    return response
-
-
-async def _dispatch_parsed(
-    request: Request, jrpc: JsonRpcRequest, payload: dict[str, Any], operator: Operator
-) -> Response:
-    """Check the parsed request, run its handler and return the answer."""
     protocol_error = _validate_protocol_version_header(request, jrpc.method, payload)
-    if protocol_error is not None:
-        return protocol_error
-
     # Capture the Mcp-Session-Id header (G8.2-T2 #1010 + G0.14-T6 #1147
     # decouple) so the audit writer can correlate every row of this
     # call to one agent session. Capture-if-present is unconditional;
     # MCP_REQUIRE_SESSION_ID only gates the missing-header reject
     # (-32600 before any dispatch). Bound for both requests and
     # notifications — notifications still write audit rows downstream.
-    session_error = _bind_mcp_session_id(request, payload)
-    if session_error is not None:
-        return session_error
+    # Bound before the watcher starts: its task copies the log context
+    # then, so its log line carries the session id.
+    session_error = _bind_mcp_session_id(request, payload) if protocol_error is None else None
 
+    # #3696: the body is fully read here, so the watcher can notice a
+    # caller that disconnects. It watches until the answer is sent, also
+    # when the answer is one of the refusals.
+    await until_sent.enter_async_context(_watch_call(request, jrpc))
+    refusal = protocol_error or session_error
+    response: Response = (
+        refusal if refusal is not None else await _dispatch_parsed(request, jrpc, payload, operator)
+    )
+    # After the send the server reports a disconnect for every answer, so
+    # the watcher must see a disconnect from before the send now.
+    await let_watcher_see_disconnect()
+    return response
+
+
+async def _dispatch_parsed(
+    request: Request, jrpc: JsonRpcRequest, payload: dict[str, Any], operator: Operator
+) -> Response:
+    """Run the handler of a checked request and return the answer."""
     # Notification detection: JSON-RPC §4.1.2 says a notification is a
     # request without an ``id`` member. Pydantic-side, ``jrpc.id``
     # collapses absent and explicit-null to ``None`` (spec discourages

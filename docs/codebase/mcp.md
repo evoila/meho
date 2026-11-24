@@ -2576,10 +2576,14 @@ left. A cancel is raised again after the line. The line is written by
 request is parsed until the answer is sent. So it also covers the refusals
 before the handler (protocol version, session id, no tenant chosen) and the
 steps after it (for example the audit row of a new session). Right before the
-answer is sent, the route yields once to the event loop. A disconnect that the
-server noticed just before the send then reaches the watcher. The older
-`caller_gone_during_request` line has the same form as before; on `/mcp` it
-now covers the same time.
+answer is sent, the route gives the event loop up to five turns
+(`let_watcher_see_disconnect` in `operations/caller_gone.py`). A disconnect
+that the server noticed just before the send then reaches the watcher. This
+matters because the server writes nothing to a client that has gone, and after
+the send it reports a disconnect for every answer. The session id is read
+from the header before the watcher starts. So the older
+`caller_gone_during_request` line still carries the full `mcp_session_id`,
+as before; on `/mcp` it now covers the same time.
 
 ## Request-size bounds
 

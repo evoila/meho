@@ -1153,8 +1153,13 @@ jobs:
         # In each download try, `apt-get update` runs first and the install
         # second, so the install uses the package lists of the same try.
         # If the last try fails, the step prints "SETUP FAILURE" and exits 1.
+        #
+        # Time limits: 60 s for `dpkg -i`, and 150 s for each update and
+        # each install, so at most 60 + 2 * (150 + 150) = 660 s. The step
+        # limit is above that sum, so both tries can finish and the step
+        # can print "SETUP FAILURE". Change them together.
         shell: bash
-        timeout-minutes: 6
+        timeout-minutes: 12
         env:
           LOCALE_DEBS_CACHE_HIT: ${{ steps.locale-debs-cache.outputs.cache-hit }}
         run: |
@@ -1173,7 +1178,7 @@ jobs:
           shopt -s nullglob
           cached=("${debs}"/*.deb)
           if [ "${#cached[@]}" -gt 0 ]; then
-            if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}" && ready; then
+            if timeout 60 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}" && ready; then
               echo "locale data ready from the package cache"
               exit 0
             fi

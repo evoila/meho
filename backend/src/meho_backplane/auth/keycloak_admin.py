@@ -712,14 +712,19 @@ class KeycloakAdminClient:
 
         Sets ``clientAuthenticatorType=client-jwt`` and puts the public key set
         in the client's ``jwks.string`` attribute, so the client's own private
-        key signs its login. Every other part of the client stays as it is (the
-        Admin API ``PUT`` replaces the whole representation, so this reads it
-        first).
+        key signs its login. Every other part of the client stays as it is:
+        this reads the client first and writes it back.
+
+        The write leaves out ``enabled``, and Keycloak keeps the current value
+        of a field that the ``PUT`` leaves out. So this write never turns a
+        client on again, also when Keycloak applies it after a revoke that
+        turned the client off.
 
         Raises :class:`KeycloakClientNotFoundError` on an unknown id.
         """
 
         def _apply(representation: dict[str, Any]) -> None:
+            representation.pop("enabled", None)
             representation["clientAuthenticatorType"] = "client-jwt"
             attributes = dict(representation.get("attributes") or {})
             attributes["use.jwks.url"] = "false"

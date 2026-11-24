@@ -114,10 +114,18 @@ server's token address when the runner must reach it under another name than
 central tells it. Both addresses must be `https://`. Plain `http://` works only
 for an address on the same machine.
 
+The runner sends its `MEHO_RUNNER_ID` with the code. When the code belongs to
+a runner with another name, central refuses it and changes nothing, so the
+code still works for its own runner. Check which code goes to which site, and
+start again.
+
 A runner whose key is lost stops with an error. Put the old key file back. Or
 revoke the runner, register a new one under a new name, and start with the new
 `MEHO_RUNNER_ID` and `MEHO_RUNNER_ENROLLMENT_CODE`. The same key folder can
-stay: the runner replaces the old login there.
+stay: the runner replaces the old login there. Give the new runner a new,
+empty `MEHO_RUNNER_SPOOL_DIR`, and keep the old spool folder as it is. Each
+result waiting in the spool carries the name of the runner that made it, and
+central refuses it under the new name.
 
 *A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
 Keycloak client instead. The runner sends it as it is and does not renew

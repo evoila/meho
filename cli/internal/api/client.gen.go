@@ -10220,10 +10220,13 @@ type RunnerAssignment struct {
 	Items             *[]RunnerWorkItem `json:"items,omitempty"`
 }
 
-// RunnerEnrollRequest A runner's one-time code and its public key (a JWK, EC P-256).
+// RunnerEnrollRequest A runner's one-time code, its public key (a JWK, EC P-256) and its name.
 type RunnerEnrollRequest struct {
 	EnrollmentCode string                 `json:"enrollment_code"`
 	PublicKey      map[string]interface{} `json:"public_key"`
+
+	// RunnerName The name the runner was registered under (its MEHO_RUNNER_ID). A code of a runner with another name is refused before anything changes.
+	RunnerName string `json:"runner_name"`
 }
 
 // RunnerEnrollResponse What the runner needs to sign its login request.

@@ -752,23 +752,36 @@ the same machine, and then no proxy from the environment is used
   (all give 403 `enrollment_code_invalid`). With a good code it refuses a
   private member in the key and a key that is not P-256 (422, the list shape
   of every other validation error).
-- The code enrolls one key. `runner_principal.enrolled_key_id` (the RFC 7638
-  thumbprint, `runner/key_id.py`) is set in the commit after Keycloak stored
-  the key, so a Keycloak failure keeps the code. A repeat of the code with the
-  enrolled key gives the same answer again and changes nothing, also after the
-  code's end. This is how a runner recovers when the answer was lost: it keeps
-  its key, has no login record yet, and asks again at its next start.
+- The runner sends its `MEHO_RUNNER_ID` as `runner_name`. When the code
+  belongs to a runner with another name, the route answers 409
+  `enrollment_code_for_another_runner` before anything changes, so the code
+  stays usable for its own runner.
+- The code enrolls one key, in two steps. First MEHO commits which key the
+  code accepted: `runner_principal.enrolled_key_id` (the RFC 7638 thumbprint,
+  `runner/key_id.py`). A key is accepted only before the code's end. Then,
+  under the lock again, MEHO puts the key on the Keycloak client and commits
+  `key_enrolled_at`. From the first step on, another key is refused. The
+  accepted key can finish the second step at any time, also after the code's
+  end: when Keycloak failed, or stored the key and the answer was lost, the
+  runner keeps its key, has no login record yet, and asks again at its next
+  start. A repeat after `key_enrolled_at` gives the same answer and changes
+  nothing.
 - Enrollment and revocation of one runner take turns: both hold one advisory
   lock (`take_runner_lock`) from the read of the row until the commit.
 - `KeycloakAdminClient.set_client_signed_jwt_key` sets the client to
-  `client-jwt` and stores the key set in `jwks.string`.
+  `client-jwt` and stores the key set in `jwks.string`. Its write leaves out
+  `enabled`, and Keycloak keeps a field that a `PUT` leaves out. So when a call
+  to Keycloak ends without an answer and Keycloak applies the write after a
+  revoke, the client stays disabled and gives no token.
 
 **The saved login.** The runner uses the login record only when it is for
 `MEHO_RUNNER_ID` and its key id is the one of the private key on disk. When the
 record is damaged, or the key is missing or another one, the runner enrolls
 with `MEHO_RUNNER_ENROLLMENT_CODE`. Without a code it stops with an error that
-says how to recover. It never makes a new key for an old record without a
-code. The record is written in one step, so a stop leaves no half record.
+says how to recover: put the files back, or register a new runner under a new
+name with a new, empty `MEHO_RUNNER_SPOOL_DIR` (the old spool's results carry
+the old name, and central refuses them under the new one). It never makes a
+new key for an old record without a code. The record is written in one step, so a stop leaves no half record.
 
 **Renewal.** `SignedJwtTokenProvider` signs a 60-second JWT (ES256, `kid`,
 `iss`=`sub`=client id, `aud`=issuer, unique `jti`) and posts it to the token

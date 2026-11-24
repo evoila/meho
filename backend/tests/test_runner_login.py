@@ -71,6 +71,7 @@ class _Central:
         self.client_id = "runner:site-a"
         self.token_url = _TOKEN_URL
         self.refuse_enrollment = False
+        self.refuse_name = False
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -81,6 +82,8 @@ class _Central:
             body = json.loads(request.content)
             if self.refuse_enrollment:
                 return httpx.Response(403, json={"detail": "enrollment_code_invalid"})
+            if self.refuse_name:
+                return httpx.Response(409, json={"detail": "enrollment_code_for_another_runner"})
             self.public_key = body["public_key"]
             return httpx.Response(
                 200,
@@ -411,6 +414,8 @@ async def test_a_missing_key_is_reported_and_no_new_key_is_made(tmp_path: Path) 
         await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
     assert "runner-principal register" in str(caught.value)
     assert "MEHO_RUNNER_ENROLLMENT_CODE" in str(caught.value)
+    assert "empty MEHO_RUNNER_SPOOL_DIR" in str(caught.value)
+    assert "keep the old one" in str(caught.value)
     assert central.requests == []
     assert not (tmp_path / KEY_FILE_NAME).exists()
 
@@ -495,10 +500,24 @@ async def test_a_saved_login_of_another_runner_is_not_used(tmp_path: Path) -> No
 async def test_a_code_of_another_runner_is_reported_and_not_saved(tmp_path: Path) -> None:
     central = _Central()
     central.client_id = "runner:site-z"
-    with pytest.raises(RunnerLoginError, match="the enrollment code is for runner:site-z"):
+    with pytest.raises(RunnerLoginError, match=r"another runner.*code is for runner:site-z"):
         await open_signed_jwt_login(
             _settings(tmp_path, enrollment_code="c"), transport=central.transport()
         )
+    assert not (tmp_path / LOGIN_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_the_runner_sends_its_name_and_reports_a_refused_name(tmp_path: Path) -> None:
+    central = _Central()
+    central.refuse_name = True
+    with pytest.raises(RunnerLoginError, match="code is for another runner") as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert "Nothing changed" in str(caught.value)
+    (request,) = central.requests
+    assert json.loads(request.content)["runner_name"] == "site-a"
     assert not (tmp_path / LOGIN_FILE_NAME).exists()
 
 

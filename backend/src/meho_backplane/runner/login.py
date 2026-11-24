@@ -73,7 +73,15 @@ _ASSERTION_TYPE: Final[str] = "urn:ietf:params:oauth:client-assertion-type:jwt-b
 _RECOVERY: Final[str] = (
     "Put the right files back, or revoke this runner, register a new one under a new name "
     "(meho runner-principal register), and start with its MEHO_RUNNER_ID and "
-    "MEHO_RUNNER_ENROLLMENT_CODE"
+    "MEHO_RUNNER_ENROLLMENT_CODE. Give the new runner an empty MEHO_RUNNER_SPOOL_DIR, "
+    "and keep the old one: its results carry the old name and central refuses them "
+    "under the new one"
+)
+#: What a person does when the code belongs to a runner with another name.
+_OTHER_RUNNER: Final[str] = (
+    "the enrollment code is for another runner; set MEHO_RUNNER_ID to the name that was "
+    "registered, or use the code of this runner. Nothing changed, and the code still works "
+    "for its own runner"
 )
 
 _log = structlog.get_logger(__name__)
@@ -249,10 +257,16 @@ async def enroll_with_code(
         ) as client:
             resp = await client.post(
                 _ENROLL_PATH,
-                json={"enrollment_code": code, "public_key": public_jwk(key)},
+                json={
+                    "enrollment_code": code,
+                    "public_key": public_jwk(key),
+                    "runner_name": runner_id,
+                },
             )
     except httpx.HTTPError as exc:
         raise RunnerLoginError(f"enrollment failed: {type(exc).__name__}") from exc
+    if resp.status_code == httpx.codes.CONFLICT:
+        raise RunnerLoginError(_OTHER_RUNNER)
     if resp.status_code != httpx.codes.OK:
         hint = f". {_RECOVERY}" if resp.status_code == httpx.codes.FORBIDDEN else ""
         raise RunnerLoginError(f"enrollment was refused: HTTP {resp.status_code}{hint}")
@@ -268,10 +282,7 @@ async def enroll_with_code(
     except (ValueError, KeyError, TypeError) as exc:
         raise RunnerLoginError("enrollment answer is not valid") from exc
     if record.client_id != _client_id(runner_id):
-        raise RunnerLoginError(
-            f"the enrollment code is for {record.client_id}; "
-            "set MEHO_RUNNER_ID to the name that was registered"
-        )
+        raise RunnerLoginError(f"{_OTHER_RUNNER} (the code is for {record.client_id})")
     if record.key_id != ec_key_id(public_jwk(key)):
         raise RunnerLoginError("enrollment answer is for another key")
     try:

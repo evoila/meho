@@ -340,6 +340,9 @@ class _SecretValueCheck:
         self._seen: set[int] = set()
         self._named_maps_read: set[int] = set()
         self._nodes = 0
+        # Parsed annotation objects stay alive for the whole check, so an id() in
+        # the seen sets is never reused by a later object.
+        self._parsed: list[Any] = []
 
     def _first_visit(self, value: Any) -> bool:
         if id(value) in self._seen:
@@ -365,6 +368,7 @@ class _SecretValueCheck:
                     parsed = _annotation_objects(annotations)
                     if parsed is None:
                         return True
+                    self._parsed.extend(parsed)
                     stack.extend(parsed)
             for child in _children(node, skip_items=skip_items and node is doc):
                 if self._first_visit(child):

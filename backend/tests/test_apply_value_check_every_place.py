@@ -246,6 +246,18 @@ def test_the_last_applied_annotation_is_read() -> None:
     assert _flagged(manifest) is True
 
 
+@pytest.mark.parametrize("position", ["first", "middle", "last"])
+def test_every_json_annotation_is_read_whatever_its_position(position: str) -> None:
+    plain = json.dumps({"s": {"t": [{"note": "x"}]}})
+    secret = json.dumps({"s": {"t": [{"password": _VALUE}]}})
+    index = {"first": 0, "middle": 100, "last": 199}[position]
+    parts = [
+        {"metadata": {"annotations": {"example.invalid/a": secret if i == index else plain}}}
+        for i in range(200)
+    ]
+    assert _flagged(_manifest({"metadata": {"name": "w"}, "spec": {"parts": parts}})) is True
+
+
 def test_an_annotation_text_that_is_not_json_is_a_plain_text() -> None:
     manifest = _manifest({"metadata": {"annotations": {"note": "{not json", "n2": "[1, 2"}}})
     assert _flagged(manifest) is False

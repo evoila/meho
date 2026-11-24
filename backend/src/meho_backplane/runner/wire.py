@@ -241,6 +241,13 @@ class RunnerWorkItem(BaseModel):
     signature: str | None = None
     expires_at: datetime | None = None
     package_set: str | None = None
+    #: The schedule of an item for a check that MEHO counts: the check's own
+    #: ``interval_seconds``, or ``cron_expr`` with ``timezone``. The runner
+    #: runs such an item only when it is due, also from a cached assignment.
+    #: An item with neither runs on every tick.
+    interval_seconds: int | None = None
+    cron_expr: str | None = None
+    timezone: str | None = None
 
 
 class RunnerAssignment(BaseModel):
@@ -287,8 +294,25 @@ class RunnerResult(BaseModel):
     #: When the runner made the result, on the runner's clock. Central never
     #: uses it as the time of the check (it uses the time it received the
     #: result). It only refuses a time in the future and drops a result made
-    #: before the last one it counted. A runner that sends none is accepted.
+    #: before the last one it counted. MEHO stores a result without it, but
+    #: does not count it.
     produced_at: datetime | None = None
+    #: A code for the kind of error, set only for a refused login
+    #: (``connector_auth_failed``). MEHO pauses a check after a few of them.
+    error_code: str | None = None
+
+
+class RefusedResult(BaseModel):
+    """A result MEHO refused, named in the answer to a result batch.
+
+    ``reason`` is ``future_time``: the runner time of the result is later
+    than MEHO's clock. MEHO neither stores nor counts such a result.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    result_uid: str
+    reason: str
 
 
 class RunnerResultBatch(BaseModel):

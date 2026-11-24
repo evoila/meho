@@ -38,7 +38,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -55,7 +56,13 @@ from meho_backplane.runner.client import (
 from meho_backplane.runner.executor import execute_work_item
 from meho_backplane.runner.settings import RunnerSettings, get_runner_settings
 from meho_backplane.runner.spool import ResultSpool
-from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
+from meho_backplane.runner.wire import (
+    RefusedResult,
+    RunnerAssignment,
+    RunnerResultBatch,
+    RunnerWorkItem,
+)
+from meho_backplane.scheduler.cron import next_fire_after
 
 __all__ = ["run_one_tick", "run_runner"]
 
@@ -76,10 +83,35 @@ def _log() -> structlog.typing.FilteringBoundLogger:
 
 @dataclass
 class RunnerState:
-    """Mutable per-process tick state: the cached assignment + its digest."""
+    """Mutable per-process tick state.
+
+    The cached assignment, its digest, and the time each scheduled item last
+    ran (keyed by ``check_ref``).
+    """
 
     assignment: RunnerAssignment | None = None
     assignment_version: str | None = None
+    last_run: dict[str, datetime] = field(default_factory=dict)
+
+
+def _is_due(item: RunnerWorkItem, last_run: datetime | None, now: datetime) -> bool:
+    """True when *item* should run at *now*.
+
+    An item without a schedule runs on every tick. A scheduled item runs on
+    its first tick, then again once its interval has passed or its cron
+    expression has a match after the last run. A cron expression the runner
+    cannot read runs the item on every tick, so the check still reports.
+    """
+    if last_run is None:
+        return True
+    if item.cron_expr:
+        try:
+            return next_fire_after(item.cron_expr, last_run, item.timezone or "UTC") <= now
+        except ValueError:
+            return True
+    if item.interval_seconds is not None:
+        return last_run + timedelta(seconds=item.interval_seconds) <= now
+    return True
 
 
 async def run_one_tick(
@@ -138,10 +170,18 @@ async def _execute_and_report(
     assignment = state.assignment
     if assignment is None or not assignment.items:
         return
-    results = [await execute_work_item(item) for item in assignment.items]
+    now = datetime.now(UTC)
+    due = [
+        item for item in assignment.items if _is_due(item, state.last_run.get(item.check_ref), now)
+    ]
+    if not due:
+        return
+    for item in due:
+        state.last_run[item.check_ref] = now
+    results = [await execute_work_item(item) for item in due]
     batch = RunnerResultBatch(runner_id=runner_id, results=results)
     try:
-        await client.post_results(batch)
+        _log_refused(await client.post_results(batch))
     except RunnerClientError as exc:
         # Keep the results for a later tick, also when central refused the
         # wire version: the refusal is handled by the tick after spooling.
@@ -149,6 +189,16 @@ async def _execute_and_report(
         spool.write_batch(batch)
         if isinstance(exc, RunnerWireVersionMismatchError):
             raise
+
+
+def _log_refused(refused: list[RefusedResult]) -> None:
+    """Log each result MEHO refused. A ``future_time`` refusal means this clock is ahead."""
+    for entry in refused:
+        _log().error(
+            "runner_result_refused_by_central",
+            result_uid=entry.result_uid,
+            reason=entry.reason,
+        )
 
 
 async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
@@ -159,7 +209,7 @@ async def _drain_spool(client: RunnerClient, spool: ResultSpool) -> None:
     """
     for path, batch in spool.load_oldest_first():
         try:
-            await client.post_results(batch)
+            _log_refused(await client.post_results(batch))
         except RunnerWireVersionMismatchError:
             raise
         except RunnerClientError as exc:

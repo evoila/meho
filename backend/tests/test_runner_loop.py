@@ -13,16 +13,20 @@ fails, the loop reuses the cached assignment and still executes it.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.runner import loop as runner_loop
 from meho_backplane.runner import wire
 from meho_backplane.runner.client import RunnerClient
 from meho_backplane.runner.loop import RunnerState, run_one_tick
@@ -227,3 +231,93 @@ async def test_wire_version_refusal_on_result_post_spools_and_drops_cache(
     assert calls == ["/api/v1/checks/results"]
     assert len(spool.load_oldest_first()) == 1
     assert state.assignment is None
+
+
+# ---------------------------------------------------------------------------
+# The schedule of a work item, and refused results
+# ---------------------------------------------------------------------------
+
+
+def _scheduled_item(check_ref: str, **schedule: Any) -> RunnerWorkItem:
+    return RunnerWorkItem(
+        check_ref=check_ref,
+        op_id="net.tcp_check",
+        product="net",
+        handler_ref="meho_backplane.connectors.net.ops.net_tcp_check",
+        safety_level="safe",
+        principal=RunnerPrincipal(
+            sub="s", tenant_id=uuid.uuid4(), tenant_role=TenantRole.READ_ONLY
+        ),
+        **schedule,
+    )
+
+
+async def _fake_execute(item: RunnerWorkItem) -> wire.RunnerResult:
+    return wire.RunnerResult(
+        result_uid=uuid.uuid4().hex, check_ref=item.check_ref, op_id=item.op_id, status="ok"
+    )
+
+
+def _posted_refs(posted: list[str]) -> list[list[str]]:
+    return [[r["check_ref"] for r in json.loads(body)["results"]] for body in posted]
+
+
+@pytest.mark.parametrize("fetch_fails", [False, True], ids=["fresh", "cached"])
+async def test_a_scheduled_item_runs_only_when_it_is_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fetch_fails: bool
+) -> None:
+    monkeypatch.setattr(runner_loop, "execute_work_item", _fake_execute)
+    assignment = RunnerAssignment(
+        assignment_version="v1",
+        items=[
+            _scheduled_item("hourly", interval_seconds=3600),
+            _scheduled_item("yearly", cron_expr="0 0 1 1 *", timezone="Europe/Vienna"),
+            _scheduled_item("every-tick"),
+        ],
+    )
+    posted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            if fetch_fails:
+                raise httpx.ConnectError("uplink down")
+            return httpx.Response(200, json=assignment.model_dump(mode="json"))
+        posted.append(request.content.decode())
+        return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
+
+    state = RunnerState(assignment=assignment, assignment_version="v1")
+    spool = ResultSpool(tmp_path, max_files=100)
+    await _run_tick(handler, spool, state)
+    await _run_tick(handler, spool, state)
+
+    assert _posted_refs(posted) == [["hourly", "yearly", "every-tick"], ["every-tick"]]
+
+    state.last_run["hourly"] = datetime.now(UTC) - timedelta(hours=2)
+    await _run_tick(handler, spool, state)
+    assert _posted_refs(posted)[-1] == ["hourly", "every-tick"]
+
+
+async def test_results_central_refused_are_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_loop, "execute_work_item", _fake_execute)
+    assignment = RunnerAssignment(assignment_version="v1", items=[_scheduled_item("c1")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(304)
+        return httpx.Response(
+            200,
+            json={
+                "accepted": 0,
+                "duplicates": 0,
+                "refused": [{"result_uid": "u9", "reason": "future_time"}],
+            },
+        )
+
+    state = RunnerState(assignment=assignment, assignment_version="v1")
+    with capture_logs() as logs:
+        await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
+
+    refused = [e for e in logs if e["event"] == "runner_result_refused_by_central"]
+    assert [(e["result_uid"], e["reason"]) for e in refused] == [("u9", "future_time")]

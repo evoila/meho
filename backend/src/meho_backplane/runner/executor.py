@@ -49,6 +49,8 @@ from typing import Any
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.checks.auth_park import AUTH_FAILED_ERROR_CODE
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors._shared.wrapped_creds import screen_remote_write_credential
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.operations._handler_resolve import (
@@ -88,6 +90,7 @@ def _result(
     *,
     payload: dict[str, Any] | None,
     error: str | None,
+    error_code: str | None = None,
 ) -> RunnerResult:
     return RunnerResult(
         result_uid=uuid.uuid4().hex,
@@ -97,6 +100,7 @@ def _result(
         result=payload,
         error=error,
         produced_at=datetime.now(UTC),
+        error_code=error_code,
     )
 
 
@@ -285,7 +289,13 @@ async def _invoke(handler: Callable[..., Awaitable[Any]], item: RunnerWorkItem) 
             check_ref=item.check_ref,
             exc_info=True,
         )
-        return _result(item, "error", payload=None, error=f"{type(exc).__name__}: {exc}")
+        return _result(
+            item,
+            "error",
+            payload=None,
+            error=f"{type(exc).__name__}: {exc}",
+            error_code=AUTH_FAILED_ERROR_CODE if isinstance(exc, ConnectorAuthError) else None,
+        )
     if not isinstance(payload, dict):
         return _result(
             item, "error", payload=None, error=f"handler returned non-dict {type(payload).__name__}"

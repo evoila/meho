@@ -308,6 +308,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -4120,39 +4121,42 @@ async def dispatch(
     # its audit row. The reset puts the parent's rule back.
     rule_token = policy_rule_var.set(None)
     try:
-        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-            with agent_no_grant_log_scope():
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
+        # Each call notes only the secret reads it made itself, from its first
+        # check on, so a refusal row of a step never takes the parent's value.
+        with track_secret_read_as():
+            if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+                with agent_no_grant_log_scope():
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
+            if is_draining() and not _approved:
+                _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+                return shutting_down_result(op_id)
+            with agent_no_grant_log_scope(new=True):
+                async with track_operation(
                     op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
-        if is_draining() and not _approved:
-            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-            return shutting_down_result(op_id)
-        with agent_no_grant_log_scope(new=True):
-            async with track_operation(
-                op_id=op_id,
-                connector_id=connector_id,
-                operator_sub=operator.sub,
-                tenant_id=operator.tenant_id,
-                approved_run=_approved,
-            ):
-                return await _dispatch_now(
-                    operator=operator,
                     connector_id=connector_id,
-                    op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
+                    operator_sub=operator.sub,
+                    tenant_id=operator.tenant_id,
+                    approved_run=_approved,
+                ):
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
     finally:
         policy_rule_var.reset(rule_token)
 

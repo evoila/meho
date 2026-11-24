@@ -29,14 +29,14 @@ follows (Vault, bind9 and pfSense use the same pattern).
   `version` / `impl_id` advertise the registry-v2 key. Caches one
   `kubernetes_asyncio.client.ApiClient` (REST) and, lazily, one
   `WsApiClient` (exec/websocket) per target, both keyed on the
-  tenant-unique `(tenant_id, id)` tuple from the shared
-  `target_cache_key` helper (`connectors/_shared/cache_key.py`). Keying
-  on the target-row primary key — not `target.name` and not
-  `target.secret_ref` — is a cross-tenant isolation requirement: two
-  targets in different tenants that share a name *or* a Vault `secret_ref` must never collapse onto one cached
-  client, or the second tenant is served the first tenant's
-  authenticated client without passing its own credential-store
-  authorization. Both cache fast-paths also apply the
+  tenant-unique `(tenant_id, id)` tuple plus the secret reference, from
+  the shared `target_secret_cache_key` helper
+  (`connectors/_shared/cache_key.py`). Keying on the target-row primary
+  key — not `target.name` and not `target.secret_ref` alone — keeps
+  tenants apart: two targets in different tenants that share a name *or*
+  a Vault `secret_ref` never collapse onto one cached client. The secret
+  reference in the key means a call uses only a client built from the
+  secret its own target names. Both cache fast-paths also apply the
   `is_system_operator` guard (#1008): a system/operator-less caller
   (reachable through the operator-less `k8s.ls` forwarder) always falls
   through to the fail-closed credential loader and is never served a
@@ -72,7 +72,7 @@ follows (Vault, bind9 and pfSense use the same pattern).
 
 * `KubernetesTargetLike` (`backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py`)
   -- Protocol the connector reads against: `name`, `host`, `port`,
-  `secret_ref`, plus `id` / `tenant_id` (the `(tenant_id, id)` cache
+  `secret_ref`, plus `id` / `tenant_id` (with `secret_ref`, the cache
   key components, #266). The G0.3 `Target` model carries all of them as
   UUIDs, so it satisfies the Protocol structurally.
 

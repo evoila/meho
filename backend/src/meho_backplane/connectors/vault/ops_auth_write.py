@@ -149,6 +149,7 @@ async def vault_auth_userpass_write(
             outcome = await apply_credential_source(
                 client,
                 plan,
+                operator,
                 username=username,
                 mount=mount,
                 token_policies=list(token_policies) if token_policies is not None else None,

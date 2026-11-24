@@ -2165,12 +2165,9 @@ async def test_cross_origin_redirect_warning_strips_url_query() -> None:
     warning = next(
         e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
     )
-    # The origin + path is preserved for diagnosis...
-    assert warning["from_url"] == "https://vc.example.com/guestFile"
-    # ...but the one-time ticket in the query never reaches the log.
-    assert "token=abc" not in warning["from_url"]
-    assert "SEKRIT" not in warning["from_url"]
-    assert "?" not in warning["from_url"]
+    # Only the host name is logged: no path, no query, no ticket.
+    assert warning["from_url"] == "vc.example.com"
+    assert "SEKRIT" not in repr(captured)
 
 
 @pytest.mark.asyncio
@@ -2209,10 +2206,34 @@ async def test_cross_origin_redirect_warning_logs_location_host_only(
 
 @pytest.mark.parametrize("location", ["/PATHMARK?q=QUERYMARK", "https://[::1/PATHMARK?q=QUERYMARK"])
 def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
-    from meho_backplane.connectors.adapters.http import _scrub_location_header
+    from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
 
-    assert _scrub_location_header(location) == "<unparseable-location>"
-    assert _scrub_location_header(None) is None
+    assert host_for_log(location) == UNPARSEABLE_ADDRESS
+
+
+@pytest.mark.asyncio
+async def test_followed_redirect_then_cross_origin_logs_host_only() -> None:
+    """After a followed same-origin hop, the vendor path is not in the warning."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/PATHMARK1?q=QUERYMARK1"})
+        return httpx.Response(302, headers={"Location": "https://other.example.com/PATHMARK2"})
+
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com", transport=httpx.MockTransport(handler)
+    ) as client:
+        with capture_logs() as captured:
+            await client.get("/start")
+
+    warning = next(
+        e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
+    )
+    assert warning["from_url"] == "vc.example.com"
+    assert warning["location"] == "other.example.com"
+    rendered = repr(captured)
+    for mark in ("PATHMARK1", "PATHMARK2", "QUERYMARK1"):
+        assert mark not in rendered
 
 
 @pytest.mark.asyncio

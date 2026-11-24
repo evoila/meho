@@ -101,6 +101,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.log_host import host_for_log
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -769,37 +770,6 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
-_UNPARSEABLE_LOCATION = "<unparseable-location>"
-
-
-def _origin_and_path(url: httpx.URL) -> str:
-    """Return ``scheme://host[:port]/path`` -- query, fragment, and userinfo dropped.
-
-    A guest-transfer / session URL carries a one-time ticket in its query string
-    (and could carry credentials in its userinfo). This scrubs both so the ticket
-    never reaches a log line, while still naming the origin + path that was
-    refused for diagnosis.
-    """
-    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
-
-
-def _scrub_location_header(location: str | None) -> str | None:
-    """Reduce a raw ``Location`` header to its host name for a log line.
-
-    The header comes from the vendor system. A log line shows it as the host
-    name only, or as one fixed mark when there is no host name to show (a
-    relative address, or a value ``httpx`` cannot parse). It never shows the
-    path, the query, the fragment or the user part.
-    """
-    if location is None:
-        return None
-    try:
-        host = httpx.URL(location).host
-    except httpx.InvalidURL:
-        return _UNPARSEABLE_LOCATION
-    return host or _UNPARSEABLE_LOCATION
-
-
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -867,10 +837,13 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 logger.warning(
                     "connector_redirect_not_followed_cross_origin",
                     method=request.method,
-                    # The own URL is logged as scheme, host and path. The
-                    # vendor's Location is logged as its host name only.
-                    from_url=_origin_and_path(request.url),
-                    location=_scrub_location_header(response.headers.get("Location")),
+                    # Vendor-supplied addresses are logged as host name only.
+                    from_url=host_for_log(request.url),
+                    location=(
+                        host_for_log(location_header)
+                        if (location_header := response.headers.get("Location")) is not None
+                        else None
+                    ),
                 )
                 return response
             await response.aclose()

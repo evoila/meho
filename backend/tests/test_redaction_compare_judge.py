@@ -437,3 +437,107 @@ def test_the_records_command_writes_one_record_per_input_and_step(tmp_path: Path
         assert all(isinstance(part, str) for part in r["hidden"] + r["shown"])
         assert digest.fullmatch(r["sha"]) and digest.fullmatch(r["rest"])
     assert judge_module.differences(judge_module.load(target), judge_module.load(target)) == []
+
+
+_PACKAGE_FILE = "backend/tests/redaction_compare/answers.py"
+_CI_YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+
+
+def _judge_changed(tmp_path: Path, changed: list[str], approved: str = "approved: []\n") -> int:
+    record = _record([], ["p0"])
+    (tmp_path / "base.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
+    return int(
+        judge_module.judge(
+            tmp_path / "base.jsonl",
+            tmp_path / "head.jsonl",
+            tmp_path / "approved.yaml",
+            changed=changed,
+        )
+    )
+
+
+def test_a_changed_file_of_the_compare_package_fails(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert _judge_changed(tmp_path, [_PACKAGE_FILE]) == 1
+    assert f"compare-package {_PACKAGE_FILE}: changed" in capfd.readouterr().out
+
+
+def test_a_changed_file_of_the_compare_package_with_its_own_entry_passes(tmp_path: Path) -> None:
+    entry = (
+        "approved:\n"
+        "  - id: compare-package\n"
+        f"    path: {_PACKAGE_FILE}\n"
+        "    part: changed\n"
+        "    reason: the input set grows\n"
+    )
+    assert _judge_changed(tmp_path, [_PACKAGE_FILE], entry) == 0
+
+
+def test_an_entry_for_one_package_file_does_not_cover_another(tmp_path: Path) -> None:
+    entry = (
+        "approved:\n"
+        "  - id: compare-package\n"
+        "    path: backend/tests/redaction_compare/inputs.py\n"
+        "    part: changed\n"
+        "    reason: the input set grows\n"
+    )
+    assert _judge_changed(tmp_path, [_PACKAGE_FILE], entry) == 1
+
+
+def test_no_changed_file_passes(tmp_path: Path) -> None:
+    assert _judge_changed(tmp_path, []) == 0
+
+
+def test_a_package_change_that_makes_a_shown_part_count_as_hidden_fails(tmp_path: Path) -> None:
+    # The pull request records look like the base records, because the changed
+    # package reads the same answer as hidden. The file list still fails the job.
+    base = _record(["s2"], ["p0"])
+    (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
+    (tmp_path / "changed.txt").write_text(_PACKAGE_FILE + "\n", encoding="utf-8")
+    command = [
+        sys.executable,
+        "-I",
+        str(_SCRIPT),
+        "--judge",
+        str(tmp_path / "base.jsonl"),
+        str(tmp_path / "head.jsonl"),
+        "--changed",
+        str(tmp_path / "changed.txt"),
+        "--approved",
+        str(tmp_path / "approved.yaml"),
+        "--summary-only",
+    ]
+    done = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert done.returncode == 1, done.stdout
+    _assert_names_nothing(done.stdout)
+
+
+def _compare_step_text() -> str:
+    text = _CI_YML.read_text(encoding="utf-8")
+    start = text.index("  redaction-compare:\n")
+    return text[start : text.index("\n  connector-package-template:", start)]
+
+
+def test_the_job_lists_the_changed_package_files_from_git() -> None:
+    step = _compare_step_text()
+    assert "git diff --name-only" in step
+    assert "backend/tests/redaction_compare" in step
+    assert '--changed "${dir}/changed.txt"' in step
+    assert '"${changed_args[@]}"' in step
+
+
+def test_the_job_keeps_the_container_error_output_out_of_the_log() -> None:
+    step = _compare_step_text()
+    # The error output of the container goes to a file, and a failure prints one fixed line.
+    assert '> "${dir}/head.jsonl" 2> "${dir}/head.err"; then' in step
+    assert "if ! tar -c" in step
+    assert "could not be built" in step
+    assert "exit 1" in step
+    # Nothing prints that file.
+    assert not re.search(r"(cat|tail|head|echo|<)\s+\"?\$\{dir\}/head\.err", step)
+    assert "head.err" not in step.replace('2> "${dir}/head.err"', "")

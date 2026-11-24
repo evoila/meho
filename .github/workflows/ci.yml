@@ -1553,6 +1553,8 @@ jobs:
     # Builds, for the base branch and for this pull request, the list of
     # hidden and shown parts of each fixed input on each secret-hiding step,
     # each side from its own code and input set, and judges the two lists.
+    # A change to a file under backend/tests/redaction_compare/ is judged as a
+    # difference too and needs its own approved entry.
     # It fails when the base hides a part that the pull request shows, when a
     # plain part that the base shows is now hidden, when an answer changed in
     # another way, or when an input of the base is gone, unless
@@ -1574,7 +1576,9 @@ jobs:
     # write only its own records, and never the rule script, the base
     # records or the approved files that the judge reads.
     #
-    # The job log is public, so the judge runs with --summary-only: on
+    # The job log is public, so the container's error output goes to a file
+    # that is never printed (a failed record build prints one fixed line), and
+    # the judge runs with --summary-only: on
     # purpose the log shows no input, no step, no part and no number, only
     # one closing line (and any stale approved entry, which is committed
     # already). To see the differences, run the steps locally (see
@@ -1653,20 +1657,36 @@ jobs:
             && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
           # The pull request: its own code and input set, with the base's
           # rule script, in a container with no mounts and no runner files.
+          # The files of the compare package that the pull request changes
+          # are listed from git here and judged as differences, so the input
+          # set and the way the answers are read change only with an approved
+          # entry. A base script without --changed has no such check yet.
+          changed_args=()
+          if grep -q -e '--changed' "${dir}/redaction_compare.py"; then
+            git diff --name-only "${base}" "${head}" -- backend/tests/redaction_compare \
+              > "${dir}/changed.txt"
+            changed_args=(--changed "${dir}/changed.txt")
+          fi
           stage="${dir}/head-input"
           mkdir "${stage}"
           git archive "${head}" backend | tar -x -C "${stage}"
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
-          tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+          # The container's error output goes to a file that is never
+          # printed: the job log is public.
+          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
             work="$(mktemp -d)"
             tar -x -C "${work}"
             cd "${work}/backend"
             "${work}/uv" sync --frozen >&2
             "${work}/uv" run python "${work}/redaction_compare.py" --records "${work}/head.jsonl" >&2
             cat "${work}/head.jsonl"
-          ' > "${dir}/head.jsonl"
+          ' > "${dir}/head.jsonl" 2> "${dir}/head.err"; then
+            echo "The records of the pull request could not be built. Run the compare locally to see why (docs/codebase/redaction.md, \"Compare with main\")."
+            exit 1
+          fi
           python3 -I "${dir}/redaction_compare.py" \
             --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
+            "${changed_args[@]}" \
             --approved "${dir}/head-approved.yaml" \
             --base-approved "${dir}/base-approved.yaml" \
             --summary-only

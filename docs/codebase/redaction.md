@@ -1077,6 +1077,13 @@ before a reviewer reads the pull request.
 - **The rules come from the base branch.** The job reads the rule script
   of the base commit with `git show` and runs the judge with
   `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The job also lists, with `git diff --name-only`, each file that the pull
+  request changes under `backend/tests/redaction_compare/` (the input set
+  and the code that reads the answers) and passes the list with
+  `--changed`. Each such file is a difference of its own and needs an
+  approved entry with `id: compare-package`, the file path as `path`, and
+  `part: changed`. So the records of the pull request cannot be changed to
+  look like the base's without a reviewed entry.
   The approved file is the one that the pull request commits: it is the
   open list that a reviewer reads. The job reads it, the base's approved
   file and the rule script from git before any code of the pull request
@@ -1092,6 +1099,10 @@ before a reviewer reads the pull request.
   is not approved" or "differences are left that are not approved". A
   stale approved entry is still printed, because it is in the committed
   approved file already. The exit code is the same as without the flag.
+  The error output of the pull request's container goes to a file in the
+  job's temporary folder that the job never prints. When the record build
+  fails, the job prints one fixed line that says so and points to the local
+  run below, and the job fails.
 - **See the differences locally.** Without `--summary-only` the judge
   prints each difference that is not approved (input id, step, kind) and
   the counts. From the repo root, with the pull request branch checked out,

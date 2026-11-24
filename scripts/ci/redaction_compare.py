@@ -11,13 +11,22 @@
                              sha, rest) of the current code to FILE (run from
                              a backend/ folder with uv run; it imports that
                              folder's own tests.redaction_compare code)
-  --judge BASE HEAD --approved FILE [--base-approved FILE] [--summary-only]
+  --judge BASE HEAD --approved FILE [--base-approved FILE] [--changed FILE]
+          [--summary-only]
                              compare two record files; exit 1 on a difference
                              that the approved file does not list. Only the
                              entries that are not in the base's approved file
                              count. Without --summary-only it prints each
                              difference that is not approved (input id, step,
                              kind) and the counts.
+  --changed FILE             a list of paths (one per line) under
+                             backend/tests/redaction_compare/ that the pull
+                             request changes. Each path is a difference of
+                             kind "changed" and needs an approved entry with
+                             id "compare-package", that path, and part
+                             "changed". The input set and the way the answers
+                             are read are then reviewed, never changed
+                             silently.
   --summary-only             for the public CI log: print no input id, no
                              step, no part and no number, only one closing
                              line (a stale approved entry is still printed:
@@ -48,6 +57,8 @@ import os
 import sys
 from pathlib import Path
 
+#: The id of an approved entry for a changed file of the compare package.
+COMPARE_PACKAGE = "compare-package"
 SNAPSHOT = Path("tests/snapshots/redaction_compare.jsonl")
 
 
@@ -101,6 +112,7 @@ def judge(
     approved_path: Path,
     base_approved_path: Path | None = None,
     summary_only: bool = False,
+    changed: list[str] | None = None,
 ) -> int:
     """Only the entries that the pull request adds can approve a difference or be stale.
 
@@ -116,6 +128,7 @@ def judge(
         if not entry.get("reason"):
             sys.exit(f"approved entry {entry} has no reason")
     found = differences(load(base_path), load(head_path))
+    found += [(COMPARE_PACKAGE, path, "changed") for path in sorted(changed or [])]
     used = set()
     not_approved = 0
     for input_id, path, kind in found:
@@ -176,6 +189,7 @@ def main() -> int:
     parser.add_argument("--judge", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--approved")
     parser.add_argument("--base-approved")
+    parser.add_argument("--changed")
     parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
     if args.write:
@@ -186,12 +200,17 @@ def main() -> int:
         return 0
     if args.judge and args.approved:
         base_approved = Path(args.base_approved) if args.base_approved else None
+        changed = None
+        if args.changed:
+            lines = Path(args.changed).read_text(encoding="utf-8").splitlines()
+            changed = [line.strip() for line in lines if line.strip()]
         return judge(
             Path(args.judge[0]),
             Path(args.judge[1]),
             Path(args.approved),
             base_approved,
             summary_only=args.summary_only,
+            changed=changed,
         )
     parser.error("use --write, --records FILE, or --judge BASE HEAD --approved FILE")
     return 2

@@ -11,9 +11,10 @@ points outside that folder, so an admin can move the secrets into it.
 * A platform admin (a person) sees the targets of every tenant, or of one
   tenant with ``?tenant_id=<uuid>``. A tenant the admin is a member of
   is chosen with the ``Meho-Tenant`` header, so their role there applies
-  (:func:`~meho_backplane.auth.rbac.authorize_tenant_scope`). The list of
-  every tenant leaves out each tenant where the admin is a member without
-  the ``tenant_admin`` role.
+  (:func:`~meho_backplane.auth.rbac.authorize_tenant_scope`). With the
+  header set, ``?tenant_id=`` of that same tenant lists only it. The list
+  of every tenant leaves out each other tenant where the admin is a member
+  without the ``tenant_admin`` role, also the token's own tenant.
 * When the folder check is off on this install, the list is empty and
   ``check_off`` is true.
 
@@ -102,12 +103,18 @@ def _outside_reason(row: TargetORM) -> str | None:
 
 
 def _member_tenants_without_admin_role(operator: Operator) -> set[UUID]:
-    """The tenants *operator* is a member of with a role below ``tenant_admin``."""
+    """The other tenants *operator* is a member of with a role below ``tenant_admin``.
+
+    The token's own tenant counts too, when the admin chose another tenant
+    with a token that has no tenant list.
+    """
+    roles = {entry.tenant_id: group_grant(entry.group).role for entry in operator.tenants}
+    if operator.token_tenant_id is not None and operator.token_tenant_role is not None:
+        roles[operator.token_tenant_id] = operator.token_tenant_role
     return {
-        entry.tenant_id
-        for entry in operator.tenants
-        if entry.tenant_id != operator.tenant_id
-        and group_grant(entry.group).role is not TenantRole.TENANT_ADMIN
+        tenant
+        for tenant, role in roles.items()
+        if tenant != operator.tenant_id and role is not TenantRole.TENANT_ADMIN
     }
 
 

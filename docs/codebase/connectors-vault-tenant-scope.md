@@ -158,8 +158,11 @@ checked too, and gets a warning instead of a refusal. The read goes on.
   own tenant. A platform admin sees every tenant, or one with `tenant_id`.
   `tenant_id` goes through `authorize_tenant_scope`: a tenant the admin is a
   member of is chosen with the `Meho-Tenant` header, so their role there
-  applies. The list of every tenant leaves out each tenant where the admin
-  is a member without the `tenant_admin` role.
+  applies, and `tenant_id` of that same tenant then lists only it. The list
+  of every tenant leaves out each other tenant where the admin is a member
+  without the `tenant_admin` role. That includes the token's own tenant of
+  a token without a tenant list (`Operator.token_tenant_id` and
+  `token_tenant_role`).
   The list uses the same `outside_tenant_folder_reason` as the warning, so
   a target is listed exactly when a read of its secret warns. With the
   check off, the answer has `check_off: true` and no rows.

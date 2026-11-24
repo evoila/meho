@@ -34,6 +34,8 @@ from meho_backplane.connectors.vault.tenant_scope import (
     enforce_tenant_scope,
     outside_tenant_folder_reason,
 )
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Tenant
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
@@ -345,6 +347,73 @@ async def test_the_list_keeps_the_role_of_each_member_tenant() -> None:
     assert [i["name"] for i in not_member.json()["items"]] == ["third"]
     assert chosen.status_code == 403
     assert chosen.json()["detail"] == "insufficient_role"
+
+
+async def _seed_tenant_row(tenant_id: UUID, slug: str) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=tenant_id, slug=slug, name=slug))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_token_without_a_tenant_list_keeps_the_role_of_its_own_tenant() -> None:
+    """Read-only in the token's tenant, then working in another tenant: no rows of the first."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _seed()
+    await _seed_tenant_row(_OTHER_TENANT, "lab-b")
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    claims: dict[str, Any] = {
+        "tenant_role": TenantRole.READ_ONLY.value,
+        "platform_admin": True,
+        "headers": {"Meho-Tenant": str(_OTHER_TENANT)},
+    }
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            every = _get(client, key, **claims)
+            token_tenant = _get(client, key, url=f"{_URL}?tenant_id={_TENANT}", **claims)
+    assert every.status_code == 200, every.text
+    assert every.json()["all_tenants"] is True
+    assert {(i["tenant_id"], i["name"]) for i in every.json()["items"]} == {
+        (str(_OTHER_TENANT), "other"),
+    }
+    assert token_tenant.status_code == 403
+    assert token_tenant.json()["detail"].startswith("tenant_select_with_header:")
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_member_tenant_with_its_id_lists_only_that_tenant() -> None:
+    """``meho tenants use <name>``, then ``--tenant <its id>``: only that tenant's rows."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _seed()
+    await _insert_target(name="third", tenant_id=_THIRD_TENANT, secret_ref="targets/third")
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            chosen = _get(
+                client,
+                key,
+                url=f"{_URL}?tenant_id={_TENANT}",
+                tenant_role=TenantRole.TENANT_ADMIN.value,
+                platform_admin=True,
+                extra_claims={
+                    "meho_tenants": [
+                        f"{_TENANT}:lab-a:Admins",
+                        f"{_OTHER_TENANT}:lab-b:Readers",
+                    ]
+                },
+                headers={"Meho-Tenant": "lab-a"},
+            )
+    assert chosen.status_code == 200, chosen.text
+    assert chosen.json()["all_tenants"] is False
+    assert {(i["tenant_id"], i["name"]) for i in chosen.json()["items"]} == {
+        (DEFAULT_TENANT_ID, "outside"),
+    }
 
 
 @pytest.mark.asyncio

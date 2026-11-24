@@ -92,7 +92,11 @@ this stage it exposes:
   - Platform admin (a person with `platform_admin`): may name any tenant
     that exists in the `tenant` table (by UUID or slug). There they act as
     `tenant_admin`, with `approver=False`, and
-    `Operator.role_from_platform_admin=True`. A role group in that tenant
+    `Operator.role_from_platform_admin=True`. With a token without a list,
+    the token's own tenant and role stay in `Operator.token_tenant_id` and
+    `token_tenant_role`; `authorize_tenant_scope` refuses that tenant on the
+    body and query door with `tenant_select_with_header`, as for a tenant
+    of the list. A role group in that tenant
     wins over this, also when the header names one of the person's own
     tenants by a name the token does not carry (a token without a list
     holds only the UUID): the resolved id is checked against their own

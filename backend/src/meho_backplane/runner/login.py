@@ -23,6 +23,7 @@ import base64
 import ipaddress
 import json
 import os
+import stat
 import tempfile
 import time
 import uuid
@@ -135,10 +136,28 @@ def uses_proxy_settings(url: str) -> bool:
     return httpx.URL(url).scheme == "https"
 
 
+def _read_key_file(path: Path) -> bytes:
+    """The bytes of the key file, after a check of its mode on the open file.
+
+    Rights for other users stop the runner. Group rights work, with a warning:
+    a Kubernetes pod with ``fsGroup`` adds them.
+    """
+    with path.open("rb") as handle:
+        mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+        if mode & 0o007:
+            raise RunnerLoginError(
+                f"the runner key {path} has mode {mode:04o}, so other users can use it. "
+                f"Set its mode to 0600 (chmod 600 {path}) and start the runner again."
+            )
+        if mode & 0o070:
+            _log.warning("runner_key_group_access", path=str(path), mode=f"{mode:04o}")
+        return handle.read()
+
+
 def _read_private_key(path: Path) -> ec.EllipticCurvePrivateKey | None:
     """The private key in *path*, or ``None`` when there is no such file."""
     try:
-        key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(_read_key_file(path), password=None)
     except FileNotFoundError:
         return None
     except (OSError, ValueError, TypeError, UnsupportedAlgorithm) as exc:

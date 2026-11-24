@@ -19,9 +19,11 @@ from urllib.parse import parse_qs
 import httpx
 import jwt
 import pytest
+import structlog
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from meho_backplane.runner import wire
 from meho_backplane.runner.client import RunnerClient
 from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.runner.login import (
@@ -524,6 +526,7 @@ async def test_the_runner_sends_its_name_and_reports_a_refused_name(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_a_damaged_key_file_is_reported_and_kept(tmp_path: Path) -> None:
     (tmp_path / KEY_FILE_NAME).write_text("")
+    (tmp_path / KEY_FILE_NAME).chmod(0o600)
     central = _Central()
     with pytest.raises(RunnerLoginError, match="move it away"):
         await open_signed_jwt_login(
@@ -585,3 +588,74 @@ def test_without_a_key_folder_setting_the_default_folder_is_used(
     assert settings.enrollment_code is None
     assert settings.token_endpoint_override is None
     assert settings.runner_token is None
+
+
+async def _enrolled(tmp_path: Path) -> _Central:
+    """A runner that enrolled once; the fake central has forgotten the requests."""
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    central.requests.clear()
+    return central
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [0o644, 0o606, 0o604, 0o601])
+@pytest.mark.parametrize("with_code", [False, True])
+async def test_a_key_file_that_other_users_can_use_stops_the_runner(
+    tmp_path: Path, mode: int, with_code: bool
+) -> None:
+    central = await _enrolled(tmp_path)
+    if with_code:
+        (tmp_path / LOGIN_FILE_NAME).unlink()
+    (tmp_path / KEY_FILE_NAME).chmod(mode)
+    settings = _settings(tmp_path, enrollment_code="c") if with_code else _settings(tmp_path)
+    with pytest.raises(RunnerLoginError, match="0600") as raised:
+        await open_signed_jwt_login(settings, transport=central.transport())
+    assert str(tmp_path / KEY_FILE_NAME) in str(raised.value)
+    assert central.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [0o600, 0o400])
+async def test_a_key_file_only_its_owner_can_use_works(tmp_path: Path, mode: int) -> None:
+    central = await _enrolled(tmp_path)
+    (tmp_path / KEY_FILE_NAME).chmod(mode)
+    with structlog.testing.capture_logs() as logs:
+        provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+        assert provider is not None
+        assert await provider.get_token() == "token-1"
+    assert not [e for e in logs if e["event"] == "runner_key_group_access"]
+
+
+@pytest.mark.asyncio
+async def test_a_key_file_with_group_rights_works_and_writes_one_warning(tmp_path: Path) -> None:
+    central = await _enrolled(tmp_path)
+    (tmp_path / KEY_FILE_NAME).chmod(0o640)
+    with structlog.testing.capture_logs() as logs:
+        provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+        assert provider is not None
+        assert await provider.get_token() == "token-1"
+    warnings = [e for e in logs if e["event"] == "runner_key_group_access"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["path"] == str(tmp_path / KEY_FILE_NAME)
+    assert warnings[0]["mode"] == "0640"
+
+
+@pytest.mark.asyncio
+async def test_a_key_mode_client_sends_the_scheduled_checks_feature(tmp_path: Path) -> None:
+    central = await _enrolled(tmp_path)
+    provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    assert provider is not None
+    async with RunnerClient(
+        central_url="https://central.test",
+        runner_id="site-a",
+        token_provider=provider,
+        transport=central.transport(),
+    ) as client:
+        await client.fetch_assignment(None)
+    (call,) = [r for r in central.requests if r.url.path == "/api/v1/checks/assignment"]
+    assert call.headers[wire.FEATURES_HEADER] == wire.FEATURE_SCHEDULED_CHECKS
+    assert call.headers["Authorization"] == "Bearer token-1"

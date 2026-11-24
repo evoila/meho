@@ -1679,6 +1679,15 @@ class Settings(BaseModel):
         a direct call never gets the request of such a step.
         When off, every such call makes a new request. Env
         ``APPROVAL_SAME_CALL_REUSE``.
+    approval_retry_own_audit_row:
+        Off by default. When on, a retry that gets the waiting (or approved)
+        request through the same ``idempotency_key`` writes its own
+        ``approval.reuse`` audit row, in the same transaction. The row names
+        the reused request and the retry's own session. The answer's
+        ``audit_id`` is that row, not the row of the first call. There is
+        still no second ``approval.pending`` event. When off, the retry
+        writes no audit row and the answer's ``audit_id`` is the first
+        call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
     runner_checks_enabled:
         Off by default. When on, a check bound to a runner counts like a
         central check: the result a runner posts for its own check sets the
@@ -2696,6 +2705,7 @@ class Settings(BaseModel):
     mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_retry_own_audit_row: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3948,6 +3958,9 @@ def get_settings() -> Settings:
         ),
         approval_same_call_reuse=parse_bool_env(
             os.environ.get("APPROVAL_SAME_CALL_REUSE"),
+        ),
+        approval_retry_own_audit_row=parse_bool_env(
+            os.environ.get("APPROVAL_RETRY_OWN_AUDIT_ROW"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

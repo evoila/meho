@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import respx
@@ -122,9 +122,45 @@ async def test_a_path_outside_the_folder_warns_and_the_read_goes_on(
     assert warnings[0]["target_id"] == "00000000-0000-0000-0000-0000000000aa"
     assert warnings[0]["target_name"] == "vc-lab-01"
     assert warnings[0]["tenant_id"] == str(_TENANT)
-    assert warnings[0]["secret_ref_prefix"] == "targets"
+    assert warnings[0]["secret_ref_prefix"] == "targets/…"
     assert "vc-lab-01" not in warnings[0]["secret_ref_prefix"]
     assert _CANARY not in repr(captured)
+
+
+def _made_up_part(label: str) -> str:
+    return f"{label}-{uuid4().hex}"
+
+
+@pytest.mark.parametrize(
+    ("border", "two_parts"),
+    [
+        ("/", True),
+        ("", False),
+        ("%2F", True),
+        ("\\", True),
+        ("?", True),
+        ("#", True),
+    ],
+    ids=["slash", "one-part", "encoded-slash", "backslash", "question-mark", "number-sign"],
+)
+async def test_the_warning_shows_only_the_first_part_of_the_path(
+    monkeypatch: pytest.MonkeyPatch, border: str, two_parts: bool
+) -> None:
+    first = _made_up_part("first")
+    second = _made_up_part("second")
+    ref = f"{first}{border}{second}" if two_parts else first
+
+    creds, captured = await _read(monkeypatch, _Target(secret_ref=ref), _operator())
+
+    assert creds == {"username": "u", "password": _CANARY}
+    warnings = _warnings(captured)
+    assert len(warnings) == 1
+    hidden = second if two_parts else first
+    assert hidden not in repr(captured)
+    if two_parts:
+        assert warnings[0]["secret_ref_prefix"] == f"{first}/…"
+    else:
+        assert warnings[0]["secret_ref_prefix"] == "…"
 
 
 async def test_a_path_inside_the_folder_does_not_warn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,6 +383,70 @@ async def test_the_list_keeps_the_role_of_each_member_tenant() -> None:
     assert [i["name"] for i in not_member.json()["items"]] == ["third"]
     assert chosen.status_code == 403
     assert chosen.json()["detail"] == "insufficient_role"
+
+
+@pytest.mark.asyncio
+async def test_a_machine_login_with_the_platform_admin_claim_lists_only_its_own_tenant() -> None:
+    """A service login gets only its own tenant's rows; an agent login gets 403."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _seed()
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    claims: dict[str, Any] = {
+        "tenant_role": TenantRole.TENANT_ADMIN.value,
+        "platform_admin": True,
+    }
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            service = _get(client, key, principal_kind="service", **claims)
+            service_other = _get(
+                client,
+                key,
+                url=f"{_URL}?tenant_id={_OTHER_TENANT}",
+                principal_kind="service",
+                **claims,
+            )
+            agent = _get(client, key, principal_kind="agent", **claims)
+    assert service.status_code == 200, service.text
+    assert service.json()["all_tenants"] is False
+    assert {(i["tenant_id"], i["name"]) for i in service.json()["items"]} == {
+        (DEFAULT_TENANT_ID, "outside"),
+    }
+    assert service_other.status_code == 403
+    assert agent.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_list_of_every_tenant_leaves_out_an_operator_member_tenant() -> None:
+    """A member tenant where the admin is only an operator is not in the list of every tenant."""
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _seed()
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            every = _get(
+                client,
+                key,
+                tenant_role=TenantRole.TENANT_ADMIN.value,
+                platform_admin=True,
+                extra_claims={
+                    "meho_tenants": [
+                        f"{_TENANT}:lab-a:Admins",
+                        f"{_OTHER_TENANT}:lab-b:Operators",
+                    ]
+                },
+                headers={"Meho-Tenant": str(_TENANT)},
+            )
+    assert every.status_code == 200, every.text
+    assert every.json()["all_tenants"] is True
+    assert {(i["tenant_id"], i["name"]) for i in every.json()["items"]} == {
+        (DEFAULT_TENANT_ID, "outside"),
+    }
 
 
 async def _seed_tenant_row(tenant_id: UUID, slug: str) -> None:

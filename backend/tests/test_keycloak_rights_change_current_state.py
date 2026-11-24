@@ -32,6 +32,7 @@ from structlog.testing import capture_logs
 
 import meho_backplane.connectors.keycloak.ops_write_current_state as current_state
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors.keycloak import (  # loading the package registers the ops
     KeycloakConnector,
 )
@@ -157,7 +158,7 @@ def _connector(state: dict[str, Any], *, fails: bool = False) -> KeycloakConnect
     async def _token(target: Any, operator: Any) -> str:
         if fails:
             raise RuntimeError("made-up sign-in failure")
-        connector._admin_tokens[(str(target.tenant_id), str(target.id))] = AsyncMock()
+        connector._admin_tokens[target_secret_cache_key(target)] = AsyncMock()
         return "made-up-admin-token"
 
     connector._admin_token = AsyncMock(side_effect=_token)  # type: ignore[method-assign]

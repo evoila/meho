@@ -71,7 +71,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
     _AUTH_FLOWS_PATH,
@@ -384,7 +384,7 @@ async def _signed_in(connector: KeycloakConnector, ctx: PreviewContext) -> bool:
     sign-in can lock the account.
     """
     await _shared_read(ctx, connector)
-    return target_cache_key(ctx.target) in connector._admin_tokens
+    return target_secret_cache_key(ctx.target) in connector._admin_tokens
 
 
 async def _read_binding(

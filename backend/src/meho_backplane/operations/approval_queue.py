@@ -2090,7 +2090,11 @@ async def create_pending_request(
         idempotency_key: Optional client-chosen retry key (#3486). When the
             same principal in the same tenant already has a ``pending`` or
             ``approved`` request with this key, that request is returned
-            instead of a new one: no new row, no new audit row. The
+            instead of a new one, with no new request row. When
+            ``APPROVAL_RETRY_OWN_AUDIT_ROW`` is off, the retry writes no
+            audit row. When it is on, the retry writes one
+            ``approval.reuse`` audit row and the request carries its id as
+            ``_reuse_audit_id`` (see ``_reuse_for_key_retry``). The
             returned row carries the transient attr ``_reused = True`` (and
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past

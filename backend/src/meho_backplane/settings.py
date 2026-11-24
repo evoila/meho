@@ -1687,7 +1687,7 @@ class Settings(BaseModel):
         ``audit_id`` is that row, not the row of the first call. There is
         still no second ``approval.pending`` event. When off, the retry
         writes no audit row and the answer's ``audit_id`` is the first
-        call's, as before. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
+        call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then

@@ -229,9 +229,13 @@ private-range example.
 
 ## Named file sources
 
-`screen_and_resolve` and `screen_dial_addresses` take `allow_private`
-(default false). Only the file source helper sets it, for a source that
-says `private_network_allowed`. See [file-sources.md](file-sources.md).
+Named file sources use a stricter screen of their own, in
+`connectors/_shared/file_sources.py`. It uses the same address classes, but
+the allowlist does not count for it, a host name is always resolved and
+every answer is checked, and a name that does not resolve is refused.
+Private addresses pass only for a source that says
+`private_network_allowed`. `screen_and_resolve` and every caller of this
+module are unchanged. See [file-sources.md](file-sources.md).
 
 ## References
 

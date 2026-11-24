@@ -390,29 +390,10 @@ def _resolve_addrs(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addr
     return addrs
 
 
-#: The only ranges a named file source may open with ``allow_private``:
-#: RFC 1918 IPv4 space and unique-local IPv6. Loopback, link-local (which
-#: holds the cloud metadata address) and every other range stay refused.
-_PRIVATE_SOURCE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = (
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("fc00::/7"),
-)
-
-#: Instance-service addresses that sit inside the ranges above. A named
-#: file source never reaches them, even with ``allow_private``.
-_INSTANCE_SERVICE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = (
-    ipaddress.ip_network("fd00:ec2::/32"),
-)
-
-
 def _reject_blocked(
     addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
     allow: _Allowlist,
     port: int | None,
-    *,
-    allow_private: bool = False,
 ) -> None:
     """Raise when any address in *addrs* is blocked and not allowlisted.
 
@@ -424,18 +405,9 @@ def _reject_blocked(
     return-the-addresses entry points can never diverge on which
     destinations they reject. Any blocked, non-allowlisted candidate
     rejects the whole set (the ingest guard's all-or-nothing posture).
-
-    With *allow_private*, an address in :data:`_PRIVATE_SOURCE_NETWORKS` is
-    also accepted. Only the file source helper passes it.
     """
     for addr in addrs:
         if not _is_blocked(addr):
-            continue
-        if (
-            allow_private
-            and not any(addr in network for network in _INSTANCE_SERVICE_NETWORKS)
-            and any(addr in network for network in _PRIVATE_SOURCE_NETWORKS)
-        ):
             continue
         if any(addr in network for network in allow.networks):
             continue
@@ -451,11 +423,7 @@ def _reject_blocked(
 
 
 def _screen(
-    host: str,
-    port: int | None = None,
-    *,
-    use_embedded_port: bool = True,
-    allow_private: bool = False,
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
 ) -> list[str] | None:
     """Screen *host* and return the validated addresses it may dial.
 
@@ -508,7 +476,7 @@ def _screen(
             ):
                 return None
             addrs = _resolve_addrs(dialed)
-    _reject_blocked(addrs, allow, port, allow_private=allow_private)
+    _reject_blocked(addrs, allow, port)
     return [str(addr) for addr in addrs] if addrs else None
 
 
@@ -532,11 +500,7 @@ def assert_public_destination(host: str, port: int | None = None) -> None:
 
 
 def screen_and_resolve(
-    host: str,
-    port: int | None = None,
-    *,
-    use_embedded_port: bool = True,
-    allow_private: bool = False,
+    host: str, port: int | None = None, *, use_embedded_port: bool = True
 ) -> list[str] | None:
     """Screen *host* and return the addresses a connection may pin to.
 
@@ -556,14 +520,8 @@ def screen_and_resolve(
     name (fail-open; the transport's own resolution then fails or
     succeeds naturally). Raises :class:`TargetDestinationBlockedError`
     identically to :func:`assert_public_destination`.
-
-    *allow_private* is off by default. When true, private addresses (RFC
-    1918 and unique-local IPv6) pass. Loopback, link-local, cloud metadata
-    and every other non-public range are still refused. Only the file
-    source helper (``connectors/_shared/file_sources.py``) sets it, and only
-    for a source that says ``private_network_allowed``.
     """
-    return _screen(host, port, use_embedded_port=use_embedded_port, allow_private=allow_private)
+    return _screen(host, port, use_embedded_port=use_embedded_port)
 
 
 async def assert_public_destination_async(host: str, port: int | None = None) -> None:

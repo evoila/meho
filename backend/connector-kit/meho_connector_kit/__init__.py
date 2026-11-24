@@ -31,6 +31,7 @@ from meho_backplane.connectors._shared.credential_backend import CredentialsRead
 from meho_backplane.connectors._shared.file_sources import (
     FileSource,
     FileSourceError,
+    file_source_transport,
     file_sources_from_hosts,
     file_sources_from_map,
     resolve_file_source,
@@ -168,6 +169,7 @@ __all__ = [
     "VaultCredentialsReadError",
     "compute_audit_digest_hash",
     "declare_root_shell",
+    "file_source_transport",
     "file_sources_from_hosts",
     "file_sources_from_map",
     "is_acceptable_auth_model",

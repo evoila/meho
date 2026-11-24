@@ -25,6 +25,8 @@ it and keeps no list of its own.
 - `FileSourceError`: has a `rule` that says which rule failed. Its text
   never holds the address, because an address can hold a token.
 - `file_source_resolver(source)`: the connect-time screen for a source.
+- `file_source_transport(source)`: an httpx transport that uses that
+  screen. A connector downloads a file through it.
 
 ## The rules
 
@@ -47,17 +49,23 @@ When more than one source fits, the one with the longest path prefix wins.
 ## The address guard
 
 The address guard (see the target address guard page) still runs for
-every source, at connect time, with pinned addresses.
-`file_source_resolver(source)` returns a function for
-`build_port_pinned_async_transport`. It calls `screen_dial_addresses` with
-`allow_private` set from the source.
+every source, at connect time, with pinned addresses. A connector passes
+`file_source_transport(source)` to `httpx.AsyncClient(transport=...)`.
+Each new connection runs `file_source_resolver(source)`:
 
-`allow_private` is a keyword argument of `screen_and_resolve` and
-`screen_dial_addresses`. It is off by default, so every other caller
-behaves as before. When it is on, private addresses (RFC 1918 and
-unique-local IPv6) pass. Loopback, link-local and cloud metadata addresses
-are always refused. The install-wide address allowlist does not change: a
-private source is allowed per source, never for the whole install.
+- The host and port must be the host and port of the source (rule
+  `other_host`). So a redirect to another host or port is refused.
+- The host is checked with the address guard's address classes. A host name is always
+  resolved, every answer is checked, and only the checked addresses are
+  dialed. A name that does not resolve is refused (rule
+  `address_blocked`).
+- A public address passes. A private address (RFC 1918 and unique-local
+  IPv6) passes only when the source says `private_network_allowed`.
+  Loopback, link-local and cloud metadata addresses are always refused.
+
+The install-wide address allowlist does not count for a file source. A
+private source is allowed per source, never for the whole install. Every
+other caller of the address guard keeps the allowlist as before.
 
 ## What comes next
 

@@ -200,6 +200,15 @@
       "kind": "function",
       "returns": "None"
     },
+    "file_source_transport": {
+      "inputs": [
+        "source: FileSource",
+        "*",
+        "verify: ssl.SSLContext | str | bool = True"
+      ],
+      "kind": "function",
+      "returns": "httpx.AsyncHTTPTransport"
+    },
     "file_sources_from_hosts": {
       "inputs": [
         "entries: Sequence[str]",

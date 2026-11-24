@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import ipaddress
+import traceback
 
+import httpx
 import meho_connector_kit as kit
 import pytest
 
@@ -16,6 +18,7 @@ from meho_backplane.connectors._shared.file_sources import (
     FileSource,
     FileSourceError,
     file_source_resolver,
+    file_source_transport,
     file_sources_from_hosts,
     file_sources_from_map,
     resolve_file_source,
@@ -176,7 +179,7 @@ def test_private_address_is_refused_unless_the_source_allows_it(
     open_ = file_sources_from_map({"a": BASE}, private_network_allowed=True)[0]
     for private in ("192.168.1.5", "10.0.0.7", "172.16.4.4", "fd00::5"):
         _resolving_to(monkeypatch, private)
-        with pytest.raises(TargetDestinationBlockedError):
+        with pytest.raises(FileSourceError, match="private_network_allowed"):
             file_source_resolver(closed)("files.example.com", 443)
         assert file_source_resolver(open_)("files.example.com", 443) == [private]
 
@@ -200,20 +203,96 @@ def test_loopback_link_local_and_metadata_are_refused_even_when_private_is_allow
 ) -> None:
     open_ = file_sources_from_map({"a": BASE}, private_network_allowed=True)[0]
     _resolving_to(monkeypatch, address)
-    with pytest.raises(TargetDestinationBlockedError):
+    with pytest.raises(FileSourceError) as caught:
         file_source_resolver(open_)("files.example.com", 443)
+    assert caught.value.rule == "address_blocked"
 
 
 def test_one_private_answer_among_public_ones_needs_the_source_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _resolving_to(monkeypatch, "93.184.216.34", "192.168.1.5")
-    with pytest.raises(TargetDestinationBlockedError):
-        screen_and_resolve("files.example.com", 443)
-    assert screen_and_resolve("files.example.com", 443, allow_private=True) == [
+    closed = file_sources_from_map({"a": BASE})[0]
+    open_ = file_sources_from_map({"a": BASE}, private_network_allowed=True)[0]
+    with pytest.raises(FileSourceError):
+        file_source_resolver(closed)("files.example.com", 443)
+    assert file_source_resolver(open_)("files.example.com", 443) == [
         "93.184.216.34",
         "192.168.1.5",
     ]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    ["169.254.0.0/16", "169.254.169.254", "127.0.0.0/8", "fd00:ec2::/32", "10.0.0.0/8"],
+)
+@pytest.mark.parametrize("private_allowed", [False, True])
+def test_a_listed_network_never_opens_a_blocked_address_for_a_file_source(
+    monkeypatch: pytest.MonkeyPatch, listed: str, private_allowed: bool
+) -> None:
+    monkeypatch.setenv(ssrf_guard.TARGET_SSRF_ALLOWLIST_ENV, listed)
+    source = file_sources_from_map({"a": BASE}, private_network_allowed=private_allowed)[0]
+    network = ipaddress.ip_network(listed, strict=False)
+    blocked = str(network.network_address + 1) if network.num_addresses > 1 else str(network[0])
+    if private_allowed and blocked.startswith("10."):
+        blocked = "169.254.169.254"
+    _resolving_to(monkeypatch, blocked)
+    with pytest.raises(FileSourceError) as caught:
+        file_source_resolver(source)("files.example.com", 443)
+    assert caught.value.rule == "address_blocked"
+
+
+def test_a_listed_host_name_is_still_resolved_and_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ssrf_guard.TARGET_SSRF_ALLOWLIST_ENV, "files.example.com")
+    source = file_sources_from_map({"a": BASE}, private_network_allowed=True)[0]
+    _resolving_to(monkeypatch, "169.254.169.254")
+    with pytest.raises(FileSourceError) as caught:
+        file_source_resolver(source)("files.example.com", 443)
+    assert caught.value.rule == "address_blocked"
+    # A public answer is dialed by its checked address, never by the name.
+    _resolving_to(monkeypatch, "93.184.216.34")
+    assert file_source_resolver(source)("files.example.com", 443) == ["93.184.216.34"]
+
+
+def test_a_host_name_that_does_not_resolve_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _resolving_to(monkeypatch)
+    source = file_sources_from_map({"a": BASE})[0]
+    with pytest.raises(FileSourceError) as caught:
+        file_source_resolver(source)("files.example.com", 443)
+    assert caught.value.rule == "address_blocked"
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [
+        ("other.example.com", 443),
+        ("files.example.com", 8443),
+        ("10.0.0.7", 443),
+        ("files.example.com.evil.example", 443),
+    ],
+)
+def test_a_connection_to_another_host_or_port_is_refused(
+    monkeypatch: pytest.MonkeyPatch, host: str, port: int
+) -> None:
+    _resolving_to(monkeypatch, "93.184.216.34")
+    source = file_sources_from_map({"a": BASE}, private_network_allowed=True)[0]
+    with pytest.raises(FileSourceError) as caught:
+        file_source_resolver(source)(host, port)
+    assert caught.value.rule == "other_host"
+
+
+def test_the_source_host_matches_in_any_case_and_with_a_trailing_dot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _resolving_to(monkeypatch, "93.184.216.34")
+    source = file_sources_from_map({"a": "https://Files.Example.com:8443/x"})[0]
+    assert file_source_resolver(source)("files.example.com.", 8443) == ["93.184.216.34"]
+    v6 = file_sources_from_map({"a": "https://[2001:db8::1]/"})[0]
+    with pytest.raises(FileSourceError) as caught:
+        file_source_resolver(v6)("2001:db8::1", 443)
+    assert caught.value.rule == "address_blocked"
 
 
 def test_public_address_passes_for_every_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,9 +331,60 @@ def test_source_flag_does_not_change_the_install_allowlist(
 # --- the kit --------------------------------------------------------------
 
 
+def test_formatted_traceback_never_holds_the_address() -> None:
+    secret = "dummy-secret-77"
+    urls = [
+        f"https://files.example.com:{secret}/isos/a",
+        f"https://[{secret}/isos/a",
+        f"https://files.example.com/isos/%ff{secret}",
+    ]
+    for url in urls:
+        with pytest.raises(FileSourceError) as caught:
+            resolve_file_source(url, SOURCES)
+        assert secret not in "".join(traceback.format_exception(caught.value))
+    for bad_base in (f"https://files.example.com:{secret}/", f"https://[{secret}/"):
+        with pytest.raises(FileSourceError) as caught:
+            file_sources_from_map({"a": bad_base})
+        assert secret not in "".join(traceback.format_exception(caught.value))
+
+
+def test_host_list_reader_refuses_a_bare_string() -> None:
+    with pytest.raises(FileSourceError) as caught:
+        file_sources_from_hosts("files.example.com")
+    assert caught.value.rule == "bad_source"
+
+
+def test_map_reader_refuses_a_value_that_is_not_a_map() -> None:
+    for value in ("https://files.example.com/", ["https://files.example.com/"]):
+        with pytest.raises(FileSourceError) as caught:
+            file_sources_from_map(value)  # type: ignore[arg-type]
+        assert caught.value.rule == "bad_source"
+
+
+async def test_kit_transport_connects_only_to_checked_addresses_of_the_source() -> None:
+    """Uses only public kit names. No connection is opened: each case is refused first."""
+    closed = kit.file_sources_from_map({"a": "http://10.0.0.7/files"})[0]
+    open_ = kit.file_sources_from_map(
+        {"a": "http://127.0.0.1/files"}, private_network_allowed=True
+    )[0]
+    public = kit.file_sources_from_map({"a": "http://192.0.2.10/files"})[0]
+    cases = [
+        (closed, "http://10.0.0.7/files/a.iso", "address_blocked"),
+        (open_, "http://127.0.0.1/files/a.iso", "address_blocked"),
+        (public, "http://192.0.2.10:8080/files/a.iso", "other_host"),
+        (public, "http://10.0.0.8/files/a.iso", "other_host"),
+    ]
+    for source, url, rule in cases:
+        async with httpx.AsyncClient(transport=kit.file_source_transport(source)) as client:
+            with pytest.raises(kit.FileSourceError) as caught:
+                await client.get(url)
+        assert caught.value.rule == rule
+
+
 def test_kit_offers_the_file_source_names() -> None:
     assert kit.resolve_file_source is resolve_file_source
     assert kit.FileSource is FileSource
     assert kit.FileSourceError is FileSourceError
     assert kit.file_sources_from_map is file_sources_from_map
     assert kit.file_sources_from_hosts is file_sources_from_hosts
+    assert kit.file_source_transport is file_source_transport

@@ -2082,15 +2082,16 @@ async def create_pending_request(
         if not keep_no_params and params is not None
         else None
     )
-    secret_values = call_secret_values(params, op_id=op_id)
-    parent_values = _parent_secret_values(resume_parent)
-    if keep_no_params or hidden or parent_values:
+    if keep_no_params or hidden or _parent_holds_secret(resume_parent):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None if keep_no_params else (hidden or params)
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
     # The card was built from the real params: it shows no secret value either.
-    proposed_effect = hide_call_secret_values(proposed_effect, secret_values | parent_values)
+    proposed_effect = hide_call_secret_values(
+        proposed_effect,
+        call_secret_values(params, op_id=op_id) | _parent_secret_values(resume_parent),
+    )
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -2759,6 +2760,19 @@ def params_with_secret_fields_hidden(
     if not found:
         return None
     return cast(dict[str, Any], hidden)
+
+
+def _parent_holds_secret(resume_parent: dict[str, Any] | None) -> bool:
+    """True when the params of the parent of a step hold a secret value.
+
+    The same rule as for the step's own params
+    (:func:`params_with_secret_fields_hidden`), with the parent's op id, so
+    the fields the parent's connector marked count too.
+    """
+    if resume_parent is None or not isinstance(resume_parent.get("params"), dict):
+        return False
+    parent_op_id = str(resume_parent.get("op_id"))
+    return params_with_secret_fields_hidden(resume_parent["params"], op_id=parent_op_id) is not None
 
 
 def _parent_secret_values(resume_parent: dict[str, Any] | None) -> CallSecretValues:

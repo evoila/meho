@@ -448,8 +448,10 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`proposed_effect`) shows the marker in place of each one, and while
     the approved call runs, the dispatcher hides each one in the answer, in
     the stored result and in the audit row of the run (a connector that
-    sends back the note it saved). A text of six letters or more is also
-    cut out of a longer text.
+    sends back the note it saved). These are the values under a name whose
+    last word names the secret (`password`, not `password_secret_ref`,
+    which names where the secret is) and the values of marked fields; only
+    whole values match.
   - For other operations, and for rows stored by an older release, they are
     stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim

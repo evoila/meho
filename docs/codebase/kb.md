@@ -1258,6 +1258,20 @@ The answer:
   described above. The REST answer does not change. The switch is
   measured with the retrieval-eval runner (off, on, off) before anyone
   asks to turn it on.
+- The tool text follows the same switch
+  (`mcp/tools/_kb_wiki_order_text.py`). With it on, the description of
+  `search_knowledge` (full and short) says "store hits and knowledge repo
+  hits in turns (each list best first)" in place of "best first". The
+  full description and the cut text say "hits at the end of the list were
+  left out" in place of "low hits" and "lower-ranked hits": a cut can drop
+  the first knowledge repo hit, the best of its list. With it off, the
+  whole `tools/list` entry is the same as before, byte for byte (a test
+  compares it with the exact bytes main sent, saved in
+  `tests/fixtures/search_knowledge_tools_list_main_full.json` and
+  `..._short.json`).
+  The text has no switch of its own: the measurement of
+  `KB_WIKI_INTERLEAVE` under #6758 measures the order and this text
+  together.
 - REST: `RetrieveResponse.wiki` is a `KbWikiSearch` with the hits in
   `wiki.hits`; `null` on every other call. `meho kb search` prints the
   wiki hits after the table, or the line that says why the wiki was not

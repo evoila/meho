@@ -10,21 +10,20 @@ the end of the list were left out.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp import registry
-from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._kb_wiki_order_text import (
     INTERLEAVED_ORDER,
     PARTIAL_IN_TURNS,
     PLAIN_ORDER,
     PLAIN_PARTIAL,
 )
-from meho_backplane.mcp.tools._kb_word_hint import with_word_hint
 from meho_backplane.mcp.tools._short_tool_texts import SEARCH_KNOWLEDGE_SHORT
 from meho_backplane.mcp.tools.knowledge import _bounded_search_response
 from meho_backplane.settings import get_settings
@@ -34,6 +33,10 @@ from tests.mcp_test_fixtures import (
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
+
+#: The full and short ``search_knowledge`` entries of ``tools/list`` on main
+#: (switch off), saved as they were sent. A change to the text shows here.
+_MAIN_ENTRIES = Path(__file__).parent / "fixtures" / "search_knowledge_tools_list_main.json"
 
 _OLD_FULL_ORDER = "Returns one hit per entry, best first: slug, snippet, "
 _OLD_SHORT_ORDER = "Returns one hit per entry, best first, with `passages`"
@@ -60,20 +63,10 @@ def _description(client: TestClient) -> str:
     return str(_entry(client)["description"])
 
 
-def _main_entry(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """The ``tools/list`` entry with the text chain of main (no order text)."""
-    found = registry.get_tool("search_knowledge")
-    assert found is not None
-    definition, handler = found
-    main_chain = with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT))
-    monkeypatch.setitem(
-        registry._TOOLS,
-        "search_knowledge",
-        (definition.model_copy(update={"for_settings": main_chain}), handler),
-    )
-    entry = _entry(client)
-    monkeypatch.setitem(registry._TOOLS, "search_knowledge", found)
-    return entry
+def _main_entry(short: bool) -> dict[str, Any]:
+    """The ``tools/list`` entry as main sent it, saved before this change."""
+    saved: dict[str, dict[str, Any]] = json.loads(_MAIN_ENTRIES.read_text(encoding="utf-8"))
+    return saved["short" if short else "full"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -99,8 +92,7 @@ def test_switch_off_the_whole_entry_is_the_same_as_on_main(
     short: bool,
 ) -> None:
     _switch(monkeypatch, interleave=False, short=short)
-    client = client_with_operator[0]
-    assert _entry(client) == _main_entry(client, monkeypatch)
+    assert _entry(client_with_operator[0]) == _main_entry(short)
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -113,7 +105,7 @@ def test_switch_on_only_the_order_and_cut_words_change(
     _switch(monkeypatch, interleave=True, short=short)
     client = client_with_operator[0]
     entry = _entry(client)
-    main = _main_entry(client, monkeypatch)
+    main = _main_entry(short)
     expected = str(main["description"]).replace(PLAIN_ORDER, INTERLEAVED_ORDER)
     expected = expected.replace(PLAIN_PARTIAL, PARTIAL_IN_TURNS)
     assert entry == {**main, "description": expected}

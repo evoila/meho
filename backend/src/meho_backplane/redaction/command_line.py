@@ -37,6 +37,7 @@ from meho_backplane.broadcast.events import is_secret_param_name
 __all__ = [
     "COMMAND_LINE_START",
     "HIDDEN",
+    "SHELL_WORD",
     "CommandLineState",
     "hide_command_parts",
     "hide_command_parts_from",
@@ -74,6 +75,9 @@ _SHELL_WORD = (
     rf"""(?:[^\s'"\\{_OPERATOR_CHARS}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"""
     r""""(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
 )
+
+#: One shell word, compiled: :data:`_SHELL_WORD`.
+SHELL_WORD: Final[re.Pattern[str]] = re.compile(_SHELL_WORD)
 
 #: Space between shell words: whitespace and line continuations (a ``\\``
 #: right before a new line), which the shell removes. So in ``curl -u \\``

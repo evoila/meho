@@ -16,7 +16,6 @@ manifest of a Secret, or of an object with a secret-looking value, only in
 the encrypted handoff of the run.
 """
 
-import json
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
@@ -38,6 +37,11 @@ from meho_backplane.redaction.command_line import (
     is_secret_shaped_name,
 )
 from meho_backplane.redaction.file_text import hide_file_text
+from meho_backplane.redaction.json_text import (
+    UnreadableTextError,
+    load_json_text,
+    reject_repeated_keys,
+)
 
 declare_op_classes(
     credential_read=(
@@ -156,13 +160,31 @@ def _any_object_counts(docs: list[Any], counts: _Counts) -> bool:
     return budget > MAX_CHECKED_OBJECTS
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no stubs here
+    """A YAML loader that refuses a map that names one key twice.
+
+    The parsed map keeps only the last value of such a key, but the text
+    holds every value. A ``<<`` merge key may repeat and override keys: that
+    is how merges work.
+    """
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        reject_repeated_keys(
+            (key.tag, key.value)
+            for key, _ in node.value
+            if isinstance(key, yaml.ScalarNode) and key.tag != "tag:yaml.org,2002:merge"
+        )
+        mapping: dict[Any, Any] = super().construct_mapping(node, deep=deep)
+        return mapping
+
+
 def _manifest_has(params: Mapping[str, Any], counts: _Counts) -> bool:
     manifest = params.get("manifest")
     if not isinstance(manifest, str):
         return True
     try:
-        docs = [doc for doc in yaml.safe_load_all(manifest) if doc is not None]
-    except (yaml.YAMLError, RecursionError):
+        docs = [doc for doc in yaml.load_all(manifest, Loader=_UniqueKeyLoader) if doc is not None]
+    except (yaml.YAMLError, RecursionError, UnreadableTextError):
         return True
     if not docs:
         return True
@@ -239,10 +261,14 @@ def _may_be_json(text: Any) -> bool:
 
 
 def _json_objects(text: str) -> list[Any] | None:
-    """The JSON object or list of a text, as a list of none or one; ``None`` when too deep."""
+    """The JSON object or list of a text, as a list of none or one.
+
+    ``None`` when the text is too deep to read or names one key twice in a
+    map: the parsed map keeps only the last value, the text holds them all.
+    """
     try:
-        parsed = json.loads(text)
-    except RecursionError:
+        parsed = load_json_text(text)
+    except UnreadableTextError:
         return None
     except ValueError:
         return []
@@ -281,14 +307,17 @@ class _SecretValueCheck:
     also when YAML aliases name it many times. So is each shared input of a
     rule: a ``command`` list (its end state is carried into
     each ``args`` list it is paired with), a pair of ``command`` and
-    ``args``, the keys of a ``data``-like map, and each text (parsed as
-    JSON once, read as a file once). The ``items`` of
+    ``args``, the keys of a ``data``-like map, the texts of a ``data``-like
+    map, and each text (parsed as JSON once, read as a file once). Each read
+    counts toward :data:`_MAX_NODES`. A map that names one key twice, in the
+    manifest or in a JSON text, counts as one MEHO cannot read. The ``items`` of
     a list object are read as objects of their own.
     """
 
     def __init__(self) -> None:
         self._seen: set[int] = set()
         self._keys_read: set[int] = set()
+        self._file_maps_read: set[int] = set()
         self._file_texts_read: set[int] = set()
         self._commands_read: dict[int, tuple[bool, CommandLineState]] = {}
         self._command_lines_read: set[tuple[int, int]] = set()
@@ -320,6 +349,9 @@ class _SecretValueCheck:
 
         A JSON text is read by the walk, as every JSON text of the manifest.
         """
+        if not self._first_read(values, self._file_maps_read):
+            return False
+        self._nodes += len(values)
         for text in values.values():
             if not isinstance(text, str) or not self._first_read(text, self._file_texts_read):
                 continue
@@ -405,7 +437,7 @@ def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
     secret-looking value (:class:`_SecretValueCheck`). Any document of a
     multi-document manifest counts, and any item of a list object. A
     manifest MEHO cannot read counts too: it is not text, it is not YAML or
-    JSON, a document has no kind, or it has more than
+    JSON, a map names one key twice, a document has no kind, or it has more than
     :data:`MAX_CHECKED_OBJECTS` objects.
     """
     holds_secret_value = _SecretValueCheck()

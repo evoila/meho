@@ -100,8 +100,18 @@ no list of parent keys:
   line (`MODE=fast DB_PASS=x`). A quoted value keeps all that is inside its
   quotes. An unquoted value runs to the end of the line; after `=` any text
   counts (`password=[x]`), after `:` a `{` or `[` starts a map or list
-  whose own fields are read. The indented lines of a YAML block text
-  (`password: |`) are its value;
+  whose own fields are read. In a shell script (a text that starts with
+  `#!`) the value after `=` is one shell word, so the command after it
+  stays. A value may go on below its line, and those lines are its value
+  too: the more indented lines after `password:` (a YAML block text, a
+  plain text that goes on, or a value that starts on the next line; a
+  map below an empty `password:` has its fields read on their own), YAML
+  list items right below an empty `password:`, the next line after a value
+  that ends with `\`, and the lines up to a quote that closes;
+- a map that names one key twice, in the manifest or in a JSON text,
+  makes the manifest one MEHO cannot read: the parsed map keeps only the
+  last value, but the text holds them all. A YAML `<<` merge key may
+  override keys;
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
   token with a known vendor prefix).
@@ -115,11 +125,11 @@ The check reads each value of the manifest once, also when YAML aliases
 name it many times. So it reads each shared input of a rule once: a
 `command` list (its end state is carried into each `args` list it is
 paired with, so a long shared command is read once), a pair of `command`
-and `args`, the keys of a `data`, `stringData` or `binaryData` map, and
-each text (parsed as JSON once, read as a file once; a map shared by
-`binaryData` and `data` still has its texts read), and the same object
-limit (`MAX_CHECKED_OBJECTS`)
-holds. The regular expressions of `hide_in_text` stay fast on a long line.
+and `args`, the keys of a `data`, `stringData` or `binaryData` map, the
+texts of such a map, and each text (parsed as JSON once, read as a file
+once; a map shared by `binaryData` and `data` still has its texts read).
+Each read counts toward the node limit of the check, and the same object
+limit (`MAX_CHECKED_OBJECTS`) holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of
 the parent's params either. A row stored before this rule keeps its
@@ -788,13 +798,21 @@ Secret `data` / `stringData` values (key names stay), every `env` value
 hook (header names stay), the text of every `command` / `args` list (only
 its size in bytes stays, as `{"hidden": true, "bytes": N}`), the
 last-applied annotation and a number under a secret name
-(`password: 12345678`). In any other `data` or `stringData` map, a file
-text keeps all but its secret values (`hide_file_text`). Any other text
-that is a JSON object or list, wherever it is, keeps all but its secret
-values: a text with nothing to hide stays as it is, and one with a secret
-keeps its keys, their order and its spacing. Inside such a text a command
-line stays (only its secret values are hidden), and an `env` or header
-value is hidden only under a secret-shaped name. All of this is done at any depth: a Secret nested
+(`password: 12345678`), and the `value` of a `name`/`value` pair anywhere
+whose name is secret-shaped (`DB_PASS`). In any other `data` or
+`stringData` map, the value of a key with a secret name is hidden whatever
+its type, and a file text keeps all but its secret values
+(`hide_file_text`). Any other text that is a JSON object or list,
+wherever it is (also an argument of a command line in `run_commands`),
+keeps all but its secret values: a text or a number under a secret name.
+A text with nothing to hide stays as it is. In one with a secret, each
+secret value is replaced where it stands (`replace_changed_values` in
+`redaction/json_text.py`): the keys, their order, the spacing and the line
+breaks stay. A map or list under a secret name, such as a reference to a
+stored secret, is read with the same rules and stays when it holds no
+value. A JSON text that names one key twice is hidden whole. Inside such a
+text a command line stays (only its secret values are hidden), and an
+`env` or header value is hidden only under a secret-shaped name. All of this is done at any depth: a Secret nested
 in a custom resource and a pod template's copy of the annotation are hidden
 too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
 walk: the entry's other fields are checked as well. Then the shared

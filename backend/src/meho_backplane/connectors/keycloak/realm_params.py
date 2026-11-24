@@ -50,6 +50,7 @@ __all__ = [
     "REALM_PARAM_OPS",
     "check_realm_params",
     "is_plain_realm_name",
+    "new_realm_problem",
     "realm_fence_park_check",
     "realm_fence_problem",
     "realm_param",
@@ -160,6 +161,28 @@ def is_plain_realm_name(name: str) -> bool:
     return all(" " <= ch <= "~" for ch in name)
 
 
+def new_realm_problem(target: KeycloakTargetLike | None) -> str | None:
+    """The text that refuses to create the target's managed realm, or ``None``.
+
+    ``keycloak.realm.create`` makes the managed realm, also when the call
+    names none, so that name must be plain ASCII (:func:`is_plain_realm_name`).
+    A target with no managed realm is left to the target check.
+    """
+    if target is None:
+        return None
+    try:
+        managed = resolve_realm_config(target).managed_realm
+    except ValueError:
+        return None
+    if is_plain_realm_name(managed):
+        return None
+    return f"{_CREATE}: this target works on the realm {managed!r} only; {_NOT_PLAIN}."
+
+
+async def _new_realm_park_check(ctx: PreviewContext) -> str | None:
+    return new_realm_problem(ctx.target)
+
+
 def check_realm_params(op_id: str) -> ParamsCheck:
     """The params check of *op_id*: the first realm param that is not a plain name."""
 
@@ -186,5 +209,6 @@ for _op_id in REALM_PARAM_OPS:
     register_params_check(_op_id, check_realm_params(_op_id))
 
 
-for _op_id in ("keycloak.realm.create", "keycloak.realm.delete", "keycloak.user.check_login"):
+for _op_id in ("keycloak.realm.delete", "keycloak.user.check_login"):
     register_park_check(_op_id, realm_fence_park_check(_op_id))
+register_park_check(_CREATE, realm_fence_park_check(_CREATE, _new_realm_park_check))

@@ -68,9 +68,8 @@ __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 _WHEN_TO_USE_REALM_WRITE = (
     "Use to create a new Keycloak realm (``keycloak.realm.create``) or "
     "update the managed realm's top-level config "
-    "(``keycloak.realm.update``). A target works on its managed realm only, "
-    "so create a new realm through a target that names that realm as its "
-    "managed realm. Both require human approval. Pass the "
+    "(``keycloak.realm.update``). A target works on its managed realm only. "
+    "Both require human approval. Pass the "
     "RealmRepresentation under ``representation``. Re-running a create is "
     "idempotent (a 409 already-exists is treated as success). "
     "``keycloak.realm.delete`` removes a whole realm for good (destructive: a "
@@ -243,9 +242,9 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         description=(
             "POSTs ``/admin/realms`` with the RealmRepresentation under "
             "``representation``. The realm name is ``representation.realm`` "
-            "(or the ``realm`` param) and must be the target's managed realm. "
-            "A 409 already-exists is an idempotent success. "
-            "requires_approval=True; uses the admin login."
+            "(or the ``realm`` param) and must be the managed realm. "
+            "A 409 already-exists is treated as an idempotent success. "
+            "requires_approval=True; dispatches via the admin-auth path."
         ),
         parameter_schema={
             "type": "object",
@@ -254,8 +253,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "realm": {
                     "type": "string",
                     "description": (
-                        "Realm name (if not in representation). Must be the "
-                        "target's managed realm; another realm is refused."
+                        "Realm name (if not in representation). Another realm "
+                        "than the target's managed realm is refused."
                     ),
                 },
             },
@@ -299,8 +298,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "realm": {
                     "type": "string",
                     "description": (
-                        "Realm to update. Must be the target's managed realm "
-                        "(the default); another realm is refused."
+                        "Realm to update (default managed_realm). Another realm is refused."
                     ),
                 },
                 **SMTP_PASSWORD_SECRET_PROPS,

@@ -141,7 +141,11 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     with_smtp_password,
 )
 from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
-from meho_backplane.connectors.keycloak.realm_params import realm_param
+from meho_backplane.connectors.keycloak.realm_params import (
+    REALM_PARAM_OPS,
+    new_realm_problem,
+    realm_param,
+)
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -309,18 +313,21 @@ async def keycloak_realm_create(
     """Create a realm (``POST /admin/realms``).
 
     Op-id: ``keycloak.realm.create``. ``representation`` is the
-    RealmRepresentation body; its ``realm`` field is the realm name. A
+    RealmRepresentation body. The new realm is the target's managed realm:
+    the body sent to Keycloak always names it. ``realm`` and
+    ``representation.realm`` are each checked on their own, and one that
+    names another realm is refused before anything is sent. A
     409 (realm already exists) is treated as an idempotent success.
     Returns a value-free confirmation: the realm name + created/conflict
     flags.
     """
-    representation = dict(params["representation"])
-    realm_name = (
-        realm_param(params, "representation.realm", "keycloak.realm.create", target)
-        or realm_param(params, "realm", "keycloak.realm.create", target)
-        or ""
-    )
-    representation.setdefault("realm", realm_name)
+    for path in REALM_PARAM_OPS["keycloak.realm.create"]:
+        realm_param(params, path, "keycloak.realm.create", target)
+    problem = new_realm_problem(target)
+    if problem is not None:
+        raise ValueError(problem)
+    realm_name = resolve_realm_config(target).managed_realm
+    representation = {**params["representation"], "realm": realm_name}
     result = await self._write_admin(
         target, "POST", _ADMIN_REALMS_PATH, operator=operator, json=representation
     )

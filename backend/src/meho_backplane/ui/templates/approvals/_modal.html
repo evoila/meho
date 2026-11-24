@@ -389,10 +389,19 @@
         the resolved subject + target -- identity substance only, never a raw
         param value. Leads the detail so a human reads what the request DOES
         before scanning the ids below. Absent when nothing resolved beyond the
-        raw op id (``reviewer_context.summary`` is then ``None``). -#}
-    {% if reviewer_context.summary %}
+        raw op id (``reviewer_context.summary`` is then ``None``). The realm a
+        Keycloak target works on is part of it (#6418), also with no sentence. -#}
+    {% set target_realm = (request.proposed_effect or {}).get("target_realm") %}
+    {% if reviewer_context.summary or target_realm %}
       <div class="mt-4 rounded-box border border-base-300 bg-base-200/40 p-3" aria-label="What this request does">
-        <p class="text-sm [overflow-wrap:anywhere]">{{ reviewer_context.summary }}</p>
+        {% if reviewer_context.summary %}
+          <p class="text-sm [overflow-wrap:anywhere]">{{ reviewer_context.summary }}</p>
+        {% endif %}
+        {% if target_realm %}
+          <p class="text-sm [overflow-wrap:anywhere]" data-testid="approval-target-realm">
+            Realm: <span class="font-mono font-semibold">{{ target_realm }}</span>
+          </p>
+        {% endif %}
       </div>
     {% endif %}
 
@@ -583,12 +592,6 @@
           {% endif %}
         </div>
       </div>
-
-      {% if effect.get("target_realm") %}
-        <p class="mt-2 text-sm" data-testid="approval-target-realm">
-          Realm: <span class="font-mono font-semibold">{{ effect.get("target_realm") }}</span>
-        </p>
-      {% endif %}
 
       {#- #6041: the classification the request waits under (only when the
           POLICY_CLASSIFICATION switch was on at request time). A null

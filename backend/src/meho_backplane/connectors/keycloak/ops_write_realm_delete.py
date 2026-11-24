@@ -4,7 +4,7 @@
 """Governed delete of a whole Keycloak realm (#3886).
 
 ``keycloak.realm.delete`` sends ``DELETE /admin/realms/{realm}``. It is on
-the ``destructive`` risk level, so a second person must approve every call.
+the ``destructive`` risk level: approval cannot be turned off for it.
 Deleting a realm removes every user, client, group and session in it at
 once, so this op follows the other governed deletes
 (:mod:`~meho_backplane.connectors.keycloak.ops_write_delete`):
@@ -30,6 +30,10 @@ once, so this op follows the other governed deletes
    changing the case of a letter.
 2. **Read the realm.** A realm that does not exist is a success with
    ``already_absent: true``, and no DELETE is sent. A teardown can re-run.
+   The name in Keycloak's answer must be exactly the managed realm
+   (:func:`read_managed_realm`). An answer with another name, or with no
+   name, is refused with the ``realm_name_mismatch`` code, and no DELETE is
+   sent.
 3. **Delete, then read again.** ``deleted: true`` is reported only after
    ``GET /admin/realms/{realm}`` answers 404. A read that answers with
    something other than a realm object (a list, a string, ``null``) is an
@@ -37,10 +41,11 @@ once, so this op follows the other governed deletes
 
 The preview builder in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_preview` runs steps 1 and
-2 before the request waits for approval, so a protected realm never reaches
-an approver. The approval card shows whether the realm is enabled and how
-many users, clients and groups go with it. The handler runs the guards again
-when the approved call executes.
+2 before the request waits for approval, so a protected realm, or a realm
+whose answered name is not the managed realm, never reaches an approver. The
+approval card shows whether the realm is enabled and how many users, clients
+and groups go with it. The handler runs both steps again when the approved
+call executes.
 
 References
 ----------
@@ -89,6 +94,7 @@ __all__ = [
     "REALM_DELETE_OP",
     "check_realm_guards",
     "keycloak_realm_delete",
+    "read_managed_realm",
     "realm_blast_radius",
     "realm_name_param",
 ]
@@ -124,6 +130,33 @@ def check_realm_guards(target: KeycloakTargetLike, realm: str) -> None:
 
 def _realm_path(realm: str) -> str:
     return fill_path(_ADMIN_REALM_PATH, {"realm": realm})
+
+
+async def read_managed_realm(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm: str,
+) -> dict[str, Any] | None:
+    """Read *realm*; ``None`` when Keycloak answers 404.
+
+    The answer's ``realm`` must be exactly the target's managed realm, with
+    the same letters, case and accents. Any other name, or no name, raises
+    :exc:`KeycloakDeleteRefusedError` (``realm_name_mismatch``). The message
+    names the managed realm only.
+    """
+    rep = await get_or_none(connector, target, _realm_path(realm), operator)
+    if rep is None:
+        return None
+    managed = resolve_realm_config(target).managed_realm
+    if rep.get("realm") != managed:
+        raise KeycloakDeleteRefusedError(
+            REALM_DELETE_OP,
+            "realm_name_mismatch",
+            f"Keycloak did not answer with the realm {managed!r}. Nothing was deleted. "
+            "Check the managed realm of the target.",
+        )
+    return rep
 
 
 async def _count(
@@ -173,7 +206,7 @@ async def realm_blast_radius(
     Only names and counts; the realm representation (which can carry the
     SMTP password) is never echoed.
     """
-    rep = await get_or_none(connector, target, _realm_path(realm), operator)
+    rep = await read_managed_realm(connector, operator, target, realm)
     obj: dict[str, Any] = {
         "kind": "keycloak_realm",
         "resource": "realm",
@@ -205,9 +238,8 @@ async def keycloak_realm_delete(
     realm = realm_name_param(params, target)
     check_realm_guards(target, realm)
     result: dict[str, Any] = {"realm": realm}
-    path = _realm_path(realm)
-    if await get_or_none(self, target, path, operator) is None:
+    if await read_managed_realm(self, operator, target, realm) is None:
         return {**result, "deleted": False, "already_absent": True}
     return await _delete_and_verify(
-        self, operator, target, op_id=REALM_DELETE_OP, path=path, result=result
+        self, operator, target, op_id=REALM_DELETE_OP, path=_realm_path(realm), result=result
     )

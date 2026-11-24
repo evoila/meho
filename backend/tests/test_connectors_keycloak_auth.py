@@ -459,7 +459,34 @@ async def test_fingerprint_unreachable_on_transport_error() -> None:
 
     assert fp.reachable is False
     assert "error" in fp.extras
+    assert fp.extras["admin_realm"] == "master"
+    assert fp.extras["managed_realm"] == _TARGET.extras["managed_realm"]
     assert fp.version is None
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_of_a_realm_that_does_not_exist_names_both_realms() -> None:
+    """A managed realm that has yet to be created: the error, and the realms the target uses."""
+    target = _StubTarget(
+        name="keycloak-c",
+        host="keycloak-c.test.invalid",
+        extras={"admin_realm": "ops", "managed_realm": "not-yet-made"},
+    )
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-c.test.invalid") as mock:
+        mock.post("/realms/ops/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
+        )
+        mock.get("/admin/realms/not-yet-made").respond(404, json={"error": "Realm not found."})
+        fp = await connector.fingerprint(target, operator=_make_operator())
+
+    assert fp.reachable is False
+    assert "404" in fp.extras["error"]
+    assert fp.extras["admin_realm"] == "ops"
+    assert fp.extras["managed_realm"] == "not-yet-made"
 
     await connector.aclose()
 

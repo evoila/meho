@@ -382,6 +382,24 @@ def _refused_by_realm_check(call: dict[str, Any], words: str) -> None:
     assert words in call["error"], call["error"]
 
 
+async def _run_refused_by_realm_check(
+    connector: KeycloakConnector,
+    result: dict[str, Any],
+    params: dict[str, Any],
+    target: str,
+    words: str,
+) -> None:
+    """The run is refused by the realm check: its exception class and its words.
+
+    MEHO withholds the text of a keycloak.realm.update error from the result,
+    so the words are read from the handler.
+    """
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "ValueError", result
+    with pytest.raises(ValueError, match=re.escape(words)):
+        await connector.realm_update(_person(), await _target(target), params)
+
+
 def _refused_on_run(result: dict[str, Any], code: str) -> None:
     assert result["status"] != "ok", result
     assert result["extras"]["exception_class"] == "MehoAccessRefusedError", result
@@ -791,7 +809,9 @@ async def test_the_login_realm_named_by_the_realm_param_is_refused(
         result = await _run(_REALM_UPDATE, params, target=_OTHER_REALM_TARGET)
         written = _writes(mock)
     _refused_by_realm_check(call, _OTHER_REALM_FENCE_WORDS)
-    assert result["status"] != "ok", result
+    await _run_refused_by_realm_check(
+        kc, result, params, _OTHER_REALM_TARGET, _OTHER_REALM_FENCE_WORDS
+    )
     assert written == []
 
 
@@ -832,7 +852,9 @@ async def test_a_rename_of_the_target_login_realm_is_refused(
         result = await _run(_REALM_UPDATE, params)
         written = _writes(mock)
     _refused_by_realm_check(call, _LOGIN_REALM_FENCE_WORDS)
-    assert result["status"] != "ok", result
+    await _run_refused_by_realm_check(
+        kc, result, params, _LOGIN_REALM_TARGET, _LOGIN_REALM_FENCE_WORDS
+    )
     assert written == []
 
 

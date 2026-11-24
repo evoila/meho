@@ -75,6 +75,7 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -90,6 +91,7 @@ from meho_backplane.broadcast.events import (
     resolve_op_class,
 )
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
+from meho_backplane.settings import parse_bool_env
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -102,6 +104,7 @@ __all__ = [
     "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
+    "SWITCHED_EFFECT_KEYS",
     "PreviewContext",
     "approved_preview",
     "approved_preview_var",
@@ -557,6 +560,11 @@ def register_agent_preview_filter(
 #: (:func:`register_preview_failure_keys`).
 PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
 
+#: Top-level keys of a stored ``proposed_effect`` that a caller reads only
+#: while a switch is on, each with its env name. A person always reads them:
+#: the realm a Keycloak target works on.
+SWITCHED_EFFECT_KEYS: Final[dict[str, str]] = {"target_realm": "KEYCLOAK_ANSWER_REALM"}
+
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
 #: checks and never returns to a caller: where a change of rights was asked
 #: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`).
@@ -570,12 +578,18 @@ def without_internal_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in effect.items() if key not in INTERNAL_EFFECT_KEYS}
 
 
+def _switch_on(env: str) -> bool:
+    return parse_bool_env(os.environ.get(env))
+
+
 def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
     """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS` and :data:`INTERNAL_EFFECT_KEYS`.
 
-    *effect* itself when it has none of them.
+    Also without each key of :data:`SWITCHED_EFFECT_KEYS` whose switch is
+    off. *effect* itself when it has none of them.
     """
-    hidden = PERSON_ONLY_EFFECT_KEYS | INTERNAL_EFFECT_KEYS
+    off = {key for key, env in SWITCHED_EFFECT_KEYS.items() if not _switch_on(env)}
+    hidden = PERSON_ONLY_EFFECT_KEYS | INTERNAL_EFFECT_KEYS | off
     if hidden.isdisjoint(effect):
         return effect
     return {key: value for key, value in effect.items() if key not in hidden}
@@ -604,7 +618,8 @@ def proposed_effect_for_agent(
       are gone.
 
     The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
-    the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. Every
+    the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
+    of :data:`SWITCHED_EFFECT_KEYS` is in it only while its switch is on. Every
     other ``proposed_effect`` comes back unchanged.
     """
     if not isinstance(effect, dict):

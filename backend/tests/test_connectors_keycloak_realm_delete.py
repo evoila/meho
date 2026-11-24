@@ -17,6 +17,8 @@ What is proven:
 * the guards (``protected_realm``): master, the target's admin realm, and
   the realm MEHO's own login uses (on every Keycloak target, whatever its
   host); a change of letter case does not skip them;
+* the name in Keycloak's answer must be exactly the managed realm, in the
+  preview and in the run (``realm_name_mismatch``);
 * a realm that is already gone → ``already_absent: true`` and no DELETE;
   ``deleted: true`` only after a read answers 404; a read that answers with
   something other than a realm object is an error, before and after the
@@ -353,6 +355,55 @@ async def test_malformed_read_after_delete_is_not_deleted_true(
     assert result["extras"]["exception_class"] == "KeycloakUnexpectedResponseError"
     assert del_route.call_count == 1
     assert get_route.call_count == 2
+
+
+#: A read answer whose ``realm`` is not exactly the managed realm, or is missing.
+_OTHER_NAMES = [
+    pytest.param({**_realm_rep(), "realm": "another-realm"}, id="another-name"),
+    pytest.param({**_realm_rep(), "realm": _REALM.upper()}, id="another-case"),
+    pytest.param({**_realm_rep(), "realm": "thröwaway-run-7"}, id="another-accent"),
+    pytest.param({**_realm_rep(), "realm": f"{_REALM} "}, id="a-space-at-the-end"),
+    pytest.param({**_realm_rep(), "realm": None}, id="null-name"),
+    pytest.param({"enabled": True}, id="no-name"),
+    pytest.param({}, id="empty"),
+]
+
+
+@pytest.mark.parametrize("rep", _OTHER_NAMES)
+async def test_an_answer_that_is_not_the_managed_realm_prevents_the_delete(
+    kc: KeycloakConnector, rep: dict[str, Any]
+) -> None:
+    """The name in Keycloak's answer must be exactly the managed realm; no DELETE is sent."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=rep)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        result = await _run({"realm": _REALM})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError"
+    assert "(realm_name_mismatch)" in result["extras"]["exception_message"]
+    assert not del_route.called
+
+
+@pytest.mark.parametrize("rep", _OTHER_NAMES)
+async def test_an_answer_that_is_not_the_managed_realm_gets_no_approval_request(
+    kc: KeycloakConnector, rep: dict[str, Any]
+) -> None:
+    requester = _operator()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=rep)
+        _mount_counts(mock)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        preview = await preview_operation(requester, _args(_REALM))
+        call = await call_operation(
+            requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
+        )
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "blast_radius_required"
+    assert "(realm_name_mismatch)" in call["extras"]["reason"]
+    assert not del_route.called
+    assert await _approval_rows() == 0
 
 
 async def test_realm_name_is_encoded_in_the_path(kc: KeycloakConnector) -> None:

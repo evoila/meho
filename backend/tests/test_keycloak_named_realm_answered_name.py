@@ -37,6 +37,7 @@ from meho_backplane.connectors.keycloak.realm_params import (
     is_plain_realm_name,
 )
 from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.operations._preview import blast_radius_missing_reason
 from meho_backplane.operations.grant_approval import GRANT_REASON_STRICTER
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
@@ -95,6 +96,12 @@ async def test_a_realm_keycloak_answers_as_a_protected_realm_needs_a_platform_ad
 ) -> None:
     fake.realm_answers[_TYPED] = answered
     effect, params = await _effect(fake, write, _TYPED)
+    if write.op_id == _REALM_DELETE:
+        # A delete whose answered name is not the managed realm gets no card, so it never waits.
+        assert effect["preview_unavailable"] is True
+        assert "(realm_name_mismatch)" in effect["preview_error"]
+        assert blast_radius_missing_reason(effect) is not None
+        return
     assert effect["preview"]["grant"]["login_realm"] is True
     request_id = await _park(params, effect, op_id=write.op_id)
 

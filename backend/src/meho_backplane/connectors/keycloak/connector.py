@@ -536,7 +536,8 @@ class KeycloakConnector(HttpConnector):
         ``extras["error"]`` rather than an unhandled exception.
 
         Transport / auth failure → ``reachable=False`` with
-        ``extras["error"]`` carrying ``"<ExcType>: <message>"``.
+        ``extras["error"]`` carrying ``"<ExcType>: <message>"``, with the
+        configured ``admin_realm`` and ``managed_realm`` next to it.
         """
         from meho_backplane.connectors._shared.system_operator import (
             synthesise_system_operator,
@@ -577,7 +578,7 @@ class KeycloakConnector(HttpConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=probe_method,
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+                extras={"error": f"{type(exc).__name__}: {exc}", **_realm_names(realms)},
             )
 
         server_version = await self._server_version(target, effective_operator)
@@ -1615,6 +1616,11 @@ class KeycloakConnector(HttpConnector):
         await super().aclose()
 
 
+def _realm_names(realms: RealmConfig) -> dict[str, str]:
+    """The configured realms of a target, side by side."""
+    return {"admin_realm": realms.admin_realm, "managed_realm": realms.managed_realm}
+
+
 def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
     """Project the realm representation into the fingerprint ``extras`` bag.
 
@@ -1631,6 +1637,5 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
         "enabled": repr_dict.get("enabled"),
         "ssl_required": repr_dict.get("sslRequired"),
         "login_theme": repr_dict.get("loginTheme"),
-        "admin_realm": realms.admin_realm,
-        "managed_realm": realms.managed_realm,
+        **_realm_names(realms),
     }

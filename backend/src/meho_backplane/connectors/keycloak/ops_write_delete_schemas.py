@@ -275,7 +275,8 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
             ),
             "parameter_hints": {
                 "realm": (
-                    "The exact name of the realm to delete: the target's managed realm. Required."
+                    "The exact name of the realm to delete. Required. Another realm "
+                    "than the target's managed realm is refused."
                 ),
             },
             "output_shape": "``{realm, deleted, already_absent}``.",

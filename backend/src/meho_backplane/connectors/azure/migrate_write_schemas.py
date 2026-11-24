@@ -110,8 +110,9 @@ IMPORT_START_PARAMS: Final[dict[str, Any]] = _schema(
         "maxLength": MAX_CSV_BYTES,
         "description": (
             "The text of the CSV file in Azure's import template: a header row, then one "
-            f"row per server (at most {MAX_CSV_ROWS:,}). Required columns: server name, "
-            "cores, memory in MB, OS name. MEHO uploads the file as it is."
+            f"row per server (at most {MAX_CSV_ROWS:,}, and at most {MAX_CSV_BYTES:,} bytes; "
+            "split a larger file over several calls). Required columns: Server name, Cores, "
+            "Memory (In MB), OS name. MEHO uploads the file as it is."
         ),
     },
     site=_SITE,
@@ -303,8 +304,21 @@ _STEP: Final[dict[str, Any]] = {
         step=("string", "group_put, when the step made the group."),
         operation_type=("string", "Add or Remove, when the step changed machines."),
         machines=("integer", "How many machines the step named."),
-        done=("boolean", "False when Azure was still working after MEHO's wait."),
+        sent=(
+            "boolean",
+            "False when MEHO did not send the step, because Azure had not confirmed the "
+            "step before it.",
+        ),
+        done=(
+            "boolean",
+            "True when Azure confirmed the step. False when Azure was still working after "
+            "MEHO's wait, or its status could not be read.",
+        ),
         operation=_OPERATION,
+        poll_error=(
+            TEXT_OR_NULL,
+            "Set when Azure accepted the step but its status could not be read.",
+        ),
     ),
 }
 
@@ -318,8 +332,15 @@ GROUP_RESPONSE: Final[dict[str, Any]] = {
             "description": "The group as Azure reads it after the writes, or null.",
         },
         "poll_error": {"type": TEXT_OR_NULL, "description": _POLL_ERROR[1]},
+        "not_sent": {
+            "type": TEXT_OR_NULL,
+            "description": (
+                "Set when MEHO stopped before a step, because Azure had not confirmed the "
+                "step before it. It says what to do."
+            ),
+        },
     },
-    "required": ["steps", "group", "poll_error"],
+    "required": ["steps", "group", "poll_error", "not_sent"],
 }
 
 ASSESSMENT_CREATE_RESPONSE: Final[dict[str, Any]] = {
@@ -331,7 +352,16 @@ ASSESSMENT_CREATE_RESPONSE: Final[dict[str, Any]] = {
                 "created (MEHO made it) or existing (an assessment of this name and these "
                 "settings was already there; MEHO followed it).",
             ),
-            done=("boolean", "True when Azure has computed the assessment."),
+            done=(
+                "boolean",
+                "True when Azure has computed the assessment (status Completed, OutOfSync "
+                "or OutDated).",
+            ),
+            failed=(
+                "boolean",
+                "True when Azure will not compute the assessment (status Invalid or "
+                "Deleted). done is false then.",
+            ),
             status=(TEXT_OR_NULL, "Azure's status: Created, Running, Completed, OutOfSync..."),
             machine_count=(["number", "null"], "Machines in the assessment."),
             readiness_summary=(
@@ -347,5 +377,5 @@ ASSESSMENT_CREATE_RESPONSE: Final[dict[str, Any]] = {
             "description": "The assessment as Azure reads it, with its settings and monthly costs.",
         },
     },
-    "required": ["state", "done", "status", "readiness_summary", "assessment"],
+    "required": ["state", "done", "failed", "status", "readiness_summary", "assessment"],
 }

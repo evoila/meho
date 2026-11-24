@@ -1921,10 +1921,14 @@ meho targets import subscriptions.yaml
 The `migrate` group reads what Azure Migrate knows about the servers a team
 plans to move to Azure, and can add servers and plan their move. It has 11
 operations. Seven are reads (`safe`, no approval). Four change something in
-Azure and wait for a person's approval (`caution`):
-`azure.migrate.import.start`, `azure.migrate.group.create`,
-`azure.migrate.group.update` and `azure.migrate.assessment.create`. They are
-described in "Writes: CSV import, groups and assessments" below.
+Azure (`caution`): `azure.migrate.import.start`, `azure.migrate.group.create`,
+`azure.migrate.group.update` and `azure.migrate.assessment.create`. For each of
+them: The call waits for a person's approval. A service login runs it at once when a
+standing grant or an approved run covers it. A platform admin can turn approval
+off for this operation for the whole install, with a reason and a fresh
+sign-in. A person in the web console then runs it at once. Calls by token, by a
+service login without a grant and by an agent still wait. They are described in "Writes: CSV import, groups and
+assessments" below.
 
 Azure Migrate keeps its data with two providers, each with its own pinned
 API version:
@@ -2063,19 +2067,23 @@ subscription; when they are not, the call fails with
 ### Writes: CSV import, groups and assessments (Task #5094)
 
 Five operations of the group start or follow work. Four start work on the
-customer's side. They are `caution` and wait for a person's approval. The
-fifth, `azure.migrate.job.list`, is a `safe` read. The login needs the
+customer's side and are `caution`. For each of them: The call waits for a person's approval. A service login runs it at once when a
+standing grant or an approved run covers it. A platform admin can turn approval
+off for this operation for the whole install, with a reason and a fresh
+sign-in. A person in the web console then runs it at once. Calls by token, by a
+service login without a grant and by an agent still wait. The fifth,
+`azure.migrate.job.list`, is a `safe` read. The login needs the
 "Azure Migrate Decide and Plan Expert" role on the project's resource
 group. Whether that role also covers the import site is not proven yet; the
 lab proof must say what was missing, if anything.
 
 | Operation | Parameters | What it sends |
 |---|---|---|
-| `azure.migrate.import.start` | `resource_group`, `project`, `csv`, optional `site`, `repeat_key` | reads the project; makes the import site if missing (`PUT .../importSites/{site}`); `PUT .../importcollectors/{site}-collector`; `POST .../importSites/{site}/importUri`; `PATCH` of the site tags; uploads the file; `GET .../importJobs/{job}` until the job ends |
+| `azure.migrate.import.start` | `resource_group`, `project`, `csv`, optional `site`, `repeat_key` | reads the project; makes the import site if missing (`PUT .../importSites/{site}`); `PUT .../importcollectors/{site}-collector`; `POST .../importSites/{site}/importUri`; `PATCH .../providers/Microsoft.Resources/tags/default` (`Merge`) of MEHO's own site tag; uploads the file; `GET .../importJobs/{job}` until the job ends |
 | `azure.migrate.job.list` | `resource_group`, `project`, optional `site` | `GET .../importSites/{site}/importJobs` |
 | `azure.migrate.group.create` | `resource_group`, `project`, `group`, optional `machines`, `group_type` | `PUT .../groups/{group}`, then `POST .../groups/{group}/updateMachines` (Add) |
 | `azure.migrate.group.update` | `resource_group`, `project`, `group`, optional `add`, `remove` | `POST .../updateMachines`, Add first, then Remove |
-| `azure.migrate.assessment.create` | the group names, `assessment`, `region`, `sizing`, optional `currency` (EUR), `pricing`, `hybrid_benefit`, `comfort_factor` | reads the assessment; `PUT .../assessments/{assessment}` when it does not exist; reads it until Azure has computed it |
+| `azure.migrate.assessment.create` | the group names, `assessment`, `region`, `sizing`, optional `currency` (EUR), `pricing`, `hybrid_benefit`, `comfort_factor` | reads the assessment; `PUT .../assessments/{assessment}` when it does not exist; reads it until Azure has computed it or says it cannot |
 
 Files: `migrate_write_ops.py` (operation table, guidance, `MigrateWriteOps`),
 `migrate_write_schemas.py`, `migrate_writes.py` (groups, assessments, the
@@ -2092,30 +2100,51 @@ the mixin to its own.
 - An assessment that exists with the same settings is not sent again: MEHO
   follows it. One that exists with other settings is refused, never changed.
   Every setting MEHO sends is compared with Azure's own field, also the fixed
-  ones (offer, pricing tier, percentile, time range).
+  ones (offer, pricing tier, percentile, time range). One PostgreSQL lock per
+  assessment (`advisory_lock`, shared by every worker) covers the read and the
+  `PUT`, so two MEHO calls never both find it missing and both send a `PUT`
+  with different settings.
+- `done` of an assessment is true only when Azure computed it (`Completed`,
+  `OutOfSync` or `OutDated`). `failed` is true when Azure will not compute it
+  (`Invalid` or `Deleted`); MEHO stops reading then.
 - The import keeps its record in Azure, in the tags of the import site: one
   tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
   name. MEHO writes it after it got the upload link and before it uploads.
   A retry finds the tag, reads that job and uploads nothing. If the tag
   cannot be written, nothing is uploaded. An existing site is never written
-  again (a `PUT` would replace its tags).
+  again (a `PUT` would replace its tags). MEHO adds and removes only its own
+  tag, with the Tags API (`Merge` and `Delete`), so a tag that someone else
+  changes at the same time, in MEHO or in Azure, stays as it is.
 - One PostgreSQL lock per import site (`advisory_lock`, shared by every
   worker) covers the steps from reading the tags to the end of the upload.
-  Two imports to the same site then never erase each other's tag, and the
-  same file is never uploaded twice at once. When the lock stays busy for
-  two minutes, MEHO sends nothing and answers with a conflict.
+  The same file is then never uploaded twice at once. When the lock stays
+  busy for two minutes, MEHO sends nothing and answers with a conflict.
+- A tag whose job Azure no longer has (a 404 when MEHO reads it) is kept.
+  A missing job does not prove the file never arrived, so MEHO uploads
+  nothing and the error asks for a new `repeat_key`.
 - A tag whose job still waits for its file (`WaitingForBlobUpload`) is
   followed, not sent again: the first upload may still be under way, or its
-  answer was lost (`outcome: earlier_upload_waiting`). Only a clear refusal
-  from Azure Storage means the file did not arrive; then MEHO removes the
-  tag, so the same call again uploads the file.
+  answer was lost (`outcome: earlier_upload_waiting`). Only a refusal from
+  Azure Storage (any answer from 300 to 499, also 401, 404 and 429) means
+  the file did not arrive; then MEHO removes the tag, so the same call again
+  uploads the file. The error has a fixed text, "Azure Storage refused the
+  upload (HTTP <status>)", with no part of the upload link.
 - `repeat_key` imports the same file again on purpose. The tag name gets
   `-<first 8 characters of the key's SHA-256>`, so each key has its own
   record, and a retry with the same key after a lost answer uploads nothing.
   A job that stays in `WaitingForBlobUpload` also needs a new key.
 - A lost answer or a 5xx on the upload is not an error: the call follows the
-  job (`outcome: upload_unconfirmed`). The upload is never sent twice by the
-  same call.
+  job (`outcome: upload_unconfirmed`). The upload is sent in one request,
+  whatever the answer: no new login after a 401, and no wait and second try
+  after a 429. So the upload is never sent twice by the same call.
+- Each step waits for the one before it. When Azure has not confirmed the
+  import site or the import collector after MEHO's wait, the import stops
+  before it asks for an upload link. When Azure has not confirmed the group
+  `PUT`, `group.create` adds no machines; when it has not confirmed the Add of
+  `group.update`, Remove is not sent. The step that was not sent has
+  `sent: false`, and `not_sent` says what to do.
+- When Azure accepts a write but its status cannot be read, the step keeps
+  the operation reference, `done` is false and `poll_error` says what failed.
 - A read that fails after a write was sent does not hide the write: the result
   carries `poll_error`, and `azure.migrate.job.list`,
   `azure.migrate.assessment.list` or `azure.operation.status` show the
@@ -2136,8 +2165,15 @@ SHA-256, size and row count.
 
 #### Limits and open points
 
-- At most 20,000 rows and 8 MiB per file. Header columns must include server
-  name, cores, memory and OS name. Azure checks every row; its reasons for
+- At most 20,000 rows and 327,680 bytes (320 KiB) per call. The file travels
+  inline, and MCP refuses a whole request above 1 MiB. JSON can make a text
+  up to three times longer, so this size always fits. A larger file is split
+  over several calls. Control characters other than tab and line ends are
+  refused, because JSON writes each of them as six bytes.
+- The header must have the four required columns of Azure's template by
+  their full names: `Server name`, `Cores`, `Memory (In MB)` and `OS name`,
+  each with or without its `*` mark, in any case. A UTF-8 byte order mark at
+  the start is allowed; MEHO hashes and uploads the bytes as they came. Azure checks every row; its reasons for
   bad rows come back in `bad_rows` (at most 100, secrets filtered).
 - `machines`, `add` and `remove` take the machine `name` from
   `azure.migrate.machine.list` (the API description says "machine names").

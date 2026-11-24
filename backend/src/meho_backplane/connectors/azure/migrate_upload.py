@@ -7,8 +7,8 @@ The link is a signed blob link. It is a secret and carries its own access, so
 this module never sends MEHO's Azure token to it, and never puts the link
 into an error text. :func:`upload_host` refuses a link that is not a plain
 https link to a blob host of the target's cloud. :func:`upload_file` sends the
-file through the connector's own ``send`` (the same retry rule, the same
-trace), with a caller object that gives no ``Authorization`` header.
+file through the connector's own ``send_single_try`` (the same login limit
+and trace, exactly one request), with a caller object that gives no ``Authorization`` header.
 """
 
 from __future__ import annotations
@@ -20,13 +20,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.azure._errors import (
-    AzureApiError,
-    AzureRequestError,
-    AzureServerError,
-    AzureUrlRefusedError,
-)
-from meho_backplane.connectors.azure._http import send
+from meho_backplane.connectors.azure._errors import AzureRequestError, AzureUrlRefusedError
+from meho_backplane.connectors.azure._http import send_single_try
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
 from meho_backplane.connectors.azure.storage_parse import BLOB_HOST_SUFFIXES
 
@@ -105,37 +100,41 @@ async def upload_file(
     link: str,
     content: bytes,
 ) -> bool:
-    """Upload *content* to *link*. Returns false when Azure's answer is not known.
+    """Upload *content* to *link* in one request. False when Azure's answer is not known.
 
-    A lost connection or a 5xx can come after the file arrived, so they are
-    not errors: the caller follows the job to see. Any other refusal is
-    raised with a fixed text that never holds the link.
+    The file is sent once, whatever the answer: no new login after a 401 and
+    no wait and second try after a 429. A lost connection or a 5xx can come
+    after the file arrived, so they are not errors: the caller follows the
+    job to see. Every other answer from 300 up is a refusal: the file did not
+    arrive. It is raised as :class:`AzureRequestError` with a fixed text that
+    holds no part of the link (no host, path or signature).
     """
     host = upload_host(target, link)
     caller = _UploadCaller(
         connector, {"x-ms-blob-type": "BlockBlob", "Content-Type": "text/csv; charset=utf-8"}
     )
     try:
-        await send(
+        response = await send_single_try(
             caller,  # type: ignore[arg-type]
             target,
             "PUT",
             link,
             operator=operator,
             content=content,
-            repeatable=False,
             extra_hosts=(host,),
         )
-    except (httpx.HTTPError, AzureServerError):
+    except httpx.HTTPError:
         return False
-    except AzureApiError as exc:
-        raise AzureRequestError(
-            f"Azure target {target.name!r}: Azure Storage refused the upload (HTTP "
-            f"{exc.http_status}). The upload link may have run out; send the same call "
-            "again for a new link.",
-            http_status=exc.http_status,
-            azure_error_code=exc.azure_error_code,
-            azure_message=None,
-            remediation="Send the same call again. It asks for a new upload link.",
-        ) from None
-    return True
+    status = response.status_code
+    if status < 300:
+        return True
+    if status >= 500:
+        return False
+    raise AzureRequestError(
+        f"Azure target {target.name!r}: Azure Storage refused the upload (HTTP {status}). "
+        "The upload link may have run out; send the same call again for a new link.",
+        http_status=status,
+        azure_error_code=None,
+        azure_message=None,
+        remediation="Send the same call again. It asks for a new upload link.",
+    )

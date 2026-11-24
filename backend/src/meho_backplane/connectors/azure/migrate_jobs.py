@@ -13,12 +13,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.azure._errors import clean_azure_text
+from meho_backplane.connectors.azure._errors import AzureRequestError, clean_azure_text
 from meho_backplane.connectors.azure._paging import list_all_pages
 from meho_backplane.connectors.azure._paths import (
     OFFAZURE_API_VERSION,
@@ -144,11 +145,27 @@ async def read_job(
     names: Mapping[str, str],
     job: str,
 ) -> dict[str, Any]:
-    """Read one import job of the site in *names* (``resource_group``, ``site``)."""
+    """Read one import job of the site in *names* (``resource_group``, ``site``).
+
+    Raises :class:`AzureRequestError` with a fixed text when Azure's answer is
+    not a JSON object.
+    """
     path = site_path(target, OFFAZURE_IMPORT_JOB_PATH, job=job, **names)
-    payload = await connector.arm_get(
-        target, path, operator=operator, api_version=OFFAZURE_API_VERSION
-    )
+    try:
+        payload: object = await connector.arm_get(
+            target, path, operator=operator, api_version=OFFAZURE_API_VERSION
+        )
+    except json.JSONDecodeError:
+        payload = None
+    if not isinstance(payload, Mapping):
+        raise AzureRequestError(
+            f"Azure target {target.name!r}: Azure's answer for import job {job!r} is not a "
+            "JSON object.",
+            http_status=502,
+            azure_error_code=None,
+            azure_message=None,
+            remediation="Call azure.migrate.job.list to see the job.",
+        )
     return job_row(payload)
 
 
@@ -172,6 +189,15 @@ async def job_list_impl(
     )
     rows = [job_row(item) for item in paged.rows if isinstance(item, Mapping)]
     items: list[dict[str, Any]] = []
+    skipped = len(paged.rows) - len(rows)
+    if skipped:
+        items.append(
+            {
+                "what": "import jobs",
+                "reason": "not_an_object",
+                "detail": f"{skipped} item(s) of Azure's answer were not JSON objects.",
+            }
+        )
     if paged.omission is not None:
         items.append(
             {

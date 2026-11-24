@@ -28,6 +28,7 @@ The shared helpers (:func:`arm_write`, :func:`poll_until`) are also used by
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.adapters.http import json_payload_or_empty
 from meho_backplane.connectors.azure._errors import (
     AzureApiError,
+    AzureConflictError,
     AzureNotFoundError,
     AzureRequestError,
     AzureUrlRefusedError,
@@ -68,12 +70,14 @@ from meho_backplane.connectors.azure.migrate_rows import (
     project_params,
 )
 from meho_backplane.connectors.azure.session import AzureTargetLike, resolve_target_config
+from meho_backplane.db.advisory import advisory_lock
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.azure.connector import AzureConnector
 
 __all__ = [
-    "ASSESSMENT_DONE_STATUSES",
+    "ASSESSMENT_COMPUTED_STATUSES",
+    "ASSESSMENT_FAILED_STATUSES",
     "MAX_MACHINES_PER_CALL",
     "POLL_ERRORS",
     "WriteOutcome",
@@ -82,6 +86,7 @@ __all__ = [
     "assessment_create_impl",
     "group_create_impl",
     "group_update_impl",
+    "lock_key",
     "poll_error_text",
     "poll_until",
 ]
@@ -89,10 +94,17 @@ __all__ = [
 #: Most machines one group call names. Longer lists are split by the caller.
 MAX_MACHINES_PER_CALL: Final[int] = 1000
 
-#: Azure's assessment statuses after which the numbers do not change by themselves.
-ASSESSMENT_DONE_STATUSES: Final[frozenset[str]] = frozenset(
-    {"completed", "invalid", "outofsync", "outdated", "deleted"}
+#: Azure's assessment statuses of a computed assessment. OutOfSync and OutDated
+#: mean it was computed, but its group or Azure's prices changed since.
+ASSESSMENT_COMPUTED_STATUSES: Final[frozenset[str]] = frozenset(
+    {"completed", "outofsync", "outdated"}
 )
+
+#: Azure's assessment statuses after which it will never be computed.
+ASSESSMENT_FAILED_STATUSES: Final[frozenset[str]] = frozenset({"invalid", "deleted"})
+
+#: How long a call waits for another MEHO call that makes the same assessment.
+_ASSESSMENT_LOCK_WAIT_SECONDS: Final[float] = 120.0
 
 #: How MEHO's words map to Azure's values.
 SIZING_VALUES: Final[Mapping[str, str]] = {
@@ -121,6 +133,14 @@ POLL_ERRORS: Final[tuple[type[Exception], ...]] = (
     ConnectorAuthError,
     httpx.HTTPError,
 )
+
+
+def lock_key(kind: str, resource_id: str) -> int:
+    """The PostgreSQL lock key of one Azure resource (63 bits, like the other lock keys)."""
+    digest = hashlib.blake2b(
+        f"meho:azure-migrate-{kind}:{resource_id.casefold()}".encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 def poll_error_text(exc: Exception) -> str:
@@ -158,13 +178,15 @@ class WriteOutcome:
 
     ``operation`` is the reference of a long-running operation (to read with
     ``azure.operation.status``), or ``None`` when Azure answered at once.
-    ``done`` is false when the operation was still running after MEHO's wait.
+    ``done`` is false when the operation was still running after MEHO's wait,
+    or when its status could not be read (``poll_error`` says why then).
     """
 
     status_code: int
     body: dict[str, Any]
     operation: dict[str, Any] | None
     done: bool
+    poll_error: str | None = None
 
 
 async def arm_write(
@@ -184,7 +206,9 @@ async def arm_write(
     *repeatable* says whether the write may be sent again after a lost answer
     or a 5xx: true for a ``PUT`` (same name, same body, same result), false
     for a ``POST``. A failed operation raises :class:`AzureRequestError` with
-    Azure's reason.
+    Azure's reason. When Azure accepted the write but its status cannot be
+    read, the outcome keeps the operation reference, ``done`` is false and
+    ``poll_error`` says what failed: the write is never hidden.
     """
     response = await send(
         connector,
@@ -200,7 +224,17 @@ async def arm_write(
     reference = operation_reference(target, response, resource_id=resource_id)
     if reference is None:
         return WriteOutcome(response.status_code, payload, None, True)
-    state = await wait_for_operation(connector, target, reference, operator=operator)
+    try:
+        state = await wait_for_operation(connector, target, reference, operator=operator)
+    except POLL_ERRORS as exc:
+        return WriteOutcome(
+            response.status_code,
+            payload,
+            reference.as_dict(),
+            False,
+            f"Azure accepted the write, but its status could not be read: "
+            f"{poll_error_text(exc)} Read it with azure.operation.status.",
+        )
     if state["done"] and state["status"] != "Succeeded":
         error = state["error"] or {}
         raise AzureRequestError(
@@ -284,9 +318,31 @@ async def _update_machines(
     return {
         "operation_type": operation_type,
         "machines": len(machines),
+        "sent": True,
         "done": outcome.done,
         "operation": outcome.operation,
+        "poll_error": outcome.poll_error,
     }
+
+
+def _not_sent(operation_type: str, machines: list[str]) -> dict[str, Any]:
+    """The step that MEHO did not send, because Azure had not finished the step before."""
+    return {
+        "operation_type": operation_type,
+        "machines": len(machines),
+        "sent": False,
+        "done": False,
+        "operation": None,
+        "poll_error": None,
+    }
+
+
+def _waiting_text(before: str, after: str) -> str:
+    return (
+        f"{after} was not sent: Azure had not confirmed that {before} finished after MEHO's "
+        "wait. Read the operation of that step with azure.operation.status. When it "
+        "succeeded, send the same call again."
+    )
 
 
 async def _step(
@@ -315,7 +371,7 @@ async def _group_result(
     target: AzureTargetLike,
     names: Mapping[str, str],
     steps: list[dict[str, Any]],
-    **extra: Any,
+    not_sent: str | None,
 ) -> dict[str, Any]:
     """The answer of a group write: the steps that ran and the group as Azure reads it now."""
     group: dict[str, Any] | None = None
@@ -324,7 +380,7 @@ async def _group_result(
         group = await _read_group(connector, operator, target, names)
     except POLL_ERRORS as exc:
         poll_error = f"The group was changed but could not be read back: {poll_error_text(exc)}"
-    return {"steps": steps, "group": group, "poll_error": poll_error, **extra}
+    return {"steps": steps, "group": group, "poll_error": poll_error, "not_sent": not_sent}
 
 
 async def group_create_impl(
@@ -356,8 +412,20 @@ async def group_create_impl(
         resource_id=_paths(target, MIGRATE_GROUP_PATH, names),
         repeatable=True,
     )
-    steps.append({"step": "group_put", "done": created.done, "operation": created.operation})
-    if machines:
+    steps.append(
+        {
+            "step": "group_put",
+            "sent": True,
+            "done": created.done,
+            "operation": created.operation,
+            "poll_error": created.poll_error,
+        }
+    )
+    not_sent: str | None = None
+    if machines and not created.done:
+        steps.append(_not_sent("Add", machines))
+        not_sent = _waiting_text("making the group", "Adding the machines")
+    elif machines:
         steps.append(
             await _step(
                 _update_machines(connector, operator, target, names, "Add", machines),
@@ -365,7 +433,7 @@ async def group_create_impl(
                 done="The group was made.",
             )
         )
-    return await _group_result(connector, operator, target, names, steps)
+    return await _group_result(connector, operator, target, names, steps, not_sent)
 
 
 async def group_update_impl(
@@ -388,9 +456,13 @@ async def group_update_impl(
     if both:
         raise ValueError("A machine cannot be in both add and remove.")
     steps: list[dict[str, Any]] = []
+    not_sent: str | None = None
     if add:
         steps.append(await _update_machines(connector, operator, target, names, "Add", add))
-    if remove:
+    if remove and add and not steps[-1]["done"]:
+        steps.append(_not_sent("Remove", remove))
+        not_sent = _waiting_text("adding the machines", "Taking machines out")
+    elif remove:
         steps.append(
             await _step(
                 _update_machines(connector, operator, target, names, "Remove", remove),
@@ -398,7 +470,7 @@ async def group_update_impl(
                 done="The machines were added." if add else "Nothing was changed before.",
             )
         )
-    return await _group_result(connector, operator, target, names, steps)
+    return await _group_result(connector, operator, target, names, steps, not_sent)
 
 
 # ----------------------------------------------------------------------
@@ -481,9 +553,67 @@ async def _existing_assessment(
         return None
 
 
-def _is_done(row: Mapping[str, Any]) -> bool:
-    status = row.get("status")
-    return isinstance(status, str) and status.casefold() in ASSESSMENT_DONE_STATUSES
+def _status_in(row: Mapping[str, Any] | None, statuses: frozenset[str]) -> bool:
+    status = row.get("status") if row else None
+    return isinstance(status, str) and status.casefold() in statuses
+
+
+def _is_final(row: Mapping[str, Any]) -> bool:
+    """True when the assessment's numbers do not change by themselves any more."""
+    return _status_in(row, ASSESSMENT_COMPUTED_STATUSES | ASSESSMENT_FAILED_STATUSES)
+
+
+async def _create_or_check(
+    connector: AzureConnector,
+    operator: Operator,
+    target: AzureTargetLike,
+    names: Mapping[str, str],
+    body: dict[str, Any],
+) -> tuple[dict[str, Any] | None, WriteOutcome | None]:
+    """Make the assessment when it is missing, or check the settings of the one there.
+
+    Runs under one PostgreSQL lock per assessment, shared by every MEHO
+    worker: two MEHO calls never both see it missing and both send a ``PUT``
+    (a second ``PUT`` would change the first one's settings). Returns
+    Azure's answer for an existing assessment, or the outcome of the ``PUT``.
+    """
+    resource_id = _paths(target, MIGRATE_ASSESSMENT_PATH, names)
+    async with advisory_lock(
+        lock_key("assessment", resource_id),
+        subsystem="azure_migrate_assessment",
+        wait_seconds=_ASSESSMENT_LOCK_WAIT_SECONDS,
+    ) as locked:
+        if not locked:
+            raise AzureConflictError(
+                f"Azure target {target.name!r}: another call is still making assessment "
+                f"{names['assessment']!r}. MEHO sent nothing.",
+                http_status=409,
+                azure_error_code=None,
+                azure_message=None,
+                remediation="Send the same call again in a few minutes.",
+            )
+        existing = await _existing_assessment(connector, operator, target, names)
+        if existing is not None:
+            differs = _differences(existing, body)
+            if differs:
+                raise ValueError(
+                    f"Assessment {names['assessment']!r} already exists in group "
+                    f"{names['group']!r} with other settings ({', '.join(differs)}). MEHO "
+                    "did not change it. Use a new assessment name."
+                )
+            return existing, None
+        outcome = await arm_write(
+            connector,
+            operator,
+            target,
+            "PUT",
+            _paths(target, MIGRATE_ASSESSMENT_WRITE_PATH, names),
+            MIGRATE_API_VERSION,
+            body,
+            resource_id=resource_id,
+            repeatable=True,
+        )
+        return None, outcome
 
 
 async def assessment_create_impl(
@@ -497,8 +627,9 @@ async def assessment_create_impl(
     An assessment of this name that already has the same settings is not sent
     again: its computation is followed. One with other settings is refused,
     so a retry or a second caller never changes an assessment someone else
-    reads. Reads the assessment until Azure says it is computed, or until
-    MEHO's wait is over (``done`` is false then).
+    reads. Reads the assessment until Azure has computed it, until Azure says
+    it cannot (``failed``), or until MEHO's wait is over (``done`` is false
+    then).
     """
     names = {
         **project_params(params),
@@ -506,51 +637,29 @@ async def assessment_create_impl(
         "assessment": migrate_name_param(params, "assessment"),
     }
     body = assessment_body(params)
-    existing = await _existing_assessment(connector, operator, target, names)
-    state = "existing"
-    operation: dict[str, Any] | None = None
-    if existing is None:
-        state = "created"
-        outcome = await arm_write(
-            connector,
-            operator,
-            target,
-            "PUT",
-            _paths(target, MIGRATE_ASSESSMENT_WRITE_PATH, names),
-            MIGRATE_API_VERSION,
-            body,
-            resource_id=_paths(target, MIGRATE_ASSESSMENT_PATH, names),
-            repeatable=True,
-        )
-        operation = outcome.operation
-    else:
-        differs = _differences(existing, body)
-        if differs:
-            raise ValueError(
-                f"Assessment {names['assessment']!r} already exists in group "
-                f"{names['group']!r} with other settings ({', '.join(differs)}). MEHO did "
-                "not change it. Use a new assessment name."
-            )
+    existing, outcome = await _create_or_check(connector, operator, target, names, body)
+    errors: list[str] = []
+    if outcome is not None and outcome.poll_error:
+        errors.append(outcome.poll_error)
     row = None if existing is None else assessment_row(existing, group=names["group"])
-    poll_error: str | None = None
-    done = False
     try:
-        polled, done = await poll_until(
-            lambda: read_assessment(connector, operator, target, names), _is_done
+        polled, _ = await poll_until(
+            lambda: read_assessment(connector, operator, target, names), _is_final
         )
         row = polled
     except POLL_ERRORS as exc:
-        poll_error = (
+        errors.append(
             f"The assessment was sent but could not be read: {poll_error_text(exc)} "
             "Call azure.migrate.assessment.list to see where it stands."
         )
     return {
-        "state": state,
-        "done": done,
+        "state": "existing" if existing is not None else "created",
+        "done": _status_in(row, ASSESSMENT_COMPUTED_STATUSES),
+        "failed": _status_in(row, ASSESSMENT_FAILED_STATUSES),
         "status": row.get("status") if row else None,
         "machine_count": row.get("machine_count") if row else None,
         "readiness_summary": row.get("readiness_summary") if row else {},
         "assessment": row,
-        "operation": operation,
-        "poll_error": poll_error,
+        "operation": outcome.operation if outcome is not None else None,
+        "poll_error": " ".join(errors) or None,
     }

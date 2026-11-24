@@ -16,22 +16,26 @@ never uploads the same file twice:
    retry with the same key finds it. When the tag names a job that exists,
    the file was already sent, or its upload may still be under way: MEHO
    follows that job and uploads nothing. This holds also while the job still
-   waits for its file, because the upload's outcome is not known then.
+   waits for its file, because the upload's outcome is not known then. When
+   the tag names a job that Azure no longer has, the file may still have been
+   imported: MEHO uploads nothing and asks for a new ``repeat_key``.
 3. Ask the site for an upload link (``importUri``) and write the job name to
    the tag *before* the upload. If the tag cannot be written, nothing is
-   uploaded.
+   uploaded. MEHO adds and removes only its own tag (the Tags API's
+   ``Merge`` and ``Delete``), so the other tags of the site stay as they are.
 4. Upload the file (:mod:`meho_backplane.connectors.azure.migrate_upload`).
    The link is a secret: MEHO's Azure token is never sent to it, and the link
    is in no result, error, log or audit text. A lost answer after the upload
    does not fail the call: MEHO follows the job to see whether the file
-   arrived. When Azure Storage clearly refuses the upload, the file did not
+   arrived. The file is sent in one request, whatever the answer. When Azure
+   Storage refuses the upload (any answer from 300 to 499), the file did not
    arrive: MEHO removes the tag, so the same call again uploads it.
 5. Follow the job until it ends or MEHO's wait is over.
 
 Steps 1 to 4 run under one PostgreSQL lock per import site, shared by every
-MEHO worker. Two imports to the same site then never read the tags at the
-same time, so neither erases the other's record, and the same file is never
-uploaded twice at once. When the lock stays busy, MEHO sends nothing and
+MEHO worker, so the same file is never uploaded twice at once. A step of
+the setup that Azure has not confirmed after MEHO's wait stops the call
+before the upload. When the lock stays busy, MEHO sends nothing and
 says so.
 
 The audit row of a call holds a hash of the parameters, never the file. The
@@ -50,7 +54,6 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.adapters.http import json_payload_or_empty
 from meho_backplane.connectors.azure._errors import (
     AzureApiError,
     AzureConflictError,
@@ -65,6 +68,8 @@ from meho_backplane.connectors.azure._paths import (
     OFFAZURE_API_VERSION,
     OFFAZURE_IMPORT_SITE_PATH,
     OFFAZURE_IMPORT_URI_PATH,
+    RESOURCES_API_VERSION,
+    TAGS_AT_SCOPE_PATH,
 )
 from meho_backplane.connectors.azure.migrate_csv import (
     REPEAT_KEY_PATTERN,
@@ -83,6 +88,7 @@ from meho_backplane.connectors.azure.migrate_upload import upload_file, upload_h
 from meho_backplane.connectors.azure.migrate_writes import (
     POLL_ERRORS,
     arm_write,
+    lock_key,
     poll_error_text,
     poll_until,
 )
@@ -109,12 +115,13 @@ def _record_key(prepared: PreparedCsv, repeat_key: object) -> str:
     return f"{prepared.tag_key}-{hashlib.sha256(repeat_key.encode('utf-8')).hexdigest()[:8]}"
 
 
-def _lock_key(site_id: str) -> int:
-    """The PostgreSQL lock key of one import site (63 bits, like the other lock keys)."""
-    digest = hashlib.blake2b(
-        f"meho:azure-migrate-import:{site_id.casefold()}".encode(), digest_size=8
-    ).digest()
-    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+def _object_answer(response: httpx.Response) -> dict[str, Any] | None:
+    """The JSON object of *response*, or ``None`` when its body is not one."""
+    try:
+        answer = response.json()
+    except ValueError:
+        return None
+    return answer if isinstance(answer, dict) else None
 
 
 @dataclass
@@ -160,7 +167,10 @@ class _Import:
             )
         except AzureNotFoundError:
             await self._put(
-                self.site_id, OFFAZURE_API_VERSION, {"location": location, "properties": {}}
+                self.site_id,
+                OFFAZURE_API_VERSION,
+                {"location": location, "properties": {}},
+                "the new import site",
             )
             return {}
         tags = site.get("tags")
@@ -170,8 +180,9 @@ class _Import:
             if isinstance(key, str) and isinstance(value, str)
         }
 
-    async def _put(self, path: str, api_version: str, body: dict[str, Any]) -> None:
-        await arm_write(
+    async def _put(self, path: str, api_version: str, body: dict[str, Any], what: str) -> None:
+        """Send one ``PUT`` of the setup. Stops when Azure has not confirmed it."""
+        outcome = await arm_write(
             self.connector,
             self.operator,
             self.target,
@@ -182,6 +193,15 @@ class _Import:
             resource_id=self.site_id,
             repeatable=True,
         )
+        if not outcome.done:
+            raise AzureConflictError(
+                f"Azure target {self.target.name!r}: Azure had not confirmed {what} after "
+                f"MEHO's wait. MEHO uploaded nothing. {outcome.poll_error or ''}".rstrip(),
+                http_status=409,
+                azure_error_code=None,
+                azure_message=None,
+                remediation="Send the same call again in a few minutes.",
+            )
 
     @property
     def collector(self) -> str:
@@ -191,15 +211,19 @@ class _Import:
         """Link the project to the site. A ``PUT`` with a fixed name, safe to repeat."""
         path = self._path(MIGRATE_IMPORT_COLLECTOR_PATH, collector=self.collector, **self.project)
         await self._put(
-            path, MIGRATE_API_VERSION, {"properties": {"discoverySiteId": self.site_id}}
+            path,
+            MIGRATE_API_VERSION,
+            {"properties": {"discoverySiteId": self.site_id}},
+            "the import collector",
         )
 
     async def known_job(self, tags: Mapping[str, str]) -> dict[str, Any] | None:
-        """The job the tags name for this file, or ``None`` when there is none to follow.
+        """The job the tags name for this file, or ``None`` when there is no record.
 
         A job that still waits for its file is followed too: its upload may
-        still be under way, or its answer was lost. Only a job that is gone
-        gets a new upload link.
+        still be under way, or its answer was lost. A recorded job that Azure
+        no longer has is not a sign that the file never arrived, so MEHO
+        keeps the record, uploads nothing and asks for a new ``repeat_key``.
         """
         job = job_name_of(tags.get(self.record_key))
         if job is None:
@@ -207,21 +231,38 @@ class _Import:
         try:
             return await read_job(self.connector, self.operator, self.target, self.names, job)
         except AzureNotFoundError:
-            return None
+            remediation = (
+                "Call azure.migrate.job.list and azure.migrate.machine.list to see what was "
+                "imported. To import the file again, send the call with a new repeat_key."
+            )
+            raise AzureConflictError(
+                f"Azure target {self.target.name!r}: MEHO sent this file before as import job "
+                f"{job!r}, and Azure no longer has that job. The file may have been imported. "
+                f"MEHO uploaded nothing. {remediation}",
+                http_status=409,
+                azure_error_code=None,
+                azure_message=None,
+                remediation=remediation,
+            ) from None
 
-    async def _write_tags(self, tags: Mapping[str, str]) -> None:
+    async def _patch_record(self, operation: str, job: str) -> None:
+        """Add (``Merge``) or remove (``Delete``) only this file's record tag.
+
+        The Tags API changes the named tag alone, so a tag that someone
+        changes at the same time, in MEHO or in Azure, stays as it is.
+        """
         await send(
             self.connector,
             self.target,
             "PATCH",
-            self.site_id,
+            TAGS_AT_SCOPE_PATH.format(scope=self.site_id[1:]),
             operator=self.operator,
-            params={"api-version": OFFAZURE_API_VERSION},
-            json={"tags": dict(tags)},
+            params={"api-version": RESOURCES_API_VERSION},
+            json={"operation": operation, "properties": {"tags": {self.record_key: job}}},
             repeatable=True,
         )
 
-    async def send_file(self, tags: dict[str, str]) -> tuple[str, bool]:
+    async def send_file(self) -> tuple[str, bool]:
         """Get an upload link, record the job, upload. Returns the job and if Azure confirmed."""
         response = await send(
             self.connector,
@@ -233,7 +274,12 @@ class _Import:
             json={},
             repeatable=False,
         )
-        answer = json_payload_or_empty(response)
+        answer = _object_answer(response)
+        if answer is None:
+            raise AzureUrlRefusedError(
+                f"Azure target {self.target.name!r}: Azure's answer for the upload link is "
+                "not a JSON object. MEHO uploaded nothing."
+            )
         link = answer.get("uri")
         job = job_name_of(answer.get("jobArmId"))
         upload_host(self.target, link)  # refuse a bad link before anything is recorded
@@ -244,7 +290,7 @@ class _Import:
             )
         # The record comes first: a retry after a lost answer finds the job and
         # does not upload again. When it cannot be written, nothing is uploaded.
-        await self._write_tags({**tags, self.record_key: job})
+        await self._patch_record("Merge", job)
         try:
             confirmed = await upload_file(
                 self.connector, self.operator, self.target, link, self.prepared.content
@@ -254,7 +300,7 @@ class _Import:
             # record, so the same call again uploads it. A failed drop only
             # means the retry follows the job that waits for its file.
             with contextlib.suppress(AzureApiError, httpx.HTTPError):
-                await self._write_tags(tags)
+                await self._patch_record("Delete", job)
             raise
         return job, confirmed
 
@@ -316,7 +362,9 @@ async def import_start_impl(
         _record_key(prepared, params.get("repeat_key")),
     )
     async with advisory_lock(
-        _lock_key(run.site_id), subsystem="azure_migrate_import", wait_seconds=_LOCK_WAIT_SECONDS
+        lock_key("import", run.site_id),
+        subsystem="azure_migrate_import",
+        wait_seconds=_LOCK_WAIT_SECONDS,
     ) as locked:
         if not locked:
             raise AzureConflictError(
@@ -331,7 +379,7 @@ async def import_start_impl(
         await run.ensure_collector()
         known = await run.known_job(tags)
         if known is None:
-            job, confirmed = await run.send_file(tags)
+            job, confirmed = await run.send_file()
             outcome = "uploaded" if confirmed else "upload_unconfirmed"
         else:
             job = known["name"]

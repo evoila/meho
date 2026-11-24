@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC
 from typing import Any
 from uuid import UUID
 
@@ -449,9 +450,13 @@ def _sensor_schedule(sensor: Sensor) -> dict[str, Any]:
     """The cadence and next due time of *sensor* as work item fields.
 
     The runner runs the item only when it is due. A Sensor without a stored
-    due time is due at once (its create time is in the past).
+    due time is due at once (its create time is in the past). The due time
+    is sent in UTC: SQLite gives the stored time back without a time zone.
     """
-    due = {"next_due_at": sensor.next_fire_at or sensor.created_at}
+    due_at = sensor.next_fire_at or sensor.created_at
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=UTC)
+    due = {"next_due_at": due_at.astimezone(UTC)}
     if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
         return {**due, "cron_expr": sensor.cron_expr, "timezone": sensor.timezone}
     return {**due, "interval_seconds": sensor.interval_seconds}

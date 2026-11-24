@@ -13,11 +13,14 @@ that names every Sensor a runner cannot run. The helpers come from
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -41,7 +44,11 @@ from meho_backplane.db.models import (
     Sensor,
 )
 from meho_backplane.gateway.assignment_service import materialize_assignment
+from meho_backplane.runner import loop as runner_loop
 from meho_backplane.runner import wire
+from meho_backplane.runner.client import RunnerClient
+from meho_backplane.runner.loop import RunnerState, run_one_tick
+from meho_backplane.runner.spool import ResultSpool
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
@@ -322,7 +329,9 @@ async def test_an_older_runner_gets_no_counted_check(switch_on: None) -> None:
     assert older.items == []
     assert [item.check_ref for item in current.items] == [str(sensor_id)]
     due = current.items[0].next_due_at
-    assert due is not None and due == (await _sensor(sensor_id)).next_fire_at
+    stored = (await _sensor(sensor_id)).next_fire_at
+    assert due is not None and stored is not None
+    assert due.tzinfo is not None and due == stored.replace(tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -346,6 +355,68 @@ async def test_the_assignment_route_reads_what_the_runner_can_do(
 
     assert older.status_code == 200 and older.json()["items"] == []
     assert [item["check_ref"] for item in current.json()["items"]] == [str(sensor_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_runner_tick_reads_the_due_times_the_api_sends(
+    client: TestClient, switch_on: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The due times come from the SQLite-backed API; one is the create time fallback."""
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    _register_connector()
+    due_now = await _seed_sensor(name="due-now")
+    created_only = await _seed_sensor(name="created-only")
+    later = await _seed_sensor(name="later")
+    async with get_sessionmaker()() as session:
+        past = datetime.now(UTC) - timedelta(minutes=1)
+        await session.execute(update(Sensor).where(Sensor.id == due_now).values(next_fire_at=past))
+        await session.execute(
+            update(Sensor).where(Sensor.id == created_only).values(next_fire_at=None)
+        )
+        await session.commit()
+    headers = {
+        "Authorization": f"Bearer {_runner_token(_KEY, runner_id=_RUNNER_A_ID)}",
+        wire.FEATURES_HEADER: wire.FEATURE_SCHEDULED_CHECKS,
+    }
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(_KEY))
+        body = client.get("/api/v1/checks/assignment?runner=runner-a", headers=headers).json()
+    assignment = wire.RunnerAssignment.model_validate(body)
+    posted: list[str] = []
+
+    def central(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/assignment"):
+            return httpx.Response(200, json=body)
+        posted.append(request.content.decode())
+        return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
+
+    async def run(item: wire.RunnerWorkItem) -> wire.RunnerResult:
+        return wire.RunnerResult(
+            result_uid=uuid.uuid4().hex, check_ref=item.check_ref, op_id=item.op_id, status="ok"
+        )
+
+    monkeypatch.setattr(runner_loop, "execute_work_item", run)
+    runner = RunnerClient(
+        central_url="https://central.example",
+        runner_id="runner-a",
+        token="tok",
+        transport=httpx.MockTransport(central),
+    )
+    state = RunnerState(assignment=assignment, assignment_version=assignment.assignment_version)
+    async with runner:
+        await run_one_tick(
+            client=runner,
+            spool=ResultSpool(tmp_path, max_files=10),
+            state=state,
+            runner_id="runner-a",
+        )
+
+    assert len(posted) == 1
+    sent = {r["check_ref"] for r in json.loads(posted[0])["results"]}
+    assert sent == {str(due_now), str(created_only)}  # "later" is due in a minute
+    assert str(later) in {item.check_ref for item in assignment.items}
 
 
 @pytest.mark.asyncio

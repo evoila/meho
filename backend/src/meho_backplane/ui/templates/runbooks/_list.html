@@ -70,11 +70,11 @@
                   </span>
                 {% endif %}
               </td>
-              <td class="font-mono opacity-70">v{{ tpl.version }}</td>
-              <td class="hidden md:table-cell opacity-70">
+              <td class="font-mono text-muted">v{{ tpl.version }}</td>
+              <td class="hidden md:table-cell text-muted">
                 {{ tpl.target_kind or "—" }}
               </td>
-              <td class="hidden lg:table-cell text-xs opacity-70">
+              <td class="hidden lg:table-cell text-xs text-muted">
                 {{ tpl.edited_at.strftime("%Y-%m-%d %H:%M") }}
               </td>
               <td>
@@ -177,14 +177,14 @@
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body py-10 text-center">
         {% if status_filter or target_kind_filter %}
-          <p class="text-lg opacity-60">No runbook templates match the current filters</p>
-          <p class="text-sm opacity-40">
+          <p class="text-lg text-subtle">No runbook templates match the current filters</p>
+          <p class="text-sm text-subtle">
             Adjust the status or target filters, or
             <a href="/ui/runbooks" class="link">clear them</a>.
           </p>
         {% else %}
-          <p class="text-lg opacity-60">No runbook templates yet</p>
-          <p class="text-sm opacity-40">
+          <p class="text-lg text-subtle">No runbook templates yet</p>
+          <p class="text-sm text-subtle">
             Author a template with
             <code>meho runbook draft-template</code> via CLI; published
             templates and drafts appear here.

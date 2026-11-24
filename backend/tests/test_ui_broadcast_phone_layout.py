@@ -58,7 +58,7 @@ def test_feed_rows_use_a_six_column_grid_on_a_phone() -> None:
     # Agent on line one, announcement text on line two, targets on line three.
     assert row.count('class="col-span-4 truncate sm:col-span-2"') == 1
     assert row.count("col-span-6 truncate") == 1
-    assert row.count('class="col-span-5 truncate text-xs opacity-80 sm:col-span-2"') == 1
+    assert row.count('class="col-span-5 truncate text-xs text-muted sm:col-span-2"') == 1
     # Phase and claim cells show from sm up only.
     assert row.count('class="hidden sm:col-span-1 sm:block"') == 1
     assert row.count('class="hidden truncate text-xs sm:col-span-2 sm:block"') == 1

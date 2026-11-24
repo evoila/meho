@@ -22,14 +22,14 @@
     <p class="flex items-center gap-2 text-sm">
       <span class="font-mono">{{ edge.from_endpoint.name }}</span>
       <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
-      <span class="opacity-60">&rarr;</span>
+      <span class="text-subtle">&rarr;</span>
       <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
-      <span class="opacity-60">&rarr;</span>
+      <span class="text-subtle">&rarr;</span>
       <span class="font-mono">{{ edge.to_endpoint.name }}</span>
       <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
-      <span class="text-xs opacity-50">({{ edge.source }})</span>
+      <span class="text-xs text-subtle">({{ edge.source }})</span>
     </p>
-    <p class="text-xs opacity-60">
+    <p class="text-xs text-subtle">
       Edge id <span class="font-mono">{{ edge.id }}</span>.
     </p>
   </div>

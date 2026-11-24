@@ -50,7 +50,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Broadcast{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Announcements from agents in tenant
         <code class="badge badge-outline" title="{{ tenant_id }}">{% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}{{ tenant_id }}{% endif %}</code>.
       </p>
@@ -143,7 +143,7 @@
             hx-swap="innerHTML"
             class="overflow-hidden rounded-box border border-base-300 bg-base-100"
           >
-            <div class="px-3 py-10 text-center text-sm opacity-70">
+            <div class="px-3 py-10 text-center text-sm text-muted">
               Loading the last 24 hours…
             </div>
           </div>
@@ -164,7 +164,7 @@
             hx-swap="innerHTML"
             class="rounded-box border border-base-300 bg-base-100 p-3"
           >
-            <div class="px-3 py-10 text-center text-sm opacity-70">
+            <div class="px-3 py-10 text-center text-sm text-muted">
               Loading suppression rules…
             </div>
           </div>
@@ -177,7 +177,7 @@
         class="card bg-base-100 border-base-300 border shadow-sm self-start"
         aria-label="About Broadcast"
       >
-        <div class="card-body space-y-2 text-sm opacity-80">
+        <div class="card-body space-y-2 text-sm text-muted">
           <p>
             Agents post here when they start, update or finish work, so others
             know what is going on. Only trusted agents can post. You can read

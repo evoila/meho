@@ -31,7 +31,7 @@
         <h3 class="truncate font-mono text-lg font-semibold" id="vault-delete-title">
           Delete secret versions
         </h3>
-        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+        <p class="mt-0.5 text-sm text-muted">{{ op_id }}</p>
       </div>
       <form method="dialog">
         <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
@@ -89,7 +89,7 @@
 
         <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_1fr]">
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+            <span class="label-text mb-1 text-xs text-muted">Mount</span>
             <input
               type="text"
               name="mount"
@@ -101,7 +101,7 @@
             />
           </label>
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Path</span>
+            <span class="label-text mb-1 text-xs text-muted">Path</span>
             <input
               type="text"
               name="path"
@@ -116,8 +116,8 @@
         </div>
 
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            Versions <span class="opacity-50">(comma-separated version numbers to soft-delete, e.g. 3,4,5)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            Versions <span class="text-subtle">(comma-separated version numbers to soft-delete, e.g. 3,4,5)</span>
           </span>
           <input
             type="text"

@@ -7,7 +7,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Event Sources</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         External producers authorised to publish inbound events into your tenant.
       </p>
     </div>
@@ -53,7 +53,7 @@
                       <button type="submit" class="btn btn-ghost btn-xs text-error">Delete</button>
                     </form>
                   {% else %}
-                    <span class="opacity-50 text-xs">read-only</span>
+                    <span class="text-subtle text-xs">read-only</span>
                   {% endif %}
                 </td>
               </tr>
@@ -62,7 +62,7 @@
         </table>
       </div>
     {% else %}
-      <div class="rounded-box border border-base-300 bg-base-100 p-8 text-center opacity-70">
+      <div class="rounded-box border border-base-300 bg-base-100 p-8 text-center text-muted">
         No event sources registered in this tenant.
       </div>
     {% endif %}

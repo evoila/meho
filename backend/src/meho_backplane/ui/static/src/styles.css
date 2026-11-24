@@ -111,28 +111,106 @@
    DaisyUI. They stay here because the graph is a meho surface -- the
    other two apps have no topology -- so they are not shared tokens.
 
-   On :root, not a data-theme value: there is one theme now. The light
-   values are kept; the dark pair went with the theme that carried it.
+   The graph colours have a light and a dark value, like the brand: the
+   light values on :root, the dark ones for data-theme="evoila-dark" and,
+   inside the dark @media rule, for "evoila-system" (the console's
+   default, which follows the computer). topology-graph.js reads them
+   when it draws. The light values are the colours the script used to
+   hard-code, so the light graph looks as before. The dark ones are
+   lighter shades of the same colours, checked on the dark card
+   (#162037): node colours and lines at least 3:1, text at least 4.5:1.
    ════════════════════════════════════════════════════════════════════ */
 
+/*
+   Text tokens. Secondary text is a solid colour, never base-content
+   faded with opacity-* or /<n>: faded text drops to 2.5-3.5:1 on the
+   light theme (base-content at 60% is 2.65:1 on the page), and no
+   alpha both looks muted and passes. Each value reaches 4.5:1 on the
+   page (base-200), on cards (base-100) and on the blue sheen at the top
+   of .meho-card (about #DFECF7 light, #1A2542 dark).
+
+     text-muted   descriptions, nav, table cells     light 5.9:1 · dark 6.7:1
+     text-subtle  metadata, hashes, labels, hints     light 4.6:1 · dark 4.6:1
+
+   The semantic text colours: the brand's green and amber are fills, not
+   text (1.85:1 and 2.17:1 on white), and its red is 4.49:1 on the page.
+   In the light theme text-success / -warning / -error and the soft
+   badges use darker shades of the same hues. In the dark theme the
+   brand colours themselves pass, so these point back at them.
+   tests/test_ui_text_contrast.py checks every value here.
+*/
 :root {
+  --meho-text-muted: #545866;
+  --meho-text-subtle: #646879;
+  --meho-success-text: #0A775A;
+  --meho-warning-text: #8A610D;
+  --meho-error-text: #AE2121;
+
   --meho-glow:
     radial-gradient(ellipse 70% 38% at 50% -12%, oklch(89% 0.03 275 / 0.22), transparent 60%);
   --meho-grain-opacity: 0.012;
-  --meho-graph-target: #0d9468;
-  --meho-graph-vm: #0284c7;
-  --meho-graph-host: #b45309;
-  --meho-graph-cluster: #7c3aed;
-  --meho-graph-datastore: #a16207;
-  --meho-graph-network: #0e7490;
-  --meho-graph-node-fallback: #64748b;
-  --meho-graph-node-border: #cbd5e1;
-  --meho-graph-label: #334155;
+  --meho-graph-target: #0ea5e9;
+  --meho-graph-vm: #22c55e;
+  --meho-graph-host: #f97316;
+  --meho-graph-cluster: #a855f7;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #14b8a6;
+  --meho-graph-node-fallback: #6366f1;
+  --meho-graph-node-border: #1f2937;
+  --meho-graph-label: #1f2937;
   --meho-graph-edge: #94a3b8;
-  --meho-graph-edge-label: #64748b;
+  --meho-graph-edge-label: #475569;
   --meho-graph-label-bg: #f8fafc;
-  --meho-graph-selected: #4f46e5;
-  --meho-graph-highlight: #4f46e5;
+  --meho-graph-selected: #dc2626;
+  --meho-graph-highlight: #dc2626;
+}
+
+[data-theme="evoila-dark"] {
+  --meho-text-muted: #AEB6C6;
+  --meho-text-subtle: #8796B5;
+  --meho-success-text: var(--color-success);
+  --meho-warning-text: var(--color-warning);
+  --meho-error-text: var(--color-error);
+
+  --meho-graph-target: #38bdf8;
+  --meho-graph-vm: #4ade80;
+  --meho-graph-host: #fb923c;
+  --meho-graph-cluster: #c084fc;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #2dd4bf;
+  --meho-graph-node-fallback: #818cf8;
+  --meho-graph-node-border: #0e1424;
+  --meho-graph-label: #c8cfdd;
+  --meho-graph-edge: #6b7da8;
+  --meho-graph-edge-label: #c8cfdd;
+  --meho-graph-label-bg: #162037;
+  --meho-graph-selected: #f46e6e;
+  --meho-graph-highlight: #f46e6e;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="evoila-system"] {
+    --meho-text-muted: #AEB6C6;
+    --meho-text-subtle: #8796B5;
+    --meho-success-text: var(--color-success);
+    --meho-warning-text: var(--color-warning);
+    --meho-error-text: var(--color-error);
+
+    --meho-graph-target: #38bdf8;
+    --meho-graph-vm: #4ade80;
+    --meho-graph-host: #fb923c;
+    --meho-graph-cluster: #c084fc;
+    --meho-graph-datastore: #facc15;
+    --meho-graph-network: #2dd4bf;
+    --meho-graph-node-fallback: #818cf8;
+    --meho-graph-node-border: #0e1424;
+    --meho-graph-label: #c8cfdd;
+    --meho-graph-edge: #6b7da8;
+    --meho-graph-edge-label: #c8cfdd;
+    --meho-graph-label-bg: #162037;
+    --meho-graph-selected: #f46e6e;
+    --meho-graph-highlight: #f46e6e;
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -163,6 +241,77 @@ body::after {
 /* ════════════════════════════════════════════════════════════════════
    Chrome + component voice
    ════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Headings in the brand's headline colour (navy on light, near-white on
+ * dark), one step above body text, so a title and the description under
+ * it differ in colour as well as weight. In the base layer, so a
+ * heading's own text-* utility (text-error…) still wins. Inside an
+ * alert or a coloured fill a heading keeps inheriting that container's
+ * *-content colour, as before.
+ */
+@layer base {
+  h1, h2, h3, h4 {
+    /* The offline page does not load the brand tokens; fall back to body text. */
+    color: var(--evoila-headline, var(--color-base-content));
+  }
+
+  :is(.alert, .badge, .btn, [class~="bg-primary"], [class~="bg-secondary"],
+      [class~="bg-accent"], [class~="bg-neutral"], [class~="bg-info"],
+      [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"])
+    :is(h1, h2, h3, h4) {
+    color: inherit;
+  }
+}
+
+/* The two secondary text levels; values and ratios above :root. */
+@utility text-muted {
+  color: var(--meho-text-muted);
+}
+
+@utility text-subtle {
+  color: var(--meho-text-subtle);
+}
+
+/*
+ * Readable semantic text. Unlayered, so it beats the layered utilities
+ * and DaisyUI's badge-soft, which colour text with the fill colour.
+ * Solid badges (badge-success…) keep the fill with *-content text on it.
+ */
+.text-success,
+.badge-soft.badge-success {
+  color: var(--meho-success-text);
+}
+
+.text-warning,
+.badge-soft.badge-warning {
+  color: var(--meho-warning-text);
+}
+
+.text-error,
+.badge-soft.badge-error {
+  color: var(--meho-error-text);
+}
+
+/*
+ * On a solid coloured surface -- a solid alert, a solid badge, a button,
+ * a bg-<colour> fill -- the readable text colour is that surface's
+ * *-content value, which the surface sets. The text tokens above are for
+ * the page and cards; on red or amber they would be grey-on-red. So
+ * inside these surfaces they inherit. Soft and outline alerts sit on a
+ * light tint, where the tokens read, so they are left out; ~= matches
+ * whole class names, so tints like bg-error/10 are left out too.
+ */
+:is(.alert-info, .alert-success, .alert-warning, .alert-error):not(.alert-soft, .alert-outline, .alert-dash),
+:is(.badge-primary, .badge-secondary, .badge-accent, .badge-neutral, .badge-info, .badge-success,
+    .badge-warning, .badge-error):not(.badge-soft, .badge-outline, .badge-ghost, .badge-dash),
+.btn:not(.btn-ghost, .btn-link, .btn-outline, .btn-soft, .btn-dash),
+:is([class~="bg-primary"], [class~="bg-secondary"], [class~="bg-accent"], [class~="bg-neutral"],
+    [class~="bg-info"], [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"]) {
+  & :is(.text-muted, .text-subtle, .text-success, .text-warning, .text-error) {
+    color: inherit;
+  }
+}
 
 /*
  * badge-ghost + badge-outline inside a coloured alert (#2460).
@@ -311,7 +460,7 @@ a.meho-card:hover,
   font-weight: 500;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+  color: var(--meho-text-subtle);
 }
 
 /* Navbar glass: translucent over the glow, hairline bottom border. */
@@ -332,7 +481,7 @@ a.meho-card:hover,
   border-radius: 0.5rem;
   gap: 0.625rem;
   font-weight: 500;
-  color: color-mix(in oklch, var(--color-base-content) 75%, transparent);
+  color: var(--meho-text-muted);
   transition: color 150ms ease, background-color 150ms ease;
 }
 

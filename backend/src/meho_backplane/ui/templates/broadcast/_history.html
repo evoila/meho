@@ -38,7 +38,7 @@
 >
   {# ---------- Status bar -- window + count ---------- #}
   <div
-    class="flex flex-wrap items-center justify-between gap-2 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
+    class="flex flex-wrap items-center justify-between gap-2 border-b border-base-300 px-3 py-1.5 text-xs text-muted"
   >
     <span>Last {{ retention_hours }}h of agent announcements</span>
     <span aria-live="polite" x-text="visibleEvents.length + ' / {{ in_dom_row_cap }} rows'"></span>
@@ -46,7 +46,7 @@
 
   {# ---------- Column header row -- mirrors _event_row.html grid. ---------- #}
   <div
-    class="hidden grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60 sm:grid"
+    class="hidden grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-subtle sm:grid"
   >
     <span class="col-span-2">Time</span>
     <span class="col-span-2">Agent</span>
@@ -60,7 +60,7 @@
      No announcements in the retention window. -#}
   <div
     x-show="visibleEvents.length === 0"
-    class="px-3 py-10 text-center text-sm opacity-70"
+    class="px-3 py-10 text-center text-sm text-muted"
     id="broadcast-history-empty-state"
   >
     No agent announcements in the last {{ retention_hours }}h. Agents

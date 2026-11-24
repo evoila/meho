@@ -29,7 +29,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Operations{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Pick a connector, browse its operation groups, and search for a
         runnable operation across the catalog.
       </p>
@@ -50,7 +50,7 @@
     aria-label="Find an operation"
   >
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Connector</span>
+      <span class="label-text mb-1 text-xs text-muted">Connector</span>
       <select
         name="connector_id"
         class="select select-bordered select-sm w-full font-mono"
@@ -72,9 +72,9 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Search operations</span>
+      <span class="label-text mb-1 text-xs text-muted">Search operations</span>
       <div class="relative">
-        <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center opacity-50">
+        <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center text-subtle">
           {{ icon("search", class="size-4") }}
         </span>
         <input

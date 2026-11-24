@@ -40,7 +40,7 @@
       </button>
     </div>
 
-    <p class="mt-1 text-xs opacity-60">
+    <p class="mt-1 text-xs text-subtle">
       User <code class="font-mono" data-user-uuid>{{ user_uuid }}</code>
     </p>
 
@@ -73,7 +73,7 @@
       </div>
     {% else %}
       <div class="mt-3" data-keycloak-current-roles>
-        <span class="text-xs opacity-60">Currently assigned realm roles:</span>
+        <span class="text-xs text-subtle">Currently assigned realm roles:</span>
         {% if current_roles %}
           <div class="mt-1 flex flex-wrap gap-1">
             {% for role in current_roles %}
@@ -81,7 +81,7 @@
             {% endfor %}
           </div>
         {% else %}
-          <span class="text-xs opacity-50">none</span>
+          <span class="text-xs text-subtle">none</span>
         {% endif %}
       </div>
     {% endif %}
@@ -98,7 +98,7 @@
       <input type="hidden" name="target" value="{{ target }}" />
 
       <div class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Realm role names to grant</span>
+        <span class="label-text mb-1 text-xs text-muted">Realm role names to grant</span>
         <template x-for="(role, idx) in roles" :key="idx">
           <div class="mb-1 flex gap-1">
             <input

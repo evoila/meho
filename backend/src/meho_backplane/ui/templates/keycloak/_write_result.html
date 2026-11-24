@@ -67,7 +67,7 @@
         <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-write-approval-note>{{ extras.get("approval_note") }}</p>
       {%- endif %}
       {% if approval_id %}
-        <p class="mt-1 text-xs opacity-70">
+        <p class="mt-1 text-xs text-muted">
           Request id <code data-approval-request-id>{{ approval_id }}</code>
         </p>
         <a
@@ -110,19 +110,19 @@
         <dl class="mt-1 space-y-1 text-xs">
           {% if result.get("name") %}
             <div class="flex gap-2">
-              <dt class="opacity-60">Name</dt>
+              <dt class="text-subtle">Name</dt>
               <dd class="font-mono" data-write-name>{{ result.get("name") }}</dd>
             </div>
           {% endif %}
           {% if result.get("mapper_name") %}
             <div class="flex gap-2">
-              <dt class="opacity-60">Mapper</dt>
+              <dt class="text-subtle">Mapper</dt>
               <dd class="font-mono" data-write-mapper-name>{{ result.get("mapper_name") }}</dd>
             </div>
           {% endif %}
           {% if result.get("conflict") %}
             <div class="flex gap-2">
-              <dt class="opacity-60">Status</dt>
+              <dt class="text-subtle">Status</dt>
               <dd data-write-conflict>already existed (idempotent)</dd>
             </div>
           {% endif %}

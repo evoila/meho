@@ -71,7 +71,7 @@
       </form>
     </div>
 
-    <p class="mt-1 text-xs opacity-70">
+    <p class="mt-1 text-xs text-muted">
       Parse a vendor OpenAPI spec into the connector registry. Pick a
       catalog entry or supply an explicit product / version / impl_id with
       one or more <span class="font-mono">https://</span> spec URLs. A
@@ -142,7 +142,7 @@
               {% endfor %}
             </select>
             {% if catalog_entries | selectattr("ships_local") | list %}
-              <span class="text-xs opacity-70" data-ships-local-note>
+              <span class="text-xs text-muted" data-ships-local-note>
                 Entries marked &ldquo;ships local spec/profile&rdquo; bundle a
                 MEHO-authored spec/profile &mdash; the catalog ingest needs no
                 spec upload.
@@ -254,7 +254,7 @@
           <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant, platform admins only</option>
           <option value="tenant">This tenant only</option>
         </select>
-        <span class="text-xs opacity-70">
+        <span class="text-xs text-muted">
           Global matches the CLI / REST default (omitting
           <span class="font-mono">tenant_id</span>) and needs
           platform_admin, because every tenant shares those rows;

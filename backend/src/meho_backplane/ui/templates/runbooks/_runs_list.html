@@ -53,10 +53,10 @@
             <tr>
               <td class="font-mono">
                 <a href="/ui/runbooks/runs/{{ run.run_id }}" class="link link-primary">
-                  {{ run.template_slug }}<span class="opacity-70">@v{{ run.template_version }}</span>
+                  {{ run.template_slug }}<span class="text-muted">@v{{ run.template_version }}</span>
                 </a>
               </td>
-              <td class="hidden md:table-cell opacity-70">{{ run.target }}</td>
+              <td class="hidden md:table-cell text-muted">{{ run.target }}</td>
               <td>
                 {#- State badge. DaisyUI semantic colour per run state;
                     ``aria-label`` carries the same signal so colour is never
@@ -76,21 +76,21 @@
                 {% endif %}
               </td>
               {% if is_admin %}
-                <td class="hidden sm:table-cell font-mono text-xs opacity-70">
+                <td class="hidden sm:table-cell font-mono text-xs text-muted">
                   {{ run.assigned_to }}
                 </td>
               {% endif %}
-              <td class="hidden lg:table-cell opacity-70">
+              <td class="hidden lg:table-cell text-muted">
                 {% if run.position %}
                   step {{ run.position.n }} of {{ run.position.total }}
                 {% else %}
                   &mdash;
                 {% endif %}
               </td>
-              <td class="hidden xl:table-cell font-mono text-xs opacity-70">
+              <td class="hidden xl:table-cell font-mono text-xs text-muted">
                 {{ run.work_ref or "—" }}
               </td>
-              <td class="hidden lg:table-cell text-xs opacity-70">
+              <td class="hidden lg:table-cell text-xs text-muted">
                 {{ run.started_at.strftime("%Y-%m-%d %H:%M") }}
               </td>
               <td>
@@ -114,14 +114,14 @@
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body py-10 text-center">
         {% if status_filter or assignee_filter %}
-          <p class="text-lg opacity-60">No runs match the current filters</p>
-          <p class="text-sm opacity-40">
+          <p class="text-lg text-subtle">No runs match the current filters</p>
+          <p class="text-sm text-subtle">
             Adjust the filters, or
             <a href="/ui/runbooks/runs" class="link">clear them</a>.
           </p>
         {% else %}
-          <p class="text-lg opacity-60">No runbook runs yet</p>
-          <p class="text-sm opacity-40">
+          <p class="text-lg text-subtle">No runbook runs yet</p>
+          <p class="text-sm text-subtle">
             Start a run from a published template with the
             <strong>+ Start run</strong> button above.
           </p>

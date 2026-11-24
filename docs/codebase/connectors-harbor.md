@@ -163,7 +163,7 @@ connector passes the stored username through unchanged in the Basic auth header.
    handler (the operator-context Vault read).
 2. `_load_credentials(target, operator)` acquires the per-instance
    `asyncio.Lock` and checks the `_creds_cache` dict. The key is
-   `(tenant_id, id)` from `target_cache_key`. A cached entry is used only
+   `(tenant_id, id, secret_ref)` from `target_secret_cache_key`. A cached entry is used only
    when this caller's own Vault read of the target's secret already passed
    once in this process (`SecretReaders`). Otherwise it calls the loader
    with `(target, operator)`. The synthesised system operator always runs

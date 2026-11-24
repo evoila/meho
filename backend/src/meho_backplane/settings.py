@@ -743,6 +743,15 @@ class Settings(BaseModel):
         was working on. The records exist only when
         ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_secret_read_as:
+        Show the field ``secret_read_as`` in every audit read (REST, CLI, MCP
+        and the web console): the login under which the secret the call used
+        was read from the store, in this call or in an earlier call of the
+        same caller (a login MEHO kept in memory names who read it, or
+        ``kept-login:reader-unknown``); empty when the call used no secret.
+        MEHO writes the column on every install. Default
+        ``False``: no audit read shows the field. Env var
+        ``AUDIT_SECRET_READ_AS``.
     audit_client_identity:
         Write a ``client`` block into every audit row: the login client
         (``azp``), the channel (``web`` or ``token``), the principal kind
@@ -2065,6 +2074,11 @@ class Settings(BaseModel):
     operation_search_store_query_text: bool = False
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
+    # Off by default; with it off no audit read shows ``secret_read_as``.
+    # Measured in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch
+    # (audit answers name whose login read the secret) before it is on by
+    # default".
+    audit_secret_read_as: bool = False
     # Off by default; with it off auth-config lists no per-tool login client.
     mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
@@ -3510,6 +3524,9 @@ def get_settings() -> Settings:
         ),
         audit_client_identity=parse_bool_env(
             os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
+        ),
+        audit_secret_read_as=parse_bool_env(
+            os.environ.get("AUDIT_SECRET_READ_AS", "false"),
         ),
         mcp_client_per_tool_kind=parse_bool_env(
             os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),

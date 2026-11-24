@@ -92,7 +92,10 @@ import structlog
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
@@ -336,7 +339,8 @@ class KeycloakConnector(HttpConnector):
     disturbing 26.x targets.
 
     Per-target admin token cached in :attr:`_admin_tokens` keyed on the
-    tenant-unique ``(tenant_id, target.id)`` tuple (#1642/#1672) with a
+    tenant-unique ``(tenant_id, target.id)`` tuple and the secret reference
+    (#1642/#1672) with a
     TTL-driven refresh; per-target admin credentials are loaded fresh on
     each token mint (the secret read is cheap relative to the token
     round-trip and avoids holding the credential in memory between
@@ -360,10 +364,12 @@ class KeycloakConnector(HttpConnector):
         credentials_loader: KeycloakAdminCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple
-        # (``target_cache_key``) so two same-named targets in different
-        # tenants never share a cached admin token (#1642/#1672).
-        self._admin_tokens: dict[tuple[str, str], _CachedToken] = {}
+        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple plus the
+        # secret reference (``target_secret_cache_key``) so two same-named
+        # targets in different tenants never share a cached admin token
+        # (#1642/#1672), and a call uses only a token made from the secret its
+        # caller read.
+        self._admin_tokens: dict[tuple[str, str, str], _CachedToken] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
@@ -427,7 +433,7 @@ class KeycloakConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read the Keycloak admin credential)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._token_lock:
             now = time.monotonic()
             cached = self._admin_tokens.get(cache_key)
@@ -1594,7 +1600,8 @@ class KeycloakConnector(HttpConnector):
         with it. Called after a failed login and after a target change.
         """
         async with self._token_lock:
-            self._admin_tokens.pop(target_cache_key(target), None)
+            for key in target_entry_keys(self._admin_tokens, target):
+                del self._admin_tokens[key]
             self._readers.forget(target)
 
     async def aclose(self) -> None:

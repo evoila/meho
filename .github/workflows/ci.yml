@@ -1693,9 +1693,12 @@ jobs:
           script=scripts/ci/approval_table_judge.py
           table=backend/tests/snapshots/approval_table.json
           approved=backend/tests/snapshots/approval_table_approved.yaml
-          # ls-tree fails when git cannot read the tree; an empty answer means no such file.
-          if [ -z "$(git ls-tree --name-only "${base}" -- "${script}")" ] \
-            || [ -z "$(git ls-tree --name-only "${base}" -- "${table}")" ]; then
+          # ls-tree fails when git cannot read the tree; an empty answer means
+          # no such file. Each answer is its own assignment, so set -e stops
+          # the job when git fails.
+          listed_script="$(git ls-tree --name-only "${base}" -- "${script}")"
+          listed_table="$(git ls-tree --name-only "${base}" -- "${table}")"
+          if [ -z "${listed_script}" ] || [ -z "${listed_table}" ]; then
             echo "no approval table on the base branch yet"
             exit 0
           fi
@@ -1705,7 +1708,9 @@ jobs:
           git show "${head}:${table}" > "${dir}/head.json"
           # The committed approved file of a commit; no file counts as empty.
           committed_approved() {
-            if [ -n "$(git ls-tree --name-only "$1" -- "${approved}")" ]; then
+            local found
+            found="$(git ls-tree --name-only "$1" -- "${approved}")"
+            if [ -n "${found}" ]; then
               git show "$1:${approved}" > "$2"
             else
               printf 'approved: []\n' > "$2"

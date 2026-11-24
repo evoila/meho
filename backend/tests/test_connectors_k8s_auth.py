@@ -45,7 +45,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors._shared import credential_backend as cb
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -765,8 +765,8 @@ async def test_api_client_same_secret_ref_different_tenants_get_distinct_clients
     assert c_a is not c_b
     assert factory.call_count == 2
     assert set(connector._api_clients.keys()) == {
-        target_cache_key(tenant_a),
-        target_cache_key(tenant_b),
+        target_secret_cache_key(tenant_a),
+        target_secret_cache_key(tenant_b),
     }
 
 
@@ -830,8 +830,8 @@ async def test_ws_client_same_secret_ref_different_tenants_get_distinct_clients(
     assert c_a is not c_b
     assert len(built) == 2
     assert set(connector._ws_api_clients.keys()) == {
-        target_cache_key(tenant_a),
-        target_cache_key(tenant_b),
+        target_secret_cache_key(tenant_a),
+        target_secret_cache_key(tenant_b),
     }
 
 

@@ -1548,6 +1548,129 @@ jobs:
           uv run pytest -n 3 --dist loadscope \
             --timeout=180 --timeout-method=signal "${FILES[@]}"
 
+  redaction-compare:
+    name: Secret hiding compared with the base branch
+    # Builds, for the base branch and for this pull request, the list of
+    # hidden and shown parts of each fixed input on each secret-hiding step,
+    # each side from its own code and input set, and judges the two lists.
+    # It fails when the base hides a part that the pull request shows, when a
+    # plain part that the base shows is now hidden, when an answer changed in
+    # another way, or when an input of the base is gone, unless
+    # backend/tests/snapshots/redaction_compare_approved.yaml lists the
+    # difference with a reason. A secret part that the pull request newly
+    # hides passes. The checked-in file backend/tests/snapshots/
+    # redaction_compare.jsonl holds only one checksum per input; the lists
+    # are built here, stay under RUNNER_TEMP, and are never uploaded.
+    # See docs/codebase/redaction.md, "Compare with main".
+    #
+    # The rule script comes from the base commit (`git show`), so a pull
+    # request cannot weaken the check that judges it. The judge runs with
+    # `python3 -I` and uses only the standard library. The rule script, the
+    # base's approved file and the pull request's committed approved file
+    # are read from git before any code of the pull request runs.
+    #
+    # The pull request's code runs in a container with no mounted folder:
+    # its files go in on stdin and its records come out on stdout. So it can
+    # write only its own records, and never the rule script, the base
+    # records or the approved files that the judge reads.
+    #
+    # The job log is public, so the judge runs with --summary-only: on
+    # purpose the log shows no input, no step, no part and no number, only
+    # one closing line (and any stale approved entry, which is committed
+    # already). To see the differences, run the steps locally (see
+    # docs/codebase/redaction.md, "Compare with main").
+    #
+    # It passes with "no compare on the base branch yet" only when a git
+    # lookup of the base tree succeeds and finds no rule script. Otherwise
+    # any failed step fails the job.
+    #
+    # Non-required check. Only when the change touches backend/.
+    needs: changes
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.backend_python == 'true'
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # One environment sync on the runner (with the uv cache), one image pull
+    # and one sync in the container (no cache), and two record builds
+    # (seconds each); the cap is a hang backstop.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        # On a pull request or a merge-queue run, HEAD is a merge commit.
+        # Its first parent (HEAD^1) is the base branch, so depth 2 is enough.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Build and judge the records of the base and of the pull request
+        shell: bash
+        env:
+          # The Python base image of backend/Dockerfile (same digest).
+          IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse --verify "HEAD^1^{commit}")"
+          head="$(git rev-parse --verify "HEAD^{commit}")"
+          script=scripts/ci/redaction_compare.py
+          approved=backend/tests/snapshots/redaction_compare_approved.yaml
+          # ls-tree fails when git cannot read the tree; an empty answer means no such file.
+          listed="$(git ls-tree --name-only "${base}" -- "${script}")"
+          if [ -z "${listed}" ]; then
+            echo "no compare on the base branch yet"
+            exit 0
+          fi
+          dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
+          git show "${base}:${script}" > "${dir}/redaction_compare.py"
+          # The committed approved file of a commit; no file counts as empty.
+          committed_approved() {
+            local found
+            found="$(git ls-tree --name-only "$1" -- "${approved}")"
+            if [ -n "${found}" ]; then
+              git show "$1:${approved}" > "$2"
+            else
+              printf 'approved: []\n' > "$2"
+            fi
+          }
+          # The base's approved entries are already merged: they approve
+          # nothing and are never stale.
+          committed_approved "${base}" "${dir}/base-approved.yaml"
+          committed_approved "${head}" "${dir}/head-approved.yaml"
+          # The base: its own code and input set, on the runner.
+          git worktree add --detach "${dir}/base" "${base}"
+          (cd "${dir}/base/backend" && uv sync --frozen \
+            && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
+          # The pull request: its own code and input set, with the base's
+          # rule script, in a container with no mounts and no runner files.
+          stage="${dir}/head-input"
+          mkdir "${stage}"
+          git archive "${head}" backend | tar -x -C "${stage}"
+          cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
+          tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+            work="$(mktemp -d)"
+            tar -x -C "${work}"
+            cd "${work}/backend"
+            "${work}/uv" sync --frozen >&2
+            "${work}/uv" run python "${work}/redaction_compare.py" --records "${work}/head.jsonl" >&2
+            cat "${work}/head.jsonl"
+          ' > "${dir}/head.jsonl"
+          python3 -I "${dir}/redaction_compare.py" \
+            --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
+            --approved "${dir}/head-approved.yaml" \
+            --base-approved "${dir}/base-approved.yaml" \
+            --summary-only
+
   connector-package-template:
     name: Connector package template
     # #5564. Tests the made-up sample connector package in

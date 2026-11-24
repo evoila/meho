@@ -549,7 +549,8 @@ async def test_with_the_switch_off_nothing_links_and_answers_are_unchanged(
 
     show = client.get(f"/api/v1/audit/show/{row_id}", headers=_headers())
     assert show.status_code == 200, show.text
-    assert set(show.json()) == set(AuditEntry.model_fields)
+    # ``secret_read_as`` has its own switch, off here.
+    assert set(show.json()) == set(AuditEntry.model_fields) - {"secret_read_as"}
     detail = client.get(f"/api/v1/sessions/{_SID}", headers=_headers()).json()
     assert "mcp_sessions" not in detail
     async with get_sessionmaker()() as session:

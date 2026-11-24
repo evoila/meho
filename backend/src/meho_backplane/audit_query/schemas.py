@@ -58,9 +58,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from meho_backplane.db.models import AuditEventClass
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "AuditEntry",
@@ -215,7 +216,22 @@ class AuditEntry(BaseModel):
     # the real ``audit_log.actor_sub`` column, and the agent's name from it.
     actor_sub: str | None = None
     actor_name: str | None = None
+    # The id of the login that a secret store accepted for the call (``meho``
+    # when the store saw MEHO's own identity), from ``audit_log.secret_read_as``.
+    # ``None`` when the call read no secret. An answer carries the field only
+    # while ``AUDIT_SECRET_READ_AS`` is on (see ``_hide_secret_read_as``).
+    secret_read_as: str | None = None
     broadcast_event_id: uuid.UUID | None
+
+    @model_serializer(mode="wrap")
+    def _hide_secret_read_as(self, handler):  # type: ignore[no-untyped-def]
+        """Leave ``secret_read_as`` out of an answer while the switch is off."""
+        # No annotations on purpose: a return type would replace the answer's
+        # schema in the API file with a plain object.
+        data = handler(self)
+        if not get_settings().audit_secret_read_as:
+            data.pop("secret_read_as", None)
+        return data
 
 
 class ReplayNode(AuditEntry):

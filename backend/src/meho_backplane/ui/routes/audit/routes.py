@@ -118,6 +118,7 @@ from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
 from meho_backplane.operations._audit import payload_session_from_client
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
@@ -527,6 +528,8 @@ async def _build_drawer_context(
         "references": references,
         # The login client and channel of the row (AUDIT_CLIENT_IDENTITY).
         "via_label": via_label(row.payload),
+        # The login the secret store accepted (AUDIT_SECRET_READ_AS).
+        "secret_read_as": row.secret_read_as if get_settings().audit_secret_read_as else None,
         "stored_session": await stored_session_context(db_session, row, may_read=may_read_sessions),
     }
 

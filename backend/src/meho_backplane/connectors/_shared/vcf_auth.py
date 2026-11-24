@@ -72,7 +72,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
@@ -267,9 +270,11 @@ class CredentialsCache:
     ``KeyError`` deep inside the consuming code).
 
     The cache is keyed on the tenant-unique ``(tenant_id, target.id)``
-    tuple (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`,
+    tuple and the secret reference
+    (:func:`~meho_backplane.connectors._shared.cache_key.target_secret_cache_key`,
     #1642) so two same-named targets in different tenants never share a
-    cached credential. A cached entry is handed to a caller only after
+    cached credential, and a call uses only the secret its caller read.
+    A cached entry is handed to a caller only after
     that caller's own Vault read of the target's secret passed once
     (:class:`~meho_backplane.connectors._shared.secret_readers.SecretReaders`).
     Production deploys with multiple connector instances
@@ -294,7 +299,7 @@ class CredentialsCache:
         """
         self._loader = loader
         self._product_label = product_label
-        self._cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._cache: dict[tuple[str, str, str], dict[str, str]] = {}
         self._readers = SecretReaders()
         self._lock = asyncio.Lock()
 
@@ -306,7 +311,8 @@ class CredentialsCache:
         under the operator's Identity entity via
         :func:`~meho_backplane.auth.vault.vault_client_for_operator`. The
         cache is keyed on the tenant-unique ``(tenant_id, target.id)``
-        tuple — a single per-target credential pair, because the
+        tuple and the secret reference — a single per-target credential
+        pair, because the
         ``shared_service_account`` auth model authenticates the connector
         with a Vault-sourced service account, not the operator's OIDC
         token. The pair is handed to a caller only after that caller's
@@ -346,7 +352,7 @@ class CredentialsCache:
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._lock:
             cached = self._cache.get(cache_key)
             if cached is not None and self._readers.has_read(target, operator):
@@ -381,7 +387,8 @@ class CredentialsCache:
         surfaced via a future admin endpoint).
         """
         async with self._lock:
-            self._cache.pop(target_cache_key(target), None)
+            for key in target_entry_keys(self._cache, target):
+                del self._cache[key]
             self._readers.forget(target)
 
     async def clear(self) -> None:
@@ -406,7 +413,7 @@ class CredentialsCache:
     @property
     def cached_targets(self) -> frozenset[tuple[str, str]]:
         """Frozen view of the cached ``(tenant_id, id)`` keys (read-only, for tests/audit)."""
-        return frozenset(self._cache)
+        return frozenset((tenant_id, target_id) for tenant_id, target_id, _ in self._cache)
 
     @property
     def readers(self) -> SecretReaders:

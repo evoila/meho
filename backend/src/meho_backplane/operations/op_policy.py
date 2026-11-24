@@ -17,8 +17,9 @@ The rules:
 * **Approval.** Approval is required when the classification says so or
   an override requires it. The one way to turn it off is an install-wide
   override with ``requires_approval=False``, set by a platform admin with a
-  reason and a fresh sign-in. Every edit that ends approval (also removing
-  an override) passes these checks. A destructive operation always waits
+  reason. The REST API and the CLI also need a fresh sign-in; the web
+  console accepts the admin's signed-in session. Every edit that ends
+  approval (also removing an override) passes these checks. A destructive operation always waits
   for approval. This edit also ends the per-call wait of an operation that a
   connector marked with ``declare_per_call_approval``: a ``caution``
   operation then runs at once for a person in the web console, a

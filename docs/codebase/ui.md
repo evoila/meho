@@ -2960,7 +2960,7 @@ Every list / detail / probe path filters on `session_ctx.tenant_id`:
 * List: `WHERE targets.tenant_id = :tenant_id` is the first clause in the substrate query.
 * Detail: `resolve_target` raises 404 on a cross-tenant name.
 * Probe: same `resolve_target` gate before the write.
-* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
+* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible. The query does not load `raw_payload`, the stored raw answer of each row (#6818); the card never shows it.
 * Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
 * Recent-ops fragment: resolves the target name in the session's tenant (`resolve_target`, 404 on a cross-tenant name) after the role gate, so the fragment never shows another tenant's rows.
 

@@ -22,6 +22,8 @@
   includes this same partial with no ``estimated_tokens`` in context, so
   the ``is defined`` guard renders the empty placeholder first.
 -#}
+
+{% from "_components.html" import badge %}
 <div
   id="conventions-token-preview"
   class="space-y-2"
@@ -41,13 +43,13 @@
       </span>
       {% if counts_against_budget %}
         {% if over_budget %}
-          <span class="badge badge-error badge-sm ml-1">over budget</span>
+          {{ badge("over budget", variant="error", class="ml-1") }}
           <p class="mt-1 text-xs">
             This operational rule exceeds the {{ max_tokens }}-token preamble budget and
             will be rejected on save. Trim the body, or set kind to workflow / reference.
           </p>
         {% else %}
-          <span class="badge badge-success badge-sm ml-1">within budget</span>
+          {{ badge("within budget", variant="success", class="ml-1") }}
         {% endif %}
       {% else %}
         <span class="badge badge-ghost badge-sm ml-1">{{ kind }} &mdash; exempt</span>

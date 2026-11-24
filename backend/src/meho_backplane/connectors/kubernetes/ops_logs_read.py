@@ -137,8 +137,7 @@ _LOGS_READ_OP = KubernetesOp(
         "Reads log lines of one container, with since, until, lines and a text filter. "
         "Returns {rows: [{time, line, line_truncated}], total, truncated, covered, "
         "continuation}. With since, rows carry times and continuation pages forward. "
-        "Read-only. Secrets in lines are hidden. The same shared log read parameters as on "
-        "every connector; k8s.logs stays."
+        "Read-only. Secrets in lines are hidden. k8s.logs stays."
     ),
     parameter_schema={
         **log_read_parameter_schema(

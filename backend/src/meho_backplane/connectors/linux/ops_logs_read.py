@@ -151,7 +151,7 @@ _LOGS_READ_OP = LinuxOp(
     summary="Read log lines of a host: an allow-listed log file or the systemd journal.",
     description=(
         "Reads log lines from an allow-listed file, a systemd unit or the whole journal, with "
-        "since, until, lines and a text filter. Returns {rows: [{time, line, line_truncated}], "
+        "since, until, lines and a filter. Returns {rows: [{time, line, line_truncated}], "
         "total, truncated, covered, continuation}. A file has no times and refuses since and "
         "until. Read-only. Secrets in lines are hidden."
     ),

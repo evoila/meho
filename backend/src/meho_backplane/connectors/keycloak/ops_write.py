@@ -143,6 +143,7 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
 from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
 from meho_backplane.connectors.keycloak.realm_params import (
     REALM_PARAM_OPS,
+    check_answered_realm,
     new_realm_problem,
     realm_param,
 )
@@ -353,7 +354,8 @@ async def keycloak_realm_update(
     stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
     value-free confirmation plus the read-back check. Both realm names must
     be plain names (:mod:`.realm_params`) and are percent-encoded as one
-    path segment.
+    path segment. A read that answers with another realm than the managed
+    realm is refused before anything is sent (:func:`.check_answered_realm`).
 
     The realm's SMTP password comes only from ``smtp_password_secret_ref``
     (see :mod:`.ops_write_realm_smtp`): it is read here and set as
@@ -373,6 +375,7 @@ async def keycloak_realm_update(
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
     current = await self._get_admin_json(target, path, operator=operator)
     refuse_login_realm_write(realm_name, current, representation)
+    check_answered_realm("keycloak.realm.update", current, target)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX

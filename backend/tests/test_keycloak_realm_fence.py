@@ -50,10 +50,12 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import list_operation_groups
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._result_store_helpers import MemoryResultStore
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "keycloak-fence"
@@ -303,6 +305,48 @@ async def test_update_on_the_managed_realm_works_and_the_answer_names_it(
     assert result.result[REALM_FIELD] == _REALM
 
 
+#: Answers a Keycloak database can give for the managed realm: another case,
+#: an accent, no name, not an object.
+_OTHER_ANSWERS: list[Any] = [
+    {"id": "r", "realm": "Example-Realm", "displayName": "other realm data"},
+    {"id": "r", "realm": "exämple-realm", "displayName": "other realm data"},
+    {"id": "r", "displayName": "other realm data"},
+    ["other realm data"],
+]
+_OTHER_IDS = ["case", "accent", "no-name", "not-an-object"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", _OTHER_ANSWERS, ids=_OTHER_IDS)
+async def test_a_realm_read_that_answers_with_another_realm_returns_no_data(
+    operator: Operator, answer: Any
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=answer)
+        result = await _dispatch(operator, "keycloak.realm.get", {}, approved=False)
+
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "ValueError"
+    assert "other realm data" not in repr(result.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", _OTHER_ANSWERS, ids=_OTHER_IDS)
+async def test_a_realm_update_that_reads_another_realm_sends_no_write(
+    operator: Operator, answer: Any
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=answer)
+        put_route = mock.put(url__regex=r".*").respond(204)
+        result = await _dispatch(operator, _UPDATE, _fenced_params(_UPDATE, _REALM), approved=True)
+
+    # A missing name or a non-object is refused by the login realm guard first.
+    assert result.status == "error"
+    assert not put_route.called
+
+
 def _sent_body(route: respx.Route) -> Any:
     return json.loads(route.calls.last.request.content)
 
@@ -461,6 +505,48 @@ async def test_with_the_switch_off_each_read_answer_is_as_before(
     without_field = await _read(operator, op_id)
     assert REALM_FIELD not in without_field
     assert {**without_field, REALM_FIELD: _REALM} == with_field
+
+
+#: A valid realm name whose field is longer than the size limit (512 bytes) of
+#: a plain value in the summary of a reduced answer: each letter is six bytes
+#: in the escaped JSON text.
+_LONG_REALM = "é" * 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_reduced_list_keeps_the_realm_in_the_summary_only_with_the_switch_on(
+    operator: Operator, switch_on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production reducer, not the pass-through one: a long list becomes a summary."""
+    if not switch_on:
+        monkeypatch.delenv("KEYCLOAK_ANSWER_REALM")
+        get_settings.cache_clear()
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(TargetORM).where(TargetORM.name == _TARGET_NAME))
+        ).scalar_one()
+        row.extras = {"managed_realm": _LONG_REALM}
+        await session.commit()
+    users = [{"id": f"u-{i}", "username": f"user-{i}", "enabled": True} for i in range(80)]
+    set_default_reducer(JsonFluxReducer(store=MemoryResultStore()))
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            _mount_token(mock)
+            users_route = mock.get(url__regex=r"/admin/realms/[^/]+/users").respond(200, json=users)
+            result = await _dispatch(operator, "keycloak.user.list", {}, approved=False)
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", result.error
+    assert users_route.called
+    assert result.handle is not None
+    assert result.result["row_count"] == 80
+    if switch_on:
+        assert result.result[REALM_FIELD] == _LONG_REALM
+    else:
+        assert REALM_FIELD not in result.result
+        assert "omitted_scalar_count" not in result.result
 
 
 #: Agent-visible texts with the switch off, as release v0.48.0 has them. Each

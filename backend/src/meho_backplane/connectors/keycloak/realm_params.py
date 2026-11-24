@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 __all__ = [
     "FENCED_OPS",
     "REALM_PARAM_OPS",
+    "check_answered_realm",
     "check_realm_params",
     "is_plain_realm_name",
     "new_realm_problem",
@@ -147,6 +148,25 @@ def realm_param(
     if problem is not None:
         raise ValueError(problem)
     return name
+
+
+def check_answered_realm(op_id: str, answer: Any, target: KeycloakTargetLike) -> None:
+    """Refuse a realm that Keycloak answers with another name than the managed realm.
+
+    A Keycloak database can match a realm name without letter case or
+    accents, so ``GET /admin/realms/{realm}`` can answer with another realm.
+    The answer's ``realm`` must be exactly the target's managed realm, with
+    the same letters, case and accents. Any other name, no name, or an
+    answer that is not an object raises :class:`ValueError`. The text names
+    the managed realm only. ``keycloak.realm.get`` and
+    ``keycloak.realm.update`` call it before they return or change the realm.
+    """
+    managed = resolve_realm_config(target).managed_realm
+    if not isinstance(answer, dict) or answer.get("realm") != managed:
+        raise ValueError(
+            f"{op_id}: Keycloak did not answer with the realm {managed!r}, so MEHO "
+            "returns and changes nothing. Check the managed realm of the target."
+        )
 
 
 def is_plain_realm_name(name: str) -> bool:

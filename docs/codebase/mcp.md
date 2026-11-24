@@ -2281,10 +2281,14 @@ The read checks no agent grant.
   `GET /api/v1/approvals/{id}/result` does
   (`approval_queue.read_approval_result`).
 - A stored result that is not an operation result (for example one without
-  `status` or `op_id`, or with an `extras` that is not an object) gives `status: "denied"` with
-  `extras.error_code: "approval_result_unreadable"` and a sentence that
-  says to ask a person to look at the request in the console. It writes one
-  more `approval.status` row with that outcome. An unknown `status` text in
+  `status` or `op_id`, or with an `extras` that is not an object) gives
+  `status: "error"` with `extras.error_code: "approval_result_unreadable"`,
+  `extras.approval_request_id`, `extras.approval_status: "approved"`,
+  `extras.result_state: "uncertain"` and `extras.retry: false`. Its `error`
+  text says that the request was approved and the operation may have run,
+  that MEHO cannot read its stored result, that the call must not be sent
+  again, and to ask a person to look at the request in the console. It
+  writes one more `approval.status` row with that outcome. An unknown `status` text in
   an otherwise valid result is passed on as stored, as the REST read does.
 - The answer by state: waiting gives the same `awaiting_approval` answer as
   the first call, with its `audit_id` and, for a change of rights that no

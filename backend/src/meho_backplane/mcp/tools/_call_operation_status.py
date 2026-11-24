@@ -51,8 +51,11 @@ The answer by state:
   ``extras.approval_request_id`` added. ``result_state`` is ``executed``,
   ``failed`` or ``uncertain``: with ``uncertain`` MEHO does not know whether
   the change happened, and it never runs it again. A stored result that is
-  not an operation result gives ``denied`` with
-  ``extras.error_code="approval_result_unreadable"`` and one more audit row.
+  not an operation result gives ``status="error"`` with
+  ``extras.error_code="approval_result_unreadable"``,
+  ``extras.result_state="uncertain"`` and ``extras.retry=False``: the
+  operation may have run, so the call must not be sent again. The read
+  writes one more audit row.
   An ``ok`` answer over the response
   size limit is trimmed by ``bound_complete_response``: the status and the
   ``audit_id`` stay, and ``delivery`` says what was left out;
@@ -81,6 +84,7 @@ from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     ApprovalExpiredReason,
     ApprovalNotFoundError,
+    ApprovalResultState,
     ResultAccessForbiddenError,
     _write_audit_row,
     approval_expired_reason,
@@ -112,8 +116,9 @@ _WRONG_OPERATION: Final[str] = "request_wrong_operation"
 _RESULT_UNREADABLE: Final[str] = "approval_result_unreadable"
 
 _UNREADABLE_MESSAGE: Final[str] = (
-    "The stored result of this request cannot be read. Ask a person to look at "
-    "the request in the console."
+    "The request was approved and the operation may have run. MEHO cannot read "
+    "its stored result. Do not send this call again. Ask a person to look at the "
+    "request in the console."
 )
 
 #: The only inputs a status read may send.
@@ -182,6 +187,29 @@ def _denied(op_id: str, request_id: uuid.UUID, error_code: str, message: str) ->
             error=f"{error_code}: {message}",
             duration_ms=0.0,
             extras={"error_code": error_code, "approval_request_id": str(request_id)},
+        ).model_dump(mode="json")
+    )
+
+
+def _unreadable(op_id: str, request_id: uuid.UUID) -> dict[str, Any]:
+    """The answer for an approved request whose stored result cannot be read.
+
+    The operation may have run, so this is ``error`` with an ``uncertain``
+    result, not ``denied``: ``denied`` means that nothing ran.
+    """
+    return with_data_notice(
+        OperationResult(
+            status="error",
+            op_id=op_id,
+            error=f"{_RESULT_UNREADABLE}: {_UNREADABLE_MESSAGE}",
+            duration_ms=0.0,
+            extras={
+                "error_code": _RESULT_UNREADABLE,
+                "approval_request_id": str(request_id),
+                "approval_status": ApprovalRequestStatus.APPROVED.value,
+                "result_state": ApprovalResultState.UNCERTAIN.value,
+                "retry": False,
+            },
         ).model_dump(mode="json")
     )
 
@@ -393,4 +421,4 @@ async def read_own_request_over_mcp(
         return await _answer_for(row)
     except _UnreadableResultError:
         await _audit_refusal(operator, row, _RESULT_UNREADABLE, _UNREADABLE_STATUS_CODE)
-        return _denied(row.op_id, request_id, _RESULT_UNREADABLE, _UNREADABLE_MESSAGE)
+        return _unreadable(row.op_id, request_id)

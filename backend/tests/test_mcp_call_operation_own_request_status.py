@@ -831,9 +831,14 @@ async def test_a_stored_result_in_the_wrong_shape_gives_a_structured_answer(
     response = _call(client, request_id)
 
     answer = _answer(response)
-    assert "error" in answer
-    assert answer["status"] == "denied"
+    assert answer["status"] == "error"
     assert answer["extras"]["error_code"] == "approval_result_unreadable"
+    assert answer["extras"]["approval_request_id"] == str(request_id)
+    assert answer["extras"]["approval_status"] == "approved"
+    assert answer["extras"]["result_state"] == "uncertain"
+    assert answer["extras"]["retry"] is False
+    assert "may have run" in answer["error"]
+    assert "Do not send this call again" in answer["error"]
     assert "console" in answer["error"]
     row = await _the_one_new_status_row(status_before, "approval_result_unreadable")
     assert row.payload["approval_request_id"] == str(request_id)

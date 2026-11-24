@@ -2299,6 +2299,34 @@ async def _audit_returned_result(
     return raw.model_copy(update={"audit_id": receipt})
 
 
+#: The fields of an error result that MEHO sets itself; they keep their value.
+_MEHO_ERROR_FIELDS = frozenset({"error_code", "http_status"})
+
+
+def _hide_call_secrets_in_error(result: OperationResult) -> OperationResult:
+    """*result* with the secret values of the approved call that runs now hidden.
+
+    A connector can send a secret value of the call back in its error text
+    (an HTTP 422 that repeats the note it refused). The caller's answer, the
+    audit row and the stored approval result all take this copy. Outside an
+    approved run there are no such values and *result* is returned as is.
+    """
+    values = current_call_secret_values()
+    if not values:
+        return result
+    extras = {
+        key: value if key in _MEHO_ERROR_FIELDS else hide_call_secret_values(value, values)
+        for key, value in result.extras.items()
+    }
+    return result.model_copy(
+        update={
+            "error": hide_call_secret_values(result.error, values),
+            "extras": extras,
+            "result": hide_call_secret_values(result.result, values),
+        }
+    )
+
+
 async def _audit_error_and_return(
     result: OperationResult,
     *,
@@ -2355,6 +2383,7 @@ async def _audit_error_and_return(
     result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
+    result = _hide_call_secrets_in_error(result)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,

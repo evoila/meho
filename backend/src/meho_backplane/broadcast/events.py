@@ -1321,8 +1321,10 @@ def _scrub_secret_named_keys(
                 or is_snmp_community_key(node, name, in_snmp=in_snmp)
                 or (hide_pair_value and name == "value")
             )
+            # The value of a name/value pair takes the pair's own name.
+            word_name = str(node["name"]) if hide_pair_value and name == "value" else name
             hide_number = hide_numbers and (
-                not numbers_need_secret_word or name_ends_in_secret_word(name)
+                not numbers_need_secret_word or name_ends_in_secret_word(word_name)
             )
             if secret_named and _is_secret_value(value, hide_number):
                 scrubbed[name] = _REDACTED_PARAM

@@ -15,7 +15,15 @@ a person, against the migrated SQLite engine. Covered:
 * a step that takes a plain id, under a parent that takes a secret: the row
   keeps the parent only in the one-time store, and the approved parent runs;
 * without a valid key, a step gets the refusal a direct call gets;
-* a number of days under a password-like name stays as it is.
+* a number of days under a password-like name stays as it is, also in a
+  name/value pair; a password sent as a number in such a pair is hidden;
+* a note the connector repeats inside a longer text or in an HTTP 422 error,
+  and license keys it sends back under another name, are hidden in the
+  answer, the audit row and the stored result;
+* a note on the card does not change the card's risk level;
+* an agent that resumes a step uses the step's own params for the hiding;
+* stored params that cannot be opened after the claim end the request as a
+  failed run, and the connector gets no call.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +52,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._preview import proposed_effect_for_agent
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
+    approval_risk_level,
     create_pending_request,
     params_with_secret_fields_hidden,
     resume_dispatch_after_approval,
@@ -74,9 +84,11 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_dispatcher_caches()
     clear_registry()
     d.received.clear()
-    op_classes.declare_secret_field(d.NOTE_OP_ID, "note")
+    for op_id in (d.NOTE_OP_ID, d.ECHO_OP_ID, d.REJECT_OP_ID):
+        op_classes.declare_secret_field(op_id, "note")
     yield
-    op_classes._SECRET_FIELDS.pop(d.NOTE_OP_ID, None)
+    for op_id in (d.NOTE_OP_ID, d.ECHO_OP_ID, d.REJECT_OP_ID, h.STEP_A):
+        op_classes._SECRET_FIELDS.pop(op_id, None)
     op_classes._SECRET_FIELDS.pop(d.PARENT_OP_ID, None)
     d.received.clear()
     reset_dispatcher_caches()
@@ -93,13 +105,15 @@ async def ops() -> AsyncIterator[AsyncSession]:
     embedding.dimension = 384
     await h.register_child(embedding)
     await d.register_note_op(embedding)
+    await d.register_echo_ops(embedding)
     async with get_sessionmaker()() as session:
-        await h.register_composite(
-            session,
-            d.PARENT_OP_ID,
-            "parent_with_secret_composite",
-            module="tests._approval_secret_dispatch_helpers",
-        )
+        for op_id, handler in (
+            (d.PARENT_OP_ID, "parent_with_secret_composite"),
+            (d.STEP_NOTE_PARENT_OP_ID, "step_with_note_composite"),
+        ):
+            await h.register_composite(
+                session, op_id, handler, module="tests._approval_secret_dispatch_helpers"
+            )
         yield session
 
 
@@ -277,3 +291,178 @@ async def test_the_agent_view_of_a_register_card_keeps_the_number_of_days() -> N
 
     assert shown is not None
     assert shown["params_echo"]["extras"] == {"password_max_age_days": 90}
+
+
+_PAIR_PIN = 93518842
+
+
+@pytest.mark.parametrize("with_key", [True, False], ids=["key", "no_key"])
+async def test_a_number_in_a_name_value_pair_follows_the_pair_name(
+    ops: AsyncSession, monkeypatch: pytest.MonkeyPatch, with_key: bool
+) -> None:
+    if not with_key:
+        monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", "")
+        get_settings.cache_clear()
+    days = {"name": "web", "settings": [{"name": "password_max_age_days", "value": 90}]}
+    pin = {"name": "web", "settings": [{"name": "password", "value": _PAIR_PIN}]}
+
+    kept = await _call(d.NOTE_OP_ID, days)
+    hidden = await _call(d.NOTE_OP_ID, pin)
+
+    assert kept.status == "awaiting_approval", kept.error
+    kept_row = await h.request(UUID(kept.extras["approval_request_id"]))
+    assert kept_row.params == days
+    assert kept_row.execution_handle is None
+    assert kept_row.proposed_effect is not None
+    assert kept_row.proposed_effect["params_echo"]["settings"] == days["settings"]
+    if not with_key:
+        assert hidden.status == "denied"
+        assert hidden.error == result_handoff_key_missing(d.NOTE_OP_ID, 0.0).error
+        return
+    assert hidden.status == "awaiting_approval", hidden.error
+    row = await h.request(UUID(hidden.extras["approval_request_id"]))
+    assert row.params == {"name": "web", "settings": [{"name": "password", "value": _MARKER}]}
+    assert row.execution_handle is not None
+    assert str(_PAIR_PIN) not in json.dumps(row.proposed_effect)
+
+
+async def test_secrets_sent_back_in_longer_text_and_lists_are_hidden(ops: AsyncSession) -> None:
+    keys = ["KEY-AAAA-1111-made-up", "KEY-BBBB-2222-made-up"]
+    params = {"name": "web", "note": _SECRET, "licenseKeys": keys}
+    waiting = await _call(d.ECHO_OP_ID, params)
+    assert waiting.status == "awaiting_approval", waiting.error
+    row = await h.request(UUID(waiting.extras["approval_request_id"]))
+    assert row.params == {"name": "web", "note": _MARKER, "licenseKeys": _MARKER}
+
+    result = await resume_dispatch_after_approval(
+        operator=h.operator(sub="op-approver"), request=await h.approve(row.id), params=None
+    )
+
+    assert result.status == "ok", result.error
+    assert d.received == [(d.ECHO_OP_ID, params)]
+    assert result.result == {"message": f"Saved note: {_MARKER}", "installed": [_MARKER] * 2}
+    stored = await _everything_stored()
+    assert "Saved note" in stored
+    assert _SECRET not in stored
+    assert not any(key in stored for key in keys)
+
+
+async def test_a_note_in_an_http_422_error_is_hidden(ops: AsyncSession) -> None:
+    waiting = await _call(d.REJECT_OP_ID, _PARAMS)
+    request = await h.approve(UUID(waiting.extras["approval_request_id"]))
+
+    result = await resume_dispatch_after_approval(
+        operator=h.operator(sub="op-approver"), request=request, params=None
+    )
+
+    assert result.status == "error"
+    assert d.received == [(d.REJECT_OP_ID, _PARAMS)]
+    assert result.extras["http_status"] == 422
+    assert _MARKER in json.dumps(result.extras)
+    assert not _holds_a_secret(result.model_dump_json())
+    stored = await _everything_stored()
+    assert "resume_result" in stored
+    assert "Note refused" in stored
+    assert not _holds_a_secret(stored)
+
+
+async def test_a_note_on_the_card_leaves_the_risk_level_as_it_is() -> None:
+    params = {"name": "web", "note": "caution"}
+    effect = {
+        "op_id": d.NOTE_OP_ID,
+        "safety_level": "caution",
+        "op_class": "write",
+        "preview": {"summary": "Set the note to caution"},
+    }
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=h.operator(),
+            connector_id=h.CONNECTOR_ID,
+            op_id=d.NOTE_OP_ID,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect=effect,
+        )
+        await s.commit()
+
+    assert request.proposed_effect is not None
+    assert request.proposed_effect["safety_level"] == "caution"
+    assert request.proposed_effect["preview"] == {"summary": f"Set the note to {_MARKER}"}
+    assert approval_risk_level(request) == "caution"
+
+
+async def test_an_agent_that_resumes_a_step_hides_the_steps_own_note(ops: AsyncSession) -> None:
+    op_classes.declare_secret_field(h.STEP_A, "note")
+    agent = h.operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(h.TENANT_ID, "agent-requester")
+    waiting = await _call(d.STEP_NOTE_PARENT_OP_ID, {"vm": "vm-1"}, agent)
+    assert waiting.status == "awaiting_approval", waiting.error
+    row = await h.request(UUID(waiting.extras["approval_request_id"]))
+    assert row.params == {"name": "vm-1", "note": _MARKER}
+    await h.approve(row.id)
+
+    resumed = await resume_or_surface_awaiting_approval(
+        operator=agent,
+        call_arguments={
+            "connector_id": h.CONNECTOR_ID,
+            "op_id": d.STEP_NOTE_PARENT_OP_ID,
+            "params": {"vm": "vm-1"},
+            "target": None,
+        },
+        awaiting_envelope=waiting.model_dump(mode="json"),
+        timeout_seconds=2.0,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["message"] == f"Saved note: {_MARKER}"
+    assert d.COMPUTED_NOTE not in json.dumps(resumed)
+    assert d.COMPUTED_NOTE not in await _everything_stored()
+
+
+@pytest.mark.parametrize("path", ["agent", "person"])
+async def test_stored_params_that_cannot_be_opened_end_the_request_as_failed(
+    ops: AsyncSession, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    agent = h.operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(h.TENANT_ID, "agent-requester")
+    waiting = await _call(d.NOTE_OP_ID, _PARAMS, agent)
+    assert waiting.status == "awaiting_approval", waiting.error
+    request = await h.approve(UUID(waiting.extras["approval_request_id"]))
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+
+    if path == "agent":
+        resumed = await resume_or_surface_awaiting_approval(
+            operator=agent,
+            call_arguments={
+                "connector_id": h.CONNECTOR_ID,
+                "op_id": d.NOTE_OP_ID,
+                "params": _PARAMS,
+                "target": None,
+            },
+            awaiting_envelope=waiting.model_dump(mode="json"),
+            timeout_seconds=2.0,
+        )
+    else:
+        result = await resume_dispatch_after_approval(
+            operator=h.operator(sub="op-approver"), request=request, params=None
+        )
+        resumed = result.model_dump(mode="json")
+
+    assert resumed["status"] == "denied", resumed
+    assert resumed["extras"]["error_code"] == "approval_resume_params_unavailable"
+    assert d.received == []
+    row = await h.request(request.id)
+    assert row.resume_result is not None
+    assert row.resume_result["extras"]["error_code"] == "approval_resume_params_unavailable"
+    assert await _handoff_rows() == []
+    assert not _holds_a_secret(await _everything_stored())
+
+
+async def _handoff_rows() -> list[Any]:
+    from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
+
+    async with get_sessionmaker()() as s:
+        return list((await s.execute(select(ApprovalExecutionPayload))).scalars())

@@ -67,6 +67,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.schemas import OperationResult
     from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
@@ -500,6 +501,7 @@ async def _resume_approved_or_already_resumed(
     would set up an import-time cycle; keeping both inline resolves them
     once at first-call time.
     """
+    from meho_backplane.connectors.schemas import OperationResult
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_queue import (
         claim_resume,
@@ -582,10 +584,13 @@ async def _resume_approved_or_already_resumed(
         )
 
     # Only the claim winner touches the one-time store of the request.
-    resume_parent, call_arguments = await _take_stored_run_input(request, call_arguments)
+    stored_input = await _take_stored_run_input(operator, request, call_arguments)
+    if isinstance(stored_input, OperationResult):
+        return stored_input.model_dump(mode="json")
+    resume_parent, call_arguments, approved_params = stored_input
 
     preview_refusal = await refuse_resume_if_preview_changed(
-        operator, request, resolved_target, call_arguments.get("params") or {}
+        operator, request, resolved_target, approved_params
     )
     if preview_refusal is not None:
         return preview_refusal.model_dump(mode="json")
@@ -596,6 +601,7 @@ async def _resume_approved_or_already_resumed(
         operator=operator,
         request=request,
         call_arguments=call_arguments,
+        approved_params=approved_params,
         resume_parent=resume_parent,
         resolved_target=resolved_target,
     )
@@ -607,41 +613,47 @@ async def _resume_approved_or_already_resumed(
 
 
 async def _take_stored_run_input(
-    request: ApprovalRequest, call_arguments: dict[str, Any]
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Read the one-time store of *request* once; return the parent and the call to run.
+    operator: Operator, request: ApprovalRequest, call_arguments: dict[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]] | OperationResult:
+    """Read the one-time store of *request* once; return the parent, the call and its params.
+
+    The params are the ones the person approved, of the waiting call
+    itself: for a step of a multi-step operation, the step's own params,
+    not the parent's call the agent made. The preview check and the hiding
+    of secret values use them.
 
     A request without a store entry keeps its stored parent and the agent's
-    call. With an entry, the store is read and emptied. A step of a
-    multi-step operation takes its parent from it, because the parent's
-    params live only there. A direct call runs with the params from the
-    store, not the agent's copy in memory: they are checked against the
-    approved ``params_hash`` first, so the run sends exactly what the person
-    approved. The decrypted values stay in locals and are never written to
-    the row.
+    call; a step takes its params from the row. With an entry, the store is
+    read and emptied
+    (:func:`~meho_backplane.operations.approval_queue.consume_stored_run_input`).
+    Its params match the approved ``params_hash``. A step takes its parent
+    from it, because the parent's params live only there. A direct call runs
+    with the stored params, not the agent's copy in memory, so the run sends
+    exactly what the person approved. An entry that cannot be read returns
+    the recorded refusal, and nothing runs. The decrypted values stay in
+    locals and are never written to the row.
     """
+    from meho_backplane.connectors.schemas import OperationResult
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations._validate import params_hash_matches
-    from meho_backplane.operations.approval_handoff import ApprovalHandoffError
-    from meho_backplane.operations.approval_handoff import consume as consume_handoff
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
+    from meho_backplane.operations.approval_queue import consume_stored_run_input
 
     resume_parent = cast("dict[str, Any] | None", request.resume_parent)
-    async with get_sessionmaker()() as session:
-        if request.execution_handle is None:
+    if request.execution_handle is None:
+        async with get_sessionmaker()() as session:
             await discard_handoff(session, request.id, request.tenant_id)
             await session.commit()
-            return resume_parent, call_arguments
-        handoff = await consume_handoff(
-            session, request.execution_handle, request.id, request.tenant_id
-        )
-        await session.commit()
+        if resume_parent is not None:
+            step_params = cast("dict[str, Any]", request.params or {})
+            return resume_parent, call_arguments, step_params
+        return None, call_arguments, cast("dict[str, Any]", call_arguments.get("params") or {})
+    stored = await consume_stored_run_input(operator, request)
+    if isinstance(stored, OperationResult):
+        return stored
+    params, stored_parent = stored
     if resume_parent is not None:
-        return cast("dict[str, Any] | None", handoff.get("resume_parent")), call_arguments
-    stored = handoff.get("params")
-    if not isinstance(stored, dict) or not params_hash_matches(stored, request.params_hash):
-        raise ApprovalHandoffError("approval execution payload does not match the approved request")
-    return None, {**call_arguments, "params": stored}
+        return stored_parent, call_arguments, params
+    return None, {**call_arguments, "params": params}, params
 
 
 async def _redispatch_approved(
@@ -649,6 +661,7 @@ async def _redispatch_approved(
     operator: Operator,
     request: ApprovalRequest,
     call_arguments: dict[str, Any],
+    approved_params: dict[str, Any],
     resume_parent: dict[str, Any] | None,
     resolved_target: Any,
 ) -> dict[str, Any]:
@@ -677,7 +690,9 @@ async def _redispatch_approved(
     from meho_backplane.operations.approval_secret_values import call_secret_values_bound
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
-    secret_values = call_secret_values_of_run(request, call_arguments.get("params"), resume_parent)
+    # The secret values of the waiting call itself (for a step, the step's
+    # params) and of its parent are hidden where the connector sends them back.
+    secret_values = call_secret_values_of_run(request, approved_params, resume_parent)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
         with (

@@ -436,11 +436,20 @@ Two kinds of rows carry a keyed hash of a call's params:
     free text that may hold a secret, such as a config text, a note or a
     command line. A step of a multi-step operation whose parent's params
     hold a secret value (checked with the parent's op id) keeps the parent
-    only in the handoff too. The approved run reads the real params from
-    the handoff, once, and checks them against `params_hash`; so does the
-    AI agent that waited, for a direct call (`_take_stored_run_input` in
-    `agent/approval_wait.py`), which runs the checked params and not its
-    copy in memory. A call with no secret value is stored and runs as
+    only in the handoff too. The value of a name/value pair
+    (`{"name": "password", "value": ...}`) takes the pair's own name for
+    the number rule. The approved run reads the real params from
+    the handoff, once, and checks them against `params_hash`
+    (`consume_stored_run_input`); so does the AI agent that waited
+    (`_take_stored_run_input` in `agent/approval_wait.py`). For a direct
+    call the agent runs the checked params and not its copy in memory. For
+    a step it uses the step's own params (from the handoff, or from the
+    row) for the preview check and for hiding secret values, and the
+    parent's params to run the parent. When the handoff cannot be read
+    after the claim (it is gone, or the key changed while the request
+    waited) or does not match, nothing runs: the request ends as a failed
+    run with `approval_resume_params_unavailable`, with an audit row and
+    the stored result. A call with no secret value is stored and runs as
     before. Without a valid key a step of a multi-step operation gets the
     same refusal as a direct call (`result_handoff_key_missing`).
   - The secret values of such a call also stay out of what was built from
@@ -448,10 +457,17 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`proposed_effect`) shows the marker in place of each one, and while
     the approved call runs, the dispatcher hides each one in the answer, in
     the stored result and in the audit row of the run (a connector that
-    sends back the note it saved). These are the values under a name whose
+    sends back the note it saved). An error the connector returns gets the
+    same hiding (`_hide_call_secrets_in_error`), except `error_code` and
+    `http_status`. These are the values under a name whose
     last word names the secret (`password`, not `password_secret_ref`,
-    which names where the secret is) and the values of marked fields; only
-    whole values match.
+    which names where the secret is), each item of a list under such a
+    name, and the values of marked fields. A secret text is replaced also
+    inside a longer text (`Saved note: <marker>`); a secret number only
+    where it stands as a number of its own. On the card, the fields MEHO
+    sets itself (`MEHO_CARD_FIELDS`: `safety_level`, `op_class`, the
+    classification, ...) keep their value, so the approval rules read the
+    card as it was built.
   - For other operations, and for rows stored by an older release, they are
     stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim

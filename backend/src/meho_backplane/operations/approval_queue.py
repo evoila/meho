@@ -174,7 +174,7 @@ from meho_backplane.operations.approval_secret_values import (
     CallSecretValues,
     call_secret_values,
     call_secret_values_bound,
-    hide_call_secret_values,
+    hide_call_secret_values_on_card,
     params_with_call_secrets_hidden,
 )
 from meho_backplane.operations.approval_state_pin import state_changed_since_request
@@ -256,6 +256,7 @@ __all__ = [
     "claim_resume",
     "composite_resume_binding",
     "consume_remote_write_approval",
+    "consume_stored_run_input",
     "create_pending_request",
     "expire_older_release_requests",
     "expire_stale_requests",
@@ -2088,7 +2089,7 @@ async def create_pending_request(
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
     # The card was built from the real params: it shows no secret value either.
-    proposed_effect = hide_call_secret_values(
+    proposed_effect = hide_call_secret_values_on_card(
         proposed_effect,
         call_secret_values(params, op_id=op_id) | _parent_secret_values(resume_parent),
     )
@@ -3142,22 +3143,12 @@ async def resume_dispatch_after_approval(
     # losing concurrent resume returns above without consuming its payload.
     resume_parent_override: dict[str, Any] | None = None
     if request.execution_handle is not None:
-        from meho_backplane.db.engine import get_sessionmaker
-
-        async with get_sessionmaker()() as handoff_session:
-            handoff = await consume_handoff(
-                handoff_session, request.execution_handle, request.id, request.tenant_id
-            )
-            await handoff_session.commit()
-        effective_params = cast(dict[str, Any], handoff["params"])
-        if not params_hash_matches(effective_params, request.params_hash):
-            raise ApprovalHandoffError(
-                "approval execution payload does not match the approved request"
-            )
-        if handoff.get("resume_parent") is not None:
-            # Never assign decrypted composite inputs to the ORM row: an
-            # attached request could autoflush them back into approval_request.
-            resume_parent_override = cast(dict[str, Any], handoff["resume_parent"])
+        stored_input = await consume_stored_run_input(operator, request)
+        if isinstance(stored_input, OperationResult):
+            return stored_input
+        # Never assign decrypted composite inputs to the ORM row: an
+        # attached request could autoflush them back into approval_request.
+        effective_params, resume_parent_override = stored_input
 
     preview_refusal = await refuse_resume_if_preview_changed(
         operator, request, resolved_target, cast(dict[str, Any], effective_params)
@@ -3332,6 +3323,17 @@ async def _refuse_resume(
     """
     if not await claim_resume(request.id):
         return result_already_resumed(request.op_id, request.id, 0.0)
+    return await _record_claimed_refusal(operator, request, refusal, audit_payload=audit_payload)
+
+
+async def _record_claimed_refusal(
+    operator: Operator,
+    request: ApprovalRequest,
+    refusal: OperationResult,
+    *,
+    audit_payload: dict[str, Any],
+) -> OperationResult:
+    """The steps of :func:`_refuse_resume` after the claim, for a caller that holds it."""
     await _discard_refused_handoff(request)
     error_code = str((refusal.extras or {}).get("error_code"))
     audit_id = await _audit_resume_refusal(
@@ -3398,6 +3400,42 @@ async def refuse_resume_if_preview_changed(
         )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
+
+
+async def consume_stored_run_input(
+    operator: Operator, request: ApprovalRequest
+) -> tuple[dict[str, Any], dict[str, Any] | None] | OperationResult:
+    """Read and empty the one-time store of a claimed *request*; its params and parent.
+
+    The caller holds the one-resumer claim, and *request* has a store
+    entry. The stored params must match the approved ``params_hash``. When
+    the entry cannot be read (it is gone, or the key changed while the
+    request waited) or does not match, the operation does not run: the
+    refusal :func:`~meho_backplane.operations._errors.result_resume_params_unavailable`
+    is recorded like every refusal after the claim (the entry is deleted,
+    one audit row, the stored run result) and returned.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    handle = cast(uuid.UUID, request.execution_handle)
+    handoff: dict[str, Any] = {}
+    try:
+        async with get_sessionmaker()() as handoff_session:
+            handoff = await consume_handoff(handoff_session, handle, request.id, request.tenant_id)
+            await handoff_session.commit()
+    except ApprovalHandoffError:
+        _log().warning(
+            "approval_resume_stored_input_unreadable",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+        )
+    params = handoff.get("params")
+    if not isinstance(params, dict) or not params_hash_matches(params, request.params_hash):
+        refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+        return await _record_claimed_refusal(operator, request, refusal, audit_payload={})
+    resume_parent = handoff.get("resume_parent")
+    return params, resume_parent if isinstance(resume_parent, dict) else None
 
 
 async def _discard_refused_handoff(request: ApprovalRequest) -> None:

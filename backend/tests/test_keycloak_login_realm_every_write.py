@@ -105,7 +105,8 @@ class _FakeKeycloak:
             raise httpx.HTTPStatusError(
                 "not found", request=request, response=httpx.Response(404, request=request)
             )
-        return {"realm": self.realm_answers.get(name, name), "enabled": True}
+        answered = self.realm_answers.get(name, name)
+        return {"id": f"id-{answered}", "realm": answered, "enabled": True}
 
     def connector(self) -> KeycloakConnector:
         connector = KeycloakConnector()

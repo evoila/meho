@@ -19,6 +19,10 @@ What is proven:
   host); a change of letter case does not skip them;
 * the name in Keycloak's answer must be exactly the managed realm, in the
   preview and in the run (``realm_name_mismatch``);
+* Keycloak's answer must have the realm's id: without one the delete is
+  refused before approval and in the approved run (``realm_id_missing``);
+* an agent reads the realm id of the card only while ``KEYCLOAK_ANSWER_REALM``
+  is on; the stored card and a person's card always have it;
 * a realm that is already gone → ``already_absent: true`` and no DELETE;
   ``deleted: true`` only after a read answers 404; a read that answers with
   something other than a realm object is an error, before and after the
@@ -31,6 +35,7 @@ What is proven:
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -43,6 +48,7 @@ import respx
 from sqlalchemy import func, select
 
 import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
+from meho_backplane.api.v1.approvals import get_approval_request
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import KeycloakDeleteRefusedError
@@ -56,6 +62,7 @@ from meho_backplane.connectors.keycloak.session import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import (
@@ -63,6 +70,7 @@ from meho_backplane.operations._preview import (
     blast_radius_missing_reason,
     build_proposed_effect,
 )
+from meho_backplane.operations.approval_object_check import REASON_UNREADABLE
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -769,6 +777,151 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
     assert resumed.status == "ok", resumed
     assert resumed.result == {"realm": _REALM, "deleted": True, "already_absent": False}
     assert del_route.call_count == 1
+
+
+def _rep_with_id(realm_id: Any) -> dict[str, Any]:
+    """The realm with the id *realm_id*; ``...`` leaves the id out."""
+    rep = _realm_rep()
+    if realm_id is ...:
+        del rep["id"]
+    else:
+        rep["id"] = realm_id
+    return rep
+
+
+_NO_ID = [
+    pytest.param(..., id="missing"),
+    pytest.param("", id="empty"),
+    pytest.param("  ", id="blank"),
+    pytest.param(None, id="null"),
+    pytest.param(7, id="not-a-string"),
+]
+
+
+@pytest.mark.parametrize("realm_id", _NO_ID)
+async def test_a_realm_without_an_id_gets_no_approval_request(
+    kc: KeycloakConnector, realm_id: Any
+) -> None:
+    requester = _operator()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_rep_with_id(realm_id))
+        _mount_counts(mock)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        preview = await preview_operation(requester, _args(_REALM))
+        call = await call_operation(
+            requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
+        )
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "blast_radius_required"
+    assert "(realm_id_missing)" in call["extras"]["reason"]
+    assert not del_route.called
+    assert await _approval_rows() == 0
+
+
+@pytest.mark.parametrize("realm_id", _NO_ID)
+async def test_the_handler_sends_no_delete_for_a_realm_without_an_id(
+    kc: KeycloakConnector, realm_id: Any
+) -> None:
+    """The handler alone, after every check before it."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_rep_with_id(realm_id))
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        result = await _run({"realm": _REALM})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError"
+    assert not del_route.called
+
+
+def _approver() -> Operator:
+    return _operator("kc-realm-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
+
+
+async def _wait_for_approval(requester: Operator) -> uuid.UUID:
+    preview = await preview_operation(requester, _args(_REALM))
+    call = await call_operation(
+        requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
+    )
+    assert call["status"] == "awaiting_approval", call
+    return uuid.UUID(call["extras"]["approval_request_id"])
+
+
+@pytest.mark.parametrize("realm_id", _NO_ID)
+async def test_an_approved_run_that_reads_no_realm_id_sends_no_delete(
+    kc: KeycloakConnector, realm_id: Any
+) -> None:
+    """The card had an id; when the approved call runs, Keycloak answers without one."""
+    rep = {"now": _realm_rep()}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(
+            side_effect=lambda _request: httpx.Response(200, json=rep["now"])
+        )
+        _mount_counts(mock)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        request_id = await _wait_for_approval(_operator())
+        async with get_sessionmaker()() as session:
+            await approve_request(session, request_id, operator=_approver(), params=None)
+            await session.commit()
+
+        rep["now"] = _rep_with_id(realm_id)
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=_approver(), request=row, params=None
+            )
+    assert resumed.status == "denied", resumed
+    assert resumed.extras is not None
+    assert resumed.extras["error_code"] == "object_changed_since_approval"
+    assert resumed.extras["reason"] == REASON_UNREADABLE
+    assert not del_route.called
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_an_agent_reads_the_realm_id_only_with_the_switch_on(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true" if on else "false")
+    get_settings.cache_clear()
+    requester = _operator()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_realm_rep())
+        _mount_counts(mock)
+        preview = await preview_operation(requester, _args(_REALM))
+        request_id = await _wait_for_approval(requester)
+        got = await _get_handler(requester, {"approval_request_id": str(request_id)})
+        listed = await _list_handler(requester, {"status": "pending"})
+
+    # The agent's preview never contacts Keycloak, so it has no id in both states.
+    assert _REALM_ID not in json.dumps(preview)
+    for answer in (got, listed):
+        assert (_REALM_ID in json.dumps(answer)) is on
+    agent = requester.model_copy(update={"principal_kind": PrincipalKind.AGENT})
+    for reader, sees_id in ((agent, on), (requester, True)):
+        view = await get_approval_request(request_id, operator=reader)
+        assert view.reviewer_context is not None
+        assert (_REALM_ID in json.dumps(view.proposed_effect)) is sees_id
+        assert (_REALM_ID in json.dumps(view.reviewer_context.blast_radius)) is sees_id
+        assert (_REALM_ID in view.model_dump_json()) is sees_id
+
+    # The stored card keeps the id: MEHO compares it before the approved run.
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.proposed_effect["blast_radius"]["object"]["id"] == _REALM_ID
+        assert row.proposed_effect["preview"]["blast_radius"]["object"]["id"] == _REALM_ID
+        shown = got["proposed_effect"]["blast_radius"]["object"]
+        stored = row.proposed_effect["blast_radius"]["object"]
+        assert shown == {k: v for k, v in stored.items() if on or k != "id"}
 
 
 async def test_a_realm_made_again_under_the_same_name_is_not_deleted(

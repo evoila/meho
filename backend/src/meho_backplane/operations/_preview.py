@@ -127,6 +127,7 @@ __all__ = [
     "register_preview_last_step",
     "without_internal_effect_keys",
     "without_person_only_effect_keys",
+    "without_switched_object_field",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -565,6 +566,13 @@ PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "
 #: the realm a Keycloak target works on.
 SWITCHED_EFFECT_KEYS: Final[dict[str, str]] = {"target_realm": "KEYCLOAK_ANSWER_REALM"}
 
+#: ``op_id`` -> (a field of the card's ``blast_radius.object`` that a caller
+#: reads only while a switch is on, the env name of the switch). MEHO compares
+#: the stored field before an approved run, and a person always reads it.
+SWITCHED_OBJECT_FIELDS: Final[dict[str, tuple[str, str]]] = {
+    "keycloak.realm.delete": ("id", "KEYCLOAK_ANSWER_REALM")
+}
+
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
 #: checks and never returns to a caller: where a change of rights was asked
 #: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`).
@@ -582,12 +590,45 @@ def _switch_on(env: str) -> bool:
     return parse_bool_env(os.environ.get(env))
 
 
+def without_switched_object_field(op_id: Any, block: Any) -> Any:
+    """The ``blast_radius`` *block* of *op_id* as a caller reads it.
+
+    Without the field of :data:`SWITCHED_OBJECT_FIELDS` while its switch is
+    off. *block* itself when there is nothing to hide.
+    """
+    field, env = SWITCHED_OBJECT_FIELDS.get(op_id, ("", ""))
+    obj = block.get("object") if isinstance(block, dict) else None
+    if not isinstance(obj, dict) or field not in obj or _switch_on(env):
+        return block
+    return {**block, "object": {key: value for key, value in obj.items() if key != field}}
+
+
+def _hide_switched_object_field(effect: dict[str, Any]) -> dict[str, Any]:
+    """*effect* with both copies of its ``blast_radius`` as a caller reads them."""
+    op_id = effect.get("op_id")
+    if op_id not in SWITCHED_OBJECT_FIELDS:
+        return effect
+
+    def _shown(holder: dict[str, Any]) -> dict[str, Any]:
+        if BLAST_RADIUS_KEY not in holder:
+            return holder
+        block = without_switched_object_field(op_id, holder[BLAST_RADIUS_KEY])
+        return {**holder, BLAST_RADIUS_KEY: block}
+
+    preview = effect.get("preview")
+    if isinstance(preview, dict):
+        effect = {**effect, "preview": _shown(preview)}
+    return _shown(effect)
+
+
 def without_person_only_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
     """*effect* without :data:`PERSON_ONLY_EFFECT_KEYS` and :data:`INTERNAL_EFFECT_KEYS`.
 
-    Also without each key of :data:`SWITCHED_EFFECT_KEYS` whose switch is
-    off. *effect* itself when it has none of them.
+    Also without each key of :data:`SWITCHED_EFFECT_KEYS` and each field of
+    :data:`SWITCHED_OBJECT_FIELDS` whose switch is off. *effect* itself when
+    it has none of them.
     """
+    effect = _hide_switched_object_field(effect)
     off = {key for key, env in SWITCHED_EFFECT_KEYS.items() if not _switch_on(env)}
     hidden = PERSON_ONLY_EFFECT_KEYS | INTERNAL_EFFECT_KEYS | off
     if hidden.isdisjoint(effect):
@@ -619,8 +660,9 @@ def proposed_effect_for_agent(
 
     The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
     the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
-    of :data:`SWITCHED_EFFECT_KEYS` is in it only while its switch is on. Every
-    other ``proposed_effect`` comes back unchanged.
+    of :data:`SWITCHED_EFFECT_KEYS` or a field of :data:`SWITCHED_OBJECT_FIELDS`
+    is in it only while its switch is on. Every other ``proposed_effect`` comes
+    back unchanged.
     """
     if not isinstance(effect, dict):
         return effect

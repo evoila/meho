@@ -33,7 +33,8 @@ once, so this op follows the other governed deletes
    The name in Keycloak's answer must be exactly the managed realm
    (:func:`read_managed_realm`). An answer with another name, or with no
    name, is refused with the ``realm_name_mismatch`` code, and no DELETE is
-   sent.
+   sent. The answer must also have the realm's ``id``, else the delete is
+   refused with the ``realm_id_missing`` code.
 3. **Delete, then read again.** ``deleted: true`` is reported only after
    ``GET /admin/realms/{realm}`` answers 404. A read that answers with
    something other than a realm object (a list, a string, ``null``) is an
@@ -41,8 +42,9 @@ once, so this op follows the other governed deletes
 
 The preview builder in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_preview` runs steps 1 and
-2 before the request waits for approval, so a protected realm, or a realm
-whose answered name is not the managed realm, never reaches an approver. The
+2 before the request waits for approval, so a protected realm, a realm whose
+answered name is not the managed realm, or a realm with no id never reaches
+an approver. The
 approval card shows Keycloak's id of the realm, whether the realm is enabled
 and how many users, clients and groups go with it. The handler runs both
 steps again when the approved call executes. Before an approved call runs,
@@ -148,6 +150,10 @@ async def read_managed_realm(
     the same letters, case and accents. Any other name, or no name, raises
     :exc:`KeycloakDeleteRefusedError` (``realm_name_mismatch``). The message
     names the managed realm only.
+
+    The answer's ``id`` must be a string that is not empty. Without it MEHO
+    cannot compare the realm with the one on the approval card, so the
+    delete is refused (``realm_id_missing``).
     """
     rep = await get_or_none(connector, target, _realm_path(realm), operator)
     if rep is None:
@@ -159,6 +165,15 @@ async def read_managed_realm(
             "realm_name_mismatch",
             f"Keycloak did not answer with the realm {managed!r}. Nothing was deleted. "
             "Check the managed realm of the target.",
+        )
+    realm_id = rep.get("id")
+    if not isinstance(realm_id, str) or not realm_id.strip():
+        raise KeycloakDeleteRefusedError(
+            REALM_DELETE_OP,
+            "realm_id_missing",
+            f"Keycloak answered for the realm {managed!r} without an id, so MEHO cannot "
+            "check that it is the realm on the approval card. Nothing was deleted. "
+            "The target's login needs the right to view the realm (view-realm).",
         )
     return rep
 
@@ -223,7 +238,7 @@ async def realm_blast_radius(
     children: list[dict[str, Any]] = []
     if rep is not None:
         counts = await _count(connector, operator, target, realm)
-        obj["id"] = rep.get("id") if isinstance(rep.get("id"), str) else None
+        obj["id"] = rep["id"]
         obj["enabled"] = rep.get("enabled") is True
         obj.update(counts)
         children = [{"kind": kind, "count": count} for kind, count in counts.items()]

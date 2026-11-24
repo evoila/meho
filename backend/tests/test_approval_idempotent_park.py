@@ -1320,6 +1320,19 @@ async def test_retry_of_an_approved_request_says_it_is_approved(embedding: list[
     assert connector.calls == []
 
 
+_GUIDE_LINK = (
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+    "#changes-of-rights-need-another-admin"
+)
+#: The whole rights note, word for word: the sentence that is false after an approval,
+#: then the two parts that stay true.
+_FULL_NOTE = (
+    "This change needs a second admin to approve it. "
+    f"This tenant has only one admin. See {_GUIDE_LINK}"
+)
+_WAITING_ERROR = f"awaiting_approval: {_OP_ID!r} requires approval before execution. {_FULL_NOTE}"
+
+
 def _only_admin_is_requester(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the test op a change of rights in a tenant whose only admin is the requester."""
     from meho_backplane.auth import tenant_admins
@@ -1332,10 +1345,10 @@ def _only_admin_is_requester(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_of_an_approved_rights_change_has_no_second_admin_note(
+async def test_retry_of_an_approved_rights_change_keeps_only_the_true_part_of_the_note(
     monkeypatch: pytest.MonkeyPatch, embedding: list[float]
 ) -> None:
-    """One admin, change of rights: waiting has the note, approved has only the true text."""
+    """One admin, change of rights: waiting has the full note, approved only its true part."""
     _only_admin_is_requester(monkeypatch)
     _register_recording_connector()
     register_preview_builder(_OP_ID, _blast_radius_builder)
@@ -1348,8 +1361,8 @@ async def test_retry_of_an_approved_rights_change_has_no_second_admin_note(
     bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
     first = await call_operation(requester, bound)
     request_id = first["extras"]["approval_request_id"]
-    assert first["extras"]["approval_note"]
-    assert "second admin" in first["error"]
+    assert first["extras"]["approval_note"] == _FULL_NOTE
+    assert first["error"] == _WAITING_ERROR
 
     approver = _operator(sub="op-approver").model_copy(
         update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
@@ -1361,9 +1374,12 @@ async def test_retry_of_an_approved_rights_change_has_no_second_admin_note(
     retry = await call_operation(requester, bound)
     assert retry["status"] == "awaiting_approval", retry
     assert retry["extras"]["approval_request_id"] == request_id
-    assert "approval_note" not in retry["extras"]
+    note = retry["extras"]["approval_note"]
+    assert note == f"This tenant has only one admin. See {_GUIDE_LINK}"
+    assert "This change needs a second admin to approve it." not in note
     assert retry["error"] == (
-        f"awaiting_approval: the approval request {request_id} is already approved"
+        f"awaiting_approval: the approval request {request_id} is already approved. "
+        f"This tenant has only one admin. See {_GUIDE_LINK}"
     )
 
 
@@ -1430,8 +1446,9 @@ async def test_retry_of_a_waiting_rights_change_keeps_the_second_admin_note(
     first = await call_operation(requester, bound)
     retry = await call_operation(requester, bound)
     assert retry["extras"]["approval_request_reused"] is True
-    assert retry["extras"]["approval_note"] == first["extras"]["approval_note"]
-    assert "second admin" in retry["error"]
+    for answer in (first, retry):
+        assert answer["extras"]["approval_note"] == _FULL_NOTE
+        assert answer["error"] == _WAITING_ERROR
     assert await _approval_row_count() == 1
 
 

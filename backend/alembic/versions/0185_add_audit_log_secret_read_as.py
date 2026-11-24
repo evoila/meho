@@ -9,14 +9,16 @@ Create Date: 2026-11-22
 
 One nullable ``Text`` column, with no default. It holds one of these values:
 
-* the id of the login that a secret store accepted for the call;
+* the id of the login that a secret store accepted when the secret the call
+  used was read. The read can be in this call or in an earlier call (a login
+  MEHO kept in memory), so a value does not prove a new store read;
 * ``meho`` when the store saw MEHO's own identity;
 * ``check-runner`` when the check runner read the secret and its token has
   no readable id;
 * ``kept-login:reader-unknown`` when the call used a login MEHO kept in
   memory and it is not known whose login read that secret.
 
-It is empty when the call read no secret.
+It is empty when no login read a secret for the call.
 
 Old rows
 --------

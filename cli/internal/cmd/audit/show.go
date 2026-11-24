@@ -56,12 +56,15 @@ func newShowCmd() *cobra.Command {
 			"existence is never leaked across tenant boundaries.",
 		Annotations: map[string]string{
 			"docs-reference-note": "The summary prints `secret_read_as` when the row has it. " +
-				"It is the id of the login that the secret store accepted when the call " +
-				"read a secret. It can also be one of three fixed texts: `meho` (the store " +
-				"saw MEHO's own identity), `check-runner` (the check runner read it, and " +
-				"its login has no id), or `kept-login:reader-unknown` (the call used a " +
-				"login MEHO kept in memory, and it is not known whose login read it). The line " +
-				"is missing when the call read no secret. The backplane sends the field " +
+				"It is the id of the login that the secret store accepted when the secret " +
+				"this call used was read. That read can be in this call, or in an earlier " +
+				"call when the call used a login MEHO kept in memory. So a value does not " +
+				"prove that this call read the store again. It can also be one of three " +
+				"fixed texts: `meho` (the store saw MEHO's own identity), `check-runner` " +
+				"(the check runner read it, and its login has no id), or " +
+				"`kept-login:reader-unknown` (the call used a login MEHO kept in memory, " +
+				"and it is not known whose login read it). The line is missing when no " +
+				"login read a secret for this call. The backplane sends the field " +
 				"only while the switch `AUDIT_SECRET_READ_AS` is on (off by default).",
 		},
 		Args:          cobra.ExactArgs(1),
@@ -197,7 +200,7 @@ func printEntrySummary(w io.Writer, e *api.AuditEntryDetail) {
 	field("actor_sub:", strOrDash(strDeref(e.ActorSub)))
 	field("actor_name:", strOrDash(strDeref(e.ActorName)))
 	// MEHO sends the field only with AUDIT_SECRET_READ_AS on, and it is empty
-	// when the call read no secret, so the line is left out then.
+	// when no login read a secret for the call, so the line is left out then.
 	if login := strDeref(e.SecretReadAs); login != "" {
 		field("secret_read_as:", login)
 	}

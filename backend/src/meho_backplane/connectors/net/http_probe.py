@@ -78,6 +78,7 @@ from meho_backplane.connectors.net.http_probe_trust import (
 )
 from meho_backplane.connectors.net.ops import _HINT_SCHEMA, _add_timeout_hint
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -610,7 +611,7 @@ def _error_detail(exc: BaseException) -> list[dict[str, str]]:
     nodes.reverse()
     detail: list[dict[str, str]] = []
     for node in nodes[:_MAX_ERROR_DETAIL_ENTRIES]:
-        message = str(node)
+        message = scrub_call_secrets(str(node))
         if len(message) > _MAX_ERROR_DETAIL_MESSAGE_CHARS:
             message = message[:_MAX_ERROR_DETAIL_MESSAGE_CHARS] + "..."
         detail.append({"type": _exc_type_name(node), "message": message})

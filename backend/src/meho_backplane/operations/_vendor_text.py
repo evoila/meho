@@ -50,7 +50,7 @@ from meho_backplane.operations._errors import (
     UPSTREAM_SAID,
     VAULT_SAID,
 )
-from meho_backplane.redaction.call_secrets import scrub_call_secrets_tree
+from meho_backplane.redaction.call_secrets import keep_call_secrets_whole, scrub_call_secrets_tree
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 from meho_backplane.redaction.policy import RedactionPolicy
@@ -150,9 +150,15 @@ def redact_error_payload(node: Any, policy: RedactionPolicy | None = None) -> An
     (:func:`~meho_backplane.redaction.resolver.get_default_policy`), the same
     as the error builders use, so a registered shadow-mode policy cannot turn
     it off. Raises when the redaction itself fails; the caller then withholds
-    the value.
+    the value. A text where a rule replaced part of a secret value of the
+    call is cleaned again with the value masked first, so no part stays.
     """
-    return redact(scrub_secret_fields(node), policy or get_default_policy()).redacted
+    pinned = policy or get_default_policy()
+
+    def clean(tree: Any) -> Any:
+        return redact(scrub_secret_fields(tree), pinned).redacted
+
+    return keep_call_secrets_whole(node, clean(node), clean)
 
 
 def redact_error_result(result: OperationResult) -> OperationResult:
@@ -168,7 +174,12 @@ def redact_error_result(result: OperationResult) -> OperationResult:
     try:
         policy = get_default_policy()
         error = scrub_call_secrets_tree(redact_error_payload(result.error, policy))
-        extras = scrub_call_secrets_tree(redact_error_payload(dict(result.extras), policy))
+        cleaned_extras = redact_error_payload(dict(result.extras), policy)
+        # The names of the extras and the error code are MEHO's own, so the
+        # caller and the audit writer can still read them.
+        extras = scrub_call_secrets_tree(cleaned_extras, keep_keys=True)
+        if "error_code" in cleaned_extras:
+            extras["error_code"] = cleaned_extras["error_code"]
         payload = scrub_call_secrets_tree(redact_error_payload(result.result, policy))
     except Exception:  # fail-closed: never send an error result that may hold a secret
         kept = {key: result.extras[key] for key in ("error_code",) if key in result.extras}

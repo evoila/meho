@@ -25,6 +25,10 @@ a changed form, so these forms are found too: JSON-escaped (also twice),
 percent-encoded (also with a plain ``/``), and base64 of the whole value
 (standard and URL-safe, with and without padding).
 
+:func:`keep_call_secrets_whole` keeps a known value whole when an earlier
+rule replaced only part of it in a text: that text is redacted again with the
+value masked first.
+
 A value shorter than :data:`MIN_VALUE_LENGTH` characters is not known: it
 would hide parts of ordinary words. Two values where one is a part of the
 other, or that overlap, are hidden together: one scan finds every place where
@@ -45,14 +49,18 @@ import re
 import urllib.parse
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Any, Final
 
 __all__ = [
     "CALL_SECRET_MARKER",
     "MIN_VALUE_LENGTH",
     "CallSecrets",
+    "OtherKey",
+    "PathStep",
     "bind_call_secrets",
     "collect_param_secret_values",
+    "keep_call_secrets_whole",
     "marked_secret_paths",
     "note_call_secrets",
     "reset_call_secrets",
@@ -66,8 +74,16 @@ CALL_SECRET_MARKER: Final[str] = "[REDACTED:call_secret]"
 #: A value shorter than this is not hidden by value.
 MIN_VALUE_LENGTH: Final[int] = 4
 
-#: A path step that stands for any key (a schema's ``additionalProperties``).
-ANY_KEY: Final[str] = "*"
+
+@dataclass(frozen=True, slots=True)
+class OtherKey:
+    """A path step for any key that is not in *declared* (a schema's ``additionalProperties``)."""
+
+    declared: frozenset[str]
+
+
+#: One step of a path in the params: a key, or any key not declared.
+PathStep = str | OtherKey
 
 _PERCENT_HEX: Final[re.Pattern[str]] = re.compile(r"%[0-9A-F]{2}")
 
@@ -87,6 +103,8 @@ def _json_forms(value: str) -> set[str]:
         for form in once
         for ascii_only in (True, False)
     }
+    # An encoder that writes ``/`` as ``\/`` does so in each round.
+    twice |= {form.replace("/", "\\/") for form in twice}
     return once | twice
 
 
@@ -182,27 +200,38 @@ class CallSecrets:
         parts.append(text[cursor:])
         return "".join(parts)
 
-    def _scrub_key(self, key: Any, taken: Mapping[Any, Any]) -> Any:
-        if not isinstance(key, str):
-            return key
-        clean = self.scrub(key)
-        if clean == key:
-            return key
-        unique, count = clean, 1
-        while unique in taken:
-            count += 1
-            unique = f"{clean}#{count}"
-        return unique
+    def _scrub_keys(self, keys: list[Any]) -> list[Any]:
+        """The keys of one mapping, each known value masked, no two the same.
 
-    def scrub_tree(self, node: Any) -> Any:
-        """Return *node* with the marker for every known value in a string, key or number."""
+        A key that stays as it is keeps its name. A masked key gets a
+        number when its masked name is taken, so no entry replaces another.
+        """
+        cleaned = [self.scrub(key) if isinstance(key, str) else key for key in keys]
+        taken = {clean for key, clean in zip(keys, cleaned, strict=True) if clean == key}
+        out: list[Any] = []
+        for key, clean in zip(keys, cleaned, strict=True):
+            if clean != key:
+                unique, count = clean, 1
+                while unique in taken:
+                    count += 1
+                    unique = f"{clean}#{count}"
+                taken.add(unique)
+                clean = unique
+            out.append(clean)
+        return out
+
+    def scrub_tree(self, node: Any, *, keep_keys: bool = False) -> Any:
+        """Return *node* with the marker for every known value in a string, key or number.
+
+        With *keep_keys*, the keys of the top mapping stay as they are: they
+        are field names MEHO sets itself.
+        """
         if isinstance(node, str):
             return self.scrub(node)
         if isinstance(node, Mapping):
-            out: dict[Any, Any] = {}
-            for key, value in node.items():
-                out[self._scrub_key(key, out)] = self.scrub_tree(value)
-            return out
+            keys = list(node)
+            names = keys if keep_keys else self._scrub_keys(keys)
+            return {name: self.scrub_tree(node[key]) for name, key in zip(names, keys, strict=True)}
         if isinstance(node, list):
             return [self.scrub_tree(item) for item in node]
         if isinstance(node, tuple):
@@ -212,6 +241,71 @@ class CallSecrets:
             clean = self.scrub(text)
             return node if clean == text else clean
         return node
+
+    def scrub_strings(self, node: Any) -> Any:
+        """Return *node* with the marker for every known value in a string; keys stay."""
+        if isinstance(node, str):
+            return self.scrub(node)
+        if isinstance(node, Mapping):
+            return {key: self.scrub_strings(value) for key, value in node.items()}
+        if isinstance(node, list | tuple):
+            return type(node)(self.scrub_strings(item) for item in node)
+        return node
+
+    def _found(self, text: str) -> list[str]:
+        return [text[begin:end] for begin, end in self._spans(text)]
+
+    def _cut(self, original: Any, redacted: Any) -> bool:
+        """True when a rule changed a text and a known value in it is not whole now."""
+        return (
+            isinstance(original, str)
+            and isinstance(redacted, str)
+            and original != redacted
+            and self._found(original) != self._found(redacted)
+        )
+
+    def _any_cut(self, original: Any, redacted: Any) -> bool:
+        if isinstance(original, Mapping) and isinstance(redacted, Mapping):
+            return any(
+                self._any_cut(value, redacted[key])
+                for key, value in original.items()
+                if key in redacted
+            )
+        if isinstance(original, list) and isinstance(redacted, list):
+            return any(map(self._any_cut, original, redacted))
+        return self._cut(original, redacted)
+
+    def _merge(self, original: Any, redacted: Any, again: Any) -> Any:
+        if isinstance(redacted, Mapping):
+            if not (isinstance(original, Mapping) and isinstance(again, Mapping)):
+                return redacted
+            return {
+                key: self._merge(original.get(key), value, again.get(key))
+                for key, value in redacted.items()
+            }
+        if isinstance(redacted, list):
+            if not (
+                isinstance(original, list)
+                and isinstance(again, list)
+                and len(original) == len(redacted) == len(again)
+            ):
+                return redacted
+            return [self._merge(*items) for items in zip(original, redacted, again, strict=True)]
+        return again if self._cut(original, redacted) else redacted
+
+    def keep_whole(self, original: Any, redacted: Any, redo: Callable[[Any], Any]) -> Any:
+        """Return *redacted* with no known value cut by an earlier rule.
+
+        *redacted* is *original* after rules that change only texts. When a
+        rule replaced part of a known value in a text, the rest of the value
+        would stay. For each such text, the text of ``redo`` over *original*
+        with every known value masked first is used instead. Every other
+        text keeps its own result, so the rules that read a field's name
+        from a text still see the name.
+        """
+        if not self._any_cut(original, redacted):
+            return redacted
+        return self._merge(original, redacted, redo(self.scrub_strings(original)))
 
 
 _call_secrets_var: ContextVar[CallSecrets | None] = ContextVar("call_secrets", default=None)
@@ -246,10 +340,16 @@ def scrub_call_secrets(text: str) -> str:
     return scope.scrub(text) if scope else text
 
 
-def scrub_call_secrets_tree(node: Any) -> Any:
+def scrub_call_secrets_tree(node: Any, *, keep_keys: bool = False) -> Any:
     """:meth:`CallSecrets.scrub_tree` for the call that runs now. No-op outside a call."""
     scope = _call_secrets_var.get()
-    return scope.scrub_tree(node) if scope else node
+    return scope.scrub_tree(node, keep_keys=keep_keys) if scope else node
+
+
+def keep_call_secrets_whole(original: Any, redacted: Any, redo: Callable[[Any], Any]) -> Any:
+    """:meth:`CallSecrets.keep_whole` for the call that runs now. No-op outside a call."""
+    scope = _call_secrets_var.get()
+    return scope.keep_whole(original, redacted, redo) if scope else redacted
 
 
 def _scalars(node: Any) -> Iterator[str]:
@@ -264,16 +364,22 @@ def _scalars(node: Any) -> Iterator[str]:
             yield str(item)
 
 
-def _on_marked_path(path: tuple[str, ...], marked: frozenset[tuple[str, ...]]) -> bool:
+def _step_matches(step: PathStep, key: str) -> bool:
+    if isinstance(step, OtherKey):
+        return key not in step.declared
+    return step == key
+
+
+def _on_marked_path(path: tuple[str, ...], marked: frozenset[tuple[PathStep, ...]]) -> bool:
     return any(
         len(mark) == len(path)
-        and all(step in (ANY_KEY, key) for step, key in zip(mark, path, strict=True))
+        and all(_step_matches(step, key) for step, key in zip(mark, path, strict=True))
         for mark in marked
     )
 
 
 def collect_param_secret_values(
-    node: Any, *, marked_paths: frozenset[tuple[str, ...]] = frozenset()
+    node: Any, *, marked_paths: frozenset[tuple[PathStep, ...]] = frozenset()
 ) -> Iterator[str]:
     """Yield the secret values of the params *node*.
 
@@ -325,11 +431,13 @@ def _marks_secret(node: Any) -> bool:
 
 
 def _children(
-    node: Mapping[str, Any], path: tuple[str, ...]
-) -> Iterator[tuple[Any, tuple[str, ...]]]:
+    node: Mapping[str, Any], path: tuple[PathStep, ...]
+) -> Iterator[tuple[Any, tuple[PathStep, ...]]]:
     """Each sub-schema of *node* with its path: properties, items, combiners, extra keys."""
     properties = node.get("properties")
+    declared: frozenset[str] = frozenset()
     if isinstance(properties, Mapping):
+        declared = frozenset(str(name) for name in properties)
         for name, sub in properties.items():
             yield sub, (*path, str(name))
     for key in ("items", "prefixItems", *_COMBINERS):
@@ -338,28 +446,30 @@ def _children(
             yield sub, path
     extra = node.get("additionalProperties")
     if isinstance(extra, Mapping):
-        yield extra, (*path, ANY_KEY)
+        yield extra, (*path, OtherKey(declared))
 
 
-def marked_secret_paths(schema: Any) -> frozenset[tuple[str, ...]]:
+def marked_secret_paths(schema: Any) -> frozenset[tuple[PathStep, ...]]:
     """The paths of the properties a schema marks as secret (``writeOnly``, ``format: password``).
 
     A path is the property names from the top of the schema. An array item
-    adds no step, ``additionalProperties`` adds :data:`ANY_KEY`, and a local
-    ``$ref`` is followed (each one once per path, so a schema that refers to
-    itself ends).
+    adds no step, ``additionalProperties`` adds an :class:`OtherKey` step
+    (any key but the declared properties next to it), and a local ``$ref``
+    is followed (each one once per path, so a schema that refers to itself
+    ends). The mark is read on the schema at each path, also when it comes
+    through a ``$ref``, an array's ``items`` or a combiner.
     """
-    paths: set[tuple[str, ...]] = set()
+    paths: set[tuple[PathStep, ...]] = set()
 
-    def walk(node: Any, path: tuple[str, ...], seen: frozenset[str]) -> None:
+    def walk(node: Any, path: tuple[PathStep, ...], seen: frozenset[str]) -> None:
         if not isinstance(node, Mapping):
             return
+        if path and _marks_secret(node):
+            paths.add(path)
         ref = node.get("$ref")
         if isinstance(ref, str) and ref not in seen:
             walk(_resolve_local_ref(schema, ref), path, seen | {ref})
         for sub, inner in _children(node, path):
-            if inner != path and _marks_secret(sub):
-                paths.add(inner)
             walk(sub, inner, seen)
 
     walk(schema, (), frozenset())

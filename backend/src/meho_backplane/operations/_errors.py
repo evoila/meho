@@ -67,7 +67,7 @@ from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
 )
-from meho_backplane.redaction.call_secrets import scrub_call_secrets
+from meho_backplane.redaction.call_secrets import keep_call_secrets_whole, scrub_call_secrets
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -199,7 +199,14 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     it behind a quote.
     """
     try:
-        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
+        policy = get_default_policy()
+
+        def clean(node: Any) -> Any:
+            return redact(scrub_secret_fields_in_text(node), policy).redacted
+
+        # A rule that replaces part of a secret value of the call does not
+        # leave the rest: such a text is cleaned again with the value masked.
+        redacted = keep_call_secrets_whole(text, clean(text), clean)
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out

@@ -425,7 +425,10 @@ of a multi-step operation starts with the values of its parent. The set holds:
 * the values at a place the operation's parameter schema marks as secret
   (`writeOnly` or `format: password`). The mark holds at its own path only
   (`marked_secret_paths`): marking `login.value` does not hide `display.value`.
-  Local `$ref` links are followed;
+  The mark is read on the schema at each place, also when it comes through a
+  local `$ref`, an array's `items` or a combiner. A mark on
+  `additionalProperties` holds only for keys the schema does not declare next
+  to it, so a declared `label` stays public;
 * the values MEHO reads from the secret store for the call: the secret-named
   fields under the names the connector reads, after the target's
   `secret_field_map`, both as stored and with surrounding whitespace removed
@@ -435,7 +438,21 @@ of a multi-step operation starts with the values of its parent. The set holds:
 The value pass runs last, after the rules that read the vendor's own field
 names and after MEHO decided the outcome of the call. So a vendor label that
 equals a known value cannot stop a field-name rule, and a known value cannot
-change whether a multi-step operation failed. Every place where vendor text
+change whether a multi-step operation failed. The message of a failed
+multi-step operation is picked by the severity the step returned, before its
+values are hidden.
+
+A policy rule can replace only part of a known value (a value with `?token=`
+in it). Then the rest would stay. `keep_call_secrets_whole` finds each text
+where a rule cut a known value and redacts that text again from the original
+with the known values masked first. Every other text keeps its first result,
+so a label inside a text still reaches its rule. The connector-boundary
+redaction (`_apply_redaction_middleware`), `redact_error_payload`,
+`_sanitize_free_text` and the Azure error text use it. The redaction
+manifest paths name keys of the answer, so a known value used as a key is
+masked in them too.
+
+Every place where vendor text
 leaves the connector layer replaces each known value with
 `[REDACTED:call_secret]`:
 
@@ -443,16 +460,19 @@ leaves the connector layer replaces each known value with
 | --- | --- |
 | The answer and the audit row of a success, and of a multi-step error | end of `_protect_secret_values` |
 | The error text, `extras` (with `upstream_message`) and `result` of an error | `redact_error_result` |
-| A vendor or exception text that is cut to a length | `_sanitize_free_text` and the Vault error texts, before the cut |
+| A vendor or exception text that is cut to a length | `_sanitize_free_text`, the Vault error texts, and the texts the phpIPAM, Azure, FreeIPA, Keycloak, Hetzner Robot and HTTP probe connectors cut themselves, before the cut |
 | The `audit_*` fields a handler adds to the audit row | `_add_handler_extras_and_error` |
 | The whole stored span: name, status and every attribute (URL, headers, bodies, reasons) | `_CaptureScope.add` |
 
-The pass covers strings, keys and numbers. A key that becomes the mark gets a
-counter at its end when it would match another key, so no entry is lost. A
-number that holds a known value becomes the mark as text.
+The pass covers strings, keys and numbers. A key that stays as it is keeps
+its name. A key that becomes the mark gets a counter at its end when its name
+is taken, in either order, so no entry is lost. A number that holds a known
+value becomes the mark as text. The top-level names of an error's `extras`
+and its `error_code` are MEHO's own and stay as they are, so the caller and
+the audit writer can read them.
 
 A value is found in the forms a vendor may send back: as it is, JSON-escaped
-(once and twice, with and without `\/` and `\u` escapes), percent-encoded
+(once and twice, with and without `\/` and `\u` escapes in each round), percent-encoded
 (`%20` and `+`, with `/` encoded or kept, upper and lower case), and as base64
 of the whole value (standard and URL-safe, with and without padding). A value
 shorter than four characters is not known: it would hide parts of ordinary
@@ -467,7 +487,8 @@ with the call.
 
 Cost: a call with no known value does no work at all. Otherwise each string,
 key and number of the answer is scanned once, and only one with a hit is
-rewritten. There is no size cut.
+rewritten. There is no size cut. When a rule changed a text that holds a
+known value, the redaction of that answer runs a second time.
 
 ## Action semantics
 

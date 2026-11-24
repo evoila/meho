@@ -554,8 +554,10 @@ from meho_backplane.redaction import (
 from meho_backplane.redaction.call_secrets import (
     bind_call_secrets,
     collect_param_secret_values,
+    keep_call_secrets_whole,
     marked_secret_paths,
     reset_call_secrets,
+    scrub_call_secrets,
     scrub_call_secrets_tree,
 )
 from meho_backplane.settings import get_settings
@@ -1453,14 +1455,27 @@ def _terminal_error_inline_fields(envelope: dict[str, Any]) -> dict[str, Any]:
     return inline
 
 
-def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
-    """``"<sentinel>: <first error message>"`` for the error result's ``error`` line."""
+def _error_issue_indexes(envelope: Any) -> list[int]:
+    """The places of the ``error``-severity issues in *envelope*, in order."""
+    issues = envelope.get("issues") if isinstance(envelope, dict) else None
+    if not isinstance(issues, list):
+        return []
+    return [index for index, item in enumerate(issues) if _is_error_issue(item)]
+
+
+def _composite_error_summary(error_code: str, envelope: dict[str, Any], places: list[int]) -> str:
+    """``"<sentinel>: <first error message>"`` for the error result's ``error`` line.
+
+    *places* are the error issues of the envelope before its values were
+    hidden (:func:`_error_issue_indexes`), so a hidden severity still picks
+    the message.
+    """
     issues = envelope.get("issues")
-    for item in issues if isinstance(issues, list) else []:
-        if isinstance(item, dict) and item.get("severity") == "error":
-            message = item.get("message")
-            if isinstance(message, str) and message:
-                return f"{error_code}: {message}"
+    for index in places:
+        item = issues[index] if isinstance(issues, list) and index < len(issues) else None
+        message = item.get("message") if isinstance(item, dict) else None
+        if isinstance(message, str) and message:
+            return f"{error_code}: {message}"
     return error_code
 
 
@@ -1565,6 +1580,7 @@ async def _reduce_and_audit_composite_error(
     envelope: dict[str, Any] | None
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
+    error_places = _error_issue_indexes(redaction.redacted)
     try:
         redaction = await _protect_secret_values(
             redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
@@ -1582,7 +1598,7 @@ async def _reduce_and_audit_composite_error(
         redaction = redaction.model_copy(update={"raw": fingerprint_value(redaction.raw)})
     else:
         full_envelope: dict[str, Any] = redaction.redacted
-        error_summary = _composite_error_summary(error_code, full_envelope)
+        error_summary = _composite_error_summary(error_code, full_envelope, error_places)
         envelope, handle, delivery = await _reduce_composite_error_envelope(
             full_envelope,
             op_id=op_id,
@@ -2903,13 +2919,15 @@ def _apply_redaction_middleware(
     ``redacted`` copy is unchanged.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
-    try:
-        redaction = apply_connector_boundary_redaction(
-            raw,
-            connector_id=connector_id,
-            tenant=tenant,
-            op=op_id,
+
+    def boundary(node: Any) -> RedactionMiddlewareResult:
+        return apply_connector_boundary_redaction(
+            node, connector_id=connector_id, tenant=tenant, op=op_id
         )
+
+    try:
+        redaction = boundary(raw)
+        redaction = _keep_call_secret_values_whole(redaction, boundary)
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
     if classify_op(op_id) != "credential_mint":
@@ -2918,6 +2936,28 @@ def _apply_redaction_middleware(
     # audit row's raw copy keeps only the other fields.
     audit_raw, _ = scrub_secret_named_values(redaction.raw)
     return redaction.model_copy(update={"raw": audit_raw})
+
+
+def _keep_call_secret_values_whole(
+    redaction: RedactionMiddlewareResult,
+    boundary: Callable[[Any], RedactionMiddlewareResult],
+) -> RedactionMiddlewareResult:
+    """Keep each secret value of the call whole for the last pass that hides it.
+
+    A rule of the policy can replace only part of a known value in a text
+    (a value with ``?token=`` in it). That text is redacted again from the
+    answer with the known values masked first, so no part of the value
+    stays. The manifest paths name keys of the answer, so a known value
+    used as a key is masked in them as in the stored answer.
+    """
+    redacted = keep_call_secrets_whole(
+        redaction.raw, redaction.redacted, lambda node: boundary(node).redacted
+    )
+    manifest = tuple(
+        entry if path == entry.path else entry.model_copy(update={"path": path})
+        for entry, path in ((entry, scrub_call_secrets(entry.path)) for entry in redaction.manifest)
+    )
+    return redaction.model_copy(update={"redacted": redacted, "manifest": manifest})
 
 
 def _handle_metadata_for_audit(handle: ResultHandle | None) -> dict[str, Any] | None:

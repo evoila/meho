@@ -105,6 +105,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
 
 __all__ = ["HetznerRobotConnector", "robot_form_fields"]
 
@@ -326,7 +327,8 @@ class HetznerRobotConnector(HttpConnector):
             return resp.json()
         except ValueError as exc:
             raise RuntimeError(
-                f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
+                f"Non-JSON response from {path}: {resp.status_code} "
+                f"{scrub_call_secrets(resp.text)[:200]}"
             ) from exc
 
     async def _post_form(
@@ -359,7 +361,8 @@ class HetznerRobotConnector(HttpConnector):
             return resp.json()
         except ValueError as exc:
             raise RuntimeError(
-                f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
+                f"Non-JSON response from {path}: {resp.status_code} "
+                f"{scrub_call_secrets(resp.text)[:200]}"
             ) from exc
 
     async def _post_json(

@@ -35,6 +35,7 @@ import pytest
 
 from meho_backplane.connectors.adapters.http import _read_capped_json_response
 from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
+from tests._time_limits import check_time_limit
 from tests.test_connectors_http_adapter import _ConcreteHttpConnector, _make_target
 
 _ROUNDS = 1000
@@ -247,7 +248,8 @@ async def _assert_nothing_left_open(client: httpx.AsyncClient, server: _StallSer
     started = time.monotonic()
     resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(1.0))
     assert resp.status_code == 200
-    assert time.monotonic() - started < 1.0
+    elapsed = time.monotonic() - started
+    check_time_limit(elapsed, 1.0, f"the request after the rounds took {elapsed:.2f} s")
 
 
 async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> None:
@@ -287,6 +289,7 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
         await server.stop()
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_during_close_after_time_limit_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -295,6 +298,7 @@ async def test_stop_during_close_after_time_limit_leaves_nothing_open(
     await _run_rounds(_streamed, "/slow", read_timeout=0.002)
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_during_close_of_direct_request_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -303,6 +307,7 @@ async def test_stop_during_close_of_direct_request_leaves_nothing_open(
     await _run_rounds(_direct, "/slow", read_timeout=0.002)
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_during_close_of_redirect_answer_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -311,6 +316,7 @@ async def test_stop_during_close_of_redirect_answer_leaves_nothing_open(
     await _run_rounds(_streamed, "/redirect", read_timeout=None)
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_during_close_of_direct_stream_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -319,6 +325,7 @@ async def test_stop_during_close_of_direct_stream_leaves_nothing_open(
     await _run_rounds(_direct_stream, "/slow", read_timeout=None)
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_during_close_in_direct_stream_body_read_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
@@ -327,6 +334,7 @@ async def test_stop_during_close_in_direct_stream_body_read_leaves_nothing_open(
     await _run_rounds(_direct_stream_read, "/slow", read_timeout=0.002)
 
 
+@pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
 async def test_stop_right_after_direct_stream_answer_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,

@@ -519,11 +519,10 @@ async def _run_stop_safe[T](
 
     httpcore closes an answer or a connection inside ``AsyncShieldCancellation``.
     That shield holds against anyio cancel scopes, but not against a plain
-    ``task.cancel()``. A stop that lands during such a close leaves the
-    connection open and its pool slot taken. So *work* runs in its own task,
-    inside an anyio cancel scope. A stop on the caller cancels that scope,
-    which respects httpcore's shield, and the close runs to its end. Then
-    the caller gets the stop (``CancelledError``) as before.
+    ``task.cancel()``. So *work* runs in its own task, inside an anyio cancel
+    scope. A stop on the caller cancels that scope, which respects httpcore's
+    shield, and the close runs to its end. Then the caller gets the stop
+    (``CancelledError``).
 
     The work can also end with an answer just before the stop reaches the
     caller. The caller then never gets that answer, so *discard* (when given)

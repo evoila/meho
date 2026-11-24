@@ -80,21 +80,28 @@ no list of parent keys:
   in any kind and at any depth;
 - any other key has a secret name and a value of its own (a text or a
   number): a custom kind, an annotation, a label, a chart value;
-- an `env` entry at any depth has a secret-shaped name and a value of its
-  own. A secret word may sit inside a longer name (`is_secret_shaped_name`
-  in `redaction/command_line.py`: `PGPASSWORD`, `DB_PASS`). An entry that
+- a `name`/`value` pair at any depth (an `env` entry, an HTTP header) has
+  a secret-shaped name and a value of its own. A secret word may sit
+  inside a longer name (`is_secret_shaped_name` in
+  `redaction/command_line.py`: `PGPASSWORD`, `DB_PASS`). An entry that
   reads its value from a Secret (`valueFrom`) does not count;
 - the `command` and `args` of an object, read as one command line, have a
   value that the approval preview hides (`hide_command_parts` in
   `redaction/command_line.py`): a secret flag and its value, also when the
   flag ends `command` and the value starts `args`, or a secret-named
   assignment. A user name alone after `-u` does not count;
-- a field of a text in a `data` or `stringData` value names a secret and
-  gives it a value (a file kept in a ConfigMap). Every field of a line is
-  read, so every field of a one-line JSON text is too, and a quoted value
-  keeps all that is inside its quotes;
-- an annotation value that is JSON (the last applied object) is parsed and
-  read with the same rules;
+- a text that is a JSON object or list, anywhere (an annotation such as
+  the last applied object, a file in a ConfigMap, a field of a custom
+  kind), is parsed and read with the same rules;
+- any other text in a `data` or `stringData` value (a file kept in a
+  ConfigMap) has a field that the approval preview hides
+  (`hide_file_text` in `redaction/file_text.py`). Every `name: value` and
+  `name=value` field of each line is read, also a second one on the same
+  line (`MODE=fast DB_PASS=x`). A quoted value keeps all that is inside its
+  quotes. An unquoted value runs to the end of the line; after `=` any text
+  counts (`password=[x]`), after `:` a `{` or `[` starts a map or list
+  whose own fields are read. The indented lines of a YAML block text
+  (`password: |`) are its value;
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
   token with a known vendor prefix).
@@ -105,11 +112,13 @@ name that holds a secret word (`KEYBOARD_LAYOUT`, `passwordSecretRef`); such
 a call needs the encryption key too.
 
 The check reads each value of the manifest once, also when YAML aliases
-name it many times. So it reads each shared input of a rule once: an `env`
-list, a pair of `command` and `args`, an `annotations` map and its texts,
-and the keys and the texts of a `data`, `stringData` or `binaryData` map,
-each on its own (a map shared by `binaryData` and `data` still has its
-texts read), and the same object limit (`MAX_CHECKED_OBJECTS`)
+name it many times. So it reads each shared input of a rule once: a
+`command` list (its end state is carried into each `args` list it is
+paired with, so a long shared command is read once), a pair of `command`
+and `args`, the keys of a `data`, `stringData` or `binaryData` map, and
+each text (parsed as JSON once, read as a file once; a map shared by
+`binaryData` and `data` still has its texts read), and the same object
+limit (`MAX_CHECKED_OBJECTS`)
 holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of
@@ -778,8 +787,13 @@ Secret `data` / `stringData` values (key names stay), every `env` value
 hook (header names stay), the text of every `command` / `args` list (only
 its size in bytes stays, as `{"hidden": true, "bytes": N}`), the
 last-applied annotation and a number under a secret name
-(`password: 12345678`). Any other annotation text that is JSON is read
-with the same rules and kept as JSON text. All of this is done at any depth: a Secret nested
+(`password: 12345678`). In any other `data` or `stringData` map, a file
+text keeps all but its secret values (`hide_file_text`). Any other text
+that is a JSON object or list, wherever it is, keeps all but its secret
+values: a text with nothing to hide stays as it is, and one with a secret
+keeps its keys, their order and its spacing. Inside such a text a command
+line stays (only its secret values are hidden), and an `env` or header
+value is hidden only under a secret-shaped name. All of this is done at any depth: a Secret nested
 in a custom resource and a pod template's copy of the annotation are hidden
 too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
 walk: the entry's other fields are checked as well. Then the shared

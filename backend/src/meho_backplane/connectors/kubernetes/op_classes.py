@@ -17,7 +17,6 @@ the encrypted handoff of the run.
 """
 
 import json
-import re
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
@@ -32,10 +31,13 @@ from meho_backplane.op_classes import (
     declare_sandbox_delete_grant,
 )
 from meho_backplane.redaction.command_line import (
-    hide_command_parts,
+    COMMAND_LINE_START,
+    CommandLineState,
+    hide_command_parts_from,
     hide_in_text,
     is_secret_shaped_name,
 )
+from meho_backplane.redaction.file_text import hide_file_text
 
 declare_op_classes(
     credential_read=(
@@ -182,20 +184,6 @@ _COMMAND_FIELDS: Final[frozenset[str]] = frozenset({"command", "args"})
 #: included. A manifest with more counts as one MEHO cannot read.
 _MAX_NODES: Final[int] = 2_000_000
 
-#: One field of a file text: ``name: value``, ``name=value``, ``"name": "value"``.
-#: Every field of a line is read, so the fields of a one-line JSON text are
-#: too. A quoted value keeps all that is inside its quotes. An unquoted
-#: value runs to a ``,``, ``;``, ``}`` or ``]``; a ``{`` or ``[`` starts no
-#: value, so the fields inside it are read as fields of their own.
-_FILE_FIELD = re.compile(
-    r"""(?<![A-Za-z0-9_.-])(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\\?["']?[ \t]*[:=][ \t]*"""
-    r"""(?:"(?P<double>(?:[^"\\\n]|\\.)*)"|'(?P<single>[^'\n]*)'"""
-    r"""|(?P<bare>[^\s,;{}\[\]"'][^,;}\]\n]*))?"""
-)
-
-#: A variable name written the way a shell variable is: capital letters.
-_SHELL_VARIABLE = re.compile(r"[A-Z][A-Z0-9_]*")
-
 
 def _is_secret_shaped(value: Any) -> bool:
     """True for a text with a secret shape of its own (a password in a URL, a known token)."""
@@ -211,8 +199,11 @@ def _has_value(value: Any) -> bool:
     return isinstance(value, int | float)
 
 
-def _is_secret_env_entry(entry: Any) -> bool:
-    """True for an ``env`` entry with a secret-shaped name and a value of its own."""
+def _is_secret_pair(entry: Any) -> bool:
+    """True for a ``name``/``value`` pair (an ``env`` entry, an HTTP header) with a secret value.
+
+    The name is secret-shaped and the value is a value of its own.
+    """
     return (
         isinstance(entry, Mapping)
         and is_secret_shaped_name(str(entry.get("name", "")))
@@ -223,19 +214,17 @@ def _is_secret_env_entry(entry: Any) -> bool:
 def _file_text_holds_secret(text: str) -> bool:
     """True when a field of a file text names a secret and gives it a value.
 
-    A capital-letter name is read the way a shell variable is
-    (``DB_PASS=x``); any other name by the name rule of
-    :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`.
+    The same reading the approval preview hides by
+    (:func:`~meho_backplane.redaction.file_text.hide_file_text`).
     """
-    for found in _FILE_FIELD.finditer(text):
-        name = found["name"]
-        value = found["double"] or found["single"] or found["bare"] or ""
-        is_secret = (
-            is_secret_shaped_name if _SHELL_VARIABLE.fullmatch(name) else is_secret_param_name
-        )
-        if value.strip() and is_secret(name):
-            return True
-    return False
+    return hide_file_text(text) != text
+
+
+def _parts(value: Any) -> list[Any]:
+    """The items of a ``command`` or ``args`` value: a list, one item, or none."""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
 
 
 def _children(node: Any, *, skip_items: bool) -> list[Any]:
@@ -244,16 +233,20 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
     return list(node) if isinstance(node, list) else []
 
 
-def _json_objects(text: Any) -> list[Any] | None:
-    """The JSON object of an annotation text, as a list of none or one; ``None`` when too deep."""
-    if not isinstance(text, str) or text.lstrip()[:1] not in ("{", "["):
-        return []
+def _may_be_json(text: Any) -> bool:
+    """True for a text that starts like a JSON object or list."""
+    return isinstance(text, str) and text.lstrip()[:1] in ("{", "[")
+
+
+def _json_objects(text: str) -> list[Any] | None:
+    """The JSON object or list of a text, as a list of none or one; ``None`` when too deep."""
     try:
-        return [json.loads(text)]
+        parsed = json.loads(text)
     except RecursionError:
         return None
     except ValueError:
         return []
+    return [parsed] if isinstance(parsed, dict | list) else []
 
 
 class _SecretValueCheck:
@@ -267,39 +260,40 @@ class _SecretValueCheck:
       :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`);
     * any other key has a secret name and a value of its own (a text or a
       number);
-    * an ``env`` entry has a secret-shaped name
+    * a ``name``/``value`` pair (an ``env`` entry, an HTTP header) has a
+      secret-shaped name
       (:func:`~meho_backplane.redaction.command_line.is_secret_shaped_name`,
       also a secret word inside a longer name) and a value;
     * the ``command`` and ``args`` of an object, read as one command line,
       have a value the approval preview hides
       (:func:`~meho_backplane.redaction.command_line.hide_command_parts`);
-    * a field of a text in ``data`` or ``stringData`` names a secret and
-      gives it a value (every field of a line, so every field of a one-line
-      JSON text too);
-    * a text in ``annotations`` that is JSON is read the same way;
+    * a text that is a JSON object or list, anywhere (an annotation, a file
+      in a ConfigMap, a field of a custom kind), is parsed and read with
+      these same rules;
+    * any other text in ``data`` or ``stringData`` is read as a config file,
+      and counts when the approval preview would hide a value in it
+      (:func:`~meho_backplane.redaction.file_text.hide_file_text`);
     * a text has a secret shape
       (:func:`~meho_backplane.redaction.command_line.hide_in_text`).
 
     A value of another type than a rule expects never raises: the rule does
     not apply and the walk goes on. Each value of the manifest is read once,
     also when YAML aliases name it many times. So is each shared input of a
-    rule: an ``env`` list, a pair of ``command`` and ``args``, an
-    ``annotations`` map and its texts, and the keys and the texts of a
-    ``data``, ``stringData`` or ``binaryData`` map (each on its own). The
-    ``items`` of a list object are read as objects of their own.
+    rule: a ``command`` list (its end state is carried into
+    each ``args`` list it is paired with), a pair of ``command`` and
+    ``args``, the keys of a ``data``-like map, and each text (parsed as
+    JSON once, read as a file once). The ``items`` of
+    a list object are read as objects of their own.
     """
 
     def __init__(self) -> None:
         self._seen: set[int] = set()
         self._keys_read: set[int] = set()
-        self._texts_read: set[int] = set()
-        self._env_read: set[int] = set()
-        self._annotations_read: set[int] = set()
+        self._file_texts_read: set[int] = set()
+        self._commands_read: dict[int, tuple[bool, CommandLineState]] = {}
         self._command_lines_read: set[tuple[int, int]] = set()
+        self._json_read: dict[int, list[Any] | None] = {}
         self._nodes = 0
-        # Parsed annotation objects stay alive for the whole check, so an id() in
-        # the read sets is never reused by a later object.
-        self._parsed: list[Any] = []
 
     @staticmethod
     def _first_read(value: Any, read: set[int]) -> bool:
@@ -311,35 +305,64 @@ class _SecretValueCheck:
     def _first_visit(self, value: Any) -> bool:
         return self._first_read(value, self._seen)
 
+    def _json_of(self, text: str) -> list[Any] | None:
+        """The parsed JSON of *text* (see :func:`_json_objects`), parsed once per text.
+
+        The parsed objects stay alive in the cache for the whole check, so an
+        id() in the read sets is never reused by a later object.
+        """
+        if id(text) not in self._json_read:
+            self._json_read[id(text)] = _json_objects(text)
+        return self._json_read[id(text)]
+
+    def _file_texts_hold_secret(self, values: Mapping[Any, Any]) -> bool:
+        """True when a text of a ``data`` or ``stringData`` map that is not JSON holds a secret.
+
+        A JSON text is read by the walk, as every JSON text of the manifest.
+        """
+        for text in values.values():
+            if not isinstance(text, str) or not self._first_read(text, self._file_texts_read):
+                continue
+            if _may_be_json(text) and self._json_of(text) != []:
+                continue
+            if _file_text_holds_secret(text):
+                return True
+        return False
+
     def _named_map_holds_secret(self, field: str, values: Mapping[Any, Any]) -> bool:
         """True when a key of a ``data``-like map has a secret name, or a text of it holds one."""
         if self._first_read(values, self._keys_read) and any(
             is_secret_param_name(str(key)) for key in values
         ):
             return True
-        return (
-            field != "binaryData"
-            and self._first_read(values, self._texts_read)
-            and any(isinstance(v, str) and _file_text_holds_secret(v) for v in values.values())
-        )
+        return field != "binaryData" and self._file_texts_hold_secret(values)
+
+    def _command_holds_secret(self, command: Any) -> tuple[bool, CommandLineState]:
+        """Whether ``command`` alone holds a secret, and its end state; read once per list."""
+        known = self._commands_read.get(id(command))
+        if known is None:
+            parts = _parts(command)
+            self._nodes += len(parts)
+            hidden, state = hide_command_parts_from(parts, COMMAND_LINE_START)
+            known = (hidden != parts, state)
+            self._commands_read[id(command)] = known
+        return known
 
     def _command_line_holds_secret(self, node: Mapping[Any, Any]) -> bool:
         """True when ``command`` and ``args`` of *node*, as one command line, hold a secret."""
         if not any(field in node for field in _COMMAND_FIELDS):
             return False
         command, args = node.get("command"), node.get("args")
+        holds, state = self._command_holds_secret(command)
+        if holds:
+            return True
         pair = (id(command), id(args))
         if pair in self._command_lines_read:
             return False
         self._command_lines_read.add(pair)
-        parts = [
-            part
-            for value in (command, args)
-            if value is not None
-            for part in (value if isinstance(value, list) else [value])
-        ]
+        parts = _parts(args)
         self._nodes += len(parts)
-        return hide_command_parts(parts) != parts
+        return hide_command_parts_from(parts, state)[0] != parts
 
     def _mapping_holds_secret(self, node: Mapping[Any, Any]) -> bool:
         """True when a key of *node* or a value of one of its keys holds a secret."""
@@ -350,32 +373,7 @@ class _SecretValueCheck:
                     return True
             elif is_secret_param_name(name) and _has_value(value):
                 return True
-            if (
-                name == "env"
-                and isinstance(value, list)
-                and self._first_read(value, self._env_read)
-                and any(_is_secret_env_entry(entry) for entry in value)
-            ):
-                return True
-        return self._command_line_holds_secret(node)
-
-    def _annotation_objects(self, node: Mapping[Any, Any]) -> list[Any] | None:
-        """The JSON objects not read yet in the annotations of *node*; ``None`` when too deep."""
-        annotations = node.get("annotations")
-        if not isinstance(annotations, Mapping) or not self._first_read(
-            annotations, self._annotations_read
-        ):
-            return []
-        found: list[Any] = []
-        for text in annotations.values():
-            if not self._first_read(text, self._annotations_read):
-                continue
-            parsed = _json_objects(text)
-            if parsed is None:
-                return None
-            found.extend(parsed)
-        self._parsed.extend(found)
-        return found
+        return _is_secret_pair(node) or self._command_line_holds_secret(node)
 
     def __call__(self, doc: Mapping[str, Any]) -> bool:
         if not self._first_visit(doc):
@@ -387,9 +385,11 @@ class _SecretValueCheck:
             self._nodes += 1
             if self._nodes > _MAX_NODES or _is_secret_shaped(node):
                 return True
-            if isinstance(node, Mapping):
-                parsed = self._annotation_objects(node)
-                if parsed is None or self._mapping_holds_secret(node):
+            if isinstance(node, Mapping) and self._mapping_holds_secret(node):
+                return True
+            if _may_be_json(node):
+                parsed = self._json_of(node)
+                if parsed is None:
                     return True
                 stack.extend(obj for obj in parsed if self._first_visit(obj))
             for child in _children(node, skip_items=skip_items and node is doc):

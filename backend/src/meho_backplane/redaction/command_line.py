@@ -35,8 +35,11 @@ from typing import Any, Final
 from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
+    "COMMAND_LINE_START",
     "HIDDEN",
+    "CommandLineState",
     "hide_command_parts",
+    "hide_command_parts_from",
     "hide_command_text",
     "hide_flag_value",
     "hide_in_text",
@@ -354,6 +357,14 @@ def hide_shell_script(script: str) -> str:
     return text
 
 
+#: Where a command line stands after some of its parts: the secret flag that
+#: waits for its value (or ``None``) and the last text part.
+CommandLineState = tuple[str | None, str]
+
+#: The state at the start of a command line.
+COMMAND_LINE_START: Final[CommandLineState] = (None, "")
+
+
 def hide_command_parts(parts: list[Any]) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
@@ -372,9 +383,20 @@ def hide_command_parts(parts: list[Any]) -> list[Any]:
     backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
     shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
     """
+    return hide_command_parts_from(parts, COMMAND_LINE_START)[0]
+
+
+def hide_command_parts_from(
+    parts: list[Any], state: CommandLineState
+) -> tuple[list[Any], CommandLineState]:
+    """:func:`hide_command_parts` for the parts that follow *state*, and the state after them.
+
+    So ``command`` can be read once and its end state carried into each
+    ``args`` list it is paired with: a secret flag that ends ``command``
+    hides the first item of ``args``.
+    """
     hidden: list[Any] = []
-    pending: str | None = None
-    previous = ""
+    pending, previous = state
     for part in parts:
         if not isinstance(part, str):
             hidden.append(part)
@@ -389,4 +411,4 @@ def hide_command_parts(parts: list[Any]) -> list[Any]:
             )
             hidden.append(text)
         previous = part
-    return hidden
+    return hidden, (pending, previous)

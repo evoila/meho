@@ -155,9 +155,10 @@ def test_a_plain_value_in_a_data_map_is_not_flagged() -> None:
 def _pod(container: dict[str, Any]) -> str:
     return _manifest(
         {
+            "metadata": {"name": "d"},
             "spec": {
                 "template": {"spec": {"containers": [{"name": "c", "image": "i", **container}]}}
-            }
+            },
         },
         kind="Deployment",
     )
@@ -239,6 +240,12 @@ def test_a_plain_command_does_not_count(command: dict[str, Any]) -> None:
         '{"db": {"host": "a", "password": "' + _VALUE + '"}}',
         '{"user": "app", "password": ",,,,"}',
         "password: ',;}]'",
+        "password=[" + _VALUE + "]",
+        "db.password={" + _VALUE + "}",
+        "MODE=fast DB_PASS=" + _VALUE + " ./run",
+        "export MODE=fast; export DB_PASS=" + _VALUE,
+        "password: |\n  " + _VALUE + "\n",
+        "password: " + _VALUE + ", more",
     ],
     ids=[
         "yaml",
@@ -250,6 +257,12 @@ def test_a_plain_command_does_not_count(command: dict[str, Any]) -> None:
         "json-nested",
         "json-commas",
         "yaml-punctuation",
+        "properties-bracket",
+        "properties-brace",
+        "shell-second-assignment",
+        "shell-second-export",
+        "yaml-block-text",
+        "yaml-comma",
     ],
 )
 @pytest.mark.parametrize("field", ["data", "stringData"])
@@ -270,6 +283,10 @@ def test_file_text_in_a_config_map_with_a_secret_line_counts(field: str, text: s
         "x",
         '{"user": "app", "password": ""}',
         "password:\n  file: /etc/pw\n",
+        "credentials: {file: /etc/pw}",
+        "credentials:\n  - file: /etc/pw\n",
+        "MODE=fast LOG=debug ./run",
+        "password: |\n",
     ],
 )
 def test_file_text_without_a_secret_line_does_not_count(text: str) -> None:
@@ -322,12 +339,13 @@ def test_a_map_shared_by_binary_data_and_data_has_its_file_text_read(fields: str
     assert _flagged(manifest) is True
 
 
-def _counted(monkeypatch: pytest.MonkeyPatch, name: str) -> list[int]:
-    calls: list[int] = []
+def _counted(monkeypatch: pytest.MonkeyPatch, name: str) -> list[Any]:
+    """The first argument of each call of *name* in the check."""
+    calls: list[Any] = []
     real = getattr(op_classes, name)
 
     def counting(*args: Any, **kwargs: Any) -> Any:
-        calls.append(1)
+        calls.append(args[0])
         return real(*args, **kwargs)
 
     monkeypatch.setattr(op_classes, name, counting)
@@ -355,19 +373,75 @@ def _shared_inputs_manifest(containers: int) -> str:
 
 
 def test_each_shared_input_is_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    env_reads = _counted(monkeypatch, "_is_secret_env_entry")
-    command_reads = _counted(monkeypatch, "hide_command_parts")
+    pair_reads = _counted(monkeypatch, "_is_secret_pair")
+    command_reads = _counted(monkeypatch, "hide_command_parts_from")
     json_reads = _counted(monkeypatch, "_json_objects")
     text_reads = _counted(monkeypatch, "_file_text_holds_secret")
 
     assert _flagged(_shared_inputs_manifest(containers=50)) is False
 
-    # One env list of two entries, one command line, two annotation texts,
-    # one file text: each read once, whatever the number of containers.
-    assert len(env_reads) == 2
-    assert len(command_reads) == 1
+    # One env list of two entries, one command and one args list, two
+    # annotation texts, one file text: each read once, whatever the number
+    # of containers.
+    env_entries = [read for read in pair_reads if "value" in read]
+    assert len(env_entries) == 2
+    assert len(command_reads) == 2
     assert len(json_reads) == 2
     assert len(text_reads) == 1
+
+
+def test_a_shared_command_is_read_once_with_different_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_reads = _counted(monkeypatch, "hide_command_parts_from")
+    containers = "\n".join(
+        f"    - {{name: c{i}, image: i, command: *cmd, args: [--mode, m{i}]}}" for i in range(1, 50)
+    )
+    long_command = "[" + ", ".join(f"w{i}" for i in range(500)) + "]"
+    manifest = (
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: p}\nspec:\n  containers:\n"
+        f"    - {{name: c0, image: i, command: &cmd {long_command}, args: [--mode, m0]}}\n"
+        + containers
+        + "\n"
+    )
+
+    assert _flagged(manifest) is False
+
+    parts_read = sum(len(parts) for parts in command_reads)
+    assert parts_read == 500 + 50 * 2
+
+
+def test_a_secret_flag_at_the_end_of_a_shared_command_hides_the_first_of_each_args() -> None:
+    manifest = (
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: p}\nspec:\n  containers:\n"
+        "    - {name: a, image: i, command: &cmd [mysql, --password], args: ['-h']}\n"
+        "    - {name: b, image: i, command: *cmd, args: [" + _VALUE + "]}\n"
+    )
+    assert _flagged(manifest) is True
+
+
+_SECRET_ANNOTATIONS = '{example.invalid/a: \'{"password": "' + _VALUE + "\"}'}"
+
+# The walk reads the last key of an object first. In the first form it meets
+# the map as an annotation value first; in the second, as annotations first.
+_ANNOTATION_MAP_ORDERS = {
+    "annotation-value-read-first": "metadata: {name: w, annotations: &m "
+    + _SECRET_ANNOTATIONS
+    + "}\nspec: {a: {annotations: {k: *m}}}\n",
+    "annotations-read-first": "spec: {a: {annotations: {k: &m "
+    + _SECRET_ANNOTATIONS
+    + "}}}\nmetadata: {name: w, annotations: *m}\n",
+}
+
+
+@pytest.mark.parametrize(
+    "body", list(_ANNOTATION_MAP_ORDERS.values()), ids=list(_ANNOTATION_MAP_ORDERS)
+)
+def test_an_annotation_map_also_used_as_an_annotation_value_has_its_texts_read(
+    body: str,
+) -> None:
+    manifest = "apiVersion: example.invalid/v1\nkind: Widget\n" + body
+    assert _flagged(manifest) is True
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +558,11 @@ def test_names_with_a_secret_word_and_a_plain_value_are_counted() -> None:
 # The stored request keeps no copy: before approval, after approval, after the end
 # ---------------------------------------------------------------------------
 
+
+def _config_map(name: str, text: str) -> str:
+    return _manifest({"metadata": {"name": "c"}, "data": {name: text}}, "ConfigMap")
+
+
 _STORED_FORMS = {
     "spec-data": _in_place("spec-data", "password", _VALUE),
     "annotation": _in_place("annotation", "adminPassword", _VALUE),
@@ -507,6 +586,19 @@ _STORED_FORMS = {
     ),
     "binary-data-shares-data": "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: c}\n"
     + _SHARED_MAP_ORDERS["binary-data-first"],
+    "properties-bracket": _config_map("app.properties", "password=[" + _VALUE + "]"),
+    "shell-second-assignment": _config_map("run.sh", "MODE=fast DB_PASS=" + _VALUE + " ./run"),
+    "yaml-block-text": _config_map("app.yaml", "db:\n  password: |\n    " + _VALUE + "\n"),
+    "json-in-a-custom-field": _manifest(
+        {"metadata": {"name": "w"}, "spec": {"config": json.dumps({"token": _VALUE})}}
+    ),
+    "http-header": _pod(
+        {"livenessProbe": {"httpGet": {"httpHeaders": [{"name": "X-Token", "value": _VALUE}]}}}
+    ),
+    **{
+        f"annotation-map-{name}": "apiVersion: example.invalid/v1\nkind: Widget\n" + body
+        for name, body in _ANNOTATION_MAP_ORDERS.items()
+    },
 }
 
 
@@ -553,6 +645,115 @@ async def test_the_stored_request_keeps_no_copy(manifest: str, stage: str) -> No
     stored = json.dumps({"params": row.params, "parent": row.resume_parent})
     assert _VALUE not in stored
     assert _COMMAS not in stored
+
+
+async def _store_with_preview(
+    manifest: str, preview: dict[str, Any], stage: str
+) -> tuple[dict[str, Any], str]:
+    """Store a request with its preview at *stage*; the stored effect and the whole row as JSON."""
+    params: dict[str, Any] = {"manifest": manifest}
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=_service(),
+            connector_id="kubernetes-1.x",
+            op_id="k8s.apply",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect={"op_id": "k8s.apply", "preview": preview},
+        )
+        if stage == "approved":
+            request.status = ApprovalRequestStatus.APPROVED.value
+            request.reviewed_by = "op:reviewer"
+            request.decided_at = datetime.now(UTC)
+        await s.commit()
+        request_id = request.id
+    if stage == "rejected":
+        async with get_sessionmaker()() as s:
+            await reject_request(s, request_id, operator=_reviewer(), reason="no")
+            await s.commit()
+
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT, request_id=request_id)
+    stored = json.dumps(
+        {"effect": row.proposed_effect, "params": row.params, "parent": row.resume_parent}
+    )
+    return row.proposed_effect, stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["waiting", "approved", "rejected"])
+@pytest.mark.parametrize("manifest", list(_STORED_FORMS.values()), ids=list(_STORED_FORMS))
+async def test_the_stored_preview_keeps_no_copy(
+    monkeypatch: pytest.MonkeyPatch, manifest: str, stage: str
+) -> None:
+    assert _flagged(manifest) is True
+    preview = await _apply_preview(monkeypatch, manifest)
+
+    effect, stored = await _store_with_preview(manifest, preview, stage)
+
+    assert effect["preview"]["manifest"]
+    assert _VALUE not in stored
+    assert _COMMAS not in stored
+
+
+def test_the_preview_keeps_an_ordinary_json_annotation_as_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    text = '{"command":["date"],"env":[{"name":"MODE","value":"fast"}]}'
+    manifest = _manifest({"metadata": {"name": "w", "annotations": {"example.invalid/run": text}}})
+    preview = asyncio.run(_apply_preview(monkeypatch, manifest))
+    assert preview["manifest"][0]["metadata"]["annotations"] == {"example.invalid/run": text}
+
+
+def test_the_preview_hides_only_the_secret_value_of_a_json_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    text = '{"command":["date"],"password":"' + _VALUE + '","port":80}'
+    manifest = _manifest({"metadata": {"name": "w", "annotations": {"example.invalid/run": text}}})
+    preview = asyncio.run(_apply_preview(monkeypatch, manifest))
+    shown = preview["manifest"][0]["metadata"]["annotations"]["example.invalid/run"]
+    assert _VALUE not in shown
+    # The same keys in the same order and spacing; only the secret is replaced.
+    assert shown.startswith('{"command":["date"],"password":"')
+    assert shown.endswith('","port":80}')
+
+
+@pytest.mark.parametrize(
+    "text,kept",
+    [
+        ("password=[" + _VALUE + "]\nport=80\n", ["port=80\n"]),
+        ('{"user": "app", "password": ",,,,"}', ['{"user": "app", "password": "', '"}']),
+        ("MODE=fast DB_PASS=" + _VALUE + "\n", ["MODE=fast DB_PASS="]),
+        ("db:\n  password: |\n    " + _VALUE + "\n  port: 80\n", ["db:\n", "  port: 80\n"]),
+    ],
+    ids=["properties", "json", "shell", "yaml-block"],
+)
+def test_the_preview_hides_the_secret_values_of_a_config_map_file(
+    monkeypatch: pytest.MonkeyPatch, text: str, kept: list[str]
+) -> None:
+    import asyncio
+
+    preview = asyncio.run(_apply_preview(monkeypatch, _config_map("app.conf", text)))
+    shown = preview["manifest"][0]["data"]["app.conf"]
+    assert _VALUE not in shown
+    assert ",,,," not in shown
+    assert all(part in shown for part in kept)
+
+
+def test_the_preview_keeps_a_plain_config_map_file_as_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    text = "port: 80\nmode: fast\ncredentials:\n  file: /etc/pw\n"
+    preview = asyncio.run(_apply_preview(monkeypatch, _config_map("app.yaml", text)))
+    assert preview["manifest"][0]["data"] == {"app.yaml": text}
 
 
 _NUMBER = 918273645

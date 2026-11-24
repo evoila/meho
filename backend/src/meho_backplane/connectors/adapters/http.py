@@ -561,19 +561,30 @@ async def _run_stop_safe[T](
     return cast("T", result)
 
 
-class _StopSafeCloseStream(httpx.AsyncByteStream):
-    """Close a streamed answer through :func:`_run_stop_safe`.
+async def _next_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
+    """Return the next part of a body, or ``None`` at its end."""
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        return None
 
-    The caller of ``client.stream(...)`` closes the answer in its own task,
-    after ``send`` returned. A stop during that close would leave the
-    connection open, so the close runs in a protected task too.
+
+class _StopSafeCloseStream(httpx.AsyncByteStream):
+    """Read and close a streamed answer through :func:`_run_stop_safe`.
+
+    The caller of ``client.stream(...)`` reads and closes the answer in its
+    own task, after ``send`` returned. When a body read fails (for example
+    after a time limit), httpcore closes the connection inside that read. A
+    stop during either close would leave the connection open, so each read
+    and the close run in a protected task too.
     """
 
     def __init__(self, inner: httpx.AsyncByteStream) -> None:
         self._inner = inner
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._inner:
+        chunks = aiter(self._inner)
+        while (chunk := await _run_stop_safe(lambda: _next_chunk(chunks))) is not None:
             yield chunk
 
     async def aclose(self) -> None:

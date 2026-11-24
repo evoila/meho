@@ -16,8 +16,10 @@ round. Then the tests check:
 The cases: a streamed read after a time limit, a direct ``client.request``
 after a time limit, the close of a 3xx answer before the next hop, and a
 direct ``client.stream`` whose caller is stopped while it closes the answer.
-One more case stops a direct ``client.stream`` right after the answer
-arrives, before the caller gets it.
+A direct ``client.stream`` whose caller reads the body is stopped while
+the read closes the answer after its time limit. One more case stops a
+direct ``client.stream`` right after the answer arrives, before the caller
+gets it.
 """
 
 from __future__ import annotations
@@ -210,6 +212,15 @@ async def _direct_stream(client: httpx.AsyncClient, url: str, timeout: Any) -> h
         return resp
 
 
+async def _direct_stream_read(client: httpx.AsyncClient, url: str, timeout: Any) -> httpx.Response:
+    # The caller reads the body. The read hits the time limit, and httpcore
+    # starts the close inside the body read, in the caller's task.
+    async with client.stream("GET", url, timeout=timeout) as resp:
+        async for _ in resp.aiter_bytes():
+            pass
+        return resp
+
+
 async def _wait_before_stop(round_no: int) -> None:
     """Wait a different time in each round, while the close is held open."""
     step = round_no % 4
@@ -306,6 +317,14 @@ async def test_stop_during_close_of_direct_stream_leaves_nothing_open(
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
     await _run_rounds(_direct_stream, "/slow", read_timeout=None)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_close_in_direct_stream_body_read_leaves_nothing_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    await _run_rounds(_direct_stream_read, "/slow", read_timeout=0.002)
 
 
 @pytest.mark.asyncio

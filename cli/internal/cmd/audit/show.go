@@ -54,6 +54,16 @@ func newShowCmd() *cobra.Command {
 			"either the audit_id doesn't exist or it belongs to another " +
 			"tenant — the route deliberately conflates the two so " +
 			"existence is never leaked across tenant boundaries.",
+		Annotations: map[string]string{
+			"docs-reference-note": "The summary prints `secret_read_as` when the row has it. " +
+				"It is the id of the login that the secret store accepted when the call " +
+				"read a secret. It can also be one of three fixed texts: `meho` (the store " +
+				"saw MEHO's own identity), `check-runner` (the check runner read it, and " +
+				"its login has no id), or `kept-login:reader-unknown` (the call used a " +
+				"login MEHO kept in memory, and it is not known whose login read it). The line " +
+				"is missing when the call read no secret. The backplane sends the field " +
+				"only while the switch `AUDIT_SECRET_READ_AS` is on (off by default).",
+		},
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -448,8 +448,11 @@ The fixed texts cannot be taken for a login id: MEHO's own ids start with
 runner whose token has no `sub` is named `check-runner`, never the Sensor's
 owner. A read of a deleted latest version returns no secret data, so it names
 no login. The read of the sink secret for the approval card of `secret.move`
-names the caller when it returns a secret that is not deleted; the
-`approval.request` row of the call that waits for approval holds that value.
+names the caller when it returns a secret that is not deleted. Two rows
+written for the call that waits for approval hold that value: the
+`approval.request` row, and the `approval.reuse` row of a call that gets a
+request that already waits for the same call (`APPROVAL_SAME_CALL_REUSE`).
+Each row holds the value of its own call.
 
 Switch: `AUDIT_SECRET_READ_AS` (`Settings.audit_secret_read_as`), off by
 default. MEHO writes the column `audit_log.secret_read_as` on every

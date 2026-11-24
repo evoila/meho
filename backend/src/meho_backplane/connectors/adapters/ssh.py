@@ -102,6 +102,7 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.secret_read_as import (
     KEPT_LOGIN_READER_UNKNOWN,
     current_secret_read_as,
@@ -667,6 +668,9 @@ class SshConnector(Connector):
         never reaches the flight-recorder span (only *cmd* and the result do).
         """
         conn = await self._connect(target, operator)
+        # The check right before the command goes out, after the pooled
+        # connection and its credentials are ready.
+        await raise_if_send_refused()
         # Flight-recorder typed span (#3217, F8) -- the shared SSH-transport
         # seam, so every SSH-based typed connector (bind9 / holodeck / pfsense
         # / rke2 / windows_dns) records one span per command with no

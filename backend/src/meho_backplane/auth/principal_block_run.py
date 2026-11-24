@@ -22,6 +22,7 @@ what its steps did.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -32,6 +33,7 @@ __all__ = [
     "mark_step_refused",
     "raise_if_step_was_refused",
     "request_was_sent",
+    "run_login",
     "step_refused_in_run",
     "tracking_run",
 ]
@@ -40,6 +42,7 @@ __all__ = [
 @dataclass
 class _Run:
     parent: _Run | None
+    login: tuple[str, uuid.UUID | None] | None = None
     sent: bool = False
     refused: Exception | None = None
 
@@ -54,17 +57,25 @@ _run_var: ContextVar[_Run | None] = ContextVar("principal_block_run", default=No
 
 
 @contextmanager
-def tracking_run(*, is_step: bool) -> Iterator[None]:
+def tracking_run(*, is_step: bool, login: tuple[str, uuid.UUID | None]) -> Iterator[None]:
     """Keep a record while one operation runs.
 
     *is_step* is true for a step of a multi-step operation: its marks then
-    also reach the record of that operation.
+    also reach the record of that operation. *login* is the ``(sub,
+    tenant_id)`` of the operation's operator, the login every send of the
+    operation checks (:func:`run_login`).
     """
-    token = _run_var.set(_Run(parent=_run_var.get() if is_step else None))
+    token = _run_var.set(_Run(parent=_run_var.get() if is_step else None, login=login))
     try:
         yield
     finally:
         _run_var.reset(token)
+
+
+def run_login() -> tuple[str, uuid.UUID | None] | None:
+    """The login of the running operation, or ``None`` outside one."""
+    run = _run_var.get()
+    return None if run is None else run.login
 
 
 def mark_request_sent() -> None:

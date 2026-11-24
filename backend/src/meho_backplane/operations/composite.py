@@ -102,6 +102,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.principal_block_run import (
     mark_request_sent,
     raise_if_step_was_refused,
@@ -951,6 +952,7 @@ async def enforce_subop_policy(
             params=params,
         )
         if refused is None:
+            await raise_if_send_refused()
             journal.start(connector_id, op_id, target, params, may_send_again=True)
             mark_request_sent()
         return refused
@@ -969,6 +971,10 @@ async def enforce_subop_policy(
         )
     if isinstance(gated, OperationResult):
         return gated
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     if journal is not None:
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
@@ -1071,6 +1077,10 @@ async def run_governed_subop(
         if isinstance(gated, OperationResult):
             return SubopStep(stopped=gated)
         may_send_again = gated is _GoAhead.NO_PERSON
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     entry = (
         journal.start(connector_id, op_id, target, params, may_send_again=may_send_again)
         if journal is not None

@@ -29,10 +29,14 @@ Where it is checked (all through :func:`is_principal_blocked`):
   when that login is blocked;
 * an approved call, which does not run while the person who asked is
   blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`);
-* each step of a multi-step operation, and each request a step sends
-  straight to the target (:func:`raise_if_step_login_blocked`). The logins
-  a step checks are its operator and every login bound with
-  :func:`checking_logins_for_steps`: the operator of the multi-step
+* each step of a multi-step operation;
+* every send to a target, right before it goes out
+  (:func:`raise_if_send_refused`): a request of the HTTP connector base,
+  a request of the Kubernetes client, an SSH command, the start of a
+  governed step and the start of each operation's handler. So a block made
+  while a call runs stops its next send. The logins a send checks are the
+  login of the running call and every login bound with
+  :func:`checking_logins_for_steps`: the operator of a multi-step
   operation, and on an approved run also the person who asked.
 
 The reader keeps the whole list in memory for a few seconds per process.
@@ -57,7 +61,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.principal_block_run import mark_step_refused, step_refused_in_run
+from meho_backplane.auth.principal_block_run import (
+    mark_step_refused,
+    run_login,
+    step_refused_in_run,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -77,7 +85,7 @@ __all__ = [
     "first_blocked_step_login",
     "is_principal_blocked",
     "list_blocked",
-    "raise_if_step_login_blocked",
+    "raise_if_send_refused",
     "refusal_of_step",
     "reset_block_cache",
     "unblock_principal",
@@ -245,12 +253,16 @@ async def refusal_of_step(
     been refused in that time. The refusal is noted for the running
     operation, so the whole operation stops with it.
     """
+    return await _refusal_for_login(operator.sub, operator.tenant_id, only_in_steps=only_in_steps)
+
+
+async def _refusal_for_login(
+    sub: str, tenant_id: uuid.UUID | None, *, only_in_steps: bool
+) -> PrincipalBlockedStepError | None:
     refusal = _earlier_refusal()
     if refusal is None:
         try:
-            blocked = await first_blocked_step_login(
-                operator.sub, operator.tenant_id, only_in_steps=only_in_steps
-            )
+            blocked = await first_blocked_step_login(sub, tenant_id, only_in_steps=only_in_steps)
         except PrincipalBlockUnavailableError:
             refusal = PrincipalBlockedStepError(unavailable=True)
         else:
@@ -268,18 +280,30 @@ def _earlier_refusal() -> PrincipalBlockedStepError | None:
     return cast("PrincipalBlockedStepError | None", step_refused_in_run())
 
 
-async def raise_if_step_login_blocked(operator: Operator) -> None:
-    """Stop a request a multi-step operation sends straight to the target.
+async def raise_if_send_refused() -> None:
+    """The one check every outgoing send passes, right before it goes out.
 
-    Called by the HTTP connector base before each request. Does nothing
-    outside a multi-step operation or an approved run. Raises
-    :class:`PrincipalBlockedStepError` when an earlier step of the run was
-    refused, when a login of the step is blocked, or when the list cannot be
-    read (:func:`refusal_of_step`).
+    Called by the places that send to a target: the request hook of the HTTP
+    connector base, the Kubernetes client wrapper, the SSH command runner,
+    the step runner of multi-step operations, and the start of each
+    operation's handler. The login is the one the dispatcher noted for the
+    running call (:func:`~meho_backplane.auth.principal_block_run.tracking_run`),
+    plus every login bound with :func:`checking_logins_for_steps`. A send
+    outside a running call (a health probe, for example) has no login and
+    is not checked.
+
+    Raises :class:`PrincipalBlockedStepError` when an earlier step of the
+    run was refused, when a login is blocked, or when the list cannot be
+    read (:func:`refusal_of_step`). It reads the list copy kept for
+    :data:`BLOCK_CACHE_SECONDS`, so a send reads the database at most once
+    in that time.
     """
-    refusal = await refusal_of_step(operator, only_in_steps=True)
+    login = run_login()
+    if login is None:
+        return
+    refusal = await _refusal_for_login(login[0], login[1], only_in_steps=False)
     if refusal is not None:
-        _log.info("principal_block_step_request_refused", operator_sub=operator.sub)
+        _log.info("principal_block_send_refused", operator_sub=login[0])
         raise refusal
 
 

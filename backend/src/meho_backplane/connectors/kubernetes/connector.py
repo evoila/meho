@@ -211,9 +211,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "--container / --since / --previous knobs). The right group "
         "once the agent has identified a specific pod (typically from "
         "'workload' or 'events') and needs the application's own log "
-        "output. ``k8s.logs.read`` is the same read with the shared log "
-        "read parameters (``source``, ``since``, ``until``, ``lines``, "
-        "``filter``) as on every connector. Streaming follow-mode ('kubectl logs -f') is "
+        "output. Streaming follow-mode ('kubectl logs -f') is "
         "deliberately out of scope -- request bounded chunks."
     ),
     "exec": (

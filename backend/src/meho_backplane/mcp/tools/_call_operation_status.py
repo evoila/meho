@@ -226,7 +226,7 @@ async def _audit_refusal(
         await _write_audit_row(
             session,
             audit_id=uuid.uuid4(),
-            event_class=AuditEventClass.LEGACY_REQUEST,
+            event_class=AuditEventClass.POLICY_DECISION,
             operator=operator,
             request=request,
             path=_REFUSAL_PATH,
@@ -246,7 +246,7 @@ async def _not_found(operator: Operator, op_id: str, request_id: uuid.UUID) -> d
     gets nothing in its own history.
     """
     await write_mcp_audit_row(
-        event_class=AuditEventClass.LEGACY_REQUEST,
+        event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         method="APPROVAL",
         path=_REFUSAL_PATH,

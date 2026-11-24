@@ -11,18 +11,20 @@ real local HTTP server. These tests use the same server for the odd cases:
 * one call returns a result handle that ``result_query`` reads in the same session;
 * the client closes its side during one call: the others still answer, and the
   server writes ``mcp_call_ended_without_answer`` once with the reason
-  ``caller_gone`` and the session id cut to 8 characters.
+  ``caller_gone`` and the session id cut to 8 characters. A call that is still
+  running at that moment finishes with its own answer.
 
 A call that the server cancels also writes the line (reason ``cancelled``),
-and the cancel still goes up.
+and the cancel still goes up. The same holds after the handler returned:
+while ``initialize`` waits for its audit row, and while the answer is sent.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from types import SimpleNamespace
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -34,15 +36,19 @@ import meho_backplane.mcp.server as mcp_server
 import meho_backplane.mcp.tools.operations as operation_tools
 import meho_backplane.operations.jsonflux_reducer as jsonflux_reducer_module
 import meho_backplane.operations.result_query as result_query_core
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
-from meho_backplane.mcp.schemas import PROTOCOL_VERSION, JsonRpcRequest
+from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.operations.caller_gone import caller_gone_at
 from meho_backplane.settings import get_settings
 from tests.mcp_live_server import (
     LiveServer,
+    envelope,
     live_server,
     new_client,
     open_session,
@@ -51,6 +57,7 @@ from tests.mcp_live_server import (
 )
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
+    build_operator,
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 -- pytest-discovered autouse fixture
 )
@@ -60,7 +67,8 @@ _LOG_LINE = "mcp_call_ended_without_answer"
 
 @pytest.fixture(autouse=True)
 def _broadcast_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
+    # A local port where nothing listens.
+    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://127.0.0.1:1")
     get_settings.cache_clear()
 
 
@@ -95,9 +103,9 @@ async def test_refused_or_waiting_call_does_not_hurt_the_others(
 
     monkeypatch.setattr(operation_tools, "call_operation", _fake_call)
     calls = [
-        tool_call("call_operation", {"connector_id": "stub-1.x", "op_id": "stub.thing.get"}, 1),
-        tool_call("list_targets", {}, 2),
-        tool_call("meho_broadcast_recent", {}, 3),
+        tool_call("call_operation", {"connector_id": "stub-1.x", "op_id": "stub.thing.get"}),
+        tool_call("list_targets"),
+        tool_call("meho_broadcast_recent"),
     ]
     results = await asyncio.gather(*(post(client, call, session_id) for call in calls))
 
@@ -135,21 +143,21 @@ async def test_result_handle_from_a_parallel_call_works_in_the_same_session(
             db.add(
                 TargetORM(
                     tenant_id=OPERATOR_TENANT_ID,
-                    name=f"lab-{i:03d}",
+                    name=f"target-{i:03d}",
                     aliases=[],
                     product="vault",
-                    host=f"lab-{i:03d}.example.test",
+                    host="127.0.0.1",
                     port=443,
-                    secret_ref=f"targets/lab-{i:03d}",
+                    secret_ref=f"targets/target-{i:03d}",
                     auth_model="shared_service_account",
                     fingerprint={"product": "vault", "version": "1.0", "reachable": True},
                 )
             )
 
     calls = [
-        tool_call("meho_broadcast_recent", {}, 1),
-        tool_call("list_targets", {}, 2),
-        tool_call("meho_broadcast_recent", {}, 3),
+        tool_call("meho_broadcast_recent"),
+        tool_call("list_targets"),
+        tool_call("meho_broadcast_recent"),
     ]
     results = await asyncio.gather(*(post(client, call, session_id) for call in calls))
 
@@ -157,101 +165,271 @@ async def test_result_handle_from_a_parallel_call_works_in_the_same_session(
     handle_id = _payload(results[1][1])["handle"]["handle_id"]  # type: ignore[arg-type]
     outcome, response = await post(
         client,
-        tool_call("result_query", {"handle_id": handle_id, "offset": 0, "limit": 100}, 4),
+        tool_call("result_query", {"handle_id": handle_id, "offset": 0, "limit": 100}),
         session_id,
     )
     assert outcome == "answer"
     assert len(_payload(response)["rows"]) == 89  # type: ignore[arg-type]
 
 
+def _raw_request(server: LiveServer, body: dict[str, Any], session_id: str | None) -> bytes:
+    """The bytes of one ``POST /mcp``, for a connection the test closes by itself."""
+    content = json.dumps(body).encode()
+    session = f"Mcp-Session-Id: {session_id}\r\n" if session_id else ""
+    return (
+        f"POST /mcp HTTP/1.1\r\nHost: {server.base_url.removeprefix('http://')}\r\n"
+        f"Content-Type: application/json\r\n{session}"
+        f"MCP-Protocol-Version: {PROTOCOL_VERSION}\r\n"
+        f"Content-Length: {len(content)}\r\n\r\n"
+    ).encode() + content
+
+
+async def _send_raw(
+    server: LiveServer, body: dict[str, Any], session_id: str | None
+) -> asyncio.StreamWriter:
+    port = int(server.base_url.rsplit(":", 1)[1])
+    _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(_raw_request(server, body, session_id))
+    await writer.drain()
+    return writer
+
+
+async def _wait_until(done: Callable[[], Any]) -> None:
+    async with asyncio.timeout(10):
+        while not done():
+            await asyncio.sleep(0.01)
+
+
+def _lines(logs: list[Any]) -> list[Any]:
+    return [entry for entry in logs if entry["event"] == _LOG_LINE]
+
+
 async def test_client_that_closes_during_one_call_leaves_the_others_answered(
     session: tuple[LiveServer, httpx.AsyncClient, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The slow call ends after its client left: one log line, and the others answer."""
+    """One log line for the call whose client left. A call still running then answers."""
     server, client, session_id = session
     started = asyncio.Event()
-    seen_gone = asyncio.Event()
+    held_started = asyncio.Event()
+    release = asyncio.Event()
 
     async def _slow(_operator: Any, _params: dict[str, Any] | None) -> dict[str, Any]:
         started.set()
-        for _ in range(500):
-            if caller_gone_at() is not None:
-                break
-            await asyncio.sleep(0.01)
-        seen_gone.set()
+        await _wait_until(caller_gone_at)
         return {"ok": True}
 
+    async def _held(_operator: Any, _params: dict[str, Any] | None) -> dict[str, Any]:
+        held_started.set()
+        await release.wait()
+        return {"held": True}
+
     monkeypatch.setitem(mcp_server._DISPATCH, "test/slow", _slow)
-    host_port = server.base_url.removeprefix("http://")
-    host, port = host_port.split(":")
-    body = json.dumps({"jsonrpc": "2.0", "id": 9, "method": "test/slow", "params": {}}).encode()
-    request = (
-        f"POST /mcp HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\n"
-        f"Mcp-Session-Id: {session_id}\r\nMCP-Protocol-Version: {PROTOCOL_VERSION}\r\n"
-        f"Content-Length: {len(body)}\r\n\r\n"
-    ).encode() + body
+    monkeypatch.setitem(mcp_server._DISPATCH, "test/held", _held)
 
     with capture_logs(processors=[merge_contextvars]) as logs:
-        _reader, writer = await asyncio.open_connection(host, int(port))
-        writer.write(request)
-        await writer.drain()
-        await asyncio.wait_for(started.wait(), 10)
-        others = await asyncio.gather(
-            *(
-                post(client, tool_call(tool, {}, i), session_id)
-                for i, tool in enumerate(("list_targets", "meho_broadcast_recent"), start=1)
-            )
-        )
+        writer = await _send_raw(server, envelope("test/slow", {}, 900001), session_id)
+        held = asyncio.create_task(post(client, envelope("test/held", {}, 900002), session_id))
+        other = asyncio.create_task(post(client, tool_call("list_targets"), session_id))
+        await asyncio.wait_for(asyncio.gather(started.wait(), held_started.wait()), 10)
         writer.close()
-        await asyncio.wait_for(seen_gone.wait(), 10)
-        await asyncio.sleep(0.2)
+        await _wait_until(lambda: _lines(logs))
+        await asyncio.sleep(0.1)
+        assert not held.done()
+        release.set()
+        held_outcome, held_response = await asyncio.wait_for(held, 10)
+        other_outcome, _ = await asyncio.wait_for(other, 10)
 
-    assert [outcome for outcome, _ in others] == ["answer", "answer"]
-    lines = [entry for entry in logs if entry["event"] == _LOG_LINE]
-    assert len(lines) == 1
-    assert lines[0]["reason"] == "caller_gone"
-    assert lines[0]["session"] == session_id[:8]
-    assert lines[0]["method"] == "test/slow"
+    assert (held_outcome, other_outcome) == ("answer", "answer")
+    assert held_response is not None
+    assert held_response.json()["result"] == {"held": True}
+    [line] = _lines(logs)
+    assert line["reason"] == "caller_gone"
+    assert line["method"] == "test/slow"
+    assert line["session"] == session_id[:8]
+    # The log context holds the full id. It must not reach this line.
+    assert session_id not in json.dumps(line, default=str)
+    assert any(e.get("mcp_session_id") == session_id for e in logs)
 
 
+@pytest.fixture
+def session_open_row(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, asyncio.Event]:
+    """Audit of new sessions is on, and its write waits. Events: it started, let it end."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _write(**_kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setenv("AUDIT_CLIENT_IDENTITY", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(mcp_server, "write_mcp_session_open_row", _write)
+    return started, release
+
+
+_INITIALIZE = envelope(
+    "initialize",
+    {
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {},
+        "clientInfo": {"name": "parallel-test", "version": "0"},
+    },
+    900003,
+)
+
+
+async def test_client_that_closes_after_the_handler_returned_leaves_the_log_line(
+    session_open_row: tuple[asyncio.Event, asyncio.Event],
+) -> None:
+    """The client leaves while ``initialize`` waits for its audit row."""
+    started, release = session_open_row
+    # The app sets up its logging at start, so the capture starts after that.
+    async with live_server(0.06) as server:
+        with capture_logs(processors=[merge_contextvars]) as logs:
+            writer = await _send_raw(server, _INITIALIZE, None)
+            await asyncio.wait_for(started.wait(), 10)
+            writer.close()
+            await _wait_until(
+                lambda: [e for e in logs if e["event"] == "caller_gone_during_request"]
+            )
+            assert not _lines(logs)
+            release.set()
+            await _wait_until(lambda: _lines(logs))
+
+    [line] = _lines(logs)
+    assert line["reason"] == "caller_gone"
+    assert line["method"] == "initialize"
+    # The session id the server had just given, cut to 8 characters.
+    assert len(line["session"]) == len(line["mcp_session_id"]) == 8
+
+
+async def _post_to_app(
+    body: dict[str, Any],
+    send: Callable[[Any], Awaitable[None]],
+    receive_after_body: Callable[[], Awaitable[dict[str, Any]]],
+    session_id: str | None,
+) -> None:
+    """Run one ``POST /mcp`` through the whole app, with the given ASGI channels."""
+    content = json.dumps(body).encode()
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"mcp-protocol-version", PROTOCOL_VERSION.encode()),
+    ]
+    if session_id:
+        headers.append((b"mcp-session-id", session_id.encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "root_path": "",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 80),
+    }
+    body_sent = False
+
+    async def _receive() -> dict[str, Any]:
+        nonlocal body_sent
+        if body_sent:
+            return await receive_after_body()
+        body_sent = True
+        return {"type": "http.request", "body": content, "more_body": False}
+
+    await app(scope, _receive, send)
+
+
+@pytest.fixture
+def _login(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        verify_mcp_jwt_and_bind,
+        lambda: build_operator(TenantRole.OPERATOR),
+    )
+
+
+async def _wait_for_ever(*_args: Any, **_kwargs: Any) -> Any:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.usefixtures("_login")
+@pytest.mark.parametrize("moment", ["handler", "audit row", "send"])
 async def test_cancelled_call_writes_the_log_line_and_the_cancel_goes_up(
     monkeypatch: pytest.MonkeyPatch,
+    session_open_row: tuple[asyncio.Event, asyncio.Event],
+    moment: str,
 ) -> None:
-    """A tool call that the server cancels writes one line, then the cancel goes up."""
-    inside = asyncio.Event()
+    """A cancel in the handler, after it, or during the send: one line, and it goes up."""
+    started, _release = session_open_row
+    body = tool_call("list_targets")
+    session_id: str | None = str(uuid.uuid4())
 
-    async def _hangs(*_args: Any, **_kwargs: Any) -> Any:
-        inside.set()
-        await asyncio.Event().wait()
+    async def _hangs(*_args: Any) -> dict[str, Any]:
+        started.set()
+        return await _wait_for_ever()  # type: ignore[no-any-return]
 
-    async def _never_receive() -> dict[str, Any]:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")  # pragma: no cover
+    async def _answers(*_args: Any) -> dict[str, Any]:
+        return {}
 
-    monkeypatch.setattr(mcp_server, "_dispatch_no_store", _hangs)
-    request = SimpleNamespace(
-        headers={"mcp-session-id": "0123456789abcdef"}, receive=_never_receive
-    )
-    jrpc = JsonRpcRequest(
-        jsonrpc="2.0",
-        id=1,
-        method="tools/call",
-        params={"name": "list_targets", "arguments": {}},
-    )
+    async def _send(message: Any) -> None:
+        if moment == "send" and message["type"] == "http.response.body":
+            await _hangs()
 
-    with capture_logs() as logs:
-        task = asyncio.create_task(
-            mcp_server._dispatch_watching_caller(request, jrpc, False, SimpleNamespace())  # type: ignore[arg-type]
-        )
-        await asyncio.wait_for(inside.wait(), 5)
+    if moment == "audit row":
+        body, session_id = _INITIALIZE, None
+    else:
+        handler = _hangs if moment == "handler" else _answers
+        monkeypatch.setitem(mcp_server._DISPATCH, "tools/call", handler)
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        task = asyncio.create_task(_post_to_app(body, _send, _wait_for_ever, session_id))
+        await asyncio.wait_for(started.wait(), 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    lines = [entry for entry in logs if entry["event"] == _LOG_LINE]
-    assert len(lines) == 1
-    assert lines[0]["reason"] == "cancelled"
-    assert lines[0]["tool"] == "list_targets"
-    assert lines[0]["method"] == "tools/call"
-    assert lines[0]["session"] == "01234567"
+    [line] = _lines(logs)
+    assert line["reason"] == "cancelled"
+    assert line["method"] == body["method"]
+    assert line["tool"] == (None if moment == "audit row" else "list_targets")
+    if session_id:
+        assert line["session"] == session_id[:8]
+        assert session_id not in json.dumps(line, default=str)
+    else:
+        assert len(line["session"]) == 8
+
+
+@pytest.mark.usefixtures("_login")
+async def test_client_that_leaves_during_the_send_leaves_the_log_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server drops the answer when the client left before it was sent."""
+    sending, gone = asyncio.Event(), asyncio.Event()
+
+    async def _answers(*_args: Any) -> dict[str, Any]:
+        return {}
+
+    async def _send(message: Any) -> None:
+        if message["type"] == "http.response.body":
+            sending.set()
+            await gone.wait()
+
+    async def _disconnect() -> dict[str, Any]:
+        await sending.wait()
+        asyncio.get_running_loop().call_soon(gone.set)
+        return {"type": "http.disconnect"}
+
+    monkeypatch.setitem(mcp_server._DISPATCH, "tools/call", _answers)
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        await asyncio.wait_for(
+            _post_to_app(tool_call("list_targets"), _send, _disconnect, None), 10
+        )
+
+    [line] = _lines(logs)
+    assert line["reason"] == "caller_gone"
+    assert line["tool"] == "list_targets"
+    assert line["session"] is None

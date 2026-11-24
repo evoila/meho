@@ -650,7 +650,16 @@ sources it: `lib/net.sh` in `install.sh`, the own copies in `meho-host`.
 | overlaps the pod or the service range | refused | these are MEHO's own parts; a site system there is not reachable anyway (see the chapter, "The pod and service ranges") |
 | overlaps `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` | refused | the ports of the `meho` pod itself, and a cloud's metadata service |
 | `localhost`, `cluster.local` and names that end with them | refused | names of the pod itself and of the built-in Kubernetes |
+| a list with a line break | refused | `read` would keep only the first line, so the rest of the list would be lost without a message |
 | `none` | the empty list | the guard stays fully on |
+
+The guard trusts a listed host name as it is: it does not check the
+address that the name points to. So the overlap checks hold for the ranges
+and addresses only. A short name such as `vc`, or a name such as
+`kubernetes.default`, can point to a service of the built-in Kubernetes,
+because the pod looks up names in its own cluster first. The chapter says
+to list only full names of managed systems, and that a range or an
+address is the safer entry.
 
 So `10.0.0.0/8` is refused with the default ranges: the admin names the
 networks where the managed systems are. The guard accepts more forms than

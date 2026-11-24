@@ -177,6 +177,19 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
                 self.assert_usage_error(self.run_command(value), message)
                 self.assert_nothing_changed(before)
 
+    def test_a_list_with_a_line_break_keeps_the_list_in_force(self) -> None:
+        self.assertEqual(0, self.run_command(LIST).returncode)
+        before = self.files()
+
+        result = self.run_command("10.20.0.0/16,\n10.30.0.0/16")
+
+        self.assert_usage_error(
+            result, "target-networks: the list holds a line break. Give it on one line"
+        )
+        self.assertEqual(before, self.files())
+        self.assertEqual({KEY: LIST, "LOG_LEVEL": "INFO"}, self.host.configmap(CONFIGMAP))
+        self.assertEqual(1, self.host.deployment_restarts())
+
     def test_wrong_usage(self) -> None:
         for args in ((), ("10.20.0.0/16,", "10.30.0.0/16")):
             with self.subTest(args=args):
@@ -253,17 +266,27 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
         self.assert_nothing_changed(before)
 
     def test_values_with_a_config_block_of_their_own_change_nothing(self) -> None:
-        self.host.host_file(VALUES_PATH, place_values() + 'config:\n  logLevel: "DEBUG"\n')
-        before = self.files()
+        blocks = {
+            "another key": 'config:\n  logLevel: "DEBUG"\n',
+            "an empty line in the block": 'config:\n\n  logLevel: "DEBUG"\n',
+            "an empty line after the list": target_block() + "\n",
+            "a comment in the block": f'config:\n# set by hand\n  targetSsrfAllowlist: "{LIST}"\n',
+            "a value on the heading": "config: {}\n",
+        }
+        for name, block in blocks.items():
+            with self.subTest(block=name):
+                self.host.host_file(VALUES_PATH, place_values() + block)
+                before = self.files()
 
-        result = self.run_command(LIST)
+                result = self.run_command(LIST)
 
-        self.assert_one_fail_line(
-            result,
-            "[FAIL] /etc/meho/values-place.yaml has a config block that install.sh did not "
-            f"write, so meho-host cannot change it. Nothing was changed. Fix: {SUPPORT_HINT}",
-        )
-        self.assert_nothing_changed(before)
+                self.assert_one_fail_line(
+                    result,
+                    "[FAIL] /etc/meho/values-place.yaml has a config block that install.sh did "
+                    f"not write, so meho-host cannot change it. Nothing was changed. Fix: "
+                    f"{SUPPORT_HINT}",
+                )
+                self.assert_nothing_changed(before)
 
     def test_without_the_values_file_nothing_changes(self) -> None:
         self.host.host_path(VALUES_PATH).unlink()

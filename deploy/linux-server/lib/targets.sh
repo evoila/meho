@@ -26,7 +26,12 @@
 #   the built-in Kubernetes, not the addresses of the meho pod itself
 #   (0.0.0.0/8 and 127.0.0.0/8 reach its own ports), not the link-local
 #   range (a cloud's metadata service), and no name of the built-in
-#   Kubernetes or of the pod itself (cluster.local, localhost);
+#   Kubernetes or of the pod itself (cluster.local, localhost). The guard
+#   trusts a listed host name without checking the address it points to,
+#   so this holds for the ranges and addresses; the chapter says to list
+#   only full names of managed systems;
+# - the list is one line: a line break would make read keep only the first
+#   line, so the rest of the list would be lost without a message;
 # - "none" is the empty list: MEHO accepts no target on a private address.
 #
 # install.sh and meho-host read TARGET_NETWORKS and TARGET_NETWORKS_PROBLEM,
@@ -144,6 +149,10 @@ parse_target_networks() {
     local list=${1,,} entries=() kept=() entry
     TARGET_NETWORKS=""
     TARGET_NETWORKS_PROBLEM=""
+    if [[ $list == *$'\n'* || $list == *$'\r'* ]]; then
+        target_problem "the list holds a line break. Give it on one line, with a comma between two entries, for example 10.20.0.0/16,10.30.0.0/16."
+        return 1
+    fi
     [[ $list != none ]] || return 0
     IFS=, read -r -a entries <<<"$list"
     for entry in "${entries[@]}"; do

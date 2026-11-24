@@ -352,18 +352,20 @@ too. Output that is not this JSON gives one red doctor line. See
    [linux-server-install.md](linux-server-install.md#the-target-networks)):
    IPv4 ranges that start at their first address, addresses and host
    names, a port only on an address or a name, nothing that overlaps the
-   two ranges, `0.0.0.0/8`, `127.0.0.0/8` or `169.254.0.0/16`, and no
-   `localhost` or `cluster.local` name. A wrong entry is a usage error
-   that names it, and nothing changes.
+   two ranges, `0.0.0.0/8`, `127.0.0.0/8` or `169.254.0.0/16`, no
+   `localhost` or `cluster.local` name, and no line break in the list. A
+   wrong entry is a usage error that names it, and nothing changes.
 4. Write the new install record and the new values file next to the old
    ones with `mktemp`. `record_with_target_networks` changes the line of
    `target_networks`, or adds it in front of `from_disk` in a record of an
    older `install.sh`. `values_with_target_networks` replaces the last
    block, `config` with `targetSsrfAllowlist`, as `render_target_values` of
-   `lib/core.sh` writes it, or removes it for `none`. A record without the
-   new line afterwards, or a `config` block that holds more than the list,
-   is not in the form `install.sh` writes: the new files are removed and
-   the command stops with a `[FAIL]` line. Otherwise both files move into
+   `lib/core.sh` writes it, or removes it for `none`. The block runs from
+   its heading to the next top-level key. A record without the new line
+   afterwards, or a `config` block with any other line (another key, an
+   empty line, a comment, or a value on the heading), is not in the form
+   `install.sh` writes: the new files are removed and the command stops
+   with a `[FAIL]` line. Otherwise both files move into
    place, mode 0600.
 5. Patch `MEHO_TARGET_SSRF_ALLOWLIST` in the ConfigMap `meho-config` with
    a JSON merge patch on standard input, so every other key stays. Helm

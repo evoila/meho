@@ -185,6 +185,13 @@ entry is refused. No entry may hold an address of MEHO itself:
 - the names `localhost` and `cluster.local`, and every name that ends
   with them.
 
+MEHO trusts a host name in the list as it is. It does not check the
+address that the name points to. So a range or an address is the safer
+entry. List a host name only when it is the full name of a managed system
+in your DNS, for example `vcenter.example.com`, not `vcenter`. A short
+name, or a name such as `kubernetes.default`, can point to a service of
+MEHO itself.
+
 Without the option, the list is empty, and MEHO accepts no system on a
 private address. The result of the install then says so.
 

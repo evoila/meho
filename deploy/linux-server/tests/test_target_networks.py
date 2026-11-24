@@ -85,6 +85,9 @@ class RuleTests(unittest.TestCase):
             "10.20.0.0/16 10.30.0.0/16": "'10.20.0.0/16 10.30.0.0/16' holds a space. Put a comma",
             "none,10.20.0.0/16": "none stands alone: it empties the list.",
             ",": "the list is empty.",
+            "10.20.0.0/16,\n10.30.0.0/16": "the list holds a line break. Give it on one line",
+            "10.20.0.0/16\r": "the list holds a line break.",
+            "none\n": "the list holds a line break.",
         }
         for given, problem in cases.items():
             with self.subTest(given=given):
@@ -154,6 +157,7 @@ class InstallTargetNetworksTests(InstallTestCase):
         cases = {
             "10.20.0.7/24": "--target-networks: 10.20.0.7/24 does not start at the first address",
             "10.0.0.0/8": "--target-networks: 10.0.0.0/8 overlaps 10.42.0.0/16, the pod range",
+            "10.20.0.0/16,\n10.30.0.0/16": "--target-networks: the list holds a line break.",
             "": "--target-networks needs a value.",
         }
         for value, message in cases.items():

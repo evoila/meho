@@ -28,7 +28,9 @@
                              id "compare-package", that path, and part
                              "changed". The input set and the way the answers
                              are read are then reviewed, never changed
-                             silently.
+                             silently. The file is read as bytes, and each
+                             path is spelled so that two different paths
+                             never get the same spelling (see path_name).
   --summary-only             for the public CI log: print no input id, no
                              step, no part and no number, only one closing
                              line (a stale approved entry is still printed:
@@ -89,6 +91,36 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
         if old.get(field) is None or old.get(field) != new.get(field):
             found.append((*key, "text"))
     return found
+
+
+def path_name(raw: bytes) -> str:
+    """The spelling of a path from git, as the approved file and the output use it.
+
+    A letter of valid UTF-8 that is printable and is not a space, a quote or a
+    backslash stays as it is. A backslash is written as two backslashes, a byte
+    that is not UTF-8 as ``\\xNN``, and any other letter as ``\\uNNNN`` or
+    ``\\UNNNNNNNN``. So the spelling fits on one line of the approved file, and
+    two different paths always get two different spellings.
+    """
+    out = []
+    for letter in raw.decode("utf-8", "surrogateescape"):
+        code = ord(letter)
+        if 0xDC80 <= code <= 0xDCFF:
+            out.append(f"\\x{code - 0xDC00:02x}")
+        elif letter == "\\":
+            out.append("\\\\")
+        elif letter.isprintable() and not letter.isspace() and letter not in "\"'":
+            out.append(letter)
+        elif code <= 0xFFFF:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(f"\\U{code:08x}")
+    return "".join(out)
+
+
+def read_changed(path: Path) -> list[str]:
+    """The paths of a ``--changed`` file: NUL-ended bytes, each spelled with path_name."""
+    return [path_name(name) for name in path.read_bytes().split(b"\0") if name]
 
 
 def read_approved(path: Path) -> list[dict]:
@@ -202,10 +234,7 @@ def main() -> int:
         return 0
     if args.judge and args.approved:
         base_approved = Path(args.base_approved) if args.base_approved else None
-        changed = None
-        if args.changed:
-            names = Path(args.changed).read_text(encoding="utf-8").split("\0")
-            changed = [name for name in names if name]
+        changed = read_changed(Path(args.changed)) if args.changed else None
         return judge(
             Path(args.judge[0]),
             Path(args.judge[1]),

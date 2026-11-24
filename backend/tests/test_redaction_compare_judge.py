@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -652,12 +653,199 @@ def test_entries_with_the_exact_names_approve_a_move_and_an_accented_file(
     assert _judge_command(tmp_path, changed, _entries(_OLD, _NEW, _ACCENTED)) == 0
 
 
-def test_the_local_command_passes_the_changed_package_files_like_the_job() -> None:
+def _local_block() -> str:
     text = _DOCS.read_text(encoding="utf-8")
     block = text[text.index("- **See the differences locally.**") :]
-    block = block[: block.index("\n  ```\n", block.index("```bash"))]
+    block = block[block.index("```bash\n") + len("```bash\n") :]
+    return block[: block.index("\n  ```\n")] + "\n"
+
+
+def test_the_local_command_passes_the_changed_package_files_like_the_job() -> None:
+    block = _local_block()
     match = _DIFF_LINE.search(block)
     assert match is not None
-    assert "--name-only --no-renames -z" in match.group(1)
+    assert "--name-only --no-renames -z origin/main HEAD" in match.group(1)
     assert '-- backend/tests/redaction_compare > "$tmp/changed.txt"' in match.group(1)
-    assert '--changed "$tmp/changed.txt"' in block
+    assert 'changed_args=(--changed "$tmp/changed.txt")' in block
+    assert "grep -q -e '--changed' \"$rules\"" in block
+
+
+# --- the local command, run end to end on a small repo ---------------------
+
+_RECORDS = """def records():
+    return [{"id": "one", "path": "redact", "hidden": ["s1"], "shown": ["p0"],
+             "sha": "a", "rest": "r"}]
+"""
+_UV = """#!/bin/sh
+case "$1" in
+  sync) exit 0 ;;
+  run) shift; exec "$@" ;;
+esac
+exit 2
+"""
+
+
+def _old_judge() -> str:
+    """The judge without the --changed option, as a base branch can still have it."""
+    text = _SCRIPT.read_text(encoding="utf-8")
+    assert 'parser.add_argument("--changed")' in text
+    return text.replace("--changed", "--not-known").replace("args.changed", "args.not_known")
+
+
+def _local_repo(tmp_path: Path, judge: str) -> tuple[Path, Path]:
+    """A main branch with the judge, a clone, and a branch that edits a package file."""
+    main = tmp_path / "main"
+    package = main / "backend" / "tests" / "redaction_compare"
+    package.mkdir(parents=True)
+    (package / "answers.py").write_text(_RECORDS, encoding="utf-8")
+    snapshots = main / "backend" / "tests" / "snapshots"
+    snapshots.mkdir()
+    (snapshots / "redaction_compare_approved.yaml").write_text("approved: []\n", "utf-8")
+    (main / "scripts" / "ci").mkdir(parents=True)
+    (main / "scripts" / "ci" / "redaction_compare.py").write_text(judge, encoding="utf-8")
+    _git(main, "init", "-q", "-b", "main")
+    _git(main, "add", "-A")
+    _git(main, "commit", "-q", "-m", "base")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(main), str(clone))
+    _git(clone, "checkout", "-q", "-b", "change")
+    edited = (package / "answers.py").relative_to(main)
+    (clone / edited).write_text(_RECORDS + "# read the answers\n", encoding="utf-8")
+    _git(clone, "commit", "-q", "-am", "edit")
+    return main, clone
+
+
+def _run_local_block(tmp_path: Path, clone: Path) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "uv").write_text(_UV, encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    for name in ("python", "python3"):
+        if not (bin_dir / name).exists():
+            (bin_dir / name).symlink_to(sys.executable)
+    return subprocess.run(
+        ["bash", "-c", _local_block()],
+        cwd=clone,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_local_command_with_a_judge_that_knows_changed_lists_the_package_file(
+    tmp_path: Path,
+) -> None:
+    _, clone = _local_repo(tmp_path, _SCRIPT.read_text(encoding="utf-8"))
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 1, done.stderr
+    assert "compare-package backend/tests/redaction_compare/answers.py: changed" in done.stdout
+
+
+def test_the_local_command_with_an_older_judge_runs_without_changed(tmp_path: Path) -> None:
+    _, clone = _local_repo(tmp_path, _old_judge())
+    done = _run_local_block(tmp_path, clone)
+    assert "unrecognized arguments" not in done.stderr
+    assert done.returncode == 0, done.stderr
+    assert "0 difference(s), 0 not approved" in done.stdout
+
+
+def test_the_local_command_stops_when_main_moved_and_uses_the_trees_of_ci_after_a_merge(
+    tmp_path: Path,
+) -> None:
+    main, clone = _local_repo(tmp_path, _SCRIPT.read_text(encoding="utf-8"))
+    # Main picks up the same edit on its own: the merged tree does not change the file.
+    answers = main / "backend" / "tests" / "redaction_compare" / "answers.py"
+    answers.write_text(_RECORDS + "# read the answers\n", encoding="utf-8")
+    _git(main, "commit", "-q", "-am", "same edit on main")
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 1
+    assert "merge origin/main into this branch first" in done.stderr
+    assert "compare-package" not in done.stdout
+    _git(clone, "merge", "-q", "--no-edit", "origin/main")
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 0, done.stderr
+    assert "0 difference(s), 0 not approved" in done.stdout
+
+
+# --- the exact bytes of each path ------------------------------------------
+
+_PACKAGE = b"backend/tests/redaction_compare/"
+
+
+def test_distinct_paths_keep_distinct_spellings() -> None:
+    names = [
+        b"a\rb.py",
+        b"a\nb.py",
+        b"a\xffb.py",
+        b"a\\xffb.py",
+        b"a\\u000ab.py",
+        b"a b.py",
+        "a\u00e9.py".encode(),
+        "ae\u0301.py".encode(),
+    ]
+    spelled = [judge_module.path_name(name) for name in names]
+    assert len(set(spelled)) == len(names)
+    for one in spelled:
+        assert one.isprintable() and not any(letter.isspace() for letter in one)
+    assert judge_module.path_name("entrées.py".encode()) == "entrées.py"
+    assert judge_module.path_name(b"a\rb.py") == "a\\u000db.py"
+    assert judge_module.path_name(b"a\xffb.py") == "a\\xffb.py"
+
+
+def _write_changed(tmp_path: Path, *names: bytes) -> Path:
+    target = tmp_path / "changed.txt"
+    target.write_bytes(b"".join(_PACKAGE + name + b"\0" for name in names))
+    return target
+
+
+def test_paths_that_differ_in_a_carriage_return_need_distinct_entries(tmp_path: Path) -> None:
+    changed = _write_changed(tmp_path, b"a\rb.py", b"a\nb.py")
+    names = judge_module.read_changed(changed)
+    assert len(set(names)) == 2
+    assert _judge_command(tmp_path, changed, _entries(names[0])) == 1
+    assert _judge_command(tmp_path, changed, _entries(names[1])) == 1
+    assert _judge_command(tmp_path, changed, _entries(*names)) == 0
+
+
+def test_a_path_that_is_not_utf8_is_judged_and_needs_its_own_entry(tmp_path: Path) -> None:
+    changed = _write_changed(tmp_path, b"a\xffb.py", b"a\\xffb.py")
+    names = judge_module.read_changed(changed)
+    assert names == [
+        "backend/tests/redaction_compare/a\\xffb.py",
+        "backend/tests/redaction_compare/a\\\\xffb.py",
+    ]
+    assert _judge_command(tmp_path, changed, _entries(names[0])) == 1
+    assert _judge_command(tmp_path, changed, _entries(*names)) == 0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs file names that are not UTF-8")
+def test_the_job_lists_exact_bytes_from_git_for_unusual_names(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    package = repo / "backend" / "tests" / "redaction_compare"
+    package.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (package / "keep.py").write_text("X = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    raw = [b"a\rb.py", b"a\nb.py", b"a\xffb.py"]
+    for name in raw:
+        with open(os.path.join(os.fsencode(package), name), "wb") as handle:
+            handle.write(b"X = 2\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add")
+    head = _git(repo, "rev-parse", "HEAD")
+    match = _DIFF_LINE.search(_compare_step_text())
+    assert match is not None
+    out = tmp_path / "out"
+    out.mkdir()
+    subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", match.group(1)],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "base": base, "head": head, "dir": str(out)},
+        check=True,
+    )
+    names = judge_module.read_changed(out / "changed.txt")
+    assert sorted(names) == sorted(judge_module.path_name(_PACKAGE + name) for name in raw)
+    assert len(set(names)) == 3

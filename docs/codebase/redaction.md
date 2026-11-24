@@ -1080,10 +1080,15 @@ before a reviewer reads the pull request.
   The job also lists, with `git diff --name-only --no-renames -z`, each
   file that the pull request changes under `backend/tests/redaction_compare/`
   (the input set and the code that reads the answers) and passes the list
-  with `--changed`. A moved file gives its old and its new path, and each
-  path stays exactly as it is, also with letters outside ASCII. The job
-  runs for any change in that folder, a `.md` file too. Each such file is a difference of its own and needs an
-  approved entry with `id: compare-package`, the file path as `path`, and
+  with `--changed`. A moved file gives its old and its new path. The judge
+  reads the list as bytes and spells each path so that two different paths
+  never get the same spelling: a printable letter other than a space, a
+  quote or a backslash stays as it is (also a letter outside ASCII), a
+  backslash becomes `\\`, a byte that is not UTF-8 becomes `\xNN`, and any
+  other letter becomes `\uNNNN` (for example a line break is `\u000a`). The
+  job runs for any change in that folder, a `.md` file too. Each such file
+  is a difference of its own and needs an approved entry with
+  `id: compare-package`, the path as the judge spells it as `path`, and
   `part: changed`. So the records of the pull request cannot be changed to
   look like the base's without a reviewed entry.
   The approved file is the one that the pull request commits: it is the
@@ -1108,9 +1113,12 @@ before a reviewer reads the pull request.
 - **See the differences locally.** Without `--summary-only` the judge
   prints each difference that is not approved (input id, step, kind) and
   the counts. From the repo root, with the pull request branch checked out
-  and its changes committed, run the block below. Like CI, it passes the
-  changed files of the compare package with `--changed`, so a change there
-  needs its approved entry here too. It works in a new private folder from `mktemp -d`,
+  and its changes committed, run the block below. It compares the same two
+  trees as CI: it fetches `main` and stops when the branch does not hold
+  the newest `origin/main`, so merge it first. Like CI, it passes the
+  changed files of the compare package with `--changed` only when the
+  judge of `main` knows that option, so a change there needs its approved
+  entry here too. It works in a new private folder from `mktemp -d`,
   stops when a step fails (also either record build), and removes the
   folder and the second checkout when it ends, so no record file is left
   behind or read again by a later run.
@@ -1118,6 +1126,11 @@ before a reviewer reads the pull request.
   ```bash
   (
     set -euo pipefail
+    git fetch -q origin main
+    if ! git merge-base --is-ancestor origin/main HEAD; then
+      echo "merge origin/main into this branch first, so the compare uses the trees of CI" >&2
+      exit 1
+    fi
     tmp="$(mktemp -d)"
     trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
     git worktree add --detach "$tmp/base" origin/main
@@ -1127,10 +1140,14 @@ before a reviewer reads the pull request.
     (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
     git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
       > "$tmp/base-approved.yaml"
-    git diff --name-only --no-renames -z origin/main...HEAD -- backend/tests/redaction_compare > "$tmp/changed.txt"
+    changed_args=()
+    if grep -q -e '--changed' "$rules"; then
+      git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/redaction_compare > "$tmp/changed.txt"
+      changed_args=(--changed "$tmp/changed.txt")
+    fi
     python3 -I "$rules" \
       --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
-      --changed "$tmp/changed.txt" \
+      ${changed_args[@]+"${changed_args[@]}"} \
       --approved backend/tests/snapshots/redaction_compare_approved.yaml \
       --base-approved "$tmp/base-approved.yaml"
   )

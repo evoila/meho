@@ -122,9 +122,9 @@ IMPORT_START_PARAMS: Final[dict[str, Any]] = _schema(
         "description": (
             "Set a new key to import a file again that MEHO already sent to this site, for "
             "example the date. Without it, the same file (same SHA-256) is not uploaded "
-            "twice: MEHO follows the first job instead. MEHO keeps one record per file and "
-            "key, so the same call with the same key after a lost answer uploads nothing "
-            "twice either."
+            "again while MEHO's record of it is there: MEHO follows the first job instead. "
+            "MEHO keeps one record per file and key, so the same holds for the same call with "
+            "the same key."
         ),
     },
 )

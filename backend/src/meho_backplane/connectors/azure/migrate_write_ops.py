@@ -49,7 +49,11 @@ WRITE_WHEN_TO_USE: Final[str] = (
     "import job; azure.migrate.job.list shows the import jobs and their state; "
     "azure.migrate.group.create and azure.migrate.group.update make a group and change its "
     "machines; azure.migrate.assessment.create makes an Azure VM assessment and waits until "
-    "Azure has computed it. A retry never makes a second import, group or assessment. The "
+    "Azure has computed it. A retry makes no second group or assessment, because their "
+    "names are the caller's, and a retry of the import uploads nothing while the record of "
+    "the first call is there. When a step did not finish or a record could not be written, "
+    "tell the person and read the state first with azure.migrate.job.list, "
+    "azure.migrate.group.list, azure.migrate.assessment.list or azure.operation.status. The "
     "login needs the Azure Migrate Decide and Plan Expert role on the project's resource "
     "group for the writes."
 )
@@ -90,8 +94,9 @@ _IMPORT_GUIDANCE: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "If done is false or poll_error is set, call azure.migrate.job.list with the same "
-        "project: do not send the file again. Send the same call again only after a lost "
-        "answer: MEHO finds the first job by the file's SHA-256 and uploads nothing twice. "
+        "project: do not send the file again. After a lost answer, tell the person and call "
+        "azure.migrate.job.list first. While the record of the first call is there, the same "
+        "call finds the first job by the file's SHA-256 and uploads nothing. "
         "If the job of earlier_upload_waiting still waits for its file after some minutes, "
         "the file did not arrive: send the call again with a new repeat_key. Set a new "
         "repeat_key also to import the same file on purpose, or when an error says Azure no "
@@ -114,8 +119,9 @@ _JOB_LIST_GUIDANCE: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "State Completed, CompletedWithWarnings or CompletedWithErrors means the job ended; "
-        "InProgress or WaitingForBlobUpload means it did not. A job that waits for the file "
-        "got none: send azure.migrate.import.start again. An error that says the site is "
+        "InProgress or WaitingForBlobUpload means it did not. A job that still waits for its "
+        "file after some minutes got none: tell the person; to send the file again, call "
+        "azure.migrate.import.start with a new repeat_key. An error that says the site is "
         "not found means no import was started for this project."
     ),
     "result_objects": {"objects": {"omissions": ["count", "items"], "state_counts": []}},
@@ -141,11 +147,13 @@ _GROUP_CREATE_GUIDANCE: Final[dict[str, Any]] = {
         f"not_sent}}. {_TREAT_AS_DATA}"
     ),
     "next_step": (
-        "The same call again makes no second group and adds nothing twice. To change the "
-        "machines later, call azure.migrate.group.update. To assess the group, call "
-        "azure.migrate.assessment.create. If an error says the group was made but its "
-        "machines were not added, send the same call again. If not_sent is set, do what it "
-        "says."
+        "The same call again makes no second group, because the group has the caller's "
+        "name. To change the machines later, call azure.migrate.group.update. To assess the "
+        "group, call azure.migrate.assessment.create. If an error says the group was made "
+        "but its machines were not added, or a step did not finish (done false, poll_error "
+        "or not_sent set), tell the person and read the group with azure.migrate.group.list "
+        "or the step with azure.operation.status before the call is sent again. If not_sent "
+        "is set, do what it says."
     ),
 }
 
@@ -162,7 +170,10 @@ _GROUP_UPDATE_GUIDANCE: Final[dict[str, Any]] = {
         f"{{name, status, type, machine_count, ...}}, poll_error, not_sent}}. {_TREAT_AS_DATA}"
     ),
     "next_step": (
-        "The same call again changes nothing more. If not_sent is set, do what it says. "
+        "Before the same call is sent again, read the group with azure.migrate.group.list "
+        "and tell the person what it shows; if a step did not finish (done false, poll_error "
+        "or not_sent set), read that step with azure.operation.status first. If not_sent is "
+        "set, do what it says. "
         "An assessment of the group may now be "
         "out of date (status OutOfSync): make a new one with azure.migrate.assessment.create."
     ),
@@ -228,8 +239,8 @@ WRITE_OPS: Final[tuple[AzureTypedOp, ...]] = (
         "migrate_import_start",
         "Import a CSV file of servers into an Azure Migrate project and follow the import job.",
         "Makes the import site and import collector if missing, gets an upload link, "
-        "uploads the file and follows the job. A retry finds the job by the file's hash "
-        "and uploads nothing twice. Waits for approval.",
+        "uploads the file and follows the job. While the record of the first call is there, "
+        "a retry finds the job by the file's hash and uploads nothing. Waits for approval.",
         IMPORT_START_PARAMS,
         IMPORT_START_RESPONSE,
         _IMPORT_GUIDANCE,
@@ -269,7 +280,7 @@ WRITE_OPS: Final[tuple[AzureTypedOp, ...]] = (
         "migrate_group_update",
         "Add machines to a group of an Azure Migrate project, or take machines out of it.",
         "Sends POST .../groups/{group}/updateMachines, once to add and once to remove. "
-        "Adding a machine twice changes nothing. Waits for approval.",
+        "Waits for approval.",
         GROUP_UPDATE_PARAMS,
         GROUP_RESPONSE,
         _GROUP_UPDATE_GUIDANCE,

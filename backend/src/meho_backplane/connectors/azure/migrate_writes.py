@@ -354,13 +354,15 @@ async def _step(
     except POLL_ERRORS as exc:
         raise AzureRequestError(
             f"Azure target {target.name!r}: a step failed after an earlier one ran. {done} "
-            f"The failed step: {poll_error_text(exc)} Send the same call again: it makes no "
-            "second group and changes nothing twice.",
+            f"The failed step: {poll_error_text(exc)} Read the group with "
+            "azure.migrate.group.list and tell the person what it shows before the call is "
+            "sent again; the same call makes no second group.",
             http_status=getattr(exc, "http_status", None) or 502,
             azure_error_code=getattr(exc, "azure_error_code", None),
             azure_message=getattr(exc, "azure_message", None),
             remediation=(
-                "Send the same call again, or read the group with azure.migrate.group.list."
+                "Read the group with azure.migrate.group.list first and tell the person what "
+                "it shows."
             ),
         ) from exc
 

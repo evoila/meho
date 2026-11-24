@@ -2092,11 +2092,13 @@ shared `arm_write` and `poll_until`), `migrate_import.py` (the import flow),
 job list), `migrate_upload.py` (the upload). `migrate.py` adds the table and
 the mixin to its own.
 
-#### How a retry never makes duplicate work
+#### What a retry does
 
 - Group and assessment names are the caller's. The same call sends the same
-  `PUT`. `updateMachines` changes nothing for a machine already in (or out
-  of) the group.
+  `PUT`, so a retry makes no second group or assessment. When a step of a
+  group call did not finish, the agent tells the person and reads the group
+  with `azure.migrate.group.list` or the step with `azure.operation.status`
+  first.
 - An assessment that exists with the same settings is not sent again: MEHO
   follows it. One that exists with other settings is refused, never changed.
   Every setting MEHO sends is compared with Azure's own field, also the fixed
@@ -2111,10 +2113,12 @@ the mixin to its own.
   tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
   name. MEHO writes it after it got the upload link and before it uploads.
   A retry finds the tag, reads that job and uploads nothing. If the tag
-  cannot be written, nothing is uploaded. An existing site is never written
-  again (a `PUT` would replace its tags). MEHO adds and removes only its own
-  tag, with the Tags API (`Merge` and `Delete`), so a tag that someone else
-  changes at the same time, in MEHO or in Azure, stays as it is.
+  cannot be written, nothing is uploaded, and the import job that Azure made
+  for the upload link stays without a file; the agent then tells the person
+  and reads the jobs with `azure.migrate.job.list` first. An existing site is
+  never written again (a `PUT` would replace its tags). MEHO adds and removes
+  only its own tag, with the Tags API (`Merge` and `Delete`), so a tag that
+  someone else changes at the same time, in MEHO or in Azure, stays as it is.
 - One PostgreSQL lock per import site (`advisory_lock`, shared by every
   worker) covers the steps from reading the tags to the end of the upload.
   The same file is then never uploaded twice at once. When the lock stays
@@ -2131,7 +2135,8 @@ the mixin to its own.
   upload (HTTP <status>)", with no part of the upload link.
 - `repeat_key` imports the same file again on purpose. The tag name gets
   `-<first 8 characters of the key's SHA-256>`, so each key has its own
-  record, and a retry with the same key after a lost answer uploads nothing.
+  record, and a retry with the same key uploads nothing while that record is
+  there.
   A job that stays in `WaitingForBlobUpload` also needs a new key.
 - A lost answer or a 5xx on the upload is not an error: the call follows the
   job (`outcome: upload_unconfirmed`). The upload is sent in one request,

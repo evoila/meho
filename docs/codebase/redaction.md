@@ -723,7 +723,14 @@ Why two new columns rather than one `audit_log.payload` extension:
 - `raw_payload` is potentially **large** (a connector list response
   can be megabytes); keeping it in a dedicated column lets the
   audit-query surface skip it on list endpoints without parsing
-  JSON to find the field.
+  JSON to find the field. The list reads do skip it (#6818): the
+  audit list (`query_audit`, used by REST, CLI, MCP and the console)
+  and the recent-operations lists of the topology drawer and the
+  target page load every column except `raw_payload`
+  (`defer(AuditLog.raw_payload, raiseload=True)`, so a read of it on
+  such a row fails instead of running one more query). The row still
+  keeps the whole raw answer; the policy replay reads it with its own
+  query.
 - `redaction_manifest` is **structured** (a list of dicts with a
   fixed schema); a future GIN index on the JSONB column (e.g.
   "find every audit row where the `kubeconfig` rule fired in the

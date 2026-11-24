@@ -6,7 +6,8 @@
 A change (PUT, POST, PATCH, DELETE) is sent at most twice, and the second send
 goes only to the same path after a 307 or 308. Every other redirect ends the
 call, and the result says what the code means. Reads keep following redirects
-on the same origin. Names and addresses are made up; the transport is mocked.
+on the same origin. Each followed redirect passes the same block check as the
+first send. Names and addresses are made up; the transport is mocked.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import respx
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError
 from meho_backplane.connectors.adapters.http import (
     HttpConnector,
     _SameOriginRedirectClient,
@@ -406,6 +408,54 @@ async def test_direct_client_call_puts_no_redirect_into_the_trace() -> None:
         await _send(_Server(answer), "POST", "/login")
 
     assert recorded == []
+
+
+def _blocked_after_first_send() -> tuple[list[str], Any]:
+    """A block check that lets the first send go and refuses every later one."""
+    checks: list[str] = []
+
+    async def check(operator: Operator) -> None:
+        checks.append(operator.sub)
+        if len(checks) > 1:
+            raise PrincipalBlockedStepError(unavailable=False)
+
+    return checks, patch(
+        "meho_backplane.connectors.adapters.http.raise_if_step_login_blocked", side_effect=check
+    )
+
+
+@pytest.mark.asyncio
+async def test_login_blocked_before_a_followed_change_redirect_gets_no_second_request() -> None:
+    checks, blocked = _blocked_after_first_send()
+    conn = _Conn()
+    with blocked:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            first = mock.put("/items/7").respond(307, headers={"Location": "/items/7/"})
+            second = mock.put("/items/7/").respond(200, json={"ok": True})
+            with pytest.raises(PrincipalBlockedStepError):
+                await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
+    await conn.aclose()
+
+    assert checks == ["test-operator", "test-operator"]
+    assert first.call_count == 1
+    assert second.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_login_blocked_before_a_followed_read_redirect_gets_no_second_request() -> None:
+    checks, blocked = _blocked_after_first_send()
+    conn = _Conn()
+    with blocked:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            first = mock.get("/list").respond(307, headers={"Location": "/list/"})
+            second = mock.get("/list/").respond(200, json={"items": []})
+            with pytest.raises(PrincipalBlockedStepError):
+                await conn._request_json(_target(), "GET", "/list", operator=_operator())
+    await conn.aclose()
+
+    assert len(checks) == 2
+    assert first.call_count == 1
+    assert second.call_count == 0
 
 
 _KC_BASE = "https://kc.example.test"

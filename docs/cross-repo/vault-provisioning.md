@@ -164,10 +164,21 @@ is done, and do the steps in this order:
    other key of `extras` with its value and type.
    `meho targets update --extra` replaces the whole map and writes every
    value as text. When `extras` holds a value that is not text (a
-   boolean, a number, a list or an object), take `extras` from
-   `describe --json`, change only `provider_secret_ref`, and send the
-   full object in one `PATCH /api/v1/targets/<name>` with the body
-   `{"extras": {...}}`.
+   boolean, a number, a list or an object), take `extras` from the raw
+   answer of `GET /api/v1/targets/<name>` and save it. Do not take it
+   from `meho targets describe`: the CLI reads numbers as decimals and
+   can round a large whole number. Change only `provider_secret_ref`
+   with a JSON tool that keeps whole numbers exact (for example the
+   `json` module of Python), and send the full object in one
+   `PATCH /api/v1/targets/<name>` with the body `{"extras": {...}}`.
+   A change made with a person's token only asks for approval: the
+   PATCH answers `202` and `meho targets update` exits 0. Wait until a
+   person approves each request (or make the change in the web console,
+   where it applies at once). Then check that the target shows the new
+   path. After a PATCH, read `GET /api/v1/targets/<name>` again and
+   compare its `extras` with the saved answer, with the same exact JSON
+   tool. Go to step 4 only after this check, because the old grants
+   still let the old path work.
 4. Check that MEHO reads the moved secret through the target: run a
    read-only operation on the target, and for a moved provider secret
    also a read-only operation of the provider plane. A direct Vault read

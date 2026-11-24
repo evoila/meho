@@ -623,7 +623,7 @@ pythonpath = ["."]
 # wins. The load suite also self-skips when ``MEHO_RUN_LOAD_TESTS``
 # is unset, so a bare ``pytest -m load`` reports the gating contract
 # instead of running the timing loop.
-addopts = ["-m", "not load"]
+addopts = ["-m", "not load and not long_form"]
 # Custom markers — registered so ``pytest --strict-markers`` (when CI
 # flips it on) does not warn. Currently:
 # * ``slow`` — opt-in only via ``MEHO_RUN_SLOW_TESTS=1``. Used by
@@ -637,6 +637,7 @@ addopts = ["-m", "not load"]
 markers = [
     "slow: opt-in network/IO-heavy tests; gate via MEHO_RUN_SLOW_TESTS=1.",
     "load: opt-in resolver/cache microbenchmarks; gate via MEHO_RUN_LOAD_TESTS=1.",
+    "long_form: the long form of a test (many rounds); the default options leave it out, the non-required 'Python timing tests' job runs it.",
     "slow_runner_tolerant: compares real elapsed time with a wide fixed limit (tests/_time_limits.py); required CI jobs turn the limit off, the non-required 'Python timing tests' job checks it.",
 ]
 # Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",

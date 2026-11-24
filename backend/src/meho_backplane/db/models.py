@@ -6022,8 +6022,9 @@ class RunnerCheckResult(Base):
     # ``_RUNNER_RESULT_STATUSES``.
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # The handler's structured payload (a failed probe is still a result,
-    # not a runner error). Nullable: refused/error rows carry none.
-    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+    # not a runner error); a list for an operation that answers with a list.
+    # Nullable: refused/error rows carry none.
+    result_payload: Mapped[dict[str, object] | list[object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
         default=None,
@@ -6053,6 +6054,12 @@ class RunnerCheckResult(Base):
             "tenant_id",
             "runner_name",
             "check_ref",
+            "received_at",
+            postgresql_using="btree",
+        ),
+        # The clean-up job deletes rows older than the retention window.
+        Index(
+            "runner_check_results_received_at_idx",
             "received_at",
             postgresql_using="btree",
         ),
@@ -9603,6 +9610,15 @@ class Sensor(Base):
         default="__sensor__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Name of the runner (``runner_principal.name``, same tenant) that runs
+    # this check at a site. ``NULL`` means the central check loop runs it.
+    # A soft reference: the runner row is never hard-deleted.
+    runner_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The runner's own time (``produced_at``) of the last result counted for
+    # this check. Only runner times are compared with it, never MEHO's clock.
+    runner_produced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

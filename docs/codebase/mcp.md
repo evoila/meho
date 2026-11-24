@@ -2244,20 +2244,61 @@ The read checks no agent grant.
   the call over when it has `approval_request_id`. The call runs nothing,
   makes no new request and writes no call record.
 - With `MCP_REVEAL_FETCH` also on, an approved secret reveal of the caller
-  still goes to the value fetch above. Every other request goes here.
+  still goes to the value fetch above. Every other request goes here. To
+  pick the path, the handler first looks up the request
+  (`is_approved_reveal`). This lookup runs before the checks below, also
+  when the call has extra inputs. It writes no audit row and its result is
+  not sent. With `MCP_REVEAL_FETCH` off, there is no such lookup.
 - Only `connector_id`, `op_id` and `approval_request_id` may be sent
   (`-32602`, `own_request_status_extra_inputs`). `connector_id` and `op_id`
-  must be the ones of the request (`request_wrong_operation`). Both checks
-  run before anything is read.
+  must be the ones of the request (`request_wrong_operation`). For a request
+  made by a step of a multi-step operation, they are the step's, not the
+  operation's.
+- The checks of `_call_operation_status.py` run in this order, after that
+  lookup:
+  1. the switch;
+  2. extra inputs (`-32602`);
+  3. a bad id (`-32602`);
+  4. the request is the caller's own, in its tenant
+     (`approval_request_not_found`);
+  5. under an agent's connector list, the request's connector and stored
+     target are inside the list (`connector_not_allowed`);
+  6. `connector_id` and `op_id` are the ones of the request
+     (`request_wrong_operation`);
+  7. the read, the only step that writes the `approval.result` row;
+  8. the answer.
 - A request of another login, of another tenant and an unknown id all get
   `approval_request_not_found`, word for word.
-- Each read writes one `approval.result` audit row, as
+- Each refusal in steps 4 to 6 writes one audit row with path
+  `approval.status` and an `outcome` that names the reason, and no
+  `approval.result` row. The row of `approval_request_not_found` is a row of
+  the caller in its own tenant. It is linked to no request, so a request of
+  another person or tenant gets nothing in its own history. The row of the
+  other two refusals is linked to the request: its parent is the request's
+  `approval.request` row. Its session is the session of the read, not the
+  session that made the request.
+- Each read that passes the checks writes one `approval.result` audit row, as
   `GET /api/v1/approvals/{id}/result` does
   (`approval_queue.read_approval_result`).
+- A stored result that is not an operation result (for example one without
+  `status` or `op_id`, or with an `extras` that is not an object) gives
+  `status: "error"` with `extras.error_code: "approval_result_unreadable"`,
+  `extras.approval_request_id`, `extras.approval_status: "approved"`,
+  `extras.result_state: "uncertain"` and `extras.retry: false`. Its `error`
+  text says that the request was approved and the operation may have run,
+  that MEHO cannot read its stored result, that the call must not be sent
+  again, and to ask a person to look at the request in the console. It
+  writes one more `approval.status` row with that outcome. An unknown `status` text in
+  an otherwise valid result is passed on as stored, as the REST read does.
 - The answer by state: waiting gives the same `awaiting_approval` answer as
-  the first call; approved and not finished gives `status: "pending"` with
+  the first call, with its `audit_id` and, for a change of rights that no
+  other admin could approve, its `extras.approval_note`; approved and not finished gives `status: "pending"` with
   `extras.result_state` (`not_started` or `started`); approved and run gives
-  the stored result with `extras.result_state` added; rejected, expired and
+  the stored result with `extras.result_state` added (`executed`, `failed`
+  or `uncertain`; with `uncertain` MEHO does not know if the change
+  happened, and it never runs it again, see
+  [approvals.md](approvals.md#uncertain-meho-does-not-know-if-the-change-happened-5025));
+  rejected, expired and
   withdrawn give `status: "denied"` with `extras.error_code` of
   `approval_request_rejected`, `approval_request_expired` or
   `approval_request_withdrawn`, and a sentence that says to ask again.

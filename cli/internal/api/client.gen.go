@@ -5703,6 +5703,7 @@ type DashboardMemberView struct {
 	OpId            string                            `json:"op_id"`
 	Pending         bool                              `json:"pending"`
 	RawState        DashboardMemberViewRawState       `json:"raw_state"`
+	RunnerName      *string                           `json:"runner_name,omitempty"`
 	SensorId        openapi_types.UUID                `json:"sensor_id"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
@@ -9606,6 +9607,15 @@ type RefreshResult struct {
 	UpdatedNodes      int                `json:"updated_nodes"`
 }
 
+// RefusedResult A result MEHO refused, named in the answer to a result batch.
+//
+// “reason“ is “future_time“: the runner time of the result is later
+// than MEHO's clock. MEHO neither stores nor counts such a result.
+type RefusedResult struct {
+	Reason    string `json:"reason"`
+	ResultUid string `json:"result_uid"`
+}
+
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
 	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
@@ -9796,10 +9806,14 @@ type ResolvedTargetDescriptor struct {
 //
 // “accepted“ counts rows newly persisted; “duplicates“ counts rows
 // whose “result_uid“ was already ingested for this runner (a re-posted
-// spool batch). “accepted + duplicates“ equals the batch length.
+// spool batch). “refused“ names the results MEHO refused and did not
+// store (with “RUNNER_CHECKS_ENABLED“ on: a runner time later than
+// MEHO's clock). It is left out of the answer when there is none.
+// “accepted + duplicates + len(refused)“ equals the batch length.
 type ResultIngestResponse struct {
-	Accepted   int `json:"accepted"`
-	Duplicates int `json:"duplicates"`
+	Accepted   int              `json:"accepted"`
+	Duplicates int              `json:"duplicates"`
+	Refused    *[]RefusedResult `json:"refused,omitempty"`
 }
 
 // ResultQueryBody POST body for “/api/v1/operations/result-query“ (#3179).
@@ -10354,12 +10368,25 @@ type RunnerPrincipalRead struct {
 //   - “error“ — the handler raised; the exception is summarised in
 //     “error“ and never re-raised into the tick loop.
 type RunnerResult struct {
-	CheckRef  string                  `json:"check_ref"`
-	Error     *string                 `json:"error"`
-	OpId      string                  `json:"op_id"`
-	Result    *map[string]interface{} `json:"result"`
-	ResultUid string                  `json:"result_uid"`
-	Status    string                  `json:"status"`
+	CheckRef   string               `json:"check_ref"`
+	Error      *string              `json:"error"`
+	ErrorCode  *string              `json:"error_code"`
+	OpId       string               `json:"op_id"`
+	ProducedAt *time.Time           `json:"produced_at"`
+	Result     *RunnerResult_Result `json:"result"`
+	ResultUid  string               `json:"result_uid"`
+	Status     string               `json:"status"`
+}
+
+// RunnerResultResult0 defines model for .
+type RunnerResultResult0 map[string]interface{}
+
+// RunnerResultResult1 defines model for .
+type RunnerResultResult1 = []interface{}
+
+// RunnerResult_Result defines model for RunnerResult.Result.
+type RunnerResult_Result struct {
+	union json.RawMessage
 }
 
 // RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
@@ -10396,13 +10423,16 @@ type RunnerResultBatch struct {
 // the runner refuses the item when its own digest differs. “None“ for an
 // op built into MEHO.
 type RunnerWorkItem struct {
-	CheckRef   string                  `json:"check_ref"`
-	ExpiresAt  *time.Time              `json:"expires_at"`
-	HandlerRef string                  `json:"handler_ref"`
-	ImplId     *string                 `json:"impl_id,omitempty"`
-	OpId       string                  `json:"op_id"`
-	PackageSet *string                 `json:"package_set"`
-	Params     *map[string]interface{} `json:"params,omitempty"`
+	CheckRef        string                  `json:"check_ref"`
+	CronExpr        *string                 `json:"cron_expr"`
+	ExpiresAt       *time.Time              `json:"expires_at"`
+	HandlerRef      string                  `json:"handler_ref"`
+	ImplId          *string                 `json:"impl_id,omitempty"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	NextDueAt       *time.Time              `json:"next_due_at"`
+	OpId            string                  `json:"op_id"`
+	PackageSet      *string                 `json:"package_set"`
+	Params          *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
 	//
@@ -10440,6 +10470,7 @@ type RunnerWorkItem struct {
 	// is ever embedded (the runner spools assignments on disk, so a value
 	// would durably persist — a locked no-durable-artifact violation).
 	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Timezone         *string                   `json:"timezone"`
 	Version          *string                   `json:"version,omitempty"`
 }
 
@@ -11048,6 +11079,7 @@ type SensorCreate struct {
 	Params              *map[string]interface{} `json:"params,omitempty"`
 	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
 	RetryTimes          *int                    `json:"retry_times,omitempty"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -11137,6 +11169,7 @@ type SensorRead struct {
 	PendingState        *SensorReadPendingState `json:"pending_state"`
 	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
 	RetryTimes          int                     `json:"retry_times"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -13535,6 +13568,7 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 	Runner                 string  `form:"runner" json:"runner"`
 	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	XMEHORunnerFeatures    *string `json:"X-MEHO-Runner-Features,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
 	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
@@ -17368,6 +17402,68 @@ func (t RunbookTemplateBody_Steps_Item) MarshalJSON() ([]byte, error) {
 }
 
 func (t *RunbookTemplateBody_Steps_Item) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsRunnerResultResult0 returns the union data inside the RunnerResult_Result as a RunnerResultResult0
+func (t RunnerResult_Result) AsRunnerResultResult0() (RunnerResultResult0, error) {
+	var body RunnerResultResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRunnerResultResult0 overwrites any union data inside the RunnerResult_Result as the provided RunnerResultResult0
+func (t *RunnerResult_Result) FromRunnerResultResult0(v RunnerResultResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRunnerResultResult0 performs a merge with any union data inside the RunnerResult_Result, using the provided RunnerResultResult0
+func (t *RunnerResult_Result) MergeRunnerResultResult0(v RunnerResultResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRunnerResultResult1 returns the union data inside the RunnerResult_Result as a RunnerResultResult1
+func (t RunnerResult_Result) AsRunnerResultResult1() (RunnerResultResult1, error) {
+	var body RunnerResultResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRunnerResultResult1 overwrites any union data inside the RunnerResult_Result as the provided RunnerResultResult1
+func (t *RunnerResult_Result) FromRunnerResultResult1(v RunnerResultResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRunnerResultResult1 performs a merge with any union data inside the RunnerResult_Result, using the provided RunnerResultResult1
+func (t *RunnerResult_Result) MergeRunnerResultResult1(v RunnerResultResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t RunnerResult_Result) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *RunnerResult_Result) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -31732,37 +31828,48 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.XMEHORunnerFeatures != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Features", runtime.ParamLocationHeader, *params.XMEHORunnerFeatures)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("X-MEHO-Runner-Features", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 		if params.XMEHORunnerWireVersion != nil {
-			var headerParam1 string
+			var headerParam2 string
 
-			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam2)
 		}
 
 		if params.XMEHORunnerPackageSet != nil {
-			var headerParam2 string
+			var headerParam3 string
 
-			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			headerParam3, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam3)
 		}
 
 	}

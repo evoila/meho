@@ -4,10 +4,11 @@
 
   The preview of a settings file, swapped into ``#settings-result``.
 
-  * ``mistakes`` set: every refused part with its reason, and no Apply
-    button. MEHO saves nothing from such a file.
+  * ``mistakes`` set: every refused part with its reason, the warnings,
+    and no Apply button. MEHO saves nothing from such a file.
   * else: the warnings, the changes that only a person in the web console
-    may make, every row of the diff, and the Apply form. The form sends the
+    may make (the two policies, and each target added or changed), every
+    row of the diff, and the Apply form. The form sends the
     same file bytes (``file_b64``) to ``/ui/settings/apply``.
 
   Context (``_preview_context`` in ``ui/routes/settings.py``): ``mistakes``,
@@ -26,12 +27,13 @@
           </ul>
         </div>
       </div>
-    {% else %}
-      {% for warning in warnings %}
-        <div class="alert alert-warning" role="alert" data-settings-warning>
-          <span>{{ warning }}</span>
-        </div>
-      {% endfor %}
+    {% endif %}
+    {% for warning in warnings %}
+      <div class="alert alert-warning" role="alert" data-settings-warning>
+        <span>{{ warning }}</span>
+      </div>
+    {% endfor %}
+    {% if not mistakes %}
       {% for note in console_only %}
         <div class="alert alert-info" role="status" data-settings-console-only>
           <span>{{ note }}</span>
@@ -49,6 +51,7 @@
       {% if has_changes %}
         <form
           id="settings-apply-form"
+          data-settings-form
           hx-post="/ui/settings/apply"
           hx-encoding="multipart/form-data"
           hx-target="#settings-result"

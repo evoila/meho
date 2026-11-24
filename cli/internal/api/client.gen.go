@@ -14964,6 +14964,24 @@ type UiSensorsListUiSensorsGetParams struct {
 	CadenceKind *string `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
 }
 
+// UiSettingsApplyUiSettingsApplyPostMultipartBody defines parameters for UiSettingsApplyUiSettingsApplyPost.
+type UiSettingsApplyUiSettingsApplyPostMultipartBody struct {
+	// File The meho-settings.yaml file (the upload form).
+	File *openapi_types.File `json:"file,omitempty"`
+
+	// FileB64 The same file bytes as base64 (the Apply form of the preview).
+	FileB64 *string `json:"file_b64,omitempty"`
+}
+
+// UiSettingsPreviewUiSettingsPreviewPostMultipartBody defines parameters for UiSettingsPreviewUiSettingsPreviewPost.
+type UiSettingsPreviewUiSettingsPreviewPostMultipartBody struct {
+	// File The meho-settings.yaml file (the upload form).
+	File *openapi_types.File `json:"file,omitempty"`
+
+	// FileB64 The same file bytes as base64 (the Apply form of the preview).
+	FileB64 *string `json:"file_b64,omitempty"`
+}
+
 // UiTenantPickerUiTenantGetParams defines parameters for UiTenantPickerUiTenantGet.
 type UiTenantPickerUiTenantGetParams struct {
 	Notice *string `form:"notice,omitempty" json:"notice,omitempty"`
@@ -15698,6 +15716,12 @@ type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody = UISess
 
 // UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody defines body for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost for application/json ContentType.
 type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISessionContext
+
+// UiSettingsApplyUiSettingsApplyPostMultipartRequestBody defines body for UiSettingsApplyUiSettingsApplyPost for multipart/form-data ContentType.
+type UiSettingsApplyUiSettingsApplyPostMultipartRequestBody UiSettingsApplyUiSettingsApplyPostMultipartBody
+
+// UiSettingsPreviewUiSettingsPreviewPostMultipartRequestBody defines body for UiSettingsPreviewUiSettingsPreviewPost for multipart/form-data ContentType.
+type UiSettingsPreviewUiSettingsPreviewPostMultipartRequestBody UiSettingsPreviewUiSettingsPreviewPostMultipartBody
 
 // AnnotateUiTopologyEdgesPostFormdataRequestBody defines body for AnnotateUiTopologyEdgesPost for application/x-www-form-urlencoded ContentType.
 type AnnotateUiTopologyEdgesPostFormdataRequestBody = BodyAnnotateUiTopologyEdgesPost
@@ -19306,11 +19330,11 @@ type ClientInterface interface {
 	// UiSettingsUiSettingsGet request
 	UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiSettingsApplyUiSettingsApplyPost request
-	UiSettingsApplyUiSettingsApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiSettingsApplyUiSettingsApplyPostWithBody request with any body
+	UiSettingsApplyUiSettingsApplyPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiSettingsPreviewUiSettingsPreviewPost request
-	UiSettingsPreviewUiSettingsPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiSettingsPreviewUiSettingsPreviewPostWithBody request with any body
+	UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTenantPickerUiTenantGet request
 	UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -27276,8 +27300,8 @@ func (c *Client) UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...Requ
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiSettingsApplyUiSettingsApplyPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiSettingsApplyUiSettingsApplyPostRequest(c.Server)
+func (c *Client) UiSettingsApplyUiSettingsApplyPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsApplyUiSettingsApplyPostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27288,8 +27312,8 @@ func (c *Client) UiSettingsApplyUiSettingsApplyPost(ctx context.Context, reqEdit
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiSettingsPreviewUiSettingsPreviewPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiSettingsPreviewUiSettingsPreviewPostRequest(c.Server)
+func (c *Client) UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -53564,8 +53588,8 @@ func NewUiSettingsUiSettingsGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewUiSettingsApplyUiSettingsApplyPostRequest generates requests for UiSettingsApplyUiSettingsApplyPost
-func NewUiSettingsApplyUiSettingsApplyPostRequest(server string) (*http.Request, error) {
+// NewUiSettingsApplyUiSettingsApplyPostRequestWithBody generates requests for UiSettingsApplyUiSettingsApplyPost with any type of body
+func NewUiSettingsApplyUiSettingsApplyPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -53583,16 +53607,18 @@ func NewUiSettingsApplyUiSettingsApplyPostRequest(server string) (*http.Request,
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
 
+	req.Header.Add("Content-Type", contentType)
+
 	return req, nil
 }
 
-// NewUiSettingsPreviewUiSettingsPreviewPostRequest generates requests for UiSettingsPreviewUiSettingsPreviewPost
-func NewUiSettingsPreviewUiSettingsPreviewPostRequest(server string) (*http.Request, error) {
+// NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody generates requests for UiSettingsPreviewUiSettingsPreviewPost with any type of body
+func NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -53610,10 +53636,12 @@ func NewUiSettingsPreviewUiSettingsPreviewPostRequest(server string) (*http.Requ
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -56904,11 +56932,11 @@ type ClientWithResponsesInterface interface {
 	// UiSettingsUiSettingsGetWithResponse request
 	UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error)
 
-	// UiSettingsApplyUiSettingsApplyPostWithResponse request
-	UiSettingsApplyUiSettingsApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error)
+	// UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse request with any body
+	UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error)
 
-	// UiSettingsPreviewUiSettingsPreviewPostWithResponse request
-	UiSettingsPreviewUiSettingsPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error)
+	// UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse request with any body
+	UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error)
 
 	// UiTenantPickerUiTenantGetWithResponse request
 	UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error)
@@ -73416,18 +73444,18 @@ func (c *ClientWithResponses) UiSettingsUiSettingsGetWithResponse(ctx context.Co
 	return ParseUiSettingsUiSettingsGetResponse(rsp)
 }
 
-// UiSettingsApplyUiSettingsApplyPostWithResponse request returning *UiSettingsApplyUiSettingsApplyPostResponse
-func (c *ClientWithResponses) UiSettingsApplyUiSettingsApplyPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
-	rsp, err := c.UiSettingsApplyUiSettingsApplyPost(ctx, reqEditors...)
+// UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse request with arbitrary body returning *UiSettingsApplyUiSettingsApplyPostResponse
+func (c *ClientWithResponses) UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
+	rsp, err := c.UiSettingsApplyUiSettingsApplyPostWithBody(ctx, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseUiSettingsApplyUiSettingsApplyPostResponse(rsp)
 }
 
-// UiSettingsPreviewUiSettingsPreviewPostWithResponse request returning *UiSettingsPreviewUiSettingsPreviewPostResponse
-func (c *ClientWithResponses) UiSettingsPreviewUiSettingsPreviewPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
-	rsp, err := c.UiSettingsPreviewUiSettingsPreviewPost(ctx, reqEditors...)
+// UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse request with arbitrary body returning *UiSettingsPreviewUiSettingsPreviewPostResponse
+func (c *ClientWithResponses) UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
+	rsp, err := c.UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

@@ -313,8 +313,10 @@ them at once.
 
 All four endpoints need a login; without a token they answer 401. There is
 no page before login. The first admin signs in and calls the endpoints with
-their own token. The console and the command line do not have the settings
-file yet.
+their own token. The web console has the settings file page for the
+preview and the import (see
+[The settings file page of the web console](#the-settings-file-page-of-the-web-console)).
+The command line does not have the settings file yet.
 
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
@@ -431,11 +433,14 @@ nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 
 - `GET /ui/settings`: the page with the upload form.
 - `POST /ui/settings/preview`: runs `build_plan` and shows every mistake
-  with its reason, the warnings, a note for each change that only a
-  person in the web console may make, and every row of the diff. Writes
-  nothing. It calls `note_preview`, so it writes no execution audit row.
+  with its reason, the warnings (also next to the mistakes), a note for
+  each change that only a person in the web console may make (the two
+  policies, and each target the file adds or changes), and every row of
+  the diff. Writes nothing. It calls `note_preview`, so it writes no
+  execution audit row.
 - `POST /ui/settings/apply`: runs `apply_import` and shows what really
-  changed, the items in `failed`, and the revision id.
+  changed, the items in `failed`, and the revision id. The main message
+  says whether MEHO wrote all of the file, part of it, or nothing.
 
 The console operator has `web_session` true, so targets,
 `run_approval_target_kinds` turned on and `announce_gate_enabled` turned
@@ -443,15 +448,26 @@ off apply here. The gate (`require_ui_settings_admin`) asks for a person
 first (403 `human_principal_required` for an agent, service or runner
 login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`).
 `build_plan` refuses a file that names another tenant for a
-`tenant_admin`; the page shows that refusal. The CSRF check of the console
+`tenant_admin`. Such a refusal answers 403 with the reason as an HTML
+fragment, so the audit log keeps a refusal row for the preview and the
+apply. `static/src/app/settings-file.js` swaps every error answer of the
+two forms into the page (htmx does not swap an error on its own); an
+answer that is not HTML becomes a fixed error text. The CSRF check of the console
 runs on both POST routes.
 
 The upload is multipart (the CSRF middleware caps a url-encoded body at
 256 KiB). The preview keeps no state: its apply form sends the same file
 bytes as base64, and the apply checks the file again before it writes.
-The apply binds `op_id=settings.import`, so the chassis audit middleware
-writes one row for it before the answer leaves; when that write fails, the
-answer is a 500. Tests: `tests/test_ui_settings_file.py`.
+The apply binds `op_id=settings.import` and owns its transaction
+(`get_raw_session`). It adds its `operation_execution` audit row, with the
+id that the revision keeps, to the same transaction as the settings and
+the revision, and commits them together. When that write fails, MEHO
+rolls back and answers 500 with an error text: nothing is saved. A
+refusal, a file with mistakes and a file that changes nothing roll back.
+After the audit cutover the middleware sees the committed row and writes
+none of its own; before it, the middleware adds its request row with a
+new id. Tests: `tests/test_ui_settings_file.py`,
+`tests/test_ui_settings_file_js.py`.
 
 ### `POST /api/v1/settings/conventions-drift`
 

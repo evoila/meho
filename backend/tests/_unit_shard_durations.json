@@ -1262,6 +1262,8 @@
   "tests/test_ui_session_cookie.py": 0.87,
   "tests/test_ui_session_ref.py": 0.1,
   "tests/test_ui_session_store.py": 24.85,
+  "tests/test_ui_settings_file.py": 70.0,
+  "tests/test_ui_settings_file_js.py": 0.5,
   "tests/test_ui_static_assets.py": 2.14,
   "tests/test_ui_target_and_topology_writes_need_a_person.py": 73.67,
   "tests/test_ui_templates.py": 2.48,

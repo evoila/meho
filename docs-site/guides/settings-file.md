@@ -262,7 +262,8 @@ token: targets, `run_approval_target_kinds: true` and
    shows every change of the file. When the file has mistakes, MEHO
    lists each one with its reason and offers no **Apply** button.
 3. Read the preview. A change that MEHO accepts only from a person in
-   the web console has its own note.
+   the web console has its own note: the two policies, and each target
+   that the file adds or changes. Warnings show also next to mistakes.
 4. Click **Apply**. MEHO checks the file again and saves it. The answer
    shows what really changed, and the id of the new entry in the
    history.
@@ -276,8 +277,11 @@ Who may use the page:
   `human_principal_required`, and any other role gets
   `insufficient_role`.
 
-One audit row covers each apply. When MEHO cannot write the audit row,
-the page shows an error, not the result.
+MEHO saves the changes of an apply and its audit row together. When MEHO
+cannot write the audit row, it saves nothing, and the page shows an
+error, not the result. When MEHO refuses the file (for example a file
+for another tenant), the page shows the reason, and the audit log keeps
+the refusal.
 
 ### What the checks refuse
 

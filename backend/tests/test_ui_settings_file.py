@@ -9,11 +9,15 @@
   (``test_settings_import_console_policies.py``).
 * An agent, service or runner login, and a person without an admin role,
   cannot reach the page, the preview or the apply. Nothing is written.
-* A ``tenant_admin`` cannot apply a file for another tenant; a
-  ``platform_admin`` can.
-* The preview shows every change, and every mistake with its reason.
-* One audit row per apply; when the audit write fails, the answer is a 500
-  and not the success page.
+* A ``tenant_admin`` cannot apply a file for another tenant (403, and a
+  refusal row in the audit log); a ``platform_admin`` can.
+* The preview shows every change, every mistake with its reason, the
+  warnings next to the mistakes, and a note for each target the file adds
+  or changes.
+* The result names a full, a partial and a failed apply.
+* The settings, the revision and the audit row of an apply commit
+  together; when the audit write fails, nothing is saved and the answer is
+  a 500 with an error text.
 """
 
 from __future__ import annotations
@@ -27,17 +31,27 @@ from typing import Any
 import pytest
 import yaml
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 from starlette.middleware import Middleware
 
-from meho_backplane import audit as audit_module
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, InstanceSettingsRevision, Tenant, TenantConvention
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    InstanceSettingsRevision,
+    Tenant,
+    TenantConvention,
+)
+from meho_backplane.instance_settings import service as settings_service
+from meho_backplane.settings import get_settings
+from meho_backplane.ui.routes import settings as settings_routes
 from tests import test_ui_agent_grants
 from tests._oidc_jwt_helpers import mint_token
+from tests._vault_fakes import install_fake_vault
 from tests.test_ui_agent_grants import (
     _TENANT_A,
     _TENANT_B,
@@ -66,6 +80,43 @@ def _audited_app(monkeypatch: pytest.MonkeyPatch) -> None:
         return app
 
     monkeypatch.setattr(test_ui_agent_grants, "_build_app", _build)
+
+
+@pytest.fixture
+def cutover_on(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """``AUDIT_WRAPPER_ROWS_RETIRED=true``: the middleware writes no routine rows."""
+    monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def sqlite_transactions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let SQLite open a real transaction, so a rollback undoes the savepoints too.
+
+    The sqlite driver sends no ``BEGIN`` before a ``SAVEPOINT``, so releasing
+    a savepoint commits it at once. This is the SQLAlchemy recipe for
+    SQLite: the driver starts no transaction itself, and each SQLAlchemy
+    transaction sends ``BEGIN``.
+    """
+    make = engine_module.create_engine_for_url
+
+    def _make(url: str, *, pool_size: int, pool_timeout: float) -> Any:
+        engine = make(url, pool_size=pool_size, pool_timeout=pool_timeout)
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _no_driver_transactions(dbapi_connection: Any, _record: Any) -> None:
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(engine.sync_engine, "begin")
+        def _begin(connection: Any) -> None:
+            connection.exec_driver_sql("BEGIN")
+
+        return engine
+
+    monkeypatch.setattr(engine_module, "create_engine_for_url", _make)
 
 
 def _seed_tenants() -> None:
@@ -123,6 +174,7 @@ def _file(
     return yaml.safe_dump(doc, sort_keys=False).encode()
 
 
+_KEEP: dict[str, Any] = {"announce_gate_enabled": True}
 _LOOSEN = _file({"run_approval_target_kinds": True, "announce_gate_enabled": False})
 
 
@@ -276,7 +328,8 @@ def test_a_tenant_admin_cannot_apply_a_file_for_another_tenant() -> None:
         mock.stop()
 
     for response in (preview, applied):
-        assert response.status_code == 200, response.text
+        assert response.status_code == 403, response.text
+        assert response.headers["content-type"].startswith("text/html")
         assert "data-settings-refused" in response.text
         assert "a tenant_admin may import a file for their own tenant only" in response.text
         assert "data-settings-applied" not in response.text
@@ -357,14 +410,132 @@ def test_the_apply_writes_every_change_of_a_long_file() -> None:
     assert _state() == (True, False, 60, 1)
 
 
+@pytest.mark.usefixtures("cutover_on")
+def test_a_refusal_for_another_tenant_leaves_a_refusal_record() -> None:
+    _seed_tenants()
+    other = _file({"announce_gate_enabled": False}, tenant_id=_TENANT_B)
+    client, mock, csrf = _client()
+    try:
+        preview = _preview(client, csrf, other)
+        applied = _apply(client, csrf, other)
+    finally:
+        mock.stop()
+
+    assert (preview.status_code, applied.status_code) == (403, 403)
+    refusals = [
+        row
+        for row in asyncio.run(_all(AuditLog))
+        if row.event_class == AuditEventClass.POLICY_DECISION and row.status_code == 403
+    ]
+    assert sorted(row.path for row in refusals) == [_APPLY, _PREVIEW]
+    assert _state(_TENANT_B) == _UNCHANGED
+
+
+def test_the_preview_shows_the_warnings_next_to_the_mistakes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHART_VERSION", "0.1.0")
+    _seed_tenants()
+    content = _file(
+        {"announce_gate_enabled": True},
+        targets=[{"name": "app-01", "product": "no-such-product", "host": "h"}],
+    )
+    doc = yaml.safe_load(content)
+    doc["metadata"] = {"exportedFrom": {"mehoVersion": "999.0.0"}}
+    content = yaml.safe_dump(doc, sort_keys=False).encode()
+    client, mock, csrf = _client()
+    try:
+        preview = _preview(client, csrf, content)
+    finally:
+        mock.stop()
+
+    assert preview.status_code == 200, preview.text
+    assert "data-settings-mistakes" in preview.text
+    assert "spec.tenants[0].targets[0]" in preview.text
+    assert "data-settings-warning" in preview.text
+    assert "exported from a newer MEHO" in preview.text
+    assert 'data-action="settings-apply"' not in preview.text
+
+
+def test_the_preview_names_each_target_the_file_adds_or_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_vault(monkeypatch)
+    _seed_tenants()
+    stored = {"name": "app-01", "product": "linux", "host": "h1"}
+    client, mock, csrf = _client()
+    try:
+        first = _apply(client, csrf, _file(_KEEP, targets=[stored]))
+        assert "MEHO applied the file." in first.text, first.text
+        changed = {**stored, "host": "h2"}
+        added = {"name": "app-02", "product": "linux", "host": "h3"}
+        preview = _preview(client, csrf, _file(_KEEP, targets=[changed, added]))
+    finally:
+        mock.stop()
+
+    assert preview.status_code == 200, preview.text
+    notes = re.findall(
+        r"<div[^>]*data-settings-console-only>\s*<span>(.*?)</span>", preview.text, re.S
+    )
+    assert notes == [
+        "`spec.tenants[0].targets[0]` changes the target `app-01`. "
+        "MEHO accepts this change only from a person in the web console.",
+        "`spec.tenants[0].targets[1]` adds the target `app-02`. "
+        "MEHO accepts this change only from a person in the web console.",
+    ]
+    assert 'data-action="settings-apply"' in preview.text
+
+
+def _break_policy_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fail(_session: Any, tenant_plan: Any, failed: list[str]) -> None:
+        if tenant_plan.policies is not None:
+            failed.append(f"`spec.tenants[{tenant_plan.index}].policies` could not be written.")
+
+    monkeypatch.setattr(settings_service, "_apply_policies", _fail)
+
+
+def test_the_result_says_when_no_part_was_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_tenants()
+    _break_policy_writes(monkeypatch)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "MEHO could not write any part of the file. Nothing changed." in applied.text
+    assert "already match" not in applied.text
+    assert "MEHO applied" not in applied.text
+    assert "data-settings-failed" in applied.text
+    assert _state() == _UNCHANGED
+
+
+def test_the_result_says_when_part_was_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_tenants()
+    _break_policy_writes(monkeypatch)
+    rule = {"slug": "rule-001", "title": "Rule", "body": "Nights only.", "kind": "reference"}
+    content = _file({"announce_gate_enabled": False}, conventions=[rule])
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, content)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "MEHO applied part of the file." in applied.text
+    assert "MEHO applied the file." not in applied.text
+    assert "data-settings-failed" in applied.text
+    assert _state() == (True, False, 1, 1)
+
+
 @pytest.mark.parametrize("path", [_PREVIEW, _APPLY])
-def test_a_post_without_a_file_asks_for_one(path: str) -> None:
+@pytest.mark.parametrize("value", ["not base64!", "Zm9v\u00e9"], ids=["bad-base64", "non-ascii"])
+def test_a_post_without_a_file_asks_for_one(path: str, value: str) -> None:
     _seed_tenants()
     client, mock, csrf = _client()
     try:
-        response = client.post(
-            path, files={"file_b64": (None, "not base64!")}, headers=_csrf_headers(csrf)
-        )
+        response = client.post(path, files={"file_b64": (None, value)}, headers=_csrf_headers(csrf))
     finally:
         mock.stop()
     assert response.status_code == 200, response.text
@@ -387,7 +558,11 @@ def test_one_audit_row_per_apply_with_the_revision_id() -> None:
         mock.stop()
 
     assert applied.status_code == 200, applied.text
-    (row,) = _audit_rows("settings.import")
+    (row,) = [
+        r
+        for r in _audit_rows("settings.import")
+        if r.event_class == AuditEventClass.OPERATION_EXECUTION
+    ]
     (revision,) = asyncio.run(_all(InstanceSettingsRevision))
     assert row.id == revision.audit_id
     assert row.operator_sub == "op-alice"
@@ -396,13 +571,19 @@ def test_one_audit_row_per_apply_with_the_revision_id() -> None:
     assert all(r.payload["op_class"] == "read" for r in _audit_rows("settings.import.preview"))
 
 
-def test_a_failed_audit_write_gives_no_success_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("sqlite_transactions")
+@pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
+def test_a_failed_audit_write_saves_nothing(
+    cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
     _seed_tenants()
 
-    async def _broken(**_kwargs: Any) -> None:
+    async def _broken(*_args: Any, **_kwargs: Any) -> None:
         raise OperationalError("INSERT INTO audit_log", {}, Exception("database is gone"))
 
-    monkeypatch.setattr(audit_module, "_write_audit_row", _broken)
+    monkeypatch.setattr(settings_routes, "_add_audit_row", _broken)
     client, mock, csrf = _client()
     try:
         applied = _apply(client, csrf, _LOOSEN)
@@ -410,4 +591,11 @@ def test_a_failed_audit_write_gives_no_success_answer(monkeypatch: pytest.Monkey
         mock.stop()
 
     assert applied.status_code == 500, applied.text
+    assert "MEHO could not write the audit record of this import." in applied.text
     assert "MEHO applied the file." not in applied.text
+    assert _state() == _UNCHANGED
+    assert not [
+        r
+        for r in _audit_rows("settings.import")
+        if r.event_class == AuditEventClass.OPERATION_EXECUTION and r.status_code == 200
+    ]

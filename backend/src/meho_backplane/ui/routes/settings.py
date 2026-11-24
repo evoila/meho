@@ -27,28 +27,45 @@ The upload is multipart: the CSRF middleware caps a url-encoded body at
 apply form carries the exact file bytes as base64, and the apply checks the
 file again before it writes.
 
+A refusal (another tenant, or a file this caller may not apply) is a 403
+with the reason as an HTML fragment. The page script
+(``static/src/app/settings-file.js``) swaps every error answer of these two
+forms into the page, and shows a fixed error text for an answer that is not
+HTML.
+
 Audit: the apply binds the ``settings.import`` audit op id, the same as the
-REST route. The chassis audit middleware writes the row before the answer
-leaves; when that write fails, the answer is a 500, never the success page.
-The preview is marked as a preview, so it writes no execution row.
+REST route. The apply owns its transaction: it adds its
+``operation_execution`` audit row to the same transaction as the settings
+and the revision, and commits all of them together. When that write fails,
+MEHO rolls everything back and answers 500 with an error text. The audit
+middleware sees the committed row and adds no row of its own after the
+cutover; before the cutover it adds its request row with a new id. The
+preview is marked as a preview, so it writes no execution row; a refused
+preview leaves its refusal row.
 """
 
 from __future__ import annotations
 
 import base64
-import binascii
 import json
+import uuid
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
+from meho_backplane.audit import _PREALLOCATED_AUDIT_ID_KEY, _resolve_audit_payload
 from meho_backplane.audit_cutover import note_preview
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_session
+from meho_backplane.db.engine import get_raw_session, get_session
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.instance_settings.console_only import CONSOLE_ONLY_POLICIES, SETTINGS_PAGE
 from meho_backplane.instance_settings.diff import SECTIONS
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
@@ -58,6 +75,8 @@ from meho_backplane.instance_settings.service import (
     apply_import,
     build_plan,
 )
+from meho_backplane.request_usage.collector import current_request_id
+from meho_backplane.targets.schemas import TargetCreate
 from meho_backplane.ui.auth.human import ensure_ui_human
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -77,6 +96,8 @@ _OP_ID_IMPORT: Final[str] = "settings.import"
 _MAX_FORM_PART_BYTES: Final[int] = MAX_FILE_BYTES * 4 // 3 + 1024
 
 _NO_FILE: Final[str] = "Choose a settings file first."
+_AUDIT_FAILED: Final[str] = "MEHO could not write the audit record of this import."
+_CONSOLE_ONLY: Final[str] = "MEHO accepts this change only from a person in the web console."
 
 _SECTION_TITLES: Final[dict[str, str]] = {
     "tenants": "Tenant",
@@ -85,8 +106,38 @@ _SECTION_TITLES: Final[dict[str, str]] = {
     "targets": "Target",
 }
 
+#: The form fields of both POST routes. ``_read_file`` takes ``file`` when it
+#: holds a file, else ``file_b64``.
+_FORM_BODY: Final[dict[str, Any]] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "format": "binary",
+                            "description": "The meho-settings.yaml file (the upload form).",
+                        },
+                        "file_b64": {
+                            "type": "string",
+                            "description": (
+                                "The same file bytes as base64 (the Apply form of the preview)."
+                            ),
+                        },
+                    },
+                }
+            }
+        },
+    }
+}
+
 _require_session_dep = Depends(require_ui_session)
 _get_session_dep = Depends(get_session)
+#: The apply commits or rolls back itself (see the module docstring).
+_raw_session_dep = Depends(get_raw_session)
 
 
 async def require_ui_settings_admin(
@@ -148,14 +199,22 @@ def diff_rows(diff: dict[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
-def _console_only_notes(paths: list[str]) -> list[str]:
-    """One sentence for each change that only a person in the web console may make."""
+def _console_only_notes(plan: ImportPlan) -> list[str]:
+    """One sentence for each change that only a person in the web console may make.
+
+    The two policies of ``CONSOLE_ONLY_POLICIES``, then each target the file
+    adds or changes.
+    """
     notes = []
-    for path in paths:
+    for path in plan.console_only:
         what = CONSOLE_ONLY_POLICIES[path.rsplit(".", 1)[1]][1]
-        notes.append(
-            f"`{path}` {what}. MEHO accepts this change only from a person in the web console."
-        )
+        notes.append(f"`{path}` {what}. {_CONSOLE_ONLY}")
+    for tenant_plan in plan.tenants:
+        for i, name, body in tenant_plan.targets:
+            what = "adds the target" if isinstance(body, TargetCreate) else "changes the target"
+            notes.append(
+                f"`spec.tenants[{tenant_plan.index}].targets[{i}]` {what} `{name}`. {_CONSOLE_ONLY}"
+            )
     return notes
 
 
@@ -164,10 +223,12 @@ def _render(
     session_ctx: UISessionContext,
     template: str,
     context: dict[str, Any],
+    *,
+    status_code: int = status.HTTP_200_OK,
 ) -> HTMLResponse:
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     response = get_templates().TemplateResponse(
-        request, template, {"csrf_token": csrf_token, **context}
+        request, template, {"csrf_token": csrf_token, **context}, status_code=status_code
     )
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
@@ -180,9 +241,17 @@ def _render(
     return response
 
 
-def _refused(request: Request, session_ctx: UISessionContext, reason: str) -> HTMLResponse:
-    """A refusal as an HTML fragment with status 200, so htmx shows it on the page."""
-    return _render(request, session_ctx, "settings/_refused.html", {"reason": reason})
+def _refused(
+    request: Request,
+    session_ctx: UISessionContext,
+    reason: str,
+    *,
+    status_code: int = status.HTTP_200_OK,
+) -> HTMLResponse:
+    """A refusal as an HTML fragment. The page script swaps an error status in too."""
+    return _render(
+        request, session_ctx, "settings/_refused.html", {"reason": reason}, status_code=status_code
+    )
 
 
 async def _read_file(request: Request) -> bytes | None:
@@ -201,7 +270,7 @@ async def _read_file(request: Request) -> bytes | None:
         return None
     try:
         return base64.b64decode(encoded, validate=True) or None
-    except binascii.Error:
+    except ValueError:  # binascii.Error, and a str with a non-ASCII character
         return None
 
 
@@ -210,7 +279,7 @@ def _preview_context(plan: ImportPlan, content: bytes) -> dict[str, Any]:
     return {
         "mistakes": plan.mistakes,
         "warnings": plan.warnings,
-        "console_only": _console_only_notes(plan.console_only),
+        "console_only": _console_only_notes(plan),
         "rows": rows,
         "has_changes": any(row["kind"] != "not in file" for row in rows),
         "file_b64": base64.b64encode(content).decode("ascii"),
@@ -249,17 +318,47 @@ async def _preview_handler(
     try:
         plan = await build_plan(db_session, operator, content)
     except SettingsForbiddenError as exc:
-        return _refused(request, session_ctx, str(exc))
+        return _refused(request, session_ctx, str(exc), status_code=status.HTTP_403_FORBIDDEN)
     return _render(request, session_ctx, "settings/_preview.html", _preview_context(plan, content))
+
+
+async def _add_audit_row(
+    session: AsyncSession, request: Request, operator: Operator, audit_id: uuid.UUID
+) -> None:
+    """Add the apply's audit row to *session*, so it commits with the settings.
+
+    The payload is the one the audit middleware would write (op id, op
+    class, the ``settings_*`` keys that ``apply_import`` bound).
+    """
+    session.add(
+        AuditLog(
+            id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
+            occurred_at=datetime.now(UTC),
+            operator_sub=operator.sub,
+            actor_sub=resolve_actor_sub(),
+            tenant_id=operator.tenant_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=status.HTTP_200_OK,
+            request_id=current_request_id(),
+            duration_ms=Decimal("0"),
+            payload=_resolve_audit_payload(),
+        )
+    )
+    await session.flush()
 
 
 async def _apply_handler(
     request: Request,
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _settings_admin_dep,
-    db_session: AsyncSession = _get_session_dep,
+    db_session: AsyncSession = _raw_session_dep,
 ) -> HTMLResponse:
-    """``POST /ui/settings/apply``: checks the file again, then adds or updates."""
+    """``POST /ui/settings/apply``: checks the file again, then adds or updates.
+
+    Commits the settings, the revision and the audit row together, or none.
+    """
     # "read" until the service is about to write (it binds "write" there), so
     # a refused or unchanged file leaves no write in the audit log.
     structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_IMPORT, audit_op_class="read")
@@ -269,11 +368,31 @@ async def _apply_handler(
     try:
         result = await apply_import(db_session, operator, content)
     except SettingsForbiddenError as exc:
-        return _refused(request, session_ctx, str(exc))
+        await db_session.rollback()
+        return _refused(request, session_ctx, str(exc), status_code=status.HTTP_403_FORBIDDEN)
     if result.plan.mistakes:
+        await db_session.rollback()
         return _render(
             request, session_ctx, "settings/_preview.html", _preview_context(result.plan, content)
         )
+    if result.audit_id is None:
+        # Nothing to write: the file changes nothing.
+        await db_session.rollback()
+    else:
+        # The middleware must not write a second row with this id.
+        structlog.contextvars.unbind_contextvars(_PREALLOCATED_AUDIT_ID_KEY)
+        try:
+            await _add_audit_row(db_session, request, operator, result.audit_id)
+            await db_session.commit()
+        except SQLAlchemyError:
+            _log.exception("ui_settings_apply_audit_failed")
+            await db_session.rollback()
+            return _refused(
+                request,
+                session_ctx,
+                _AUDIT_FAILED,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
     return _render(
         request,
         session_ctx,
@@ -304,6 +423,7 @@ def build_settings_router() -> APIRouter:
         methods=["POST"],
         name="ui_settings_preview",
         response_class=HTMLResponse,
+        openapi_extra=_FORM_BODY,
     )
     router.add_api_route(
         f"{SETTINGS_PATH}/apply",
@@ -311,5 +431,6 @@ def build_settings_router() -> APIRouter:
         methods=["POST"],
         name="ui_settings_apply",
         response_class=HTMLResponse,
+        openapi_extra=_FORM_BODY,
     )
     return router

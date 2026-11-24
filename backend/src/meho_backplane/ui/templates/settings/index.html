@@ -9,6 +9,10 @@
   * The preview fragment carries the apply form; it posts the same file
     bytes to ``/ui/settings/apply`` and swaps the result into the same slot.
 
+  Errors: ``settings-file.js`` swaps an error answer of either form into
+  ``#settings-result`` (htmx does not swap one on its own): a refusal
+  fragment as it is, any other answer as a fixed error text.
+
   CSRF: the section's ``hx-headers`` echoes ``X-CSRF-Token``; the forms
   inside it, also the swapped-in apply form, inherit it.
 
@@ -40,6 +44,7 @@
 
   <form
     id="settings-upload-form"
+    data-settings-form
     hx-post="/ui/settings/preview"
     hx-encoding="multipart/form-data"
     hx-target="#settings-result"
@@ -70,4 +75,8 @@
 
   <div id="settings-result" aria-live="polite"></div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/ui/static/src/app/settings-file.js" defer></script>
 {% endblock %}

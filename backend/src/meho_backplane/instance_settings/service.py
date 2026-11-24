@@ -814,6 +814,8 @@ class ImportResult:
     revision_id: uuid.UUID | None = None
     diff: dict[str, Any] | None = None
     failed: list[str] = field(default_factory=list)
+    #: The id of the import's audit row; set once the import starts to write.
+    audit_id: uuid.UUID | None = None
 
 
 async def _apply_tenant_rows(
@@ -988,6 +990,7 @@ async def apply_import(
         raise SettingsForbiddenError(refusal)
 
     audit_id = uuid.uuid4()
+    result.audit_id = audit_id
     bind_preallocated_audit_id(audit_id)
     structlog.contextvars.bind_contextvars(audit_op_class="write")
     for tenant_plan in live:

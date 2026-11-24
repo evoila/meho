@@ -26908,6 +26908,27 @@
         "summary": "Ui Settings Preview",
         "description": "``POST /ui/settings/preview``: the mistakes and the diff. Writes nothing.",
         "operationId": "ui_settings_preview_ui_settings_preview_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The meho-settings.yaml file (the upload form)."
+                  },
+                  "file_b64": {
+                    "type": "string",
+                    "description": "The same file bytes as base64 (the Apply form of the preview)."
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -26928,8 +26949,29 @@
           "ui-settings"
         ],
         "summary": "Ui Settings Apply",
-        "description": "``POST /ui/settings/apply``: checks the file again, then adds or updates.",
+        "description": "``POST /ui/settings/apply``: checks the file again, then adds or updates.\n\nCommits the settings, the revision and the audit row together, or none.",
         "operationId": "ui_settings_apply_ui_settings_apply_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The meho-settings.yaml file (the upload form)."
+                  },
+                  "file_b64": {
+                    "type": "string",
+                    "description": "The same file bytes as base64 (the Apply form of the preview)."
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",

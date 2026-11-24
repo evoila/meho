@@ -135,7 +135,7 @@ keep that inside each sensor's tenant:
 The check-runner and a tenant with its own Vault role are refused when a
 target's own path is outside the tenant's folder. Every other caller is
 checked too, and gets a warning instead of a refusal. The read goes on.
-Move the secret into the tenant's folder: a later MEHO refuses this read.
+Move the secret into the tenant's folder.
 
 - **Where.** The shared loader (`_resolve_and_load` in
   `connectors/_shared/vault_creds.py`) calls

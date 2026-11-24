@@ -32,13 +32,6 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestKey
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
-from meho_backplane.operations.approval_queue import (
-    IdempotencyKeyConflictError,
-    SelfApprovalForbiddenError,
-    approve_request,
-    create_pending_request,
-    reject_request,
-)
 from meho_backplane.settings import get_settings
 from tests.test_destructive_preview_binding import _operator
 
@@ -137,7 +130,7 @@ async def _rows() -> list[ApprovalRequest]:
 
 async def _approve(request_id: uuid.UUID, operator: Operator) -> None:
     async with get_sessionmaker()() as session:
-        await approve_request(session, request_id, operator=operator)
+        await approval_queue_module.approve_request(session, request_id, operator=operator)
         await session.commit()
 
 
@@ -160,7 +153,7 @@ async def test_a_retry_after_the_people_behind_changed_gets_its_own_request(
     assert rows[0].idempotency_key == _KEY
     assert rows[1].people_behind == _people("person-b")
 
-    with pytest.raises(SelfApprovalForbiddenError):
+    with pytest.raises(approval_queue_module.SelfApprovalForbiddenError):
         await _approve(retry, _person("person-b"))
     await _approve(retry, _person("person-c", TenantRole.TENANT_ADMIN))
     assert [row.status for row in await _rows()] == ["pending", "approved"]
@@ -222,7 +215,7 @@ async def test_two_logins_with_one_login_name_get_two_requests(
     rows = await _rows()
     assert [row.people_behind for row in rows] == [_people("person-a"), _people("person-b")]
     assert {row.principal_sub for row in rows} == {_LOGIN}
-    with pytest.raises(SelfApprovalForbiddenError):
+    with pytest.raises(approval_queue_module.SelfApprovalForbiddenError):
         await _approve(two, _person("person-b"))
 
 
@@ -294,7 +287,7 @@ async def test_a_persons_own_retry_gets_one_request_they_cannot_approve() -> Non
     rows = await _rows()
     assert len(rows) == 1
     assert rows[0].people_behind is None
-    with pytest.raises(SelfApprovalForbiddenError):
+    with pytest.raises(approval_queue_module.SelfApprovalForbiddenError):
         await _approve(first, requester)
 
 
@@ -322,7 +315,7 @@ async def _park(
     call_params = params if params is not None else {"name": "web-01"}
     target = SimpleNamespace(id=target_id) if target_id is not None else None
     async with get_sessionmaker()() as session:
-        request = await create_pending_request(
+        request = await approval_queue_module.create_pending_request(
             session,
             operator=operator,
             connector_id="gh-rest-3",
@@ -359,7 +352,7 @@ async def test_a_retry_asked_another_way_for_another_call_is_refused(
         retry["params"] = {"name": "web-02"}
     token = work_ref_var.set("change-ticket-2") if other_call == "work_ref" else None
     try:
-        with pytest.raises(IdempotencyKeyConflictError) as refused:
+        with pytest.raises(approval_queue_module.IdempotencyKeyConflictError) as refused:
             await _park(_agent(), **retry)
     finally:
         if token is not None:
@@ -384,11 +377,11 @@ async def test_a_request_with_a_linked_key_refuses_another_call(
     second = await _park(_agent())
     assert second.id != first.id
     async with get_sessionmaker()() as session:
-        await reject_request(session, first.id, operator=_person("reviewer"))
+        await approval_queue_module.reject_request(session, first.id, operator=_person("reviewer"))
         await session.commit()
 
     _behind(monkeypatch, {"agent:nightly": ["person-c"]})
-    with pytest.raises(IdempotencyKeyConflictError) as refused:
+    with pytest.raises(approval_queue_module.IdempotencyKeyConflictError) as refused:
         await _park(_agent(), target_id=uuid.uuid4())
 
     assert refused.value.request_id == second.id

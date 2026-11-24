@@ -138,6 +138,16 @@ def test_platform_admin_working_in_a_foreign_tenant_cannot_name_own_tenant() -> 
     assert _refusal(operator, _TENANT_A).startswith("tenant_select_with_header:")
 
 
+def test_platform_admin_in_a_foreign_tenant_cannot_name_the_token_tenant() -> None:
+    """A token without a list: its own tenant A still needs the header."""
+    operator = _operator(platform_admin=True, tenant_id=_TENANT_C, role_from_platform_admin=True)
+    operator = operator.model_copy(
+        update={"token_tenant_id": _TENANT_A, "token_tenant_role": TenantRole.READ_ONLY}
+    )
+    assert _refusal(operator, _TENANT_A).startswith("tenant_select_with_header:")
+    assert authorize_tenant_scope(operator, _TENANT_C) == _TENANT_C
+
+
 def test_member_without_platform_admin_is_told_to_use_the_header() -> None:
     operator = _reader_in_a_admin_in_b()
     detail = _refusal(operator, _TENANT_A)

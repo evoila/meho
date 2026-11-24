@@ -6020,10 +6020,14 @@ of this file.
 - **The test.** `backend/tests/test_approval_table_snapshot.py` registers all
   typed operations (as `test_credential_calls_always_wait.py` does), builds
   the table with `backend/tests/approval_table.py` and compares it with the
-  file. On a difference it names the new, removed and changed rows.
+  file. On a difference it names the new, removed and changed rows. It runs
+  a fresh registration pass with `POLICY_CLASSIFICATION` on, so the policy
+  operations are in the table, and without a local
+  `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, so local grant rules never reach
+  the file. The short test run of a one-connector pull request runs it too.
 - **Write the file again.** From `backend/`:
   `MEHO_WRITE_APPROVAL_TABLE=1 uv run pytest -o tmp_path_retention_policy=failed tests/test_approval_table_snapshot.py`.
-  Commit the file.
+  Only the value `1` writes. Commit the file.
 - **The CI job.** The step "Judge the approval table against the base
   branch" of the job "Secret hiding compared with the base branch" runs
   `scripts/ci/approval_table_judge.py` on the table of the base branch and

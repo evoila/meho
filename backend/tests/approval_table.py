@@ -16,8 +16,10 @@ Write the file again, from ``backend/``::
     MEHO_WRITE_APPROVAL_TABLE=1 uv run pytest -o tmp_path_retention_policy=failed \\
         tests/test_approval_table_snapshot.py
 
-The table is the built-in default only: no install override, no tenant
-policy row, no operation made from an API file at run time.
+The table is the built-in default only: no install override (the test
+removes ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``), no tenant policy row, no
+operation made from an API file at run time. The test turns
+``POLICY_CLASSIFICATION`` on, so the policy operations are in it.
 """
 
 from __future__ import annotations

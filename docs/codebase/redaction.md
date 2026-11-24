@@ -1077,10 +1077,12 @@ before a reviewer reads the pull request.
 - **The rules come from the base branch.** The job reads the rule script
   of the base commit with `git show` and runs the judge with
   `python3 -I`, so a pull request cannot weaken the check that judges it.
-  The job also lists, with `git diff --name-only`, each file that the pull
-  request changes under `backend/tests/redaction_compare/` (the input set
-  and the code that reads the answers) and passes the list with
-  `--changed`. Each such file is a difference of its own and needs an
+  The job also lists, with `git diff --name-only --no-renames -z`, each
+  file that the pull request changes under `backend/tests/redaction_compare/`
+  (the input set and the code that reads the answers) and passes the list
+  with `--changed`. A moved file gives its old and its new path, and each
+  path stays exactly as it is, also with letters outside ASCII. The job
+  runs for any change in that folder, a `.md` file too. Each such file is a difference of its own and needs an
   approved entry with `id: compare-package`, the file path as `path`, and
   `part: changed`. So the records of the pull request cannot be changed to
   look like the base's without a reviewed entry.
@@ -1105,8 +1107,10 @@ before a reviewer reads the pull request.
   run below, and the job fails.
 - **See the differences locally.** Without `--summary-only` the judge
   prints each difference that is not approved (input id, step, kind) and
-  the counts. From the repo root, with the pull request branch checked out,
-  run the block below. It works in a new private folder from `mktemp -d`,
+  the counts. From the repo root, with the pull request branch checked out
+  and its changes committed, run the block below. Like CI, it passes the
+  changed files of the compare package with `--changed`, so a change there
+  needs its approved entry here too. It works in a new private folder from `mktemp -d`,
   stops when a step fails (also either record build), and removes the
   folder and the second checkout when it ends, so no record file is left
   behind or read again by a later run.
@@ -1123,8 +1127,10 @@ before a reviewer reads the pull request.
     (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
     git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
       > "$tmp/base-approved.yaml"
+    git diff --name-only --no-renames -z origin/main...HEAD -- backend/tests/redaction_compare > "$tmp/changed.txt"
     python3 -I "$rules" \
       --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      --changed "$tmp/changed.txt" \
       --approved backend/tests/snapshots/redaction_compare_approved.yaml \
       --base-approved "$tmp/base-approved.yaml"
   )

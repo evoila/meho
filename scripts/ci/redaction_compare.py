@@ -19,9 +19,11 @@
                              count. Without --summary-only it prints each
                              difference that is not approved (input id, step,
                              kind) and the counts.
-  --changed FILE             a list of paths (one per line) under
-                             backend/tests/redaction_compare/ that the pull
-                             request changes. Each path is a difference of
+  --changed FILE             the paths under backend/tests/redaction_compare/
+                             that the pull request changes, each ended by a
+                             NUL byte, as `git diff --name-only --no-renames
+                             -z` writes them (a moved file gives its old and
+                             its new path). Each path is a difference of
                              kind "changed" and needs an approved entry with
                              id "compare-package", that path, and part
                              "changed". The input set and the way the answers
@@ -202,8 +204,8 @@ def main() -> int:
         base_approved = Path(args.base_approved) if args.base_approved else None
         changed = None
         if args.changed:
-            lines = Path(args.changed).read_text(encoding="utf-8").splitlines()
-            changed = [line.strip() for line in lines if line.strip()]
+            names = Path(args.changed).read_text(encoding="utf-8").split("\0")
+            changed = [name for name in names if name]
         return judge(
             Path(args.judge[0]),
             Path(args.judge[1]),

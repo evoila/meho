@@ -498,7 +498,7 @@ def test_a_package_change_that_makes_a_shown_part_count_as_hidden_fails(tmp_path
     (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
     (tmp_path / "head.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
     (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
-    (tmp_path / "changed.txt").write_text(_PACKAGE_FILE + "\n", encoding="utf-8")
+    (tmp_path / "changed.txt").write_text(_PACKAGE_FILE + "\0", encoding="utf-8")
     command = [
         sys.executable,
         "-I",
@@ -525,7 +525,7 @@ def _compare_step_text() -> str:
 
 def test_the_job_lists_the_changed_package_files_from_git() -> None:
     step = _compare_step_text()
-    assert "git diff --name-only" in step
+    assert "git diff --name-only --no-renames -z" in step
     assert "backend/tests/redaction_compare" in step
     assert '--changed "${dir}/changed.txt"' in step
     assert '"${changed_args[@]}"' in step
@@ -541,3 +541,123 @@ def test_the_job_keeps_the_container_error_output_out_of_the_log() -> None:
     # Nothing prints that file.
     assert not re.search(r"(cat|tail|head|echo|<)\s+\"?\$\{dir\}/head\.err", step)
     assert "head.err" not in step.replace('2> "${dir}/head.err"', "")
+
+
+_DOCS = Path(__file__).resolve().parents[2] / "docs" / "codebase" / "redaction.md"
+_DIFF_LINE = re.compile(r"^\s*(git diff --name-only[^\n]*)$", re.MULTILINE)
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout.strip()
+
+
+def _changed_list(tmp_path: Path) -> Path:
+    """Run the job's own ``git diff`` line on a commit that moves and adds package files.
+
+    The base has ``answers.py``; the pull request moves it to ``reading.py``
+    (same content, so git sees a rename) and adds ``entrées.py``.
+    """
+    repo = tmp_path / "repo"
+    package = repo / "backend" / "tests" / "redaction_compare"
+    package.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (package / "answers.py").write_text("ANSWERS = 1\n" * 20, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(
+        repo,
+        "mv",
+        "backend/tests/redaction_compare/answers.py",
+        "backend/tests/redaction_compare/reading.py",
+    )
+    (package / "entrées.py").write_text("X = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "move")
+    head = _git(repo, "rev-parse", "HEAD")
+    match = _DIFF_LINE.search(_compare_step_text())
+    assert match is not None
+    out = tmp_path / "out"
+    out.mkdir()
+    subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", match.group(1)],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "base": base, "head": head, "dir": str(out)},
+        check=True,
+    )
+    return out / "changed.txt"
+
+
+def _judge_command(tmp_path: Path, changed: Path, approved: str) -> int:
+    record = _record([], ["p0"])
+    (tmp_path / "base.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
+    command = [
+        sys.executable,
+        "-I",
+        str(_SCRIPT),
+        "--judge",
+        str(tmp_path / "base.jsonl"),
+        str(tmp_path / "head.jsonl"),
+        "--changed",
+        str(changed),
+        "--approved",
+        str(tmp_path / "approved.yaml"),
+    ]
+    return subprocess.run(command, capture_output=True, text=True, check=False).returncode
+
+
+def _entries(*paths: str) -> str:
+    lines = ["approved:"]
+    for path in paths:
+        lines += [
+            "  - id: compare-package",
+            f"    path: {path}",
+            "    part: changed",
+            "    reason: the package is reorganised",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+_OLD = "backend/tests/redaction_compare/answers.py"
+_NEW = "backend/tests/redaction_compare/reading.py"
+_ACCENTED = "backend/tests/redaction_compare/entrées.py"
+
+
+def test_the_job_lists_both_paths_of_a_moved_file_and_keeps_accented_names(
+    tmp_path: Path,
+) -> None:
+    changed = _changed_list(tmp_path)
+    names = changed.read_text(encoding="utf-8").split("\0")
+    assert sorted(name for name in names if name) == sorted([_OLD, _NEW, _ACCENTED])
+
+
+def test_a_moved_file_needs_an_entry_for_its_old_path_too(tmp_path: Path) -> None:
+    changed = _changed_list(tmp_path)
+    assert _judge_command(tmp_path, changed, _entries(_NEW, _ACCENTED)) == 1
+
+
+def test_entries_with_the_exact_names_approve_a_move_and_an_accented_file(
+    tmp_path: Path,
+) -> None:
+    changed = _changed_list(tmp_path)
+    assert _judge_command(tmp_path, changed, _entries(_OLD, _NEW, _ACCENTED)) == 0
+
+
+def test_the_local_command_passes_the_changed_package_files_like_the_job() -> None:
+    text = _DOCS.read_text(encoding="utf-8")
+    block = text[text.index("- **See the differences locally.**") :]
+    block = block[: block.index("\n  ```\n", block.index("```bash"))]
+    match = _DIFF_LINE.search(block)
+    assert match is not None
+    assert "--name-only --no-renames -z" in match.group(1)
+    assert '-- backend/tests/redaction_compare > "$tmp/changed.txt"' in match.group(1)
+    assert '--changed "$tmp/changed.txt"' in block

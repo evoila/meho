@@ -123,6 +123,7 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
         descriptor_credential_reason,
         descriptor_credential_waits,
         descriptor_needs_per_call_approval,
+        per_call_mark_turned_off,
     )
 
     op_id = descriptor.op_id
@@ -130,6 +131,7 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
     marks = {
         "root_shell": is_root_shell(op_id),
         "per_call_approval": descriptor_needs_per_call_approval(descriptor),
+        "per_call_approval_off": per_call_mark_turned_off(descriptor),
         "credential": descriptor_credential_reason(descriptor) is not None,
         "credential_waits": (
             descriptor_credential_waits(descriptor) or params_write_credential(op_id, params)

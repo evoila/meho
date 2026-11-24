@@ -146,6 +146,7 @@ __all__ = [
     "never_covered_reason",
     "null_target_only_park_hint",
     "per_call_approval_grant_reason",
+    "per_call_mark_turned_off",
 ]
 
 #: Either standing-grant table. The lookup, list and revoke code takes one.
@@ -436,15 +437,21 @@ def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
     """Build the ingest shape of a stored row, for the connector's ingest correction.
 
     A stored risk level outside the four ingest levels is left out (the
-    shape's default is used), so such a row still gets its correction.
+    shape's default is used), so such a row still gets its correction. The
+    in-memory row of a step has no method and path; it takes them from
+    ``correction_route``, the pair of its stored row.
     """
     from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
     level = getattr(descriptor, "safety_level", "safe")
+    method, path = descriptor.method, descriptor.path
+    route = getattr(descriptor, "correction_route", None)
+    if not method and route is not None:
+        method, path = route
     return EndpointDescriptorProto(
         op_id=descriptor.op_id,
-        method=descriptor.method or "",
-        path=descriptor.path or "",
+        method=method or "",
+        path=path or "",
         summary=getattr(descriptor, "summary", None),
         description=getattr(descriptor, "description", None),
         tags=list(getattr(descriptor, "tags", None) or []),
@@ -457,19 +464,17 @@ def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
     )
 
 
-def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
-    """Return ``True`` when a connector marked the call of *descriptor* per call.
+_CORRECTION_FAILED: Final = object()
 
-    The mark is a set of op ids. A stored row can carry another op id than
-    the one the connector's ingest correction gives the same method and path
-    (:func:`~meho_backplane.operations.ingest.spec_corrections.apply_spec_correction`).
-    So the check reads the op id of the row and the op id the correction
-    gives it. The correction gets the stored fields of the row, the same
-    fields it gets at ingest (:func:`_stored_proto`). A correction that
-    fails counts the call as marked.
+
+def _corrected_op_id(descriptor: EndpointDescriptor) -> str | object | None:
+    """The op id the connector's ingest correction gives *descriptor*.
+
+    ``None`` when the connector registered no per-operation correction, and
+    :data:`_CORRECTION_FAILED` when the correction failed on the row. The
+    correction gets the stored fields of the row, the same fields it gets
+    at ingest (:func:`_stored_proto`).
     """
-    if needs_per_call_approval(descriptor.op_id):
-        return True
     from meho_backplane.operations.ingest.spec_corrections import (
         apply_spec_correction,
         has_spec_correction,
@@ -478,19 +483,58 @@ def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
     product = getattr(descriptor, "product", None)
     impl_id = getattr(descriptor, "impl_id", None)
     if not isinstance(product, str) or not isinstance(impl_id, str):
-        return False
+        return None
     if not has_spec_correction(product=product, impl_id=impl_id):
-        return False
+        return None
     try:
-        corrected = apply_spec_correction(
+        return apply_spec_correction(
             product=product,
             version=descriptor.version,
             impl_id=impl_id,
             proto=_stored_proto(descriptor),
-        )
+        ).op_id
     except Exception:
+        return _CORRECTION_FAILED
+
+
+def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when a connector marked the call of *descriptor* per call.
+
+    The mark is a set of op ids. A stored row can carry another op id than
+    the one the connector's ingest correction gives the same method and path
+    (:func:`~meho_backplane.operations.ingest.spec_corrections.apply_spec_correction`).
+    So the check reads the op id of the row and the op id the correction
+    gives it (:func:`_corrected_op_id`). A correction that fails counts the
+    call as marked.
+    """
+    if needs_per_call_approval(descriptor.op_id):
         return True
-    return needs_per_call_approval(corrected.op_id)
+    corrected = _corrected_op_id(descriptor)
+    if corrected is _CORRECTION_FAILED:
+        return True
+    return isinstance(corrected, str) and needs_per_call_approval(corrected)
+
+
+def per_call_mark_turned_off(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when a platform admin's approval-off edit ends the per-call wait.
+
+    The edit is an override with ``requires_approval=False`` on the row's
+    operation (``descriptor.policy_approval_off``, set by
+    :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    MEHO refuses that edit for a change of rights, so it does not count when
+    the row's op id, or the op id the connector's ingest correction gives
+    the row, is a change of rights, or when the correction fails.
+    """
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    if not getattr(descriptor, "policy_approval_off", False):
+        return False
+    if is_rights_change_op(descriptor.op_id):
+        return False
+    corrected = _corrected_op_id(descriptor)
+    if corrected is _CORRECTION_FAILED:
+        return False
+    return not (isinstance(corrected, str) and is_rights_change_op(corrected))
 
 
 def per_call_approval_grant_reason(

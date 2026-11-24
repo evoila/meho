@@ -2073,6 +2073,11 @@ class EndpointDescriptor(Base):
     #: wait (or two entries conflict). Then no standing grant and no run
     #: approval clears a call: a person approves each one.
     policy_always_wait = False
+    #: Not a column. ``True`` on a row that ``apply_effective_policy``
+    #: returned when an override turned approval off (a platform admin's
+    #: approval-off edit). It ends the per-call wait of an operation that a
+    #: connector marked, for a person in the web console only.
+    policy_approval_off = False
     #: Not a column. ``True`` on the row of one call whose params make it a
     #: call that writes or makes a credential
     #: (:func:`~meho_backplane.op_classes.declare_credential_check`). Then the
@@ -2097,6 +2102,11 @@ class EndpointDescriptor(Base):
     #: accepts no value there (``operations/switch_params.py``).
     #: ``parameter_schema`` is then the shown schema, without it.
     parameter_check_schema = cast("dict[str, object] | None", None)
+    #: Not a column. On the in-memory row of a step of a multi-step
+    #: operation, the ``(method, path)`` of the stored row with the same op
+    #: id, set by ``apply_step_policy``. Only the per-call check reads it,
+    #: for the connector's ingest correction.
+    correction_route = cast("tuple[str | None, str | None] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,

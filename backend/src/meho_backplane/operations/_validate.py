@@ -825,8 +825,11 @@ def _non_agent_park_reason(
     * Everyone else: :func:`_person_park_reason` (#3980).
     * A call that would run at once but that a connector marks for a
       person's approval on each call waits (:data:`PER_CALL_WAIT_NOTE`), for
-      a service and for a person's call with a token. A person's call in the
-      web interface keeps the rules of the web interface.
+      every caller. A person's call in the web interface runs at once only
+      after a platform admin's approval-off edit for the operation
+      (:func:`~meho_backplane.operations.service_grants.per_call_mark_turned_off`).
+      An admin's change of rights in the web console keeps its own check
+      (:func:`_console_rights_verdict`).
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -839,17 +842,22 @@ def _non_agent_park_reason(
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
-    from meho_backplane.operations.service_grants import descriptor_needs_per_call_approval
+    from meho_backplane.operations.service_grants import (
+        descriptor_needs_per_call_approval,
+        per_call_mark_turned_off,
+    )
 
     waits = (
         _service_safety_gate_reason(descriptor)
         if is_service
         else _person_park_reason(operator, descriptor)
     )
+    if waits is not None or not descriptor_needs_per_call_approval(descriptor):
+        return waits
     in_web = operator.web_session and is_human_principal(operator)
-    if waits is None and not in_web and descriptor_needs_per_call_approval(descriptor):
-        return PER_CALL_WAIT_NOTE
-    return waits
+    if in_web and per_call_mark_turned_off(descriptor):
+        return None
+    return PER_CALL_WAIT_NOTE
 
 
 async def _service_read_scope_denial(

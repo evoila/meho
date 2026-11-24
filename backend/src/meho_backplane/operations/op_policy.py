@@ -236,6 +236,8 @@ class EffectivePolicy:
     conflict: then a person approves each call, and no standing grant or
     run approval clears it. ``install_category`` is the category the
     install's entries alone give (the install's approver routing uses it).
+    ``approval_off`` is ``True`` when an override that applies turned
+    approval off (the platform admin's approval-off edit).
     """
 
     safety_level: str
@@ -245,6 +247,7 @@ class EffectivePolicy:
     labels: Mapping[str, str] = field(default_factory=dict)
     rule_ref: str | None = None
     always_wait: bool = False
+    approval_off: bool = False
 
 
 def _approval(code_approval: bool, overrides: Iterable[OperationPolicyOverride]) -> bool:
@@ -273,7 +276,10 @@ def effective_policy(
     present = [o for o in overrides if o is not None]
     safety = _max_level([code_safety, *(o.safety_level for o in present if o.safety_level)])
     approval = _approval(code_approval, present) or safety == "destructive"
-    return EffectivePolicy(safety_level=safety, requires_approval=approval)
+    approval_off = any(o.requires_approval is False for o in present)
+    return EffectivePolicy(
+        safety_level=safety, requires_approval=approval, approval_off=approval_off
+    )
 
 
 def _visible_scope(tenant_id: UUID | None) -> Any:
@@ -402,6 +408,7 @@ def _with_classification(policy: EffectivePolicy, classified: Classification) ->
         labels=dict(classified.labels),
         rule_ref=classified.rule_ref,
         always_wait=classified.always_wait,
+        approval_off=policy.approval_off,
     )
 
 
@@ -471,6 +478,8 @@ async def apply_effective_policy(
     ``policy_labels`` and ``policy_rule_ref`` (not columns either) get the
     classification, so approver routing can match the category and the
     call contract and the approval request can show it.
+    ``row.policy_approval_off`` (not a column) is ``True`` when an override
+    turned approval off, so the per-call check sees the edit.
     ``row.parameter_schema`` gets the shown schema and
     ``row.parameter_check_schema`` (not a column) the schema a call is
     checked against, and ``row.llm_instructions`` loses the examples and
@@ -504,7 +513,9 @@ async def apply_step_policy(
     (:func:`effective_policy`): the highest risk level wins, and an
     override that sets the approval flag makes the step wait. They only
     make a step stricter: an override that turns approval off leaves the
-    step's own approval flag as it is. This holds with every policy switch.
+    step's own approval flag as it is, and does not end the wait of a step
+    that a connector marks so that a person approves each call. This holds
+    with every policy switch.
 
     With the ``POLICY_CLASSIFICATION`` switch on, the classification then
     raises the level or adds a wait the same way :func:`_with_classification`
@@ -515,6 +526,7 @@ async def apply_step_policy(
     """
     key = OpKey.of(step)
     async with get_sessionmaker()() as session:
+        await _fill_stored_route(session, tenant_id=tenant_id, step=step)
         overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(key, [])
         classified = (
             await classify_step(session, tenant_id=tenant_id, step=step, overrides=overrides)
@@ -527,7 +539,9 @@ async def apply_step_policy(
     if overrides:
         raised = effective_policy(step.safety_level, step.requires_approval, overrides)
         policy = replace(
-            raised, requires_approval=step.requires_approval or raised.requires_approval
+            raised,
+            requires_approval=step.requires_approval or raised.requires_approval,
+            approval_off=False,
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
@@ -537,6 +551,48 @@ async def apply_step_policy(
     return step
 
 
+async def _fill_stored_route(
+    session: AsyncSession, *, tenant_id: UUID | None, step: EndpointDescriptor
+) -> None:
+    """Give *step* the method and path of its stored row, for the ingest correction.
+
+    Only for a connector that registered a per-operation correction
+    (:func:`~meho_backplane.operations.ingest.spec_corrections.has_spec_correction`):
+    the correction matches on method and path, and an in-memory step has
+    neither. The stored row is the one the tenant sees, in any on/off state.
+    A step without a stored row stays as it is. The pair goes to
+    ``step.correction_route`` only: ``step.method`` stays empty, so every
+    other check reads the step as before.
+    """
+    # Imported here: ``_lookup`` imports this module.
+    from meho_backplane.operations._lookup import visible_scope_clause
+    from meho_backplane.operations.ingest.spec_corrections import has_spec_correction
+
+    if not has_spec_correction(product=step.product, impl_id=step.impl_id):
+        return
+    stored = (
+        await session.execute(
+            select(EndpointDescriptor.method, EndpointDescriptor.path)
+            .where(
+                visible_scope_clause(
+                    EndpointDescriptor,
+                    tenant_id=tenant_id,
+                    product=step.product,
+                    version=step.version,
+                    impl_id=step.impl_id,
+                ),
+                EndpointDescriptor.product == step.product,
+                EndpointDescriptor.version == step.version,
+                EndpointDescriptor.impl_id == step.impl_id,
+                EndpointDescriptor.op_id == step.op_id,
+            )
+            .limit(1)
+        )
+    ).first()
+    if stored is not None:
+        step.correction_route = (stored.method, stored.path)
+
+
 def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> None:
     """Copy the classification of *policy* to the attributes of *row* that are not columns."""
     row.policy_always_wait = policy.always_wait
@@ -544,6 +600,7 @@ def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> Non
     row.policy_install_category = policy.install_category
     row.policy_labels = dict(policy.labels)
     row.policy_rule_ref = policy.rule_ref
+    row.policy_approval_off = policy.approval_off
 
 
 # ---------------------------------------------------------------------------

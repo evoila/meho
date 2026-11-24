@@ -1265,9 +1265,10 @@ The answer:
   full description and the cut text say "hits at the end of the list were
   left out" in place of "low hits" and "lower-ranked hits": a cut can drop
   the first knowledge repo hit, the best of its list. With it off, the
-  whole `tools/list` entry is the same as before (a test compares it with
-  the entries main sent, saved in
-  `tests/fixtures/search_knowledge_tools_list_main.json`).
+  whole `tools/list` entry is the same as before, byte for byte (a test
+  compares it with the exact bytes main sent, saved in
+  `tests/fixtures/search_knowledge_tools_list_main_full.json` and
+  `..._short.json`).
   The text has no switch of its own: the measurement of
   `KB_WIKI_INTERLEAVE` under #6758 measures the order and this text
   together.

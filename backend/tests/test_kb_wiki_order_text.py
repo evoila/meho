@@ -34,9 +34,10 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-#: The full and short ``search_knowledge`` entries of ``tools/list`` on main
-#: (switch off), saved as they were sent. A change to the text shows here.
-_MAIN_ENTRIES = Path(__file__).parent / "fixtures" / "search_knowledge_tools_list_main.json"
+#: The bytes of the full and short ``search_knowledge`` entries of ``tools/list``
+#: on main (switch off), saved exactly as main sent them. A change to the text,
+#: or to the order of the fields, shows here.
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 _OLD_FULL_ORDER = "Returns one hit per entry, best first: slug, snippet, "
 _OLD_SHORT_ORDER = "Returns one hit per entry, best first, with `passages`"
@@ -63,10 +64,26 @@ def _description(client: TestClient) -> str:
     return str(_entry(client)["description"])
 
 
-def _main_entry(short: bool) -> dict[str, Any]:
-    """The ``tools/list`` entry as main sent it, saved before this change."""
-    saved: dict[str, dict[str, Any]] = json.loads(_MAIN_ENTRIES.read_text(encoding="utf-8"))
-    return saved["short" if short else "full"]
+def _tools_list_bytes(client: TestClient) -> bytes:
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    return bytes(response.content)
+
+
+def _main_entry_bytes(short: bool) -> bytes:
+    """The bytes of the ``tools/list`` entry as main sent it, saved before this change."""
+    name = f"search_knowledge_tools_list_main_{'short' if short else 'full'}.json"
+    saved = (_FIXTURES / name).read_bytes()
+    return saved.removesuffix(b"\n")
+
+
+def _has_whole_entry(body: bytes, entry: bytes) -> bool:
+    """*entry* is one whole item of the tool list in *body*, byte for byte."""
+    return any(start + entry + end in body for start in (b"[", b",") for end in (b",", b"]"))
+
+
+def _json_text(text: str) -> bytes:
+    """*text* as it is written inside a JSON string of the answer."""
+    return json.dumps(text, ensure_ascii=False)[1:-1].encode("utf-8")
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -92,7 +109,9 @@ def test_switch_off_the_whole_entry_is_the_same_as_on_main(
     short: bool,
 ) -> None:
     _switch(monkeypatch, interleave=False, short=short)
-    assert _entry(client_with_operator[0]) == _main_entry(short)
+    saved = _main_entry_bytes(short)
+    assert saved.startswith(b'{"name":"search_knowledge",')
+    assert _has_whole_entry(_tools_list_bytes(client_with_operator[0]), saved)
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -103,12 +122,12 @@ def test_switch_on_only_the_order_and_cut_words_change(
     short: bool,
 ) -> None:
     _switch(monkeypatch, interleave=True, short=short)
-    client = client_with_operator[0]
-    entry = _entry(client)
-    main = _main_entry(short)
-    expected = str(main["description"]).replace(PLAIN_ORDER, INTERLEAVED_ORDER)
-    expected = expected.replace(PLAIN_PARTIAL, PARTIAL_IN_TURNS)
-    assert entry == {**main, "description": expected}
+    expected = _main_entry_bytes(short).replace(
+        _json_text(PLAIN_ORDER), _json_text(INTERLEAVED_ORDER)
+    )
+    expected = expected.replace(_json_text(PLAIN_PARTIAL), _json_text(PARTIAL_IN_TURNS))
+    assert expected != _main_entry_bytes(short)
+    assert _has_whole_entry(_tools_list_bytes(client_with_operator[0]), expected)
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

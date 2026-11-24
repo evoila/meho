@@ -259,7 +259,9 @@ Other rules:
   the realm `master`, the target's `admin_realm`, and the realm of MEHO's
   own login. Names are compared without case. MEHO reads the realm first
   and deletes it only when Keycloak answers with exactly the managed realm
-  (`realm_name_mismatch` otherwise). Approval cannot be turned off for this
+  (`realm_name_mismatch` otherwise), and with the realm's id
+  (`realm_id_missing` otherwise: the target's login needs `view-realm`).
+  Approval cannot be turned off for this
   operation.
 
 `keycloak.idp.create` (identity-provider federation) is **deferred** —

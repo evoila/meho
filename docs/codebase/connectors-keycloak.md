@@ -1743,6 +1743,12 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   Keycloak's answer must be exactly the managed realm; another name, or no
   name, is refused with the `realm_name_mismatch` code. That runs before
   the request waits for approval and again when the approved call runs.
+- **The realm id.** The answer must also have Keycloak's `id` of the realm,
+  as a string that is not empty. Without it MEHO cannot compare the realm
+  with the one on the card, so the delete is refused with the
+  `realm_id_missing` code, before approval and again when the approved call
+  runs. Keycloak leaves the id out when the target's login may not view the
+  realm (`view-realm` or `manage-realm`).
 - **Approval** cannot be turned off for this operation.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
@@ -1756,7 +1762,12 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   the realm. Before an approved call runs, MEHO builds the card again and
   compares the id (`approval_object_check.py`). A realm that was deleted and
   made again under the same name has a new id, so the run is refused with
-  `object_changed_since_approval` and nothing is deleted. The counts come from
+  `object_changed_since_approval` and nothing is deleted. The stored card and
+  the card a person reads always have the id. `meho_approvals_get`,
+  `meho_approvals_list` and the REST reads of an agent login return it only
+  while `KEYCLOAK_ANSWER_REALM` is on (`SWITCHED_OBJECT_FIELDS` in
+  `operations/_preview.py`). `preview_operation` never contacts Keycloak, so
+  it has no id. The counts come from
   `GET .../users/count`, `GET .../groups/count` (all groups, not only the
   top level) and the length of `GET .../clients`. The client read must
   answer with a JSON array. Any other body is an error
@@ -2256,7 +2267,16 @@ Every other op takes no realm value and always acts on the managed realm.
 Keycloak answers with (`check_answered_realm` in `realm_params.py`): its
 `realm` must be exactly the managed realm, with the same case and accents.
 Another name, no name, or an answer that is not an object is an error, so
-`realm.get` returns no realm data and `realm.update` sends no write. A
+`realm.get` returns no realm data and `realm.update` sends no write.
+Every other operation has the same check (`ManagedRealmChecks` in
+`managed_realm_check.py`). The request helpers of the connector read the
+realm before a request inside it (users, clients, groups, roles, flows) and
+before a write of the realm settings, so a wrong answer returns nothing and
+sends nothing. This covers approval cards and the `keycloak:` sides of
+`secret.move` too. `keycloak.user.check_login` runs it before it sends the
+password. An operation that reads the realm settings also checks that
+answer. One passed check counts for 5 seconds, and each run starts with a
+new one. Every admin login can read the name. A
 `keycloak.realm.create` that names no realm makes the managed realm, so its
 approval check judges it by that name, like a create that names it
 (`ops_write_login_realm_rule.py`).
@@ -2275,12 +2295,14 @@ applied to `KeycloakConnector`) wraps each op handler. With the switch
 `KEYCLOAK_ANSWER_REALM` on (`Settings.keycloak_answer_realm`, off by
 default), a dict answer gets the field `managed_realm` first, set to the
 realm the call acted on. A read answer and a write answer show the same
-field. With the switch off, no answer has the field. Each Keycloak op is
-registered with `managed_realm` in its `result_scalars` hint
-(`with_realm_scalar`), so the summary of a reduced list keeps the field
-whole, also when a long realm name is over the size limit of the other
-plain values. With the switch off the answer has no such field, and the
-hint keeps nothing. The field changes what
+field. With the switch off, no answer has the field. The summary of a long
+answer (a list or one large object) keeps the field whole, also when a long
+realm name is over the size limit of the other plain values. The dispatcher
+passes the field name to the reducer directly
+(`operations/required_fields.py`). It is not part of an operation's
+instructions: the operation detail does not show it, and an admin's edit of
+the instructions does not remove it. With the switch off nothing is passed.
+The field changes what
 an AI agent reads, so it stays off until it is measured. The `meho keycloak`
 commands print it as `managed realm:` when the answer has it.
 The approval card of a Keycloak write shows the realm in its opening

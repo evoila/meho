@@ -51,9 +51,11 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.tools._call_operation_status import read_own_request_over_mcp
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.operations._target_connector_limit import connector_limit
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import create_pending_request
+from meho_backplane.operations.composite import composite_dispatch_var, enforce_subop_policy
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
 from meho_backplane.settings import get_settings
@@ -599,18 +601,32 @@ async def _refusal_rows(outcome: str) -> list[AuditLog]:
     return [row for row in await _status_rows() if row.payload.get("outcome") == outcome]
 
 
+async def _status_row_ids() -> set[uuid.UUID]:
+    return {row.id for row in await _status_rows()}
+
+
+async def _the_one_new_status_row(before: set[uuid.UUID], outcome: str) -> AuditLog:
+    """The one ``approval.status`` row the call added, whatever its outcome, checked."""
+    added = [row for row in await _status_rows() if row.id not in before]
+    assert len(added) == 1, [row.payload.get("outcome") for row in added]
+    (row,) = added
+    assert row.payload["outcome"] == outcome
+    return row
+
+
 async def test_an_unknown_id_writes_one_audit_row_of_the_caller_linked_to_no_request(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch(monkeypatch, status=True)
     unknown = uuid.UUID("00000000-0000-0000-0000-000000006817")
     before = await _count(AuditLog)
+    status_before = await _status_row_ids()
     results_before = await _result_rows()
 
     answer = _answer(_call(client, unknown))
 
     assert answer["extras"]["error_code"] == _NOT_FOUND
-    (row,) = await _refusal_rows(_NOT_FOUND)
+    row = await _the_one_new_status_row(status_before, _NOT_FOUND)
     assert row.operator_sub == _REQUESTER.sub
     assert row.tenant_id == _REQUESTER.tenant_id
     assert "approval_request_id" not in row.payload
@@ -625,10 +641,11 @@ async def test_a_request_of_someone_else_gets_no_row_in_its_own_history(
     _switch(monkeypatch, status=True)
     request_id = await _park()
     _Caller.operator = _REQUESTER.model_copy(update={"sub": "someone-else"})
+    status_before = await _status_row_ids()
 
     _answer(_call(client, request_id))
 
-    (row,) = await _refusal_rows(_NOT_FOUND)
+    row = await _the_one_new_status_row(status_before, _NOT_FOUND)
     assert row.operator_sub == "someone-else"
     assert str(request_id) not in {
         str(value) for value in row.payload.values() if value != str(request_id)
@@ -651,15 +668,16 @@ async def test_a_wrong_operation_writes_one_audit_row_on_the_request(
 ) -> None:
     _switch(monkeypatch, status=True)
     request_id = await _park()
+    status_before = await _status_row_ids()
+    results_before = await _result_rows()
 
     answer = _answer(_call(client, request_id, **overrides))
 
     assert answer["extras"]["error_code"] == outcome
-    (row,) = await _refusal_rows(outcome)
+    row = await _the_one_new_status_row(status_before, outcome)
     assert row.payload["approval_request_id"] == str(request_id)
-    assert row.payload["outcome"] == outcome
     assert row.status_code == 409
-    assert await _result_rows() == 0
+    assert await _result_rows() == results_before
 
 
 @pytest.mark.usefixtures("client")
@@ -668,14 +686,49 @@ async def test_a_request_outside_the_connector_list_writes_one_audit_row(
 ) -> None:
     _switch(monkeypatch, status=True)
     request_id = await _park()
+    status_before = await _status_row_ids()
+    results_before = await _result_rows()
 
     with connector_limit(frozenset({_IN_LIST})):
         answer = await read_own_request_over_mcp(_REQUESTER, _arguments(request_id))
 
     assert answer["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
-    (row,) = await _refusal_rows(CONNECTOR_NOT_ALLOWED)
+    row = await _the_one_new_status_row(status_before, CONNECTOR_NOT_ALLOWED)
     assert row.payload["approval_request_id"] == str(request_id)
-    assert await _result_rows() == 0
+    assert await _result_rows() == results_before
+
+
+@pytest.mark.usefixtures("client")
+async def test_a_refusal_row_names_the_session_of_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request was made in one session and is read from another."""
+    _switch(monkeypatch, status=True)
+    first_session = uuid.uuid4()
+    read_session = uuid.uuid4()
+    token = agent_session_id_var.set(first_session)
+    try:
+        request_id = await _park()
+    finally:
+        agent_session_id_var.reset(token)
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, request_id)
+    assert request is not None
+    assert request.agent_session_id == first_session
+    status_before = await _status_row_ids()
+
+    token = agent_session_id_var.set(read_session)
+    try:
+        answer = await read_own_request_over_mcp(
+            _REQUESTER, _arguments(request_id, op_id="demo.vm.list")
+        )
+    finally:
+        agent_session_id_var.reset(token)
+
+    assert answer["extras"]["error_code"] == "request_wrong_operation"
+    row = await _the_one_new_status_row(status_before, "request_wrong_operation")
+    assert row.agent_session_id == read_session
+    assert row.parent_audit_id == request.request_audit_id
 
 
 class _OtherConnector:
@@ -717,16 +770,38 @@ async def test_a_target_that_picks_a_connector_outside_the_list_is_refused(
 async def test_a_request_of_a_step_is_read_with_the_op_id_of_the_step(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A step of a multi-step operation stores its own op_id, not the operation's."""
+    """A step of a multi-step operation that waits stores its own op_id, not the operation's."""
     _switch(monkeypatch, status=True)
-    request_id = await _park(op_id="demo.vm.delete_step")
+    parent_op, step_op = "demo.vm.bulk_delete", "demo.vm.delete_step"
+    token = composite_dispatch_var.set((parent_op, {"vms": ["vm-1"]}))
+    try:
+        waiting = await enforce_subop_policy(
+            operator=_REQUESTER,
+            connector_id=_CONNECTOR,
+            op_id=step_op,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params={"vm": "vm-1"},
+        )
+    finally:
+        composite_dispatch_var.reset(token)
+    assert waiting is not None
+    assert waiting.status == "awaiting_approval"
+    request_id = uuid.UUID(waiting.extras["approval_request_id"])
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, request_id)
+    assert request is not None
+    assert request.resume_parent is not None
+    assert request.resume_parent["op_id"] == parent_op
 
-    refused = _answer(_call(client, request_id, op_id="demo.vm.bulk_delete"))
-    read = _answer(_call(client, request_id, op_id="demo.vm.delete_step"))
+    refused = _answer(_call(client, request_id, op_id=parent_op))
+    read = _answer(_call(client, request_id, op_id=step_op))
 
     assert refused["extras"]["error_code"] == "request_wrong_operation"
-    assert "demo.vm.delete_step" in refused["error"]
+    assert step_op in refused["error"]
     assert read["status"] == "awaiting_approval"
+    assert read["extras"]["approval_request_id"] == str(request_id)
 
 
 @pytest.mark.parametrize(
@@ -736,8 +811,9 @@ async def test_a_request_of_a_step_is_read_with_the_op_id_of_the_step(
         {"status": "ok"},
         {"op_id": _OP},
         ["not", "an", "envelope"],
+        {"status": "ok", "op_id": _OP, "duration_ms": 1.0, "extras": ["not", "a", "map"]},
     ],
-    ids=["no-status-no-op", "no-op", "no-status", "not-an-object"],
+    ids=["no-status-no-op", "no-op", "no-status", "not-an-object", "extras-a-list"],
 )
 async def test_a_stored_result_in_the_wrong_shape_gives_a_structured_answer(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, stored: Any
@@ -750,6 +826,7 @@ async def test_a_stored_result_in_the_wrong_shape_gives_a_structured_answer(
         resumed_at=datetime.now(UTC),
         resume_result=stored,
     )
+    status_before = await _status_row_ids()
 
     response = _call(client, request_id)
 
@@ -758,7 +835,7 @@ async def test_a_stored_result_in_the_wrong_shape_gives_a_structured_answer(
     assert answer["status"] == "denied"
     assert answer["extras"]["error_code"] == "approval_result_unreadable"
     assert "console" in answer["error"]
-    (row,) = await _refusal_rows("approval_result_unreadable")
+    row = await _the_one_new_status_row(status_before, "approval_result_unreadable")
     assert row.payload["approval_request_id"] == str(request_id)
 
 

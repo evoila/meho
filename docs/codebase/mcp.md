@@ -2244,13 +2244,18 @@ The read checks no agent grant.
   the call over when it has `approval_request_id`. The call runs nothing,
   makes no new request and writes no call record.
 - With `MCP_REVEAL_FETCH` also on, an approved secret reveal of the caller
-  still goes to the value fetch above. Every other request goes here.
+  still goes to the value fetch above. Every other request goes here. To
+  pick the path, the handler first looks up the request
+  (`is_approved_reveal`). This lookup runs before the checks below, also
+  when the call has extra inputs. It writes no audit row and its result is
+  not sent. With `MCP_REVEAL_FETCH` off, there is no such lookup.
 - Only `connector_id`, `op_id` and `approval_request_id` may be sent
   (`-32602`, `own_request_status_extra_inputs`). `connector_id` and `op_id`
   must be the ones of the request (`request_wrong_operation`). For a request
   made by a step of a multi-step operation, they are the step's, not the
   operation's.
-- The checks run in this order:
+- The checks of `_call_operation_status.py` run in this order, after that
+  lookup:
   1. the switch;
   2. extra inputs (`-32602`);
   3. a bad id (`-32602`);
@@ -2269,12 +2274,14 @@ The read checks no agent grant.
   `approval.result` row. The row of `approval_request_not_found` is a row of
   the caller in its own tenant. It is linked to no request, so a request of
   another person or tenant gets nothing in its own history. The row of the
-  other two refusals is linked to the request.
+  other two refusals is linked to the request: its parent is the request's
+  `approval.request` row. Its session is the session of the read, not the
+  session that made the request.
 - Each read that passes the checks writes one `approval.result` audit row, as
   `GET /api/v1/approvals/{id}/result` does
   (`approval_queue.read_approval_result`).
 - A stored result that is not an operation result (for example one without
-  `status` or `op_id`) gives `status: "denied"` with
+  `status` or `op_id`, or with an `extras` that is not an object) gives `status: "denied"` with
   `extras.error_code: "approval_result_unreadable"` and a sentence that
   says to ask a person to look at the request in the console. It writes one
   more `approval.status` row with that outcome. An unknown `status` text in

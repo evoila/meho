@@ -12,8 +12,15 @@ follow that request. This module adds one:
 * Only with the switch ``MCP_OWN_REQUEST_STATUS`` on (off by default). With
   it off, :func:`status_for_settings` leaves the input and its text out of
   ``call_operation``, so the input check refuses it.
+* With ``MCP_REVEAL_FETCH`` also on, the handler first looks up the request
+  to see if it is the caller's own approved secret reveal
+  (:func:`is_approved_reveal`). That lookup only picks the path: it writes
+  no audit row and its result is not sent. A reveal goes to the fetch. Every
+  other request comes here, and the checks below begin.
 * Only ``connector_id``, ``op_id`` and ``approval_request_id`` may be sent.
-  Any other input is refused as bad input (``-32602``) before anything is read.
+  Any other input is refused as bad input (``-32602``). This is the first
+  check of this module, so the request is not read for the answer and no
+  audit row is written.
 * The call runs nothing and makes no new request. It only reads.
 * The checks run in this order. Each refusal writes one audit row (path
   ``approval.status``, with an ``outcome``) and no ``approval.result`` row:
@@ -221,7 +228,11 @@ async def is_approved_reveal(operator: Operator, arguments: dict[str, Any]) -> b
 async def _audit_refusal(
     operator: Operator, request: ApprovalRequest, outcome: str, status_code: int
 ) -> None:
-    """Write the audit row of a refused read of *request*, linked to it."""
+    """Write the audit row of a refused read of *request*, linked to it.
+
+    The row names the session of this read, not the session that made the
+    request. Its parent is still the request's ``approval.request`` row.
+    """
     async with get_sessionmaker()() as session:
         await _write_audit_row(
             session,
@@ -233,6 +244,7 @@ async def _audit_refusal(
             status_code=status_code,
             duration_ms=0.0,
             extra_payload={"outcome": outcome},
+            caller_session=True,
         )
         await session.commit()
 
@@ -286,16 +298,14 @@ def _stored_result_answer(envelope: dict[str, Any], extras: dict[str, Any]) -> d
 
     The added fields make the stored result larger, so the limit is checked
     on the answer that is sent. The limiter also counts ``data_notice``.
+    The stored result is checked as it is stored, before the fields are
+    added, so a wrong field in it is never hidden by the added ones.
     """
-    stored_extras = envelope.get("extras")
-    merged = {
-        **envelope,
-        "extras": {**(stored_extras if isinstance(stored_extras, dict) else {}), **extras},
-    }
     try:
-        stored = OperationResult.model_validate(merged)
+        stored = OperationResult.model_validate(envelope)
     except ValidationError as exc:
         raise _UnreadableResultError from exc
+    stored = OperationResult.model_validate({**envelope, "extras": {**stored.extras, **extras}})
     bounded = bound_complete_response(
         stored, get_settings().result_complete_response_wire_max_bytes
     )

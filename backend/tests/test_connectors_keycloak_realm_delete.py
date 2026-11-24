@@ -81,6 +81,7 @@ _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_REALM = "master"
 _REALM = "throwaway-run-7"
 _REALM_PATH = f"/admin/realms/{_REALM}"
+_REALM_ID = "4f6c2a1e-0000-0000-0000-00000000d001"
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000003886")
 
@@ -208,9 +209,10 @@ def _mount_token(mock: respx.MockRouter) -> None:
     )
 
 
-def _realm_rep(enabled: bool = True) -> dict[str, Any]:
+def _realm_rep(enabled: bool = True, realm_id: str = _REALM_ID) -> dict[str, Any]:
     # smtpServer.password is a secret; the card must never echo it.
     return {
+        "id": realm_id,
         "realm": _REALM,
         "enabled": enabled,
         "smtpServer": {"host": "smtp.test", "password": "smtp-secret-value"},
@@ -529,6 +531,7 @@ async def test_realm_card_shows_enabled_and_counts_and_no_secret(kc: KeycloakCon
         "resource": "realm",
         "realm": _REALM,
         "present": True,
+        "id": _REALM_ID,
         "enabled": False,
         "users": 12,
         "clients": 2,
@@ -766,3 +769,52 @@ async def test_realm_delete_waits_for_a_second_person_then_runs(kc: KeycloakConn
     assert resumed.status == "ok", resumed
     assert resumed.result == {"realm": _REALM, "deleted": True, "already_absent": False}
     assert del_route.call_count == 1
+
+
+async def test_a_realm_made_again_under_the_same_name_is_not_deleted(
+    kc: KeycloakConnector,
+) -> None:
+    """The realm is deleted and made again while the request waits: the run is refused."""
+    requester = _operator("kc-realm-delete-requester")
+    approver = _operator("kc-realm-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
+    realm_id = {"now": _REALM_ID}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(
+            side_effect=lambda _request: httpx.Response(
+                200, json=_realm_rep(realm_id=realm_id["now"])
+            )
+        )
+        _mount_counts(mock)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+
+        preview = await preview_operation(requester, _args(_REALM))
+        call = await call_operation(
+            requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
+        )
+        assert call["status"] == "awaiting_approval", call
+        request_id = uuid.UUID(call["extras"]["approval_request_id"])
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            assert row.proposed_effect["blast_radius"]["object"]["id"] == _REALM_ID
+            await approve_request(session, request_id, operator=approver, params=None)
+            await session.commit()
+
+        realm_id["now"] = "4f6c2a1e-0000-0000-0000-00000000d002"
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+    assert resumed.status == "denied", resumed
+    assert resumed.extras is not None
+    assert resumed.extras["error_code"] == "object_changed_since_approval"
+    assert not del_route.called

@@ -43,9 +43,13 @@ The preview builder in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_preview` runs steps 1 and
 2 before the request waits for approval, so a protected realm, or a realm
 whose answered name is not the managed realm, never reaches an approver. The
-approval card shows whether the realm is enabled and how many users, clients
-and groups go with it. The handler runs both steps again when the approved
-call executes.
+approval card shows Keycloak's id of the realm, whether the realm is enabled
+and how many users, clients and groups go with it. The handler runs both
+steps again when the approved call executes. Before an approved call runs,
+MEHO builds the card again and compares the realm id
+(:mod:`~meho_backplane.operations.approval_object_check`): a realm that was
+deleted and made again under the same name has a new id, so the run is
+refused and nothing is deleted.
 
 References
 ----------
@@ -201,9 +205,12 @@ async def realm_blast_radius(
     target: KeycloakTargetLike,
     realm: str,
 ) -> dict[str, Any]:
-    """Approval card for a realm delete: enabled, and the user / client / group counts.
+    """Approval card for a realm delete: the realm id, enabled, and the counts.
 
-    Only names and counts; the realm representation (which can carry the
+    The id is Keycloak's id of the realm. The check before an approved run
+    compares it, so a realm made again under the same name is not deleted.
+
+    Only the id, names and counts; the realm representation (which can carry the
     SMTP password) is never echoed.
     """
     rep = await read_managed_realm(connector, operator, target, realm)
@@ -216,6 +223,7 @@ async def realm_blast_radius(
     children: list[dict[str, Any]] = []
     if rep is not None:
         counts = await _count(connector, operator, target, realm)
+        obj["id"] = rep.get("id") if isinstance(rep.get("id"), str) else None
         obj["enabled"] = rep.get("enabled") is True
         obj.update(counts)
         children = [{"kind": kind, "count": count} for kind, count in counts.items()]

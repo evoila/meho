@@ -2788,6 +2788,16 @@ for approval.
   `extras.approval_request_id` and `extras.approval_request_reused: true`.
   No new row, no new `approval.request` audit row, no second
   `approval.pending` event. The first row's audit record stands.
+  With the switch `APPROVAL_RETRY_OWN_AUDIT_ROW` on (off by default), the
+  retry writes one `approval.reuse` audit row of its own, in the same
+  transaction (`_reuse_for_key_retry`, the same row the same-call path
+  writes). It names the reused `approval_request_id` and the retry's own
+  agent session, and the answer's `audit_id` is that row. It also holds
+  for a retry that gets an `approved` request, and for a retry that lost
+  the insert race to another retry. A retry that expires an old request
+  and parks a new one is not changed: it writes a new `approval.request`
+  row. With the switch off, the retry writes no row and `audit_id` is the
+  first call's.
 - **Asked the same way.** A request counts for the key only when it was
   asked the same way as this call (`_Asker` in `approval_queue.py`): the
   same kind of login (`principal_kind`), the same people behind the login

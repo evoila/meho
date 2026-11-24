@@ -2187,6 +2187,12 @@ call. The answer has that request's `approval_request_id` and
 tool and no input changes. See
 [approvals.md](approvals.md#the-same-call-without-the-same-key-approval_same_call_reuse-off-by-default).
 
+A seventh switch changes the `audit_id` of an answer: `APPROVAL_RETRY_OWN_AUDIT_ROW`
+(off by default). With it on, a retry with the same `idempotency_key` that
+gets the waiting request writes its own audit row, and the answer's
+`audit_id` is that row, not the first call's. No tool and no input changes.
+See [approvals.md](approvals.md#1-send-an-idempotency_key-so-a-retry-gets-the-same-request).
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second

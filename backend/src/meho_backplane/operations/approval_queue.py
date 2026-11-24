@@ -1348,6 +1348,22 @@ async def _write_reuse_audit_row(
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
 
 
+async def _reuse_for_key_retry(
+    session: AsyncSession, operator: Operator, reused: ApprovalRequest
+) -> ApprovalRequest:
+    """Give a retry with the same key its own audit row when the switch is on.
+
+    Needs ``APPROVAL_RETRY_OWN_AUDIT_ROW``. The row is the same
+    ``approval.reuse`` row that the same-call path writes. With the switch
+    off, the retry writes no row and the answer is the first call's.
+    """
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_retry_own_audit_row:
+        await _write_reuse_audit_row(session, operator, reused)
+    return reused
+
+
 def _is_composite_step() -> bool:
     """True when this call is a step a multi-step operation sent through ``dispatch_child``."""
     from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
@@ -2169,7 +2185,7 @@ async def create_pending_request(
             ),
         )
         if live is not None:
-            return _reuse(live)
+            return await _reuse_for_key_retry(session, operator, _reuse(live))
 
     if _same_call_reuse_applies(run_id, resume_parent, requester):
         same_call = await _find_same_call_pending_request(
@@ -2323,7 +2339,7 @@ async def create_pending_request(
             session, request, idempotency_key=idempotency_key, asker=asker
         )
         if winner is not None:
-            return _reuse(winner)
+            return await _reuse_for_key_retry(session, operator, _reuse(winner))
     request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(

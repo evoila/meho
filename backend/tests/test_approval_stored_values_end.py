@@ -542,6 +542,10 @@ async def test_the_clean_up_covers_ended_rows_and_leaves_rows_that_can_run(
         row = await get_request(s, tenant_id=tenant_id, request_id=started)
         row.resumed_at = datetime.now(UTC)
         await s.commit()
+    kept = {
+        request_id: (await _load(tenant_id, request_id)).params
+        for request_id in (waiting, approved_now, started)
+    }
 
     await hide_values_of_requests_that_cannot_run()
 
@@ -549,17 +553,22 @@ async def test_the_clean_up_covers_ended_rows_and_leaves_rows_that_can_run(
         "spec": {"name": "lab-1", "rootPassword": _MARKER}
     }
     for request_id in (waiting, approved_now, started):
-        assert (await _load(tenant_id, request_id)).params == _SPEC_PARAMS
+        assert (await _load(tenant_id, request_id)).params == kept[request_id]
+    # The one-time store entry of a request that can still run stays.
+    for request_id in (waiting, approved_now):
+        assert await _handoff_rows(request_id) == 1
 
 
 @pytest.mark.asyncio
 async def test_without_a_release_identity_no_approved_row_is_cleaned() -> None:
     tenant_id = await _tenant()
     request_id = await _park(tenant_id, _SPEC_OP, _SPEC_PARAMS, release_id="release-a")
+    kept = (await _load(tenant_id, request_id)).params
 
     await hide_values_of_requests_that_cannot_run()
 
-    assert (await _load(tenant_id, request_id)).params == _SPEC_PARAMS
+    assert (await _load(tenant_id, request_id)).params == kept
+    assert await _handoff_rows(request_id) == 1
 
 
 @pytest.mark.asyncio

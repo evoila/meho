@@ -483,6 +483,11 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approval_secret_values import (
+    current_call_secret_values,
+    hide_call_secret_keys,
+    hide_call_secret_values,
+)
 from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
@@ -1186,6 +1191,10 @@ async def _protect_secret_values(
     script: a large text value in the answer takes time to read, and the
     event loop keeps serving other requests meanwhile.
 
+    The default view also hides the secret values of an approved call that
+    waited for approval
+    (:func:`~meho_backplane.operations.approval_secret_values.current_call_secret_values`).
+
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
     the caller saw the value or not. So no secret value is stored in the
@@ -1200,6 +1209,9 @@ async def _protect_secret_values(
     """
     redacted = redaction.redacted
     shown = await asyncio.to_thread(hide_secret_values, op_id, redacted, raw=redaction.raw)
+    # An approved call that waited hides its own secret values here too
+    # (a note the connector saved and sends back).
+    shown = hide_call_secret_values(shown, current_call_secret_values())
     if error_cleanup:
         redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
     if secret_view == "hidden":
@@ -1210,9 +1222,12 @@ async def _protect_secret_values(
         mark_answer_holds_secret()
     else:
         caller = redacted
-    return redaction.model_copy(
-        update={"raw": fingerprint_hidden_values(redaction.raw, shown), "redacted": caller}
+    # A secret value the connector sends back as a key (a license key that
+    # names its own entry) is hidden in the raw copy's keys too.
+    raw = hide_call_secret_keys(
+        fingerprint_hidden_values(redaction.raw, shown), current_call_secret_values()
     )
+    return redaction.model_copy(update={"raw": raw, "redacted": caller})
 
 
 def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView | None:
@@ -1376,7 +1391,12 @@ def _is_error_issue(item: Any) -> bool:
 
 
 def _cut_text_to_bytes(text: str, cap: int) -> str:
-    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes."""
+    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes.
+
+    The secret values of the approved call that runs now are hidden first,
+    so a cut never leaves a part of one.
+    """
+    text = hide_call_secret_values(text, current_call_secret_values())
     if json_text_bytes(text) - 2 <= cap:  # minus the enclosing quotes
         return text
     budget = cap - len(_TERMINAL_ERROR_TEXT_CUT_MARK)
@@ -2265,6 +2285,8 @@ async def _audit_returned_result(
         )
     if raw.status not in ("awaiting_approval", "denied"):
         return raw
+    # A connector's reason for a deny can quote a secret value of the call.
+    raw = _hide_call_secrets_in_error(raw)
     try:
         receipt = await audit_safe(
             audit_id=audit_id,
@@ -2286,6 +2308,49 @@ async def _audit_returned_result(
             approval_request_id=str(approval_request_id) if approval_request_id else None,
         )
     return raw.model_copy(update={"audit_id": receipt})
+
+
+#: The fields of an error, deny or wait result that MEHO sets itself. They
+#: keep their value, so MEHO still reads the result right: for example an
+#: ``execution_outcome`` of ``uncertain`` still stops a second run.
+_MEHO_ERROR_FIELDS = frozenset(
+    {
+        "error_code",
+        "http_status",
+        "execution_outcome",
+        "retry",
+        "reason_code",
+        "approval_request_id",
+        "retry_after_seconds",
+        MESSAGE_SOURCE_KEY,
+    }
+)
+
+
+def _hide_call_secrets_in_error(result: OperationResult) -> OperationResult:
+    """*result* with the secret values of the approved call that runs now hidden.
+
+    A connector can send a secret value of the call back in its error text
+    (an HTTP 422 that repeats the note it refused), or in the reason of a
+    deny. The caller's answer, the audit row and the stored approval result
+    all take this copy. The fields MEHO sets itself
+    (:data:`_MEHO_ERROR_FIELDS`) keep their value. Outside an approved run
+    there are no such values and *result* is returned as is.
+    """
+    values = current_call_secret_values()
+    if not values:
+        return result
+    extras = {
+        key: value if key in _MEHO_ERROR_FIELDS else hide_call_secret_values(value, values)
+        for key, value in result.extras.items()
+    }
+    return result.model_copy(
+        update={
+            "error": hide_call_secret_values(result.error, values),
+            "extras": extras,
+            "result": hide_call_secret_values(result.result, values),
+        }
+    )
 
 
 async def _audit_error_and_return(
@@ -2344,6 +2409,7 @@ async def _audit_error_and_return(
     result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
+    result = _hide_call_secrets_in_error(result)
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
@@ -3681,6 +3747,19 @@ async def destructive_binding_evidence(
     return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
 
 
+def result_handoff_key_missing(op_id: str, duration_ms: float) -> OperationResult:
+    """The answer to a call that must wait with its params in the one-time store, without a key.
+
+    The direct call and a step of a multi-step operation give the same answer.
+    """
+    return result_denied(
+        op_id,
+        "credential-write approval custody is unavailable; configure a valid "
+        "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
+        duration_ms,
+    )
+
+
 def _preflight_denied_refusal(
     *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
 ) -> OperationResult | None:
@@ -3986,12 +4065,7 @@ async def _handle_needs_approval(
             duration_ms=duration_ms,
         )
     except ApprovalHandoffKeyError:
-        return result_denied(
-            op_id,
-            "credential-write approval custody is unavailable; configure a valid "
-            "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
-            duration_ms,
-        )
+        return result_handoff_key_missing(op_id, duration_ms)
     except Exception:
         import structlog as _structlog
 

@@ -55,6 +55,7 @@ from meho_backplane.operations._audit import (
     run_id_var,
     work_ref_var,
 )
+from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.composite import composite_depth_var
 from meho_backplane.scheduler import loop as scheduler_loop
 from meho_backplane.settings import get_settings
@@ -247,7 +248,11 @@ async def test_approved_resume_is_refused_when_the_stop_comes_during_the_target_
 ) -> None:
     claim = _stop_comes_during_the_target_lookup(monkeypatch)
     request = MagicMock(
-        op_id="demo.thing.change", params={}, execution_handle=None, reveal_secret=False
+        op_id="demo.thing.change",
+        params={},
+        params_hash=compute_audit_params_hash({}),
+        execution_handle=None,
+        reveal_secret=False,
     )
 
     result = await approval_queue.resume_dispatch_after_approval(
@@ -269,7 +274,11 @@ async def test_agent_approved_resume_is_refused_when_the_stop_comes_during_the_t
     monkeypatch.setattr(approval_handoff, "consume", custody)
     monkeypatch.setattr(approval_handoff, "discard", custody)
     request = MagicMock(
-        op_id="demo.thing.change", params={}, execution_handle=None, resume_parent=None
+        op_id="demo.thing.change",
+        params={},
+        params_hash=compute_audit_params_hash({}),
+        execution_handle=None,
+        resume_parent=None,
     )
 
     async def _get_request(*_args: Any, **_kwargs: Any) -> MagicMock:

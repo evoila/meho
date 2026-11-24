@@ -108,8 +108,6 @@ from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
     classify_op,
-    holds_hidden_param_values,
-    scrub_secret_named_values,
 )
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
@@ -171,6 +169,13 @@ from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
     preview_changed_since_request,
     target_changed_since_request,
+)
+from meho_backplane.operations.approval_secret_values import (
+    CallSecretValues,
+    call_secret_values,
+    call_secret_values_bound,
+    hide_call_secret_values_on_card,
+    params_with_call_secrets_hidden,
 )
 from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import (
@@ -251,6 +256,7 @@ __all__ = [
     "claim_resume",
     "composite_resume_binding",
     "consume_remote_write_approval",
+    "consume_stored_run_input",
     "create_pending_request",
     "expire_older_release_requests",
     "expire_stale_requests",
@@ -267,6 +273,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_claimed_run_unless_row_params_match",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -2063,13 +2070,30 @@ async def create_pending_request(
     # manifest of a k8s.apply of a Secret), keep their params and the
     # parent's params only in the encrypted one-time handoff: the row never
     # holds them, also not when the request is approved and never runs.
-    if classify_op(op_id) == "credential_write" or (
+    # Without a valid handoff key such a call is refused (the dispatcher
+    # answers for ApprovalHandoffKeyError).
+    keep_no_params = classify_op(op_id) == "credential_write" or (
         params is not None and hidden_stored_param(op_id, params) is not None
-    ):
+    )
+    # A call with a secret-named value, or a field its connector marked
+    # (declare_secret_field), keeps the real params only in the handoff.
+    # The row keeps the copy with a marker for each secret value. The same
+    # holds when the params of the parent multi-step operation hold one.
+    hidden = (
+        params_with_secret_fields_hidden(params, op_id=op_id)
+        if not keep_no_params and params is not None
+        else None
+    )
+    if keep_no_params or hidden or _parent_holds_secret(resume_parent):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
-        stored_params = None
+        stored_params = None if keep_no_params else (hidden or params)
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
+    # The card was built from the real params: it shows no secret value either.
+    proposed_effect = hide_call_secret_values_on_card(
+        proposed_effect,
+        call_secret_values(params, op_id=op_id) | _parent_secret_values(resume_parent),
+    )
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -2717,16 +2741,20 @@ def params_with_secret_fields_hidden(
     (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
     a row without such a field is never rewritten. A number under such a
-    name (a PIN, a password sent as a number) is hidden too. The param that
+    name is hidden too when the last word of the name names the secret (a
+    password sent as a number), not when it names a setting of it
+    (``password_max_age_days``). The param that
     *op_id* declared with
     :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
     replaced too, when its check flags the params (the manifest of a
-    ``k8s.apply`` that holds a Secret). The other fields keep their value,
+    ``k8s.apply`` that holds a Secret), and so is each field the operation
+    marked with :func:`~meho_backplane.op_classes.declare_secret_field`. The
+    other fields keep their value,
     as in the audit row's raw copy.
     """
     if params is None:
         return None
-    hidden, found = scrub_secret_named_values(params, hide_numbers=True)
+    hidden, found = params_with_call_secrets_hidden(params, op_id=op_id)
     name = hidden_stored_param(op_id, params)
     if name is not None:
         hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
@@ -2734,6 +2762,38 @@ def params_with_secret_fields_hidden(
     if not found:
         return None
     return cast(dict[str, Any], hidden)
+
+
+def _parent_holds_secret(resume_parent: dict[str, Any] | None) -> bool:
+    """True when the params of the parent of a step hold a secret value.
+
+    The same rule as for the step's own params
+    (:func:`params_with_secret_fields_hidden`), with the parent's op id, so
+    the fields the parent's connector marked count too.
+    """
+    if resume_parent is None or not isinstance(resume_parent.get("params"), dict):
+        return False
+    parent_op_id = str(resume_parent.get("op_id"))
+    return params_with_secret_fields_hidden(resume_parent["params"], op_id=parent_op_id) is not None
+
+
+def _parent_secret_values(resume_parent: dict[str, Any] | None) -> CallSecretValues:
+    """The secret values in the params of the parent multi-step operation of a step."""
+    if resume_parent is None or not isinstance(resume_parent.get("params"), dict):
+        return CallSecretValues()
+    return call_secret_values(resume_parent["params"], op_id=str(resume_parent.get("op_id")))
+
+
+def call_secret_values_of_run(
+    request: ApprovalRequest, params: Any, resume_parent: dict[str, Any] | None
+) -> CallSecretValues:
+    """The secret values of an approved run: of its *params*, and of its parent's params.
+
+    The run binds them (:func:`call_secret_values_bound`), so the dispatcher
+    hides each one where the connector sends it back.
+    """
+    own = call_secret_values(params if isinstance(params, dict) else None, op_id=request.op_id)
+    return own | _parent_secret_values(resume_parent)
 
 
 def resume_parent_without_inputs(
@@ -3084,22 +3144,12 @@ async def resume_dispatch_after_approval(
     # losing concurrent resume returns above without consuming its payload.
     resume_parent_override: dict[str, Any] | None = None
     if request.execution_handle is not None:
-        from meho_backplane.db.engine import get_sessionmaker
-
-        async with get_sessionmaker()() as handoff_session:
-            handoff = await consume_handoff(
-                handoff_session, request.execution_handle, request.id, request.tenant_id
-            )
-            await handoff_session.commit()
-        effective_params = cast(dict[str, Any], handoff["params"])
-        if not params_hash_matches(effective_params, request.params_hash):
-            raise ApprovalHandoffError(
-                "approval execution payload does not match the approved request"
-            )
-        if handoff.get("resume_parent") is not None:
-            # Never assign decrypted composite inputs to the ORM row: an
-            # attached request could autoflush them back into approval_request.
-            resume_parent_override = cast(dict[str, Any], handoff["resume_parent"])
+        stored_input = await consume_stored_run_input(operator, request)
+        if isinstance(stored_input, OperationResult):
+            return stored_input
+        # Never assign decrypted composite inputs to the ORM row: an
+        # attached request could autoflush them back into approval_request.
+        effective_params, resume_parent_override = stored_input
 
     preview_refusal = await refuse_resume_if_preview_changed(
         operator, request, resolved_target, cast(dict[str, Any], effective_params)
@@ -3143,8 +3193,9 @@ def _stored_call(
 def _stored_params_can_run(request: ApprovalRequest) -> bool:
     """True when the params stored on *request* are still the ones the requester sent.
 
-    Stored params without a marker (``[REDACTED:param_name]``) can run.
-    With a marker, there are two cases (#6064):
+    Stored params can run only when they match the request's
+    ``params_hash``, with a marker or without one. With a marker, there are
+    two cases (#6064):
 
     * MEHO wrote it (:func:`claim_resume` or :func:`end_run_input`): the
       real secret value is gone, so the params no longer match the
@@ -3154,10 +3205,8 @@ def _stored_params_can_run(request: ApprovalRequest) -> bool:
       still match ``params_hash``. They run as sent.
     """
     stored = cast(dict[str, Any] | None, request.params)
-    if stored is None:
+    if stored is None or not isinstance(request.params_hash, str):
         return False
-    if not holds_hidden_param_values(stored):
-        return True
     return params_hash_matches(stored, request.params_hash)
 
 
@@ -3275,6 +3324,17 @@ async def _refuse_resume(
     """
     if not await claim_resume(request.id):
         return result_already_resumed(request.op_id, request.id, 0.0)
+    return await _record_claimed_refusal(operator, request, refusal, audit_payload=audit_payload)
+
+
+async def _record_claimed_refusal(
+    operator: Operator,
+    request: ApprovalRequest,
+    refusal: OperationResult,
+    *,
+    audit_payload: dict[str, Any],
+) -> OperationResult:
+    """The steps of :func:`_refuse_resume` after the claim, for a caller that holds it."""
     await _discard_refused_handoff(request)
     error_code = str((refusal.extras or {}).get("error_code"))
     audit_id = await _audit_resume_refusal(
@@ -3341,6 +3401,67 @@ async def refuse_resume_if_preview_changed(
         )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
+
+
+async def consume_stored_run_input(
+    operator: Operator, request: ApprovalRequest
+) -> tuple[dict[str, Any], dict[str, Any] | None] | OperationResult:
+    """Read and empty the one-time store of a claimed *request*; its params and parent.
+
+    The caller holds the one-resumer claim, and *request* has a store
+    entry. The stored params must match the approved ``params_hash``. When
+    the entry cannot be read (it is gone, or the key changed while the
+    request waited) or does not match, the operation does not run: the
+    refusal :func:`~meho_backplane.operations._errors.result_resume_params_unavailable`
+    is recorded like every refusal after the claim (the entry is deleted,
+    one audit row, the stored run result) and returned.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    handle = cast(uuid.UUID, request.execution_handle)
+    handoff: dict[str, Any] = {}
+    try:
+        async with get_sessionmaker()() as handoff_session:
+            handoff = await consume_handoff(handoff_session, handle, request.id, request.tenant_id)
+            await handoff_session.commit()
+    except ApprovalHandoffError:
+        _log().warning(
+            "approval_resume_stored_input_unreadable",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+        )
+    params = handoff.get("params")
+    if not isinstance(params, dict) or not params_hash_matches(params, request.params_hash):
+        refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+        return await _record_claimed_refusal(operator, request, refusal, audit_payload={})
+    resume_parent = handoff.get("resume_parent")
+    return params, resume_parent if isinstance(resume_parent, dict) else None
+
+
+async def refuse_claimed_run_unless_row_params_match(
+    operator: Operator, request: ApprovalRequest
+) -> OperationResult | None:
+    """Refuse a claimed *request* whose stored params do not match ``params_hash``.
+
+    For a request without a store entry, whose params the run reads from
+    the row (the step of a multi-step operation). *request* is the row as
+    it was read before the claim. ``None`` when the params match. Else the
+    refusal :func:`~meho_backplane.operations._errors.result_resume_params_unavailable`
+    is recorded like every refusal after the claim and returned, and
+    nothing runs.
+    """
+    if _stored_params_can_run(request):
+        return None
+    _log().warning(
+        "approval_resume_stored_params_changed",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        operator_sub=operator.sub,
+    )
+    refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+    return await _record_claimed_refusal(operator, request, refusal, audit_payload={})
 
 
 async def _discard_refused_handoff(request: ApprovalRequest) -> None:
@@ -3742,9 +3863,13 @@ async def _dispatch_resume_with_bound_context(
     # the only one GET /approvals/{id}/result serves, so the parker owns any
     # result handle this run spills.
     owner_token = handle_owner_sub_var.set(request.principal_sub)
+    # A value the connector sends back (a note it saved) is hidden in the
+    # answer and in the audit row of the run, like in the stored request.
+    secret_values = call_secret_values_of_run(request, effective_params, resume_parent)
     try:
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
+            call_secret_values_bound(secret_values),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
             composite_resume_binding(

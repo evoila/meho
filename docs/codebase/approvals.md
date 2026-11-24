@@ -423,7 +423,66 @@ Two kinds of rows carry a keyed hash of a call's params:
     plain copy, also not when the request is approved and never runs.
     Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
     call instead of letting it wait.
-  - For most operations they are stored in `approval_request.params`,
+  - A call that holds a secret value does the same, with one difference:
+    the row keeps a copy of the params in which each secret value is the
+    marker `[REDACTED:param_name]`, so the approval pages keep working. A
+    secret value is a value under a secret name, at any depth (the name
+    rule of the broadcast scrub), or a value in a field that a connector
+    marked with `declare_secret_field(op_id, *path)` (`op_classes.py`,
+    exported by the connector kit). A number under a secret name counts
+    only when the last word of the name names the secret (`password`,
+    `api_key`), not a setting of it (`password_max_age_days`,
+    `secret_id_ttl`; `name_ends_in_secret_word`). A marked field is for
+    free text that may hold a secret, such as a config text, a note or a
+    command line. A step of a multi-step operation whose parent's params
+    hold a secret value (checked with the parent's op id) keeps the parent
+    only in the handoff too. The value of a name/value pair
+    (`{"name": "password", "value": ...}`) takes the pair's own name for
+    the number rule. The approved run reads the real params from
+    the handoff, once, and checks them against `params_hash`
+    (`consume_stored_run_input`); so does the AI agent that waited
+    (`_take_stored_run_input` in `agent/approval_wait.py`). For a direct
+    call the agent runs the checked params and not its copy in memory. For
+    a step it uses the step's own params (from the handoff, or from the
+    row) for the preview check and for hiding secret values, and the
+    parent's params to run the parent. Step params read from the row must
+    match `params_hash` too
+    (`refuse_claimed_run_unless_row_params_match`); else nothing runs. When the handoff cannot be read
+    after the claim (it is gone, or the key changed while the request
+    waited) or does not match, nothing runs: the request ends as a failed
+    run with `approval_resume_params_unavailable`, with an audit row and
+    the stored result. A call with no secret value is stored and runs as
+    before. Without a valid key a step of a multi-step operation gets the
+    same refusal as a direct call (`result_handoff_key_missing`).
+  - The secret values of such a call also stay out of what was built from
+    the params (`operations/approval_secret_values.py`): the stored card
+    (`proposed_effect`) shows the marker in place of each one, and while
+    the approved call runs, the dispatcher hides each one in the answer, in
+    the stored result and in the audit row of the run (a connector that
+    sends back the note it saved). An error, a deny or a wait the
+    connector returns gets the same hiding (`_hide_call_secrets_in_error`),
+    except the fields MEHO sets itself (`error_code`, `http_status`,
+    `execution_outcome`, `retry`, `reason_code`, ...): a write that timed
+    out stays `uncertain`, so a second run is still refused. An error text
+    is hidden before MEHO shortens it (`_sanitize_free_text`), so a cut
+    leaves no part of a value. These are the values under a name whose
+    last word names the secret (`password`, not `password_secret_ref`,
+    which names where the secret is), each item of a list under such a
+    name, the text of each secret name/value pair (also `community`), a
+    text under an SNMP `community`, and the values of marked fields. A
+    secret text is replaced also inside a longer text
+    (`Saved note: <marker>`) and in the keys of an object; two keys that
+    become the same text keep apart (`<marker> (2)`). The audit row's raw
+    copy gets the same keys. A secret number is replaced only where it
+    stands as a number of its own. The matcher is built for each masking
+    and dropped after it, so no copy of a secret stays in a shared cache.
+    On the card, the fields MEHO sets itself (`MEHO_CARD_FIELDS`:
+    `safety_level`, `op_class`, the classification, the `client` block,
+    ...) and the requester record in `permission_preflight` keep their
+    value, so the approval rules read the card as it was built and an
+    approvals surface can still check the agent's grants.
+  - For other operations, and for rows stored by an older release, they are
+    stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
     expires (`end_run_input`, also an approved request that nobody
@@ -434,8 +493,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     rewritten. Migration `0132` did the same, once, for every row that was
     already decided. A re-run of a failed run
     (`POST /api/v1/approvals/{id}/rerun`) then needs the params sent
-    again, as for a credential write; the stored copy with markers never
-    runs (`_stored_call` treats it as not stored).
+    again, as for a credential write. Stored params run only when they
+    match `params_hash` (`_stored_params_can_run`), with a marker or
+    without one, so a stored copy with markers never runs.
     A marker the requester sent as a value is different (#6064). Example:
     an object read from MEHO and passed back unchanged, like the
     `expected_before` of a FortiGate interface update. Such params still

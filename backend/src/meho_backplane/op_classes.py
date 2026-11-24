@@ -47,6 +47,7 @@ __all__ = [
     "declare_root_shell",
     "declare_safe_writes",
     "declare_sandbox_delete_grant",
+    "declare_secret_field",
     "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
@@ -58,6 +59,7 @@ __all__ = [
     "params_make_credential_call",
     "returns_no_secret_value",
     "sandbox_delete_grant_allowed",
+    "secret_field_paths",
     "waits_when_set",
 ]
 
@@ -81,6 +83,7 @@ _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
+_SECRET_FIELDS: dict[str, set[tuple[str, ...]]] = {}
 
 
 def declare_op_classes(
@@ -364,6 +367,40 @@ def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
     return name if flagged else None
 
 
+def declare_secret_field(op_id: str, *path: str) -> None:
+    """Mark the field at *path* of the params of *op_id* as one that may hold a secret.
+
+    *path* is one name for a top-level param, or several names for a field
+    inside an object (``"config", "text"``). A call to *op_id* that sets such a
+    field waits for a person like any call, and MEHO keeps the field only in
+    the encrypted one-time store of the request: the stored request shows a
+    marker. Use it for a free text field that a caller may type a secret
+    into, such as a note, a config text or a command line. An op id can mark
+    many fields. Marking a field twice changes nothing.
+    """
+    if not path or not all(isinstance(part, str) and part for part in path):
+        raise ValueError("a secret field needs a path of one or more names")
+    _SECRET_FIELDS.setdefault(op_id, set()).add(tuple(path))
+
+
+def secret_field_paths(op_id: str, params: Mapping[str, Any]) -> list[tuple[str, ...]]:
+    """The paths of :func:`declare_secret_field` that *params* sets, longest first.
+
+    A field counts when it is present and its value is not ``None``.
+    """
+    found: list[tuple[str, ...]] = []
+    for path in _SECRET_FIELDS.get(op_id, ()):
+        node: Any = params
+        for part in path:
+            if not isinstance(node, Mapping) or part not in node:
+                break
+            node = node[part]
+        else:
+            if node is not None:
+                found.append(path)
+    return sorted(found, key=lambda path: (-len(path), path))
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -382,3 +419,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()
+    _SECRET_FIELDS.clear()

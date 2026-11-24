@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.5",
+  "kit_version": "1.6",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -190,6 +190,14 @@
     "declare_root_shell": {
       "inputs": [
         "op_ids: Iterable[str]"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "declare_secret_field": {
+      "inputs": [
+        "op_id: str",
+        "*path: str"
       ],
       "kind": "function",
       "returns": "None"

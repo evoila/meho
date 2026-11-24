@@ -27,6 +27,7 @@ import pytest
 import structlog
 from sqlalchemy import update
 
+from meho_backplane import op_classes
 from meho_backplane.auth import permissions
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -142,13 +143,22 @@ async def _register_single(stub: AsyncMock) -> None:
     )
 
 
-async def _park(operator: Operator, actor: str | None = None, op_id: str = _OP) -> uuid.UUID:
+async def _park(
+    operator: Operator,
+    actor: str | None = None,
+    op_id: str = _OP,
+    params: dict[str, Any] | None = None,
+) -> uuid.UUID:
     """The call waits for approval; a person approves it. Returns the request id."""
     target = await _seed_vault_target()
     await give_known_person(operator)
     with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: actor}):
         parked = await dispatch(
-            operator=operator, connector_id="vault-1.x", op_id=op_id, target=target, params={}
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id=op_id,
+            target=target,
+            params=params or {},
         )
     assert parked.status == "awaiting_approval", parked
     request_id = uuid.UUID(parked.extras["approval_request_id"])
@@ -230,6 +240,29 @@ async def test_agent_login_call_run_by_a_reviewer_runs_when_the_grants_did_not_c
 
     result = await _resume(request_id, _reviewer())
 
+    assert result.status == "ok", result.error
+    assert len(_MULTI_RUNS) == 1
+
+
+async def test_a_marked_note_that_names_the_agent_keeps_the_requester_record(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """The card hides the note, not the record MEHO checks the agent's grants with."""
+    _switch(monkeypatch, "on")
+    await _register(stub_embedding_service)
+    await _grant(_OP, "needs-approval")
+    await _grant(_WRITE_STEP, "auto-execute")
+    op_classes.declare_secret_field(_OP, "note")
+    try:
+        request_id = await _park(_operator(), params={"note": "agent"})
+        effect = (await _request(request_id)).proposed_effect or {}
+        result = await _resume(request_id, _reviewer())
+    finally:
+        op_classes._SECRET_FIELDS.pop(_OP, None)
+
+    requester = effect["permission_preflight"]["requester"]
+    assert requester["principal_kind"] == "agent"
+    assert requester["client_id"] == _AGENT
     assert result.status == "ok", result.error
     assert len(_MULTI_RUNS) == 1
 

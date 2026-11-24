@@ -56,7 +56,6 @@ from meho_backplane.operations._validate import (
     params_hash_candidates,
     params_hash_matches,
 )
-from meho_backplane.operations.approval_handoff import ApprovalHandoffError
 from meho_backplane.operations.approval_queue import (
     ParamsMismatchError,
     approve_request,
@@ -468,7 +467,10 @@ async def test_retry_of_a_request_stored_with_the_plain_hash_reuses_it() -> None
 async def test_resume_runs_the_stored_input_under_either_hash(
     stored: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The resumed call runs with the stored input; a hash that fits no input is refused."""
+    """The resumed call runs with the stored input; a hash that fits no input is refused.
+
+    The refusal is stored as the run result, and nothing is sent.
+    """
     stored_hash = compute_params_hash(_PARAMS) if stored == "keyed" else _plain_sha256(_PARAMS)
     calls: list[dict[str, Any]] = []
 
@@ -489,8 +491,9 @@ async def test_resume_runs_the_stored_input_under_either_hash(
         if params_hash == stored_hash:
             await resume_dispatch_after_approval(operator=reviewer, request=row)
         else:
-            with pytest.raises(ApprovalHandoffError):
-                await resume_dispatch_after_approval(operator=reviewer, request=row)
+            refused = await resume_dispatch_after_approval(operator=reviewer, request=row)
+            assert refused.status == "denied"
+            assert refused.extras["error_code"] == "approval_resume_params_unavailable"
     assert [call["params"] for call in calls] == [_PARAMS]
 
 

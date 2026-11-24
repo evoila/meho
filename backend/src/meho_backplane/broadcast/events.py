@@ -1273,6 +1273,7 @@ def _scrub_secret_named_keys(
     hide_numbers: bool = False,
     plain_names: frozenset[str] = frozenset(),
     in_snmp: bool = False,
+    numbers_need_secret_word: bool = False,
 ) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
@@ -1299,7 +1300,12 @@ def _scrub_secret_named_keys(
     that the field holds no secret (a date, a count, a policy, a file's
     mode; :func:`meho_backplane.operations.register_plain_fields`).
     *in_snmp* says *node* sits under a key with an SNMP word, so a bare
-    ``community`` in it is hidden (:func:`is_snmp_community_key`).
+    ``community`` in it is hidden (:func:`is_snmp_community_key`). With
+    *numbers_need_secret_word*, *hide_numbers* hides a number only under a
+    name whose last word names the secret itself (``password``,
+    ``admin_pin_password``, ``api_key``), not a setting of it
+    (``password_max_age_days``, ``secret_id_ttl``)
+    (:func:`name_ends_in_secret_word`).
     """
     if isinstance(node, Mapping):
         found = False
@@ -1315,7 +1321,12 @@ def _scrub_secret_named_keys(
                 or is_snmp_community_key(node, name, in_snmp=in_snmp)
                 or (hide_pair_value and name == "value")
             )
-            if secret_named and _is_secret_value(value, hide_numbers):
+            # The value of a name/value pair takes the pair's own name.
+            word_name = str(node["name"]) if hide_pair_value and name == "value" else name
+            hide_number = hide_numbers and (
+                not numbers_need_secret_word or name_ends_in_secret_word(word_name)
+            )
+            if secret_named and _is_secret_value(value, hide_number):
                 scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue
@@ -1324,6 +1335,7 @@ def _scrub_secret_named_keys(
                 hide_numbers=hide_numbers,
                 plain_names=plain_names,
                 in_snmp=in_snmp or has_snmp_word(name),
+                numbers_need_secret_word=numbers_need_secret_word,
             )
             scrubbed[name] = child
             found = found or child_found
@@ -1333,12 +1345,44 @@ def _scrub_secret_named_keys(
         found = False
         for item in node:
             child, child_found = _scrub_secret_named_keys(
-                item, hide_numbers=hide_numbers, plain_names=plain_names, in_snmp=in_snmp
+                item,
+                hide_numbers=hide_numbers,
+                plain_names=plain_names,
+                in_snmp=in_snmp,
+                numbers_need_secret_word=numbers_need_secret_word,
             )
             items.append(child)
             found = found or child_found
         return items, found
     return node, False
+
+
+def name_ends_in_secret_word(name: str) -> bool:
+    """True when the last word of *name* names a secret itself.
+
+    ``password``, ``admin_password``, ``client_secret`` and ``api_key`` end
+    in such a word. ``password_max_age_days``, ``secret_id_ttl`` and
+    ``password_length`` name a setting of a secret: their last word is a
+    plain word. Uses the word rules of :func:`_is_secret_param_name`.
+    """
+    flat = name.replace("-", "_").replace(".", "_")
+    split = _CAMEL_BOUNDARY.sub("_", flat).lower()
+    if split in _PLAIN_KEY_NAMES:
+        return False
+    return any(_last_words_are_secret(form) for form in (split, flat.lower()))
+
+
+def _last_words_are_secret(normalised: str) -> bool:
+    """Apply the word rules to the last word, and to the last two words as a pair."""
+    tokens = [token for token in normalised.split("_") if token]
+    if not tokens:
+        return False
+    if _tokens_are_secret(tokens[-1]):
+        return True
+    pairs = (
+        _SECRET_NAME_TOKEN_PAIRS | _SECRET_NAME_FINAL_TOKEN_PAIRS | _SECRET_KEY_FINAL_TOKEN_PAIRS
+    )
+    return tuple(tokens[-2:]) in pairs
 
 
 def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
@@ -1349,7 +1393,11 @@ def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
 
 
 def scrub_secret_named_values(
-    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+    node: Any,
+    *,
+    hide_numbers: bool = False,
+    plain_names: frozenset[str] = frozenset(),
+    numbers_need_secret_word: bool = False,
 ) -> tuple[Any, bool]:
     """Key-name-aware secret scrub for a caller-bound dispatch response.
 
@@ -1375,8 +1423,15 @@ def scrub_secret_named_values(
     key; the dispatch answer and the stored audit copy use it, the params
     hash and the broadcast params scrub do not. *plain_names* are the
     fields the operation declared as plain; they keep their value.
+    With *numbers_need_secret_word* a number is hidden only under a name
+    whose last word names the secret (:func:`name_ends_in_secret_word`).
     """
-    return _scrub_secret_named_keys(node, hide_numbers=hide_numbers, plain_names=plain_names)
+    return _scrub_secret_named_keys(
+        node,
+        hide_numbers=hide_numbers,
+        plain_names=plain_names,
+        numbers_need_secret_word=numbers_need_secret_word,
+    )
 
 
 def holds_hidden_param_values(node: Any) -> bool:

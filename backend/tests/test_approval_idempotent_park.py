@@ -53,7 +53,7 @@ from meho_backplane.main import app
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var, policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import compute_audit_params_hash, compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     IdempotencyKeyConflictError,
@@ -1232,6 +1232,7 @@ async def test_a_call_that_gets_the_waiting_request_writes_its_own_audit_row(
     assert first["audit_id"] == str(request_row.id)
     assert second["audit_id"] == str(reuse_row.id)
     assert reuse_row.payload["approval_request_id"] == request_id
+    assert reuse_row.payload["params_hash"] == compute_audit_params_hash(_PARAMS)
     assert request_row.agent_session_id == first_session
     assert reuse_row.agent_session_id == second_session
     assert reuse_row.parent_audit_id == request_row.id
@@ -1450,6 +1451,7 @@ async def test_a_retry_with_the_same_key_writes_its_own_audit_row(
     assert first["audit_id"] == str(request_row.id)
     assert second["audit_id"] == str(reuse_row.id)
     assert reuse_row.payload["approval_request_id"] == request_id
+    assert reuse_row.payload["params_hash"] == compute_audit_params_hash(_PARAMS)
     assert request_row.agent_session_id == first_session
     assert reuse_row.agent_session_id == second_session
     assert await _approval_row_count() == 1
@@ -1482,4 +1484,21 @@ async def test_a_retry_of_an_approved_request_writes_its_own_audit_row() -> None
     assert retry.id == a.id
     reuse_rows = [r for r in await _approval_audit_rows() if r.path == "approval.reuse"]
     assert len(reuse_rows) == 1
+    assert reuse_rows[0].payload["params_hash"] == compute_audit_params_hash({"name": "web-01"})
     assert getattr(retry, "_reuse_audit_id", None) == reuse_rows[0].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_the_retry_row_hashes_the_params_with_secret_values_masked() -> None:
+    params = {"name": "web-01", "password": "first-test-value"}
+    first = await _park_same_call(key="key-secret", params=params)
+    retry = await _park_same_call(key="key-secret", params=params)
+
+    assert retry.id == first.id
+    reuse_rows = [r for r in await _approval_audit_rows() if r.path == "approval.reuse"]
+    assert len(reuse_rows) == 1
+    stored = reuse_rows[0].payload["params_hash"]
+    assert stored == compute_audit_params_hash({"name": "web-01", "password": "other-test-value"})
+    assert stored != compute_params_hash(params)
+    assert "first-test-value" not in str(reuse_rows[0].payload)

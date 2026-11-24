@@ -2791,8 +2791,9 @@ for approval.
   With the switch `APPROVAL_RETRY_OWN_AUDIT_ROW` on (off by default), the
   retry writes one `approval.reuse` audit row of its own, in the same
   transaction (`_reuse_for_key_retry`, the same row the same-call path
-  writes). It names the reused `approval_request_id` and the retry's own
-  agent session, and the answer's `audit_id` is that row. It also holds
+  writes). It names the reused `approval_request_id`, the `params_hash`
+  of the retry's params and the retry's own agent session, and the
+  answer's `audit_id` is that row. It also holds
   for a retry that gets an `approved` request, and for a retry that lost
   the insert race to another retry. A retry that expires an old request
   and parks a new one is not changed: it writes a new `approval.request`
@@ -2888,6 +2889,8 @@ second `approval.request` row:
 - `path` is `approval.reuse`, `status_code` is 202 (waits for approval),
   and `event_class` is `policy_decision`.
 - `payload.approval_request_id` names the reused request.
+- `payload.params_hash` is the hash of this call's params
+  (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the
   first call. `parent_audit_id` is the first call's `approval.request` row.
 - The answer's `audit_id` is the id of this new row.

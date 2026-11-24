@@ -734,9 +734,9 @@ config:
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
   # -- `kbSearchWordHint` is rendered into `KB_SEARCH_WORD_HINT`. When
-  # `"true"`, the word half of `search_knowledge` also finds passages that
-  # hold only some words of a long question. Off until a measurement shows
-  # it helps. See `docs/codebase/kb.md`.
+  # `"true"`, `search_knowledge` tells the agent to search with a few key
+  # words, and its answer has `word_match` (`some` or `none`). Off until a
+  # measurement shows it helps. See `docs/codebase/kb.md`.
   kbSearchWordHint: "false"
   # -- `kbWikiFilteredSearch` is rendered into `KB_WIKI_FILTERED_SEARCH`.
   # When `"true"`, a product or version filter on `search_knowledge` can

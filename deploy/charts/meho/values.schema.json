@@ -524,7 +524,7 @@
         "kbSearchWordHint": {
           "type": "string",
           "enum": ["true", "false"],
-          "description": "The word half of `search_knowledge` also finds passages that hold only some words of a long question. Rendered into `KB_SEARCH_WORD_HINT`. Default `\"false\"`: off until a measurement shows it helps. See `docs/codebase/kb.md`."
+          "description": "`search_knowledge` tells the agent to search with a few key words, and its answer has `word_match` (`some` or `none`). Rendered into `KB_SEARCH_WORD_HINT`. Default `\"false\"`: off until a measurement shows it helps. See `docs/codebase/kb.md`."
         },
         "kbWikiFilteredSearch": {
           "type": "string",

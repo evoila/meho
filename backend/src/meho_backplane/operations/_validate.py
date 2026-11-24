@@ -644,6 +644,12 @@ CREDENTIAL_WAIT_NOTE = (
     "grant and no run approval covers it; a person approves each call"
 )
 
+#: The wait reason of a call that a connector marks for a person's approval on each call.
+PER_CALL_WAIT_NOTE = (
+    "the connector marks this operation so that a person approves each call; no "
+    "standing grant, no agent grant and no run approval covers it"
+)
+
 
 async def _service_grant_verdict(
     *,
@@ -814,8 +820,10 @@ def _non_agent_park_reason(
       the destructive tier (decision ``governed-delete-operations.md``
       requirement 1).
     * ``requires_approval`` (G11.7-T1): the approval queue.
-    * Service principals: :func:`_service_safety_gate_reason` (#3152). They
-      keep their standing-grant rule and are not under the token rule.
+    * Service principals: a call that a connector marks for a person's
+      approval on each call waits (:data:`PER_CALL_WAIT_NOTE`); else
+      :func:`_service_safety_gate_reason` (#3152). They keep their
+      standing-grant rule and are not under the token rule.
     * Everyone else: :func:`_person_park_reason` (#3980).
     """
     if descriptor.safety_level == "destructive":
@@ -830,6 +838,10 @@ def _non_agent_park_reason(
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
     if is_service:
+        from meho_backplane.operations.service_grants import descriptor_needs_per_call_approval
+
+        if descriptor_needs_per_call_approval(descriptor):
+            return PER_CALL_WAIT_NOTE
         return _service_safety_gate_reason(descriptor)
     return _person_park_reason(operator, descriptor)
 
@@ -1313,12 +1325,18 @@ async def _agent_verdict(
     A call that reads, writes or makes a credential
     (:func:`~meho_backplane.operations.service_grants.descriptor_credential_waits`)
     is at least ``needs-approval``, also at level ``safe``, whatever the
-    agent's grant rows say. The check sits here and not in
+    agent's grant rows say. So is a call that a connector marks for a
+    person's approval on each call
+    (:func:`~meho_backplane.operations.service_grants.descriptor_needs_per_call_approval`).
+    The checks sit here and not in
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, because only
     the row here carries the class a connector's floor stored on an
     ingested operation.
     """
-    from meho_backplane.operations.service_grants import descriptor_credential_waits
+    from meho_backplane.operations.service_grants import (
+        descriptor_credential_waits,
+        descriptor_needs_per_call_approval,
+    )
 
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
@@ -1339,5 +1357,10 @@ async def _agent_verdict(
         floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
         if floored is not verdict:
             reason = f"{reason}; floored to needs-approval ({CREDENTIAL_WAIT_NOTE})"
+            verdict = floored
+    if descriptor_needs_per_call_approval(descriptor):
+        floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
+        if floored is not verdict:
+            reason = f"{reason}; floored to needs-approval ({PER_CALL_WAIT_NOTE})"
             verdict = floored
     return verdict, reason

@@ -59,6 +59,8 @@ The order is fixed.
      can run it, for a service login, in sandbox mode.
    - A call made with a token (a person's token, an agent, a runner) runs
      at once only when it is `safe`.
+   - A call of an agent or a service login that a connector marks for
+     per-call approval waits for a person, also when it is `safe`.
    - No standing grant and no run approval clears a call that shows a
      secret, connects to an address the caller gives, is marked for
      per-call approval, or that a classification makes always wait.

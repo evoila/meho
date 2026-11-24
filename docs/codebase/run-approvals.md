@@ -164,7 +164,8 @@ a standing grant covers such an operation:
   a marked operation.
 - The check also reads the op id that the connector's ingest correction gives
   the stored row (`descriptor_needs_per_call_approval`), so a row stored
-  with another op id for the same call waits too.
+  with another op id for the same call waits too. Such a call of an agent
+  or a service login waits also at risk level `safe`.
 
 Marked today:
 

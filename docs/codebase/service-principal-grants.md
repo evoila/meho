@@ -103,10 +103,15 @@ operation registered as a change of rights, such as the Keycloak writes that
 change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
 The per-call check reads the op id of the stored row and also the op id
-that the connector's ingest correction gives the row's method and path
-(`descriptor_needs_per_call_approval`). A row stored with another op id is
-marked too. A correction that fails counts the call as marked. Grant create,
-run approval create, the call-time check and the policy shadow report use it.
+that the connector's ingest correction gives the row
+(`descriptor_needs_per_call_approval`). The correction gets the stored
+fields of the row (method, path, tags, parameter schema and the rest), as
+at ingest. A row stored with another op id is marked too. A correction
+that fails counts the call as marked. Grant create, run approval create,
+the call-time check and the policy shadow report use it. At call time a
+marked call of an agent or a service login always waits for a person, also
+at risk level `safe` (`PER_CALL_WAIT_NOTE` in `operations/_validate.py`,
+the floor `per_call_approval_waits` in `policy/floors.py`).
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
 holds: a credential call, per-call approval, a caller-address field,

@@ -116,6 +116,14 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 ),
             )
         )
+    if asker.kind in ("agent", "service") and "per_call_approval" in asked.op_class:
+        hits.append(
+            FloorHit(
+                "wait",
+                "per_call_approval_waits",
+                "the connector marks the operation so that a person approves each call",
+            )
+        )
     if _token_call(asker) and asked.risk in KNOWN_NON_SAFE:
         hits.append(
             FloorHit(

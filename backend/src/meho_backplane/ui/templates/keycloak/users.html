@@ -35,7 +35,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Keycloak users</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         List, create, reset passwords, and assign realm roles for the managed
         realm's users. Credential material is redacted.
       </p>
@@ -57,7 +57,7 @@
     hx-push-url="true"
   >
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Keycloak target</span>
+      <span class="label-text mb-1 text-xs text-muted">Keycloak target</span>
       <select
         name="target"
         class="select select-bordered select-sm w-full font-mono"
@@ -77,7 +77,7 @@
       </select>
     </label>
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Username filter</span>
+      <span class="label-text mb-1 text-xs text-muted">Username filter</span>
       <input
         type="text"
         name="username"
@@ -98,11 +98,11 @@
   </form>
 
   {% if not targets %}
-    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
       No Keycloak targets registered for this tenant.
     </div>
   {% elif not active_target %}
-    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
       Select a Keycloak target to list its users.
     </div>
   {% else %}
@@ -135,8 +135,8 @@
     {% endif %}
 
     <section aria-label="Users" data-keycloak-users>
-      <h2 class="mb-2 text-sm font-semibold opacity-80">
-        Users <span class="text-xs opacity-60">({{ users | length }})</span>
+      <h2 class="mb-2 text-sm font-semibold text-muted">
+        Users <span class="text-xs text-subtle">({{ users | length }})</span>
       </h2>
       {% if users %}
         <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
@@ -154,7 +154,7 @@
               {% for user in users %}
                 <tr data-user-row data-user-uuid="{{ user.get('id') | default('', true) }}">
                   <td class="font-mono">{{ user.get("username") | default("—", true) }}</td>
-                  <td class="text-xs opacity-70">{{ user.get("email") | default("—", true) }}</td>
+                  <td class="text-xs text-muted">{{ user.get("email") | default("—", true) }}</td>
                   <td>
                     {% if user.get("enabled") %}
                       <span class="badge badge-success badge-xs">yes</span>
@@ -206,7 +206,7 @@
           </table>
         </div>
       {% else %}
-        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm text-subtle">
           No users in this realm{% if username_filter %} matching <code>{{ username_filter }}</code>{% endif %}.
         </div>
       {% endif %}

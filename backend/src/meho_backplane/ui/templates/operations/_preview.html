@@ -54,7 +54,7 @@
   <div class="space-y-3" data-preview-status="ok">
     <div class="flex items-center gap-2">
       <span class="badge badge-success badge-sm">would-be request</span>
-      <span class="text-xs opacity-60">not sent &middot; not run</span>
+      <span class="text-xs text-subtle">not sent &middot; not run</span>
     </div>
 
     {#- Method + resolved path: the literal line meho would put on the wire. -#}
@@ -85,7 +85,7 @@
         </span>
       </div>
       {% if envelope.redacted_body is none %}
-        <p class="text-xs opacity-60">No request body.</p>
+        <p class="text-xs text-subtle">No request body.</p>
       {% else %}
         <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-preview-body><code>{{ envelope.redacted_body | tojson(indent=2) }}</code></pre>
       {% endif %}
@@ -99,7 +99,7 @@
         <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-preview-effect><code>{{ envelope.proposed_effect | tojson(indent=2) }}</code></pre>
       </div>
     {% elif envelope.get("plan_note") %}
-      <p class="text-xs opacity-60" data-preview-plan-note>{{ envelope.plan_note }}</p>
+      <p class="text-xs text-subtle" data-preview-plan-note>{{ envelope.plan_note }}</p>
     {% endif %}
 
     {#- The preview hash binds a destructive run to this exact preview. -#}

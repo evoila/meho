@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,14 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> Any:
 
 
 def _iprecverr_supported() -> bool:
-    """Whether this kernel accepts the unprivileged IP_RECVERR UDP mechanism."""
+    """Whether this kernel accepts the unprivileged IP_RECVERR UDP mechanism.
+
+    This is a skip for a platform reason, not for a flaky test. ``IP_RECVERR``
+    is a Linux socket option and its number 11 is fixed in the code. On macOS
+    11 is another option, so setting it works but the error queue is absent.
+    """
+    if sys.platform != "linux":
+        return False
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
@@ -314,7 +322,7 @@ def test_clamp_float_bounds(raw: object, expected: float) -> None:
 
 @pytest.mark.skipif(
     not _iprecverr_supported(),
-    reason="kernel does not honour the unprivileged IP_RECVERR UDP mechanism",
+    reason="IP_RECVERR is a Linux socket option; this test runs only on Linux",
 )
 async def test_trace_reaches_loopback(
     monkeypatch: pytest.MonkeyPatch,

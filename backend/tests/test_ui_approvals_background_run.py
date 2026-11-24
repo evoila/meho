@@ -142,6 +142,20 @@ def _runs_of(client: TestClient, request_id: uuid.UUID) -> list[OperationRun]:
     return _in_loop(client, _read)
 
 
+def _runs_until_ended(client: TestClient, request_id: uuid.UUID) -> list[OperationRun]:
+    """Read the runs of *request_id* until one exists and none is still going (10 seconds)."""
+    deadline = time.monotonic() + 10
+    while True:
+        runs = _runs_of(client, request_id)
+        ended = bool(runs) and all(
+            run.status not in (OperationRunStatus.PENDING.value, OperationRunStatus.RUNNING.value)
+            for run in runs
+        )
+        if ended or time.monotonic() > deadline:
+            return runs
+        time.sleep(0.05)
+
+
 def _approve(client: TestClient, csrf: str, request_id: uuid.UUID) -> tuple[str, float]:
     started = time.monotonic()
     response = client.post(
@@ -256,11 +270,10 @@ def test_closing_the_dialog_does_not_stop_the_run() -> None:
     ):
         _approve(client, csrf, rid)
         operation.release.set()
-        deadline = time.monotonic() + 10
-        while _stored(client, rid).resume_result is None and time.monotonic() < deadline:
-            time.sleep(0.05)
+        # The result is stored by the operation itself, a moment before the
+        # run row is marked as ended. Wait for the row that the test reads.
+        runs = _runs_until_ended(client, rid)
         stored = _stored(client, rid)
-        runs = _runs_of(client, rid)
 
     assert stored.resume_result is not None
     assert stored.resume_result["status"] == "ok"
@@ -500,7 +513,9 @@ def test_notice_shows_when_the_run_has_ended() -> None:
         run_id = _runs_of(client, rid)[0].id
         while_running = _notices(client, run_id)
         operation.release.set()
-        _ask_until(client, f"/ui/approvals/{rid}/run", _has_ended)
+        # The notice shows only once the run row is marked as ended, a moment
+        # after the card already shows the stored result.
+        _runs_until_ended(client, rid)
         ended = _notices(client, run_id)
 
     assert "data-run-ended" not in while_running
@@ -533,6 +548,7 @@ def test_notice_when_another_caller_runs_the_operation() -> None:
         # The person moved to another page: only the notice route is asked.
         while_running = _notices(client, run_id)
         _in_loop(client, lambda: persist_resume_result(rid, _OK, parked_op_id=_OP_ID))
+        _runs_until_ended(client, rid)
         ended = _notices(client, run_id)
 
     assert 'data-result-state="started"' in card

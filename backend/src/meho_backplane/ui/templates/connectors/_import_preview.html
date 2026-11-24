@@ -54,7 +54,7 @@
                   {% endif %}
                 </td>
                 <td class="font-mono">{{ row.name }}</td>
-                <td class="text-xs opacity-80">
+                <td class="text-xs text-muted">
                   {{ row.fields | join(", ") }}
                   {% for warning in row.warnings %}
                     <div class="text-warning mt-1" role="alert" data-import-warning>{{ warning }}</div>

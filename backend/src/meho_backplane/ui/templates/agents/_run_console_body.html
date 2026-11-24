@@ -33,7 +33,7 @@
       {{ icon("bot", class="size-6 opacity-80") }}
       Run <span class="font-mono">{{ agent_name }}</span>
     </h1>
-    <p class="text-sm opacity-70">
+    <p class="text-sm text-muted">
       Invoke the agent and watch it reason live. Each turn, tool call,
       tool result, and the final output stream into the transcript below.
     </p>
@@ -72,7 +72,7 @@
       </label>
 
       <label class="flex flex-col gap-1 max-w-md">
-        <span class="text-sm font-medium">Work ref <span class="opacity-60 font-normal">(optional)</span></span>
+        <span class="text-sm font-medium">Work ref <span class="text-subtle font-normal">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
@@ -81,13 +81,13 @@
           {% if not enabled %}disabled{% endif %}
           aria-label="External change-ticket reference"
         />
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           Stamps the run with an external change-ticket reference for later filtering.
         </span>
       </label>
 
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <span class="text-xs opacity-70" aria-live="polite">
+        <span class="text-xs text-muted" aria-live="polite">
           Turn budget: <span class="badge badge-outline badge-sm font-mono">{{ turn_budget }}</span>
           &mdash; the maximum model turns this run may take.
         </span>
@@ -112,7 +112,7 @@
       {# ``?run=<id>``: follow that run's saved events, then the live ones. #}
       {% include "agents/_run_transcript.html" %}
     {% else %}
-      <p class="px-1 py-6 text-center text-sm opacity-60" data-state="idle">
+      <p class="px-1 py-6 text-center text-sm text-subtle" data-state="idle">
         Enter a prompt and press Run to start a live agent run.
       </p>
     {% endif %}

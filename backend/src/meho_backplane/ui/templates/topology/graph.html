@@ -75,7 +75,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Topology{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Interactive graph view: pan, zoom, click a node to inspect.
       </p>
     </div>
@@ -200,7 +200,7 @@
      ``node_count`` / ``edge_count`` give the operator the rendered
      size at a glance; ``truncated`` flashes the cap-reached banner. -#}
   <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
-    <div class="opacity-70">
+    <div class="text-muted">
       Rendering <span class="font-mono">{{ node_count }}</span> nodes /
       <span class="font-mono">{{ edge_count }}</span> edges
       {%- if truncated %}
@@ -269,7 +269,7 @@
     aria-live="polite"
     aria-label="Node detail drawer"
   >
-    <div class="card-body text-sm opacity-70">
+    <div class="card-body text-sm text-muted">
       Click a node in the graph to inspect it.
     </div>
   </aside>

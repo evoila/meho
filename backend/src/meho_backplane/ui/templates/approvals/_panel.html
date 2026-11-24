@@ -56,22 +56,22 @@
               {% if req.chain %}
                 <p class="truncate text-xs" data-approval-chain-step="{{ req.chain.step }}">
                   <span class="badge badge-sm badge-info">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
-                  <span class="text-base-content/55">in change ticket</span>
+                  <span class="text-subtle">in change ticket</span>
                   <span class="font-mono">{{ req.chain.work_ref }}</span>
                 </p>
               {% endif %}
-              <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
+              <p class="text-xs text-subtle [overflow-wrap:anywhere] sm:truncate">
                 <span>{{ req.connector_id }}</span>
                 <span aria-hidden="true">&middot;</span>
                 <span>requested by {{ subject(req.requester) }}</span>
               </p>
               {% if req.people_behind_line %}
-                <p class="text-xs text-base-content/55 [overflow-wrap:anywhere]" data-approval-people-behind-line>
+                <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-people-behind-line>
                   {{ req.people_behind_line }}
                 </p>
               {% endif %}
               {% if req.who_can_approve %}
-                <p class="text-xs text-base-content/55 [overflow-wrap:anywhere]" data-approval-who-can-approve>
+                <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-who-can-approve>
                   Who can approve: {{ req.who_can_approve }}
                 </p>
               {% endif %}
@@ -91,8 +91,8 @@
       </ul>
     {% else %}
       <div class="py-10 text-center">
-        <p class="text-base text-base-content/55">No pending approvals</p>
-        <p class="mt-1 text-sm text-base-content/40">
+        <p class="text-base text-subtle">No pending approvals</p>
+        <p class="mt-1 text-sm text-subtle">
           New requests appear here the moment an agent action needs your sign-off.
         </p>
       </div>

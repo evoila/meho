@@ -51,7 +51,7 @@
         </a>
       </nav>
       <h1 class="text-2xl font-semibold">Upload Knowledge Entries</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Drag-and-drop or browse to upload <code>.md</code> files.
         Duplicate content (same body hash) is silently ignored.
       </p>
@@ -108,11 +108,11 @@
       aria-label="Drag and drop .md files here"
     >
       <div class="card-body items-center text-center py-10 gap-3">
-        <div class="text-4xl opacity-40" aria-hidden="true">&#x1F4C1;</div>
+        <div class="text-4xl text-subtle" aria-hidden="true">&#x1F4C1;</div>
         <p class="text-base font-medium">
           Drop <code>.md</code> files here
         </p>
-        <p class="text-sm opacity-60">or</p>
+        <p class="text-sm text-subtle">or</p>
         <button
           type="button"
           class="btn btn-primary btn-sm"
@@ -133,7 +133,7 @@
           aria-hidden="true"
           tabindex="-1"
         />
-        <p class="text-xs opacity-40" aria-live="polite">
+        <p class="text-xs text-subtle" aria-live="polite">
           <span x-show="files.length === 0">No files selected</span>
           <span x-show="files.length === 1" x-text="`1 file selected: ${files[0].name}`"></span>
           <span x-show="files.length > 1" x-text="`${files.length} files selected`"></span>
@@ -160,7 +160,7 @@
           <div class="form-control">
             <label class="label" for="single-slug">
               <span class="label-text">Slug</span>
-              <span class="label-text-alt opacity-60">override filename-derived value</span>
+              <span class="label-text-alt text-subtle">override filename-derived value</span>
             </label>
             <input
               id="single-slug"
@@ -173,7 +173,7 @@
               aria-label="Slug for the uploaded entry"
             />
             <div class="label">
-              <span class="label-text-alt opacity-50">
+              <span class="label-text-alt text-subtle">
                 Must start with [a-z], may contain hyphens + dots.
               </span>
             </div>
@@ -233,14 +233,14 @@
           {# File list preview #}
           <ul class="space-y-1 text-sm max-h-48 overflow-y-auto" role="list" aria-label="Files to upload">
             <template x-for="(f, i) in files" :key="i">
-              <li class="flex items-center gap-2 opacity-80">
+              <li class="flex items-center gap-2 text-muted">
                 <span aria-hidden="true" class="text-xs">&#x1F4C4;</span>
                 <span class="font-mono" x-text="f.name"></span>
               </li>
             </template>
           </ul>
 
-          <p class="text-xs opacity-50">
+          <p class="text-xs text-subtle">
             Slugs are derived from filenames. Re-uploading unchanged content is a no-op.
           </p>
 

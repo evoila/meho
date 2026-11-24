@@ -177,6 +177,7 @@ func printRealmGet(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	for _, key := range []string{"realm", "enabled", "sslRequired", "loginTheme", "accessTokenLifespan"} {
 		v, ok := realm[key]
 		if !ok || v == nil {

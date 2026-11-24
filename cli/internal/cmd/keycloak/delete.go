@@ -218,15 +218,16 @@ func newRealmDeleteCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a whole Keycloak realm (destructive, a second person must approve)",
+		Short: "Delete a whole Keycloak realm (destructive, approval cannot be turned off)",
 		Long: "delete dispatches keycloak.realm.delete. It removes the realm for good,\n" +
 			"with every user, client, group and session in it.\n\n" +
 			"It runs in two steps:\n" +
 			"  1. Without --preview-hash it only previews: nothing is deleted and\n" +
 			"     nothing waits for approval. It prints a preview_hash.\n" +
 			"  2. Run the same command again with --preview-hash <hash>. The request\n" +
-			"     then waits until a second person approves it. Approving it runs\n" +
-			"     the delete; do not run the command again after approval.\n\n" +
+			"     then waits for approval. Approval cannot be turned off for this\n" +
+			"     operation. Approving it runs the delete; do not run the command\n" +
+			"     again after approval.\n\n" +
 			"--realm is required, and it must be the target's managed realm: a\n" +
 			"target works on that realm only, and another realm is refused. MEHO\n" +
 			"also refuses master, the target's admin realm, and the realm MEHO's own\n" +

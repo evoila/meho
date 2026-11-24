@@ -169,7 +169,7 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 		fmt.Fprintf(w, "%-18s %s\n", "extras:", output.SafeText(formatExtras(t.Extras)))
 	}
 	if line := keycloakRealmsLine(t); line != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "realms:", line)
+		fmt.Fprintf(w, "%-18s %s\n", "realms:", output.SafeText(line))
 	}
 	// Render timestamps in the same RFC3339Z shape the backend's
 	// model_dump(mode="json") emits, so --json output and the human

@@ -77,6 +77,7 @@ func printWriteResult(opID string) func(w io.Writer, r *CallResult) {
 			fallbackResultRender(w, r)
 			return
 		}
+		printManagedRealm(w, r)
 		for _, key := range writeResultKeyOrder {
 			if v, ok := obj[key]; ok && v != nil {
 				fmt.Fprintf(w, "  %-16s %v\n", key+":", v)

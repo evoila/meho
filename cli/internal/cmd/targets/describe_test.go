@@ -338,3 +338,34 @@ func TestPrintTargetSummaryKeycloakRealms(t *testing.T) {
 		})
 	}
 }
+
+// TestPrintTargetSummaryKeycloakRealmsEscapesControlCharacters — a control
+// character in a stored realm name shows as a visible escape in the realms
+// line and in the extras line.
+func TestPrintTargetSummaryKeycloakRealmsEscapesControlCharacters(t *testing.T) {
+	tgt := &api.Target{
+		Id:        mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		TenantId:  mustUUID(t, "22222222-2222-2222-2222-222222222222"),
+		Name:      "t",
+		Product:   "keycloak",
+		Host:      "h",
+		AuthModel: "shared_service_account",
+		Extras:    map[string]interface{}{"admin_realm": "a\x1b[2Kb", "managed_realm": "c\ad"},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	var buf bytes.Buffer
+	printTargetSummary(&buf, tgt)
+	out := buf.String()
+	if strings.ContainsAny(out, "\x1b\a") {
+		t.Errorf("output holds a raw ESC or BEL byte:\n%q", out)
+	}
+	for _, want := range []string{
+		`realms:            admin=a\x1b[2Kb, managed=c\x07d`,
+		`extras:            admin_realm=a\x1b[2Kb, managed_realm=c\x07d`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

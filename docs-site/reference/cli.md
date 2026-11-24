@@ -3463,7 +3463,7 @@ meho keycloak realm create [flags]
 
 #### `meho keycloak realm delete`
 
-Delete a whole Keycloak realm (destructive, a second person must approve)
+Delete a whole Keycloak realm (destructive, approval cannot be turned off)
 
 ```
 meho keycloak realm delete [flags]

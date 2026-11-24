@@ -22,6 +22,7 @@
   Context keys: ``connector_id``, ``query``, ``groups``, ``hits``,
   ``error``, ``next_step`` (see ``operations/routes.py``).
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 {%- macro safety_badge(safety) -%}
@@ -31,11 +32,11 @@
       before reading the label -- same palette as the connectors ops
       matrix. -#}
   {% if safety == "dangerous" %}
-    <span class="badge badge-error badge-xs" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+    {{ badge(safety, variant="error", size="xs", title="Dangerous — irreversible or high-impact") }}
   {% elif safety == "caution" %}
-    <span class="badge badge-warning badge-xs" title="Caution — state-changing">{{ safety }}</span>
+    {{ badge(safety, variant="warning", size="xs", title="Caution — state-changing") }}
   {% else %}
-    <span class="badge badge-ghost badge-xs" title="Safe — read or non-impacting">{{ safety }}</span>
+    {{ badge(safety, variant="quiet", size="xs", title="Safe — read or non-impacting") }}
   {% endif %}
 {%- endmacro -%}
 
@@ -86,7 +87,7 @@
                 {{ group.name }}
                 <span class="ml-2 text-xs text-subtle">({{ group.enabled_op_count }} ops)</span>
                 {% if group.partial %}
-                  <span class="badge badge-outline badge-xs ml-1" title="Group not fully enabled; some ops enabled per-op">partial</span>
+                  {{ badge("partial", variant="outline", size="xs", class="ml-1", title="Group not fully enabled; some ops enabled per-op") }}
                 {% endif %}
               </summary>
               {% if group.when_to_use %}
@@ -117,7 +118,7 @@
                     <span class="font-mono text-sm">{{ hit.op_id }}</span>
                     {{ safety_badge(hit.safety_level) }}
                     {% if hit.requires_approval %}
-                      <span class="badge badge-outline badge-xs" title="Requires approval">approval</span>
+                      {{ badge("approval", variant="outline", size="xs", title="Requires approval") }}
                     {% endif %}
                   </div>
                   {% if hit.summary %}

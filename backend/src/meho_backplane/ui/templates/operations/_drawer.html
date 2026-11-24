@@ -46,6 +46,7 @@
     previewable      -- bool: True for an HTTP-ingested or destructive op
     csrf_token       -- str: minted double-submit token for the preview POST
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="operations-drawer" class="modal" aria-label="Operation detail">
   <div class="modal-box max-w-2xl">
@@ -88,19 +89,19 @@
       <div class="flex flex-wrap items-center gap-2">
         {% set safety = descriptor.safety_level %}
         {% if safety == "destructive" %}
-          <span class="badge badge-error badge-sm" title="Destructive — deletes something that cannot be undone">{{ safety }}</span>
+          {{ badge(safety, variant="error", title="Destructive — deletes something that cannot be undone") }}
         {% elif safety == "dangerous" %}
-          <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+          {{ badge(safety, variant="error", title="Dangerous — irreversible or high-impact") }}
         {% elif safety == "caution" %}
-          <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ safety }}</span>
+          {{ badge(safety, variant="warning", title="Caution — state-changing") }}
         {% else %}
-          <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ safety }}</span>
+          {{ badge(safety, variant="quiet", title="Safe — read or non-impacting") }}
         {% endif %}
         {% if descriptor.requires_approval %}
-          <span class="badge badge-outline badge-sm" title="Requires approval">requires approval</span>
+          {{ badge("requires approval", variant="outline", title="Requires approval") }}
         {% endif %}
         {% if descriptor.group_key %}
-          <span class="badge badge-ghost badge-sm">group: {{ descriptor.group_key }}</span>
+          {{ badge("group: " ~ descriptor.group_key, variant="quiet") }}
         {% endif %}
       </div>
 
@@ -157,25 +158,25 @@
           >
             <input type="hidden" name="connector_id" value="{{ connector_id }}" />
             <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
-            <label class="form-control">
-              <span class="label-text mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
+            <label>
+              <span class="mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
               <input
                 type="text"
                 name="target"
                 maxlength="256"
-                class="input input-bordered input-sm w-full font-mono"
+                class="input input-sm w-full font-mono"
                 placeholder="e.g. prod-k8s"
                 aria-label="Target name"
                 autocomplete="off"
               />
             </label>
-            <label class="form-control">
-              <span class="label-text mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
+            <label>
+              <span class="mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
               <textarea
                 name="params"
                 rows="4"
                 maxlength="65536"
-                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                class="textarea textarea-sm w-full font-mono text-xs"
                 placeholder='{"path": "secret/data/app"}'
                 aria-label="Operation params as JSON"
               ></textarea>
@@ -183,7 +184,7 @@
             <button type="submit" class="btn btn-outline btn-sm gap-1" data-action="preview">
               {{ icon("search", class="size-4") }}
               Preview request
-              <span class="badge badge-ghost badge-xs">no dispatch</span>
+              {{ badge("no dispatch", variant="quiet", size="xs") }}
             </button>
           </form>
           {#- Swap target for the rendered preview fragment. Empty until the

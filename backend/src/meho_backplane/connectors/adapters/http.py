@@ -631,6 +631,35 @@ def _scrub_location_header(location: str | None) -> str | None:
         return "<unparseable-location>"
 
 
+# A change (any method that is not a read) follows at most one redirect, and
+# only a 307 / 308 to the same path (see :func:`_change_may_be_sent_again`).
+_MAX_CHANGE_REDIRECTS = 1
+
+
+def _folded_path(url: httpx.URL) -> str:
+    """The path of *url* without one trailing slash, in lower case."""
+    return url.path.removesuffix("/").lower()
+
+
+def _change_may_be_sent_again(
+    status_code: int, sent: httpx.URL, location: httpx.URL, already_sent: set[str]
+) -> bool:
+    """Whether a change may be sent once more to *location* after a redirect.
+
+    Only a 307 or 308 (the target says: send the same request there), only to
+    the path that was sent (apart from one trailing slash or letter case) with
+    the same query, and never to an address that was already sent to. The
+    compare uses the sent URL, never a path template: a template would match a
+    redirect to another object's id.
+    """
+    return (
+        status_code in (307, 308)
+        and _folded_path(sent) == _folded_path(location)
+        and sent.query == location.query
+        and str(location) not in already_sent
+    )
+
+
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -649,10 +678,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
     same-origin canonicalisation (the vendor trailing-slash ``301`` that
     vcsim's ``/rest`` mount and some appliances emit) is still followed, so
-    no vendor flow regresses. Any cross-origin ``Location`` terminates the
-    loop and the ``3xx`` response is returned to the caller unfollowed — the
-    request is **never** replayed off-origin, so no header or body crosses
-    the origin boundary.
+    no vendor flow regresses. A change (a method that is not a read) follows
+    at most one redirect: a 307 or 308 to the same path. Any cross-origin
+    ``Location`` terminates the loop and the ``3xx`` response is returned to
+    the caller unfollowed — the request is **never** replayed off-origin, so
+    no header or body crosses the origin boundary.
     """
 
     async def send(
@@ -667,8 +697,13 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # following; this class owns the redirect decision so the
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
+        is_change = request.method.upper() not in _IDEMPOTENT_METHODS
+        max_hops = _MAX_CHANGE_REDIRECTS if is_change else _MAX_SAME_ORIGIN_REDIRECTS
+        sent_urls = {str(request.url)}
+        hops = 0
+        hop_start = flight_recorder_capture.span_start()
         response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
-        for _ in range(_MAX_SAME_ORIGIN_REDIRECTS):
+        while True:
             if not response.has_redirect_location:
                 return response
             # ``next_request`` is httpx's own correctly-built follow-up
@@ -692,19 +727,49 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     location=_scrub_location_header(response.headers.get("Location")),
                 )
                 return response
+            if is_change and (
+                hops >= max_hops
+                or not _change_may_be_sent_again(
+                    response.status_code, request.url, next_request.url, sent_urls
+                )
+            ):
+                # A change is sent at most twice, and only to the same path.
+                # Any other redirect ends here; the dispatcher words the
+                # result by what the status code means.
+                logger.warning(
+                    "connector_redirect_not_followed_on_change",
+                    method=request.method,
+                    status_code=response.status_code,
+                    from_url=_origin_and_path(request.url),
+                    location=_scrub_location_header(response.headers.get("Location")),
+                )
+                return response
+            if hops >= max_hops:
+                # Exhausted the same-origin hop budget — surface httpx's own
+                # error so the caller sees a redirect loop rather than a
+                # silent 3xx. Close the final 3xx first so its connection is
+                # released back to the pool rather than held checked-out
+                # until GC (a looping target would otherwise slowly starve
+                # the pooled client).
+                await response.aclose()
+                raise httpx.TooManyRedirects(
+                    f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
+                    request=request,
+                )
+            # One trace entry per request that was really sent: the
+            # caller records the last one.
+            flight_recorder_capture.record_vendor_call(
+                hop_start,
+                method=request.method,
+                request_headers=request.headers,
+                response=response,
+            )
             await response.aclose()
+            hops += 1
             request = next_request
+            sent_urls.add(str(request.url))
+            hop_start = flight_recorder_capture.span_start()
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
-        # Exhausted the same-origin hop budget — surface httpx's own error
-        # so the caller sees a redirect loop rather than a silent 3xx. Close
-        # the final 3xx first so its connection is released back to the pool
-        # rather than held checked-out until GC (a looping target would
-        # otherwise slowly starve the pooled client).
-        await response.aclose()
-        raise httpx.TooManyRedirects(
-            f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
-            request=request,
-        )
 
 
 class HttpConnector(Connector):
@@ -1220,7 +1285,7 @@ class HttpConnector(Connector):
             raise
         flight_recorder_capture.record_vendor_call(
             _fr_start,
-            method=verb,
+            method=resp.request.method,
             request_headers=headers,
             response=resp,
             request_body=json if json is not None else data,

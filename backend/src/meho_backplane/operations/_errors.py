@@ -80,6 +80,7 @@ __all__ = [
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
+    "is_redirect_on_change",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
@@ -98,6 +99,7 @@ __all__ = [
     "result_connector_not_found",
     "result_connector_package_not_installed",
     "result_connector_probe_refused",
+    "result_connector_redirect_on_change",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_connector_vault_forbidden",
@@ -1688,6 +1690,71 @@ def result_connector_error(
         duration_ms=duration_ms,
         extras=extras,
     )
+
+
+#: The redirect statuses that :func:`result_connector_redirect_on_change` words
+#: by what the code means.
+_REDIRECT_ON_CHANGE_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
+
+
+def is_redirect_on_change(exc: httpx.HTTPStatusError) -> bool:
+    """Whether *exc* is a redirect that MEHO did not follow after a change.
+
+    A change is a request whose method is not a read. The redirect must name
+    a ``Location``, and its status must be one of
+    :data:`_REDIRECT_ON_CHANGE_STATUSES`.
+    """
+    return (
+        exc.request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and exc.response.status_code in _REDIRECT_ON_CHANGE_STATUSES
+        and bool(exc.response.headers.get("Location"))
+    )
+
+
+def _redirect_address(exc: httpx.HTTPStatusError) -> str:
+    """The address a redirect names: scheme, host and path only.
+
+    The query and any login part of the address are dropped, so a one-time
+    ticket in the address never reaches an error text.
+    """
+    location = exc.response.headers.get("Location", "")
+    try:
+        url = exc.request.url.join(location)
+    except httpx.InvalidURL:
+        return "an address MEHO could not read"
+    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
+
+
+def result_connector_redirect_on_change(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """A change got a redirect that MEHO did not follow.
+
+    The text follows what the HTTP status code means: 307 / 308 say the
+    target did not handle the request; 303 says the change ran and the result
+    is at the address; 301 / 302 are unclear. The result keeps the shape of a
+    ``connector_error`` and adds no field.
+    """
+    result = result_connector_error(op_id, exc, duration_ms)
+    address = _redirect_address(exc)
+    status_code = exc.response.status_code
+    if status_code in (307, 308):
+        message = (
+            f"The target did not run this call. It asked for it to go to {address}. "
+            "That is not the approved call. Make a new preview and approval for that address."
+        )
+    elif status_code == 303:
+        message = (
+            f"The target says the change ran. It put the result at {address}. MEHO did not read it."
+        )
+    else:
+        message = (
+            f"The target answered with a redirect to {address}. MEHO did not follow it "
+            "and could not find out if the change ran. Check the target."
+        )
+    return result.model_copy(update={"error": f"{result.error}. {message}"})
 
 
 def result_vault_credentials_read_error(

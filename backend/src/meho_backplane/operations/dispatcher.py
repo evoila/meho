@@ -371,6 +371,7 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
+    is_redirect_on_change,
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
@@ -385,6 +386,7 @@ from meho_backplane.operations._errors import (
     result_connector_http_422,
     result_connector_not_found,
     result_connector_probe_refused,
+    result_connector_redirect_on_change,
     result_connector_timeout,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
@@ -2411,6 +2413,9 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
+    * a redirect after a change (301, 302, 303, 307, 308) ->
+      :func:`result_connector_redirect_on_change`, worded by what the code
+      means; marked uncertain when the operation may change the target.
     * ``410`` -> :func:`result_connector_http_410` -- the product version
       removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
@@ -2429,6 +2434,12 @@ def _classify_http_status_error(
     rejected (``reestablished``). Only the auth-class branch consumes it.
     """
     status_code = http_exc.response.status_code
+    if is_redirect_on_change(http_exc):
+        # MEHO did not follow a redirect after a change. It does not know
+        # whether the change ran, except that a 307 / 308 asked for a repeat
+        # at another address.
+        redirected = result_connector_redirect_on_change(op_id, http_exc, duration_ms)
+        return with_uncertain_outcome(redirected) if changes_target else redirected
     if status_code == 403:
         return result_connector_http_403(op_id, http_exc, duration_ms)
     if status_code == 410:
@@ -2519,8 +2530,10 @@ async def _handle_http_status_error(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
-    if callable(invalidate_session) and (
-        is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response)
+    if (
+        callable(invalidate_session)
+        and not is_redirect_on_change(http_exc)
+        and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
     ):
         # One rule for both paths: repeat only when it cannot send a change twice.
         if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):

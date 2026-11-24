@@ -47,6 +47,10 @@ agent-reasonable error shape the connector-allow-list check in
 :mod:`meho_backplane.agent.toolset` uses. The model receives a tool-level retry
 prompt ("you've reached the maximum invocation depth; answer directly or stop")
 it can reason about -- it is not a tool-execution crash that fails the whole run.
+
+A child run of a person an admin blocked is the exception: the child row ends
+failed with the refusal text, and the refusal stops the parent run too, with
+no retry (:mod:`meho_backplane.agent.principal_block_gate`).
 The depth ceiling is a deterministic termination condition the *model never
 controls* (ai_engineering best practices, "termination is deterministic ...
 never rely on the model to stop").
@@ -96,6 +100,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 from pydantic_ai import ModelRetry, RunContext, Tool
 
+from meho_backplane.agent.principal_block_gate import PrincipalBlockedRunError
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.operations.identity_budget import TokenUsage
@@ -380,8 +385,9 @@ def make_invoke_agent_tool(
         finalizer: Optional terminal-state recorder for a recorded child row.
             Called after the child loop only when ``recorder`` returned a run
             id: on success with the child's output, on
-            :class:`~meho_backplane.agent.run.AgentRunError` with the error.
-            ``None`` leaves the child row un-finalized (the recorder's lineage
+            :class:`~meho_backplane.agent.run.AgentRunError` or
+            :class:`~meho_backplane.agent.principal_block_gate.PrincipalBlockedRunError`
+            with the error. ``None`` leaves the child row un-finalized (the recorder's lineage
             row and the in-process bounds are unaffected).
 
     Returns:
@@ -502,6 +508,21 @@ def make_invoke_agent_tool(
                 inputs=inputs,
                 usage=ctx.usage,
             )
+        except PrincipalBlockedRunError as exc:
+            # The person is blocked (or the block list cannot be read). The
+            # child row ends failed with the refusal text, and the refusal
+            # goes on to the parent: its run stops too, with no retry.
+            _log.warning(
+                "agent_invoke_child_refused_principal_blocked",
+                child_agent=definition.name,
+                depth=attempted_depth,
+                operator_sub=operator.sub,
+            )
+            await _stop_child_heartbeat(child_heartbeat)
+            child_heartbeat = None
+            if child_run_id is not None and finalizer is not None:
+                await finalizer(child_run_id, output=None, error=str(exc))
+            raise
         except AgentRunError as exc:
             _log.warning(
                 "agent_invoke_child_failed",

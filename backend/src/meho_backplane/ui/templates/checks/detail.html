@@ -65,6 +65,9 @@
               <td>
                 <div class="font-medium">{{ m.name }}</div>
                 <div class="font-mono text-xs text-subtle">{{ m.connector_id }} &middot; {{ m.op_id }}</div>
+                {% if m.runner_name %}
+                  <div class="text-xs text-subtle">runs at: runner {{ m.runner_name }}</div>
+                {% endif %}
                 {% if m.status == "paused" %}
                   {{ badge("paused", variant="outline", size="xs") }}
                 {% endif %}

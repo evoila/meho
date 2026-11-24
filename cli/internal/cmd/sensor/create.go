@@ -47,6 +47,7 @@ func newCreateCmd() *cobra.Command {
 		identitySub         string
 		tenant              string
 		force               bool
+		runner              string
 		jsonOut             bool
 		backplaneOverride   string
 	)
@@ -82,7 +83,12 @@ func newCreateCmd() *cobra.Command {
 			"the create is refused with 422 sensor_connector_mismatch and a " +
 			"warning that names the connector that fits, when there is one. " +
 			"--force creates the sensor anyway; the warning then shows in " +
-			"`meho sensor list`.",
+			"`meho sensor list`.\n\n--runner names a runner of the tenant " +
+			"that runs the check at its site instead of the central check " +
+			"loop. It needs RUNNER_CHECKS_ENABLED on the backplane (else 422 " +
+			"sensor_runner_checks_disabled), a runner of that name (else 422 " +
+			"sensor_runner_unknown) and an op the runner can run unattended " +
+			"(else 422 sensor_runner_op_unsupported).",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -105,6 +111,7 @@ func newCreateCmd() *cobra.Command {
 				IdentitySub:         identitySub,
 				Tenant:              tenant,
 				Force:               force,
+				Runner:              runner,
 				JSONOut:             jsonOut,
 				BackplaneOverride:   backplaneOverride,
 			})
@@ -141,6 +148,8 @@ func newCreateCmd() *cobra.Command {
 		"target tenant UUID (platform_admin cross-tenant create)")
 	cmd.Flags().BoolVar(&force, "force", false,
 		"create the sensor even when its connector does not fit the target's product and version")
+	cmd.Flags().StringVar(&runner, "runner", "",
+		"name of a runner that runs the check at its site (needs RUNNER_CHECKS_ENABLED)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw Sensor JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
@@ -170,6 +179,7 @@ type createOptions struct {
 	IdentitySub         string
 	Tenant              string
 	Force               bool
+	Runner              string
 	JSONOut             bool
 	BackplaneOverride   string
 }
@@ -363,6 +373,10 @@ func buildCreateBody(
 	if opts.Force {
 		force := true
 		body.Force = &force
+	}
+	if opts.Runner != "" {
+		runner := opts.Runner
+		body.RunnerName = &runner
 	}
 	return body
 }

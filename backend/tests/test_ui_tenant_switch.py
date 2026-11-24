@@ -47,6 +47,12 @@ from structlog.testing import capture_logs
 
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.principal_block import (
+    PRINCIPAL_BLOCKED_MESSAGE,
+    block_principal,
+    reset_block_cache,
+)
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -130,6 +136,7 @@ def _reset_caches() -> None:
     reset_read_revalidation_cache_for_testing()
     clear_discovery_cache()
     clear_jwks_cache()
+    reset_block_cache()
     reset_engine_for_testing()
     structlog.contextvars.clear_contextvars()
 
@@ -756,3 +763,74 @@ def test_every_page_loads_the_page_tenant_script() -> None:
     feed = (static_root_dir() / "src" / "app" / "broadcast-feed.js").read_text("utf-8")
     assert "onSseError()" in feed
     assert "probeTenantChanged" in feed
+
+
+# ---------------------------------------------------------------------------
+# Admin block list: a block in one tenant leaves the other tenants open
+# ---------------------------------------------------------------------------
+
+
+def _block_in(tenant_id: uuid.UUID, *, platform_admin: bool = False) -> None:
+    """Block the person, as the admin of *tenant_id* (or as a platform admin)."""
+    admin = Operator(
+        sub="admin-person",
+        name=None,
+        email=None,
+        raw_jwt="<test>",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+        platform_admin=platform_admin,
+    )
+    _run(block_principal(admin, _PERSON, "left the team"))
+
+
+def test_login_with_the_first_tenant_blocked_opens_the_picker(
+    monkeypatch: pytest.MonkeyPatch, keypair: Any
+) -> None:
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    _block_in(_TENANT_A)
+
+    response, row = _login(monkeypatch, _two_tenant_token(keypair))
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/ui/tenant"
+    client = _client(row.id)
+    assert client.get("/ui/tenant").status_code == 200
+    refused = _switch(client, row.id, str(_TENANT_A))
+    assert refused.status_code == 403
+    assert _session_row(row.id).tenant_chosen is False
+    assert _switch(client, row.id, str(_TENANT_B)).status_code == 303
+    assert client.get("/ui/connectors").status_code == 200
+
+
+def test_person_blocked_in_the_current_tenant_can_switch_to_another(keypair: Any) -> None:
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    session_id = _seed_session(_two_tenant_token(keypair), tenant_id=_TENANT_A)
+    client = _client(session_id)
+    _block_in(_TENANT_A)
+
+    page = client.get("/ui/connectors")
+    assert page.status_code == 403
+    assert page.text == PRINCIPAL_BLOCKED_MESSAGE
+    assert client.get("/ui/tenant").status_code == 200
+
+    assert _switch(client, session_id, str(_TENANT_B)).status_code == 303
+    assert _session_row(session_id).tenant_id == _TENANT_B
+    assert client.get("/ui/connectors").status_code == 200
+    # Moving back into the blocked tenant is refused, and nothing changes.
+    assert _switch(client, session_id, str(_TENANT_A)).status_code == 403
+    assert _session_row(session_id).tenant_id == _TENANT_B
+
+
+def test_block_in_every_tenant_closes_the_picker_too(keypair: Any) -> None:
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    session_id = _seed_session(_two_tenant_token(keypair), tenant_id=_TENANT_A)
+    client = _client(session_id)
+    _block_in(_TENANT_A, platform_admin=True)
+
+    picker = client.get("/ui/tenant")
+    assert picker.status_code == 403
+    assert picker.text == PRINCIPAL_BLOCKED_MESSAGE
+    assert _switch(client, session_id, str(_TENANT_B)).status_code == 403
+    assert _session_row(session_id).tenant_id == _TENANT_A

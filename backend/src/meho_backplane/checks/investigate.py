@@ -121,7 +121,7 @@ import hashlib
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -197,8 +197,11 @@ from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "ChecksFinding",
+    "TransitionClaims",
+    "claim_transitions",
     "investigate_on_transition",
     "run_investigation",
+    "send_claimed_transitions",
 ]
 
 #: ``work_ref`` prefix stamped onto every fired ``agent_run`` -- the
@@ -448,28 +451,81 @@ async def _process_transition(
     if not dashboard_ids:
         return
 
-    pending: list[_ClaimedTransition] = []
-    member_notices: list[DashboardNotice] = []
+    claims = TransitionClaims()
     for dashboard_id in dashboard_ids:
-        claims = await _claim_dashboard_transition(
-            sessionmaker,
-            tenant_id=tenant_id,
-            dashboard_id=dashboard_id,
-            now=now,
-            returned_sensor_id=sensor_id if acknowledgement_expired else None,
+        claims.add(
+            await _claim_dashboard_transition(
+                sessionmaker,
+                tenant_id=tenant_id,
+                dashboard_id=dashboard_id,
+                now=now,
+                returned_sensor_id=sensor_id if acknowledgement_expired else None,
+            )
         )
-        if claims.transition is not None:
-            pending.append(claims.transition)
-        member_notices.extend(claims.member_notices)
+    await send_claimed_transitions(tenant_id, claims)
 
-    # Claims committed under the per-(tenant, dashboard) lock; spawn the
-    # expensive work off the runner's persist path. Investigation and
-    # notification are independent consumers of one claim: the investigator
-    # keeps its worsening-and-actively-failing gate, and the notifier decides
-    # for itself from the configured floor (both edge directions, #2719).
-    # No Broadcast event is published (#3758): checks keep their own
-    # notification pipeline.
-    for claim in pending:
+
+@dataclass
+class TransitionClaims:
+    """The Dashboard edges and member notices one result claimed.
+
+    Built by :func:`claim_transitions` inside the transaction that records
+    the result, and sent by :func:`send_claimed_transitions` once that
+    transaction has committed.
+    """
+
+    transitions: list[_ClaimedTransition] = field(default_factory=list)
+    member_notices: list[DashboardNotice] = field(default_factory=list)
+
+    def add(self, claims: _DashboardClaims) -> None:
+        if claims.transition is not None:
+            self.transitions.append(claims.transition)
+        self.member_notices.extend(claims.member_notices)
+
+
+async def claim_transitions(
+    session: AsyncSession,
+    *,
+    sensor_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    acknowledgement_expired: bool = False,
+) -> TransitionClaims:
+    """Claim the Dashboard edges of *sensor_id* in the caller's open transaction.
+
+    The same claim as :func:`investigate_on_transition`, but in *session*,
+    so it reads the result the caller just wrote and commits with it. A
+    result that a later writer recovers can then never lose its warning:
+    the edge is claimed before any other writer sees the result. Does not
+    commit. Send the claims with :func:`send_claimed_transitions` after the
+    commit.
+    """
+    claims = TransitionClaims()
+    for dashboard in await _dashboards_for_sensor(
+        session, tenant_id=tenant_id, sensor_id=sensor_id
+    ):
+        claims.add(
+            await _claim_dashboard_in_session(
+                session,
+                tenant_id=tenant_id,
+                dashboard_id=dashboard.id,
+                now=now,
+                returned_sensor_id=sensor_id if acknowledgement_expired else None,
+            )
+        )
+    return claims
+
+
+async def send_claimed_transitions(tenant_id: uuid.UUID, claims: TransitionClaims) -> None:
+    """Start the investigator and the mails for committed *claims*.
+
+    Investigation and notification are independent consumers of one claim:
+    the investigator keeps its worsening-and-actively-failing gate, and the
+    notifier decides for itself from the configured floor (both edge
+    directions, #2719). No Broadcast event is published (#3758): checks keep
+    their own notification pipeline.
+    """
+    for claim in claims.transitions:
         if claim.worsening and claim.non_green:
             _schedule_investigation(
                 tenant_id=tenant_id, dashboard=claim.dashboard, members=claim.non_green
@@ -480,7 +536,7 @@ async def _process_transition(
             # ``_investigate_group`` instead.
             await _publish_dashboard_event(tenant_id, claim.dashboard)
         schedule_dashboard_notification(claim.notice)
-    for notice in member_notices:
+    for notice in claims.member_notices:
         schedule_dashboard_notification(notice)
 
 
@@ -524,64 +580,83 @@ async def _claim_dashboard_transition(
     backgrounded notification opens none at all.
     """
     async with sessionmaker() as session:
-        await _lock_dashboard_transition(
-            session, _dashboard_transition_lock_key(tenant_id, dashboard_id)
+        claims = await _claim_dashboard_in_session(
+            session,
+            tenant_id=tenant_id,
+            dashboard_id=dashboard_id,
+            now=now,
+            returned_sensor_id=returned_sensor_id,
         )
-        dashboard = await session.get(CheckDashboard, dashboard_id)
-        if dashboard is None or dashboard.tenant_id != tenant_id:
-            return _DashboardClaims(transition=None, member_notices=[])
-        evaluations: list[_MemberRow] = [
-            (link, s, evaluate_member(_member_state(s), now))
-            for link, s in await _member_rows(session, dashboard_id=dashboard_id)
-        ]
-        current = fold([e for _, _, e in evaluations])
-        previous_memo = dashboard.last_rollup_state
-        previous = previous_memo or "ok"
-        worsening = is_worsening(previous, current)
-        dashboard_snapshot = _dashboard_snapshot(dashboard, previous, current)
-        non_green = [
-            _member_snapshot(s, ev)
-            for _, s, ev in evaluations
-            if ev.effective_state not in ("ok", "skip")
-        ]
-        claimed = False
-        dashboard_edge = current != previous_memo
-        # #6008: no claim while a Dashboard waits for members; a new one's first ok is silent.
-        waiting = _is_waiting_first_state(previous_memo, current, evaluations, now)
-        silent_first = previous_memo is None and current == "ok"
-        if dashboard_edge and not waiting:
-            # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
-            claimed = await _claim_rollup_transition(
-                session, dashboard_id, expected=previous_memo, new=current
-            )
-        changes: list[MemberChange] = []
-        if (claimed or not dashboard_edge) and not waiting:
-            # A caller that lost the Dashboard edge leaves the member memos to
-            # the winner: its change belongs to a mail this caller does not own.
-            # During a wait (#6711) the member memos stay too.
-            changes = await _claim_member_changes(session, evaluations)
-            if returned_sensor_id is not None:
-                returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)
-                if returned is not None:
-                    changes.append(returned)
-        transition: _ClaimedTransition | None = None
-        member_notices: list[DashboardNotice] = []
-        if claimed and not silent_first:
-            transition = _ClaimedTransition(
-                dashboard=dashboard_snapshot,
-                non_green=non_green,
-                worsening=worsening,
-                notice=_dashboard_notice(
-                    dashboard, dashboard_snapshot, non_green, member_changes=tuple(changes)
-                ),
-            )
-        elif not dashboard_edge:
-            member_notices = [
-                _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
-                for change in changes
-            ]
         await session.commit()
+    return claims
 
+
+async def _claim_dashboard_in_session(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    dashboard_id: uuid.UUID,
+    now: datetime,
+    returned_sensor_id: uuid.UUID | None,
+) -> _DashboardClaims:
+    """The claim of :func:`_claim_dashboard_transition`, in *session*; does not commit."""
+    await _lock_dashboard_transition(
+        session, _dashboard_transition_lock_key(tenant_id, dashboard_id)
+    )
+    # Read fresh under the lock: the session may hold a copy loaded before it.
+    dashboard = await session.get(CheckDashboard, dashboard_id, populate_existing=True)
+    if dashboard is None or dashboard.tenant_id != tenant_id:
+        return _DashboardClaims(transition=None, member_notices=[])
+    evaluations: list[_MemberRow] = [
+        (link, s, evaluate_member(_member_state(s), now))
+        for link, s in await _member_rows(session, dashboard_id=dashboard_id)
+    ]
+    current = fold([e for _, _, e in evaluations])
+    previous_memo = dashboard.last_rollup_state
+    previous = previous_memo or "ok"
+    worsening = is_worsening(previous, current)
+    dashboard_snapshot = _dashboard_snapshot(dashboard, previous, current)
+    non_green = [
+        _member_snapshot(s, ev)
+        for _, s, ev in evaluations
+        if ev.effective_state not in ("ok", "skip")
+    ]
+    claimed = False
+    dashboard_edge = current != previous_memo
+    # #6008: no claim while a Dashboard waits for members; a new one's first ok is silent.
+    waiting = _is_waiting_first_state(previous_memo, current, evaluations, now)
+    silent_first = previous_memo is None and current == "ok"
+    if dashboard_edge and not waiting:
+        # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
+        claimed = await _claim_rollup_transition(
+            session, dashboard_id, expected=previous_memo, new=current
+        )
+    changes: list[MemberChange] = []
+    if (claimed or not dashboard_edge) and not waiting:
+        # A caller that lost the Dashboard edge leaves the member memos to
+        # the winner: its change belongs to a mail this caller does not own.
+        # During a wait (#6711) the member memos stay too.
+        changes = await _claim_member_changes(session, evaluations)
+        if returned_sensor_id is not None:
+            returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)
+            if returned is not None:
+                changes.append(returned)
+    transition: _ClaimedTransition | None = None
+    member_notices: list[DashboardNotice] = []
+    if claimed and not silent_first:
+        transition = _ClaimedTransition(
+            dashboard=dashboard_snapshot,
+            non_green=non_green,
+            worsening=worsening,
+            notice=_dashboard_notice(
+                dashboard, dashboard_snapshot, non_green, member_changes=tuple(changes)
+            ),
+        )
+    elif not dashboard_edge:
+        member_notices = [
+            _dashboard_notice(dashboard, dashboard_snapshot, non_green, member_change=change)
+            for change in changes
+        ]
     return _DashboardClaims(transition=transition, member_notices=member_notices)
 
 
@@ -867,6 +942,7 @@ async def _member_rows(
         .join(Sensor, Sensor.id == CheckDashboardSensor.sensor_id)
         .where(CheckDashboardSensor.dashboard_id == dashboard_id)
         .order_by(Sensor.name, Sensor.id)
+        .execution_options(populate_existing=True)
     )
     result = await session.execute(stmt)
     return [(link, sensor) for link, sensor in result.all()]

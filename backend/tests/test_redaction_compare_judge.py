@@ -55,13 +55,17 @@ def _judge(
     base: dict[str, object],
     head: dict[str, object],
     approved: str = "approved: []\n",
+    summary_only: bool = False,
 ) -> int:
     (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
     (tmp_path / "head.jsonl").write_text(json.dumps(head) + "\n", encoding="utf-8")
     (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
     return int(
         judge_module.judge(
-            tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+            tmp_path / "base.jsonl",
+            tmp_path / "head.jsonl",
+            tmp_path / "approved.yaml",
+            summary_only=summary_only,
         )
     )
 
@@ -247,6 +251,94 @@ def _judge_with_base_approved(
             tmp_path / "base-approved.yaml",
         )
     )
+
+
+_STEPS = sorted({path for item in secret_inputs() for path in item.paths})
+
+
+def _assert_names_nothing(out: str) -> None:
+    record = _record([], [])
+    assert str(record["id"]) not in out
+    assert not re.search(r"\b(" + "|".join(_STEPS) + r")\b", out)
+    assert not re.search(r"\b[sp][0-9]+\b", out)
+    assert not re.search(r"[0-9]", out)
+
+
+def test_the_ci_mode_names_no_input_and_gives_no_number(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base, head = _record(["s2"], ["p0"]), _record(["p0"], ["s2"], "b", "q")
+    code = _judge(tmp_path, base, head, summary_only=True)
+    out = capfd.readouterr().out
+    assert code == 1
+    assert out.splitlines() == [out.strip()]
+    assert "not approved" in out
+    assert "no difference" not in out
+    _assert_names_nothing(out)
+
+
+def test_the_ci_mode_with_no_difference_passes_with_one_line(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    code = _judge(tmp_path, _record(["s2"], ["p0"]), _record(["s2"], ["p0"]), summary_only=True)
+    out = capfd.readouterr().out
+    assert code == 0
+    assert out == "no difference is left that is not approved\n"
+    _assert_names_nothing(out)
+
+
+def test_the_ci_mode_still_fails_on_a_stale_entry_and_prints_it(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    code = _judge(
+        tmp_path,
+        _record(["s2"], ["p0"]),
+        _record(["s2"], ["p0"]),
+        _APPROVED_SHOWN,
+        summary_only=True,
+    )
+    lines = capfd.readouterr().out.splitlines()
+    assert code == 1
+    assert len(lines) == 2
+    assert "stale" in lines[0] and "form.plain.password.bare" in lines[0]
+    assert lines[1] == "no difference is left that is not approved"
+
+
+def test_without_the_ci_mode_the_judge_names_each_difference_and_counts(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base, head = _record(["s2"], ["p0"]), _record(["p0"], ["s2"], "b", "q")
+    assert _judge(tmp_path, base, head) == 1
+    assert capfd.readouterr().out.splitlines() == [
+        "form.plain.password.bare redact: shown:s2",
+        "form.plain.password.bare redact: hidden:p0",
+        "form.plain.password.bare redact: text",
+        "3 difference(s), 3 not approved",
+    ]
+
+
+def test_the_command_line_takes_the_ci_mode(tmp_path: Path) -> None:
+    base, head = _record(["s2"], ["p0"]), _record([], ["p0", "s2"], "b")
+    _judge(tmp_path, base, head)
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(_SCRIPT),
+            "--judge",
+            str(tmp_path / "base.jsonl"),
+            str(tmp_path / "head.jsonl"),
+            "--approved",
+            str(tmp_path / "approved.yaml"),
+            "--summary-only",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1, done.stderr
+    assert done.stdout.count("\n") == 1
+    _assert_names_nothing(done.stdout)
 
 
 def test_a_merged_entry_that_matches_no_difference_passes(tmp_path: Path) -> None:

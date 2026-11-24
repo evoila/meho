@@ -1078,6 +1078,29 @@ before a reviewer reads the pull request.
   the lookup fails, or the base has the script, any failed step fails the
   job: the lookup, the second checkout, either environment sync, either
   record build, or the judge.
+- **The job log shows no names and no numbers, on purpose.** The log of
+  a public repo is public, so the job runs the judge with
+  `--summary-only`. Then the judge prints no input id, no step, no part id
+  and no number: only one closing line, either "no difference is left that
+  is not approved" or "differences are left that are not approved". A
+  stale approved entry is still printed, because it is in the committed
+  approved file already. The exit code is the same as without the flag.
+- **See the differences locally.** Without `--summary-only` the judge
+  prints each difference that is not approved (input id, step, kind) and
+  the counts. From the repo root, with the pull request branch checked out:
+
+  ```bash
+  git worktree add --detach /tmp/rc-base origin/main
+  (cd /tmp/rc-base/backend && uv sync --frozen \
+    && uv run python /tmp/rc-base/scripts/ci/redaction_compare.py --records /tmp/rc-base.jsonl)
+  (cd backend && uv run python /tmp/rc-base/scripts/ci/redaction_compare.py --records /tmp/rc-head.jsonl)
+  git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml > /tmp/rc-base-approved.yaml
+  python3 -I /tmp/rc-base/scripts/ci/redaction_compare.py \
+    --judge /tmp/rc-base.jsonl /tmp/rc-head.jsonl \
+    --approved backend/tests/snapshots/redaction_compare_approved.yaml \
+    --base-approved /tmp/rc-base-approved.yaml
+  git worktree remove /tmp/rc-base
+  ```
 
 ## Known issues / future work
 

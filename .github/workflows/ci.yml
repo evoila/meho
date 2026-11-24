@@ -1509,6 +1509,12 @@ jobs:
     # write only its own records, and never the rule script, the base
     # records or the approved files that the judge reads.
     #
+    # The job log is public, so the judge runs with --summary-only: on
+    # purpose the log shows no input, no step, no part and no number, only
+    # one closing line (and any stale approved entry, which is committed
+    # already). To see the differences, run the steps locally (see
+    # docs/codebase/redaction.md, "Compare with main").
+    #
     # It passes with "no compare on the base branch yet" only when a git
     # lookup of the base tree succeeds and finds no rule script. Otherwise
     # any failed step fails the job.
@@ -1597,7 +1603,8 @@ jobs:
           python3 -I "${dir}/redaction_compare.py" \
             --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
             --approved "${dir}/head-approved.yaml" \
-            --base-approved "${dir}/base-approved.yaml"
+            --base-approved "${dir}/base-approved.yaml" \
+            --summary-only
 
   connector-package-template:
     name: Connector package template

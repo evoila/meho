@@ -11,11 +11,18 @@
                              sha, rest) of the current code to FILE (run from
                              a backend/ folder with uv run; it imports that
                              folder's own tests.redaction_compare code)
-  --judge BASE HEAD --approved FILE [--base-approved FILE]
+  --judge BASE HEAD --approved FILE [--base-approved FILE] [--summary-only]
                              compare two record files; exit 1 on a difference
                              that the approved file does not list. Only the
                              entries that are not in the base's approved file
-                             count.
+                             count. Without --summary-only it prints each
+                             difference that is not approved (input id, step,
+                             kind) and the counts.
+  --summary-only             for the public CI log: print no input id, no
+                             step, no part and no number, only one closing
+                             line (a stale approved entry is still printed:
+                             it is in the committed approved file already).
+                             The exit code is the same.
 
 The judge uses only the standard library. The CI job reads this script from
 the base branch, so a pull request cannot weaken the rule that judges it.
@@ -89,12 +96,17 @@ def read_approved(path: Path) -> list[dict]:
 
 
 def judge(
-    base_path: Path, head_path: Path, approved_path: Path, base_approved_path: Path | None = None
+    base_path: Path,
+    head_path: Path,
+    approved_path: Path,
+    base_approved_path: Path | None = None,
+    summary_only: bool = False,
 ) -> int:
     """Only the entries that the pull request adds can approve a difference or be stale.
 
     An entry that is also in the base's approved file was merged with an
     earlier pull request: it approves nothing and never fails the job.
+    With ``summary_only`` the output names no input and holds no number.
     """
     old = []
     if base_approved_path is not None and base_approved_path.is_file():
@@ -105,7 +117,7 @@ def judge(
             sys.exit(f"approved entry {entry} has no reason")
     found = differences(load(base_path), load(head_path))
     used = set()
-    failed = 0
+    not_approved = 0
     for input_id, path, kind in found:
         what = kind.split(":", 1)[-1]
         match = next(
@@ -117,16 +129,24 @@ def judge(
             None,
         )
         if match is None:
-            print(f"{input_id} {path}: {kind}")
-            failed += 1
+            if not summary_only:
+                print(f"{input_id} {path}: {kind}")
+            not_approved += 1
         else:
             used.add(match)
-    for index, entry in enumerate(approved):
-        if index not in used:
-            print(f"approved entry matches no difference (stale): {entry}")
-            failed += 1
-    print(f"{len(found)} difference(s), {failed} not approved")
-    return 1 if failed else 0
+    stale = [entry for index, entry in enumerate(approved) if index not in used]
+    for entry in stale:
+        print(f"approved entry matches no difference (stale): {entry}")
+    if not summary_only:
+        print(f"{len(found)} difference(s), {not_approved + len(stale)} not approved")
+    elif not_approved:
+        print(
+            "differences are left that are not approved;"
+            ' run the compare locally to list them (docs: "Compare with main")'
+        )
+    else:
+        print("no difference is left that is not approved")
+    return 1 if not_approved or stale else 0
 
 
 def write() -> None:
@@ -156,6 +176,7 @@ def main() -> int:
     parser.add_argument("--judge", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--approved")
     parser.add_argument("--base-approved")
+    parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
     if args.write:
         write()
@@ -165,7 +186,13 @@ def main() -> int:
         return 0
     if args.judge and args.approved:
         base_approved = Path(args.base_approved) if args.base_approved else None
-        return judge(Path(args.judge[0]), Path(args.judge[1]), Path(args.approved), base_approved)
+        return judge(
+            Path(args.judge[0]),
+            Path(args.judge[1]),
+            Path(args.approved),
+            base_approved,
+            summary_only=args.summary_only,
+        )
     parser.error("use --write, --records FILE, or --judge BASE HEAD --approved FILE")
     return 2
 

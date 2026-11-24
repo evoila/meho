@@ -16,7 +16,10 @@ what stays central (which is almost everything).
 
     - A central backplane the satellite can reach **outbound** (the
       satellite dials it; the reverse path is never opened).
-    - Registering and revoking runner principals needs **tenant_admin**.
+    - Registering a runner principal needs **a person with tenant_admin**,
+      signed in with their own login: the answer carries an enrollment code.
+      A service login or an agent login gets `403 human_principal_required`.
+      Revoking needs **tenant_admin**.
     - The satellite gateway is **Beta** — see the
       [feature-maturity index](../reference/maturity.md#satellite_gateway).
 
@@ -170,6 +173,19 @@ runner signs its own login request and gets a short token. It asks for a
 new token before the old one ends, and once more after a `401`. No person
 hands it a token. The private key never leaves the site.
 
+The runner uses the key file only when other users on the machine have no
+rights to it: it stops with an error that says to set mode `0600`. When only
+the group has rights (for example from a Kubernetes `fsGroup`), it uses the
+key and writes a warning.
+
+This login follows RFC 7523, a signed JWT as the proof of a client's login
+([section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3)), and
+Keycloak's "Signed JWT" client authenticator
+([Keycloak: Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials)).
+MEHO's live test of this login runs in CI against the Keycloak image
+`keycloak/keycloak:26.0`. The proof on an operator's own Keycloak comes with
+a later step on a real install.
+
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
 MEHO_RUNNER_ID=edge-dc-a \
@@ -256,9 +272,15 @@ switch:
 meho runner-principal revoke edge-dc-a
 ```
 
-Revoke disables the runner's Keycloak client, then deletes it with its
-public key. The runner gets no new token, and its calls with the token it has
-stop working when that token ends.
+Revoke works the same for every runner, with a key or with a fixed token.
+It turns the runner's Keycloak client off, then deletes the client. With the
+client, its public key and its Keycloak secret are gone. The runner row stays
+and is marked revoked, and its enrollment code is cleared:
+`meho runner-principal list --include-revoked` shows it, and `show` shows it
+as revoked. The name stays taken: a new register of the same name gets `409`.
+A revoked runner cannot be brought back, because the deleted client cannot be
+turned on again. A new runner needs a new name and a new enrollment code. A
+token the runner already has works until it ends.
 
 ## Satellite vs. the in-process check runner
 
@@ -284,7 +306,8 @@ tenant_admin writes for each runner (step 4 above) also still works.
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. With `RUNNER_CHECKS_ENABLED` on, results of a sensor with a `runner_name` count as check results. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
-| `403` registering a runner principal | `meho runner-principal register` / `revoke` need **tenant_admin**. | Enroll under a tenant_admin session; `show` / `list` are operator-level. |
+| `403` registering a runner principal | `meho runner-principal register` needs a person with **tenant_admin**; `revoke` needs **tenant_admin**. A service login or an agent login gets `403 human_principal_required` on register. | Register with your own sign-in as a person with tenant_admin; `show` / `list` are operator-level. |
+| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | Other users on the machine have rights to the key file in `MEHO_RUNNER_KEY_DIR`. | Run `chmod 600` on the file and start the runner again. |
 
 ## What is not built yet
 

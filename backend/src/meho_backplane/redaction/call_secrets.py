@@ -161,6 +161,48 @@ def _forms_of(value: str) -> set[str]:
     return {form for form in forms if len(form) >= MIN_VALUE_LENGTH}
 
 
+def _touching_groups(
+    items: list[tuple[int, int, str | None]],
+) -> Iterator[list[tuple[int, int, str | None]]]:
+    """The sorted *items* in groups that overlap or touch (one starts where another ends)."""
+    group: list[tuple[int, int, str | None]] = []
+    end = -1
+    for item in items:
+        if group and item[0] > end:
+            yield group
+            group = []
+        group.append(item)
+        end = max(end, item[1]) if len(group) > 1 else item[1]
+    if group:
+        yield group
+
+
+def _shares_a_piece(value: str, text: str) -> bool:
+    """True when *text* holds any :data:`MIN_VALUE_LENGTH` characters in a row of *value*."""
+    size = MIN_VALUE_LENGTH
+    return any(value[start : start + size] in text for start in range(len(value) - size + 1))
+
+
+def _group_text(original: str, group: list[tuple[int, int, str | None]]) -> str:
+    """What one group shows: the rule's text when it hid each value whole, else the marker.
+
+    An item with ``None`` as its text is a known value; every other item is
+    a change of a rule with the text it wrote. The rule hid a value whole
+    when one change holds the value and the rule's text holds no piece of it.
+    """
+    changes = [(start, end) for start, end, text in group if text is not None]
+    values = [original[start:end] for start, end, text in group if text is None]
+    written = "".join(text for _, _, text in group if text is not None)
+    whole = all(
+        any(a <= start and end <= b for a, b in changes)
+        for start, end, text in group
+        if text is None
+    )
+    if whole and not any(_shares_a_piece(value, written) for value in values):
+        return written
+    return CALL_SECRET_MARKER
+
+
 class CallSecrets:
     """The known secret values of one call, with their forms and one search pattern."""
 
@@ -336,12 +378,15 @@ class CallSecrets:
         ]
 
     def _keep_text_whole(self, original: str, redacted: str) -> str:
-        """*redacted* rebuilt from *original*: each rule's change, and one marker per known value.
+        """*redacted* rebuilt from *original*: each rule's change, and no part of a known value.
 
-        A part of *original* that a rule changed shows what the rule wrote. A
-        known value, together with every change that touches it, becomes one
-        marker. Every other part is the same in both texts. So the result
-        keeps everything the rule hid and no part of a known value.
+        A part of *original* that a rule changed shows what the rule wrote.
+        A known value, together with every change that touches it, is one
+        group. When the rule hid each known value of the group whole (one
+        change holds it, and the rule's text holds no piece of it), the group
+        shows what the rule wrote, its own label; else the group becomes one
+        marker. Every other part is the same in both texts. So
+        the result keeps everything the rule hid and no part of a known value.
         """
         items: list[tuple[int, int, str | None]] = [
             *self._changed_spans(original, redacted),
@@ -349,23 +394,11 @@ class CallSecrets:
         ]
         items.sort(key=lambda item: (item[0], item[1]))
         parts: list[str] = []
-        cursor = index = 0
-        while index < len(items):
-            start, end, written = items[index]
-            hides_value = written is None
-            texts = [written] if written is not None else []
-            index += 1
-            # A change that starts where the last one ends touches it.
-            while index < len(items) and items[index][0] <= end:
-                _, stop, more = items[index]
-                end = max(end, stop)
-                hides_value = hides_value or more is None
-                if more is not None:
-                    texts.append(more)
-                index += 1
-            parts.append(original[cursor:start])
-            parts.append(CALL_SECRET_MARKER if hides_value else "".join(texts))
-            cursor = end
+        cursor = 0
+        for group in _touching_groups(items):
+            parts.append(original[cursor : group[0][0]])
+            parts.append(_group_text(original, group))
+            cursor = max(end for _, end, _ in group)
         parts.append(original[cursor:])
         return "".join(parts)
 

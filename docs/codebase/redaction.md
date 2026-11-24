@@ -454,7 +454,9 @@ in it), or hide more than the value (a whole `Bearer` token when the value is
 the word `Bearer`). `keep_call_secrets_whole` compares each text that holds a
 known value with the rule's result, word by word. A part the rule changed
 shows what the rule wrote. A known value, with every change that touches it,
-becomes one mark. Every other part is the same in both texts. So the text
+becomes one mark. When the rule hid the value whole (one change holds it, and
+the rule's text holds no four characters in a row of it), the rule's own label
+stays instead. Every other part is the same in both texts. So the text
 keeps everything the rule hid, and no part of the value. A word is the unit,
 so a letter of a hidden word never lines up with a letter of the rule's
 label. Texts with more than 20,000 words together are not compared: such a

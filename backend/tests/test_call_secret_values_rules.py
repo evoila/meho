@@ -98,8 +98,21 @@ def test_a_value_inside_what_a_rule_hid_reveals_nothing_else() -> None:
     scope = CallSecrets(["Bearer"])
     original = "send Bearer tok-5531-otter-9920 now"
     out = scope.keep_whole(original, "send [REDACTED:bearer] now")
+    # The label holds a piece of the value ("earer"), so the marker is used.
     assert out == f"send {CALL_SECRET_MARKER} now"
-    assert "tok-5531" not in out
+
+
+def test_a_rule_that_hid_the_value_whole_keeps_its_label() -> None:
+    scope = CallSecrets([_SECRET])
+    out = scope.keep_whole(f"pw {_SECRET} end", "pw [REDACTED:param_name] end")
+    assert out == "pw [REDACTED:param_name] end"
+
+
+def test_a_value_partly_in_a_change_becomes_one_marker() -> None:
+    scope = CallSecrets(["Bearer tok-5531"])
+    original = "send Bearer tok-5531 otter-9920 now"
+    out = scope.keep_whole(original, "send Bearer [R] otter-9920 now")
+    assert out == f"send {CALL_SECRET_MARKER} otter-9920 now"
 
 
 def test_a_rule_change_beside_the_value_stays() -> None:

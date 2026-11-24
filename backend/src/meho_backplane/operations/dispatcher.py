@@ -483,6 +483,7 @@ from meho_backplane.operations._validate import (
 from meho_backplane.operations._vendor_text import (
     redact_error_payload,
     redact_error_result,
+    sends_secret,
     withhold_vendor_text,
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
@@ -2404,6 +2405,7 @@ def _classify_http_status_error(
     duration_ms: float,
     relogin: Literal["not_available", "reestablished"] = "not_available",
     changes_target: bool = False,
+    op_sends_secret: bool = False,
 ) -> OperationResult:
     """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
 
@@ -2415,7 +2417,9 @@ def _classify_http_status_error(
       authenticated but lacks the op's required scope.
     * a redirect after a change (301, 302, 303, 307, 308) ->
       :func:`result_connector_redirect_on_change`, worded by what the code
-      means; marked uncertain when the operation may change the target.
+      means; marked uncertain when the operation may change the target. The
+      redirect address is left out when the operation sends a secret
+      (*op_sends_secret*).
     * ``410`` -> :func:`result_connector_http_410` -- the product version
       removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
@@ -2438,7 +2442,9 @@ def _classify_http_status_error(
         # MEHO did not follow a redirect after a change. It does not know
         # whether the change ran, except that a 307 / 308 asked for a repeat
         # at another address.
-        redirected = result_connector_redirect_on_change(op_id, http_exc, duration_ms)
+        redirected = result_connector_redirect_on_change(
+            op_id, http_exc, duration_ms, withhold_address=op_sends_secret
+        )
         return with_uncertain_outcome(redirected) if changes_target else redirected
     if status_code == 403:
         return result_connector_http_403(op_id, http_exc, duration_ms)
@@ -2539,13 +2545,19 @@ async def _handle_http_status_error(
         # The login ended, so the kept session is dropped. The change is not
         # sent again; the redirect result below tells the caller what happened.
         await invalidate_session(target, rejected=http_exc.request)
+        mark_session_relogin(status_code, resent=False)
     if (
         callable(invalidate_session)
         and not redirect_on_change
         and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
     ):
         # One rule for both paths: repeat only when it cannot send a change twice.
-        if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
+        if not may_resend_after_session_end(
+            descriptor,
+            connector_instance,
+            http_exc.request,
+            after_redirect=bool(http_exc.response.history),
+        ):
             return await _session_ended_not_resent(
                 invalidate_session=invalidate_session,
                 rejected_exc=http_exc,
@@ -2596,6 +2608,7 @@ async def _handle_http_status_error(
             target=target,
             duration_ms=duration_ms,
             changes_target=changes_target(descriptor.safety_level),
+            op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
         ),
         audit_id=audit_id,
         operator=operator,
@@ -2716,6 +2729,7 @@ async def _retry_after_expired_session_answer(
                 duration_ms=duration_ms,
                 relogin="reestablished",
                 changes_target=changes_target(descriptor.safety_level),
+                op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
             )
     except ConnectorAuthError as retry_exc:
         # The fresh sign-in was refused. Drop the kept credential too, so a
@@ -2816,6 +2830,7 @@ async def _retry_after_session_invalidation(
                 duration_ms=duration_ms,
                 relogin="reestablished",
                 changes_target=changes_target(descriptor.safety_level),
+                op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
             ),
             audit_id=audit_id,
             operator=operator,

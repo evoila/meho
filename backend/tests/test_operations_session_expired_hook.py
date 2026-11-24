@@ -259,6 +259,7 @@ async def _insert_descriptor(
     handler_ref: str | None = None,
     safety_level: str = "safe",
     op_id: str = _OP_ID,
+    tags: list[str] | None = None,
 ) -> None:
     session.add(
         EndpointDescriptor(
@@ -274,7 +275,7 @@ async def _insert_descriptor(
             handler_ref=handler_ref,
             summary="Events.",
             description="Session-ended test op.",
-            tags=[],
+            tags=tags or [],
             parameter_schema={"type": "object", "properties": {}},
             response_schema=None,
             llm_instructions=None,

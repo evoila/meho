@@ -1711,6 +1711,11 @@ def is_redirect_on_change(exc: httpx.HTTPStatusError) -> bool:
     )
 
 
+def _safe_address(url: httpx.URL) -> str:
+    """*url* as scheme, host and path only: no query, fragment or login part."""
+    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
+
+
 def _redirect_address(exc: httpx.HTTPStatusError) -> str:
     """The address a redirect names: scheme, host and path only.
 
@@ -1719,16 +1724,21 @@ def _redirect_address(exc: httpx.HTTPStatusError) -> str:
     """
     location = exc.response.headers.get("Location", "")
     try:
-        url = exc.request.url.join(location)
+        return _safe_address(exc.request.url.join(location))
     except httpx.InvalidURL:
         return "an address MEHO could not read"
-    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
+
+
+#: Put in place of the redirect address for an operation that sends a secret.
+_ADDRESS_WITHHELD: Final = "an address that MEHO does not show, because this call sends a secret"
 
 
 def result_connector_redirect_on_change(
     op_id: str,
     exc: httpx.HTTPStatusError,
     duration_ms: float,
+    *,
+    withhold_address: bool = False,
 ) -> OperationResult:
     """A change got a redirect that MEHO did not follow.
 
@@ -1736,10 +1746,16 @@ def result_connector_redirect_on_change(
     target did not handle the request; 303 says the change ran and the result
     is at the address; 301 / 302 are unclear. The result keeps the shape of a
     ``connector_error`` and adds no field.
+
+    Every text is built here from the status, the method and the safe parts
+    of the two addresses. ``str(exc)`` is not used: httpx puts the full
+    ``Location`` there, and a one-time ticket in its query would reach the
+    caller and the audit row. The redirect body is not used either. With
+    *withhold_address* (the operation sends a secret) the redirect address is
+    left out too, because the vendor chose it.
     """
-    result = result_connector_error(op_id, exc, duration_ms)
-    address = _redirect_address(exc)
     status_code = exc.response.status_code
+    address = _ADDRESS_WITHHELD if withhold_address else _redirect_address(exc)
     if status_code in (307, 308):
         message = (
             f"The target did not run this call. It asked for it to go to {address}. "
@@ -1754,7 +1770,21 @@ def result_connector_redirect_on_change(
             f"The target answered with a redirect to {address}. MEHO did not follow it "
             "and could not find out if the change ran. Check the target."
         )
-    return result.model_copy(update={"error": f"{result.error}. {message}"})
+    sent = f"{exc.request.method} {_safe_address(exc.request.url)}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"connector_error: {type(exc).__name__}. {message}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_error",
+            "exception_class": type(exc).__name__,
+            "exception_message": f"HTTP {status_code} redirect after {sent}",
+            MESSAGE_SOURCE_KEY: MESSAGE_SOURCE_MEHO,
+            "http_status": status_code,
+            "upstream_message": None,
+        },
+    )
 
 
 def result_vault_credentials_read_error(

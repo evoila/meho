@@ -678,13 +678,15 @@ async def _stream_capped_json_response(
             if total > _MAX_RESPONSE_BYTES:
                 raise _body_over_cap_error("decoded bytes")
             chunks.append(chunk)
-        return httpx.Response(
+        rebuilt = httpx.Response(
             status_code=resp.status_code,
             headers=_rebuilt_headers(resp, codings, total),
             content=b"".join(chunks),
             request=resp.request,
             extensions=resp.extensions,
         )
+        rebuilt.history = resp.history
+        return rebuilt
 
 
 async def _read_capped_json_response(
@@ -802,9 +804,35 @@ def _scrub_location_header(location: str | None) -> str | None:
 _MAX_CHANGE_REDIRECTS = 1
 
 
+#: Set while :meth:`HttpConnector._request_json` or
+#: :meth:`HttpConnector._post_json` sends its request: only then does the
+#: client put each followed redirect into the trace. A direct client call (a
+#: login, for example) stays out of the trace, as it does without a redirect.
+_trace_redirect_hops: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_trace_redirect_hops", default=False
+)
+
+
+def _encoded_path(url: httpx.URL) -> str:
+    """The path of *url* as it is sent: still percent-encoded, without the query.
+
+    :attr:`httpx.URL.path` decodes ``%2F``, so ``/a%2Fb`` and ``/a/b`` would
+    look equal although they name different resources.
+    """
+    return url.raw_path.split(b"?", 1)[0].decode("ascii")
+
+
 def _folded_path(url: httpx.URL) -> str:
-    """The path of *url* without one trailing slash, in lower case."""
-    return url.path.removesuffix("/").lower()
+    """The encoded path of *url* without one trailing slash, in lower case."""
+    return _encoded_path(url).removesuffix("/").lower()
+
+
+def _sent_address(url: httpx.URL) -> str:
+    """The address a request goes to: origin, encoded path and query.
+
+    The fragment is left out because HTTP never sends it.
+    """
+    return str(url.copy_with(fragment=None))
 
 
 def _change_may_be_sent_again(
@@ -815,14 +843,14 @@ def _change_may_be_sent_again(
     Only a 307 or 308 (the target says: send the same request there), only to
     the path that was sent (apart from one trailing slash or letter case) with
     the same query, and never to an address that was already sent to. The
-    compare uses the sent URL, never a path template: a template would match a
-    redirect to another object's id.
+    compare uses the sent, still encoded URL, never a path template: a
+    template would match a redirect to another object's id.
     """
     return (
         status_code in (307, 308)
         and _folded_path(sent) == _folded_path(location)
         and sent.query == location.query
-        and str(location) not in already_sent
+        and _sent_address(location) not in already_sent
     )
 
 
@@ -871,6 +899,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             response.stream = _StopSafeCloseStream(response.stream)
         return response
 
+    @staticmethod
+    def _hop_span_start() -> flight_recorder_capture.SpanStart | None:
+        """A trace start for a redirect hop, only inside a traced helper."""
+        return flight_recorder_capture.span_start() if _trace_redirect_hops.get() else None
+
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:
@@ -880,11 +913,15 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # ``follow_redirects=True`` slipping through a convenience method.
         is_change = request.method.upper() not in _IDEMPOTENT_METHODS
         max_hops = _MAX_CHANGE_REDIRECTS if is_change else _MAX_SAME_ORIGIN_REDIRECTS
-        sent_urls = {str(request.url)}
-        hops = 0
-        hop_start = flight_recorder_capture.span_start()
+        sent_urls = {_sent_address(request.url)}
+        # Each answer that MEHO followed. The last answer carries them in
+        # ``history`` (as httpx does), so a caller can tell that the request
+        # it sees was not the first one sent.
+        history: list[httpx.Response] = []
+        hop_start = self._hop_span_start()
         response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
         while True:
+            response.history = list(history)
             if not response.has_redirect_location:
                 return response
             # ``next_request`` is httpx's own correctly-built follow-up
@@ -909,7 +946,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 )
                 return response
             if is_change and (
-                hops >= max_hops
+                len(history) >= max_hops
                 or not _change_may_be_sent_again(
                     response.status_code, request.url, next_request.url, sent_urls
                 )
@@ -925,7 +962,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     location=_scrub_location_header(response.headers.get("Location")),
                 )
                 return response
-            if hops >= max_hops:
+            if len(history) >= max_hops:
                 # Exhausted the same-origin hop budget — surface httpx's own
                 # error so the caller sees a redirect loop rather than a
                 # silent 3xx. Close the final 3xx first so its connection is
@@ -937,8 +974,8 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
                     request=request,
                 )
-            # One trace entry per request that was really sent: the
-            # caller records the last one.
+            # One trace entry per request that was really sent, with its own
+            # method: the helper that sent the request records the last one.
             flight_recorder_capture.record_vendor_call(
                 hop_start,
                 method=request.method,
@@ -946,10 +983,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 response=response,
             )
             await response.aclose()
-            hops += 1
+            history.append(response)
             request = next_request
-            sent_urls.add(str(request.url))
-            hop_start = flight_recorder_capture.span_start()
+            sent_urls.add(_sent_address(request.url))
+            hop_start = self._hop_span_start()
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
 
 
@@ -1336,6 +1373,7 @@ class HttpConnector(Connector):
         # response, so it records an error span and re-raises (#3408). Each
         # retry attempt is its own vendor call and gets its own span.
         _fr_start = flight_recorder_capture.span_start()
+        trace_hops = _trace_redirect_hops.set(True)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1349,12 +1387,16 @@ class HttpConnector(Connector):
         except httpx.TransportError as exc:
             flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
             raise
+        finally:
+            _trace_redirect_hops.reset(trace_hops)
+        # After a followed redirect the last request can have another method
+        # (an OPTIONS answered with a 303 is followed by a GET).
         flight_recorder_capture.record_vendor_call(
             _fr_start,
-            method=method,
+            method=resp.request.method,
             request_headers=headers,
             response=resp,
-            request_body=json,
+            request_body=json if resp.request.method == method else None,
             request_content_type="application/json" if json is not None else None,
             response_body=self._trace_response_body(_fr_start, resp),
         )
@@ -1449,6 +1491,7 @@ class HttpConnector(Connector):
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
         _fr_start = flight_recorder_capture.span_start()
+        trace_hops = _trace_redirect_hops.set(True)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1464,6 +1507,8 @@ class HttpConnector(Connector):
         except httpx.TransportError as exc:
             flight_recorder_capture.record_vendor_call_error(_fr_start, method=verb, exc=exc)
             raise
+        finally:
+            _trace_redirect_hops.reset(trace_hops)
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=resp.request.method,

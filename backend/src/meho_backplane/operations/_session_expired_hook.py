@@ -130,16 +130,25 @@ def session_expired_by_hook(connector_instance: Any, response: httpx.Response) -
 
 
 def may_resend_after_session_end(
-    descriptor: Any, connector_instance: Any, rejected: httpx.Request
+    descriptor: Any,
+    connector_instance: Any,
+    rejected: httpx.Request,
+    *,
+    after_redirect: bool = False,
 ) -> bool:
     """Whether MEHO may run the operation again after "the session ended".
 
-    Yes only when a repeat cannot send a change twice:
+    Never when the refused request is a change that MEHO sent after a
+    redirect (*after_redirect*): the change was already sent twice, and a
+    change is sent at most twice.
+
+    Otherwise yes only when a repeat cannot send a change twice:
 
     * the operation's risk level is ``safe`` (it changes nothing), or
     * it is an ingested operation that sent exactly one request. That one
-      request was refused, so nothing ran. A write is always one request;
-      a read sends more than one only when the connector follows pages.
+      request was refused, so nothing ran. A write is one request, or two
+      after a 307 / 308 to the same path (the rule above); a read sends more
+      than one only when the connector follows pages.
 
     A ``safe`` operation is repeated also in a run after a person's
     approval (for example a read step of an approved multi-step operation).
@@ -148,6 +157,8 @@ def may_resend_after_session_end(
     have sent a write before the refused request, so it is not repeated
     unless it is ``safe``.
     """
+    if after_redirect and rejected.method not in _READ_METHODS:
+        return False
     if descriptor.safety_level == "safe":
         return True
     if approved_run_var.get():

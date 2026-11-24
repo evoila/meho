@@ -7,11 +7,16 @@ The transport is mocked and counts each request. MEHO marks the result
 uncertain when the operation changes the target, and does not mark it for a
 read. A change that gets a redirect is sent once, also when the connector
 says the login ended. An approved ingested PUT that gets a 303 is sent once
-and the message is stored. Names and addresses are made up.
+and the message is stored. A one-time ticket in the redirect address, and the
+address of an operation that sends a secret, stay out of the result and the
+audit row. A change sent twice after a 307 is not sent a third time after
+"the login ended". A login that gets a redirect is reported as the login.
+Names and addresses are made up.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -22,8 +27,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations.approval_queue import _dump_result_envelope
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
 from tests.test_operations_session_expired_hook import (  # noqa: F401
     _audit_rows,
@@ -55,16 +62,20 @@ class _RedirectingConnector(_NoHook403Connector):
 
     impl_id = "vcfops-rest-redirect"
     status: ClassVar[int] = 303
+    location: ClassVar[str] = "/jobs/42"
     expired: ClassVar[bool] = False
 
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[str] = []
 
+    def answer(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(self.status, headers={"Location": self.location})
+
     async def _send(self, method: str, path: str) -> dict[str, Any]:
         def answer(request: httpx.Request) -> httpx.Response:
             self.sent.append(request.method)
-            return httpx.Response(self.status, headers={"Location": "/jobs/42"})
+            return self.answer(request)
 
         async with _SameOriginRedirectClient(
             base_url="https://vcfops.example.test", transport=httpx.MockTransport(answer)
@@ -143,6 +154,12 @@ async def test_login_ended_redirect_does_not_send_the_change_again(
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
     assert result.extras["error_code"] != "connector_auth_failed"
     assert connector.invalidations >= 1
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["session_relogin"] is True
+    assert rows[0].payload["session_resent"] is False
+    assert rows[0].payload["result_unknown"] is True
+    assert rows[0].payload["session_relogin_status"] == 302
 
 
 @pytest.mark.asyncio
@@ -162,6 +179,138 @@ async def test_approved_ingested_put_with_303_is_sent_once_and_stored(
     assert isinstance(connector, _RedirectingConnector)
     assert connector.sent == ["PUT"]
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
+    assert result.error is not None
+    assert "The target says the change ran" in result.error
     rows = await _audit_rows()
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
+    assert rows[0].payload["error"]["http_status"] == 303
+    # The result that is stored on the approval request holds the message.
+    stored = _dump_result_envelope(result)
+    assert stored is not None
+    assert "The target says the change ran" in json.dumps(stored)
+
+
+class _TicketRedirectConnector(_RedirectingConnector):
+    impl_id = "vcfops-rest-redirect-ticket"
+    location = "/jobs/42?ticket=one-time-ticket-123"
+
+
+@pytest.mark.asyncio
+async def test_ticket_in_the_redirect_address_stays_out_of_result_and_audit_row(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, _ = await _run(
+        _TicketRedirectConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="POST",
+        safety_level="caution",
+    )
+
+    assert result.status == "error"
+    assert "one-time-ticket-123" not in json.dumps(result.model_dump(mode="json"))
+    assert "one-time-ticket-123" not in json.dumps(_dump_result_envelope(result))
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert "one-time-ticket-123" not in json.dumps(rows[0].payload)
+
+
+class _SecretPathRedirectConnector(_RedirectingConnector):
+    impl_id = "vcfops-rest-redirect-secret"
+    status = 307
+    location = "/keys/the-secret-value"
+
+
+@pytest.mark.asyncio
+async def test_operation_that_sends_a_secret_keeps_the_address_out(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, _ = await _run(
+        _SecretPathRedirectConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        approved=True,
+        method="PUT",
+        safety_level="caution",
+        tags=["secret"],
+    )
+
+    assert result.status == "error"
+    assert "the-secret-value" not in json.dumps(result.model_dump(mode="json"))
+    assert result.error is not None
+    assert "because this call sends a secret" in result.error
+    assert "the-secret-value" not in json.dumps(_dump_result_envelope(result))
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert "the-secret-value" not in json.dumps(rows[0].payload)
+
+
+class _RedirectThenLoginEndedConnector(_RedirectingConnector):
+    """A 307 to the same path, then 401 on the second send."""
+
+    impl_id = "vcfops-rest-redirect-then-401"
+
+    def answer(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/"):
+            return httpx.Response(401)
+        return httpx.Response(307, headers={"Location": request.url.path + "/"})
+
+
+@pytest.mark.asyncio
+async def test_change_sent_twice_after_a_307_is_not_sent_again_after_login(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _RedirectThenLoginEndedConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert isinstance(connector, _RedirectThenLoginEndedConnector)
+    assert connector.sent == ["PUT", "PUT"]
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert connector.invalidations == 1
+    rows = await _audit_rows()
+    assert rows[0].payload["session_resent"] is False
+
+
+class _LoginRedirectConnector(_RedirectingConnector):
+    """The login before the operation gets a redirect; the operation is not sent."""
+
+    impl_id = "vcfops-rest-login-redirect"
+
+    async def _send(self, method: str, path: str) -> dict[str, Any]:
+        raise SessionLoginError(
+            "profiled session-login failed for target 'lab-target': POST /api/login "
+            "returned HTTP 303 (a redirect). MEHO did not follow it and did not send "
+            "the operation."
+        )
+
+
+@pytest.mark.asyncio
+async def test_login_redirect_is_reported_as_the_login(
+    stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    result, connector = await _run(
+        _LoginRedirectConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert isinstance(connector, _LoginRedirectConnector)
+    assert connector.sent == []
+    assert result.status == "error"
+    assert "execution_outcome" not in result.extras
+    assert "POST /api/login returned HTTP 303" in result.extras["exception_message"]
+    assert "did not send the operation" in result.extras["exception_message"]
+    assert "change ran" not in (result.error or "")

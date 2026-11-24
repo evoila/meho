@@ -36,7 +36,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
-from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
@@ -678,6 +678,38 @@ async def test_session_login_post_auth_status_raises_connector_auth_error(status
     assert isinstance(err.__cause__, httpx.HTTPStatusError)
     # No session cached — the establish failed before a token was minted.
     assert credential_cache_key(target) not in connector._session_tokens
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_session_login_redirect_names_the_login_and_sends_no_operation(status: int) -> None:
+    """A redirect on the login POST is reported as the login's answer.
+
+    The error names the login request and says the operation was not sent,
+    so the dispatcher never takes it for the operation's own redirect. The
+    operation's request is never sent.
+    """
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").respond(
+            status, headers={"Location": "/ui/login?ticket=one-time-ticket-123"}
+        )
+        operation = mock.put("/api/v2/items/7").respond(200, json={})
+        with pytest.raises(SessionLoginError) as exc_info:
+            await connector._post_json(
+                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+            )
+
+    message = str(exc_info.value)
+    assert f"POST /api/v2/sessions returned HTTP {status}" in message
+    assert "did not send the operation" in message
+    assert "one-time-ticket-123" not in message
+    assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+    assert login.call_count == 1
+    assert operation.call_count == 0
     await connector.aclose()
 
 

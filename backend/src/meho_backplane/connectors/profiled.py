@@ -122,6 +122,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_basic_credentials,
 )
 from meho_backplane.connectors._shared.vcf_auth import (
+    SessionLoginError,
     is_acceptable_auth_model,
     session_establish_auth_error,
 )
@@ -537,6 +538,14 @@ class ProfiledRestConnector(HttpConnector):
             auth_error = session_establish_auth_error(exc, message=message, target=target)
             if auth_error is not None:
                 raise auth_error from exc
+            if exc.response.is_redirect:
+                # The login, not the operation, got the redirect. The error
+                # names the login request, and says the operation was not sent,
+                # so the dispatcher does not take it for the operation's answer.
+                raise SessionLoginError(
+                    f"{message} (a redirect). MEHO did not follow it and did not "
+                    "send the operation."
+                ) from exc
             raise
         return resp.json(), established_path
 

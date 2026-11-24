@@ -1183,6 +1183,27 @@ yaml`. `_image_pull_secret_names()` in `ops_workload.py` copies the names
 only. MEHO does not read the Secrets, so no secret content can appear in
 the result.
 
+### Shared log read (`ops_logs_read.py`)
+
+`k8s.logs.read` (group `logs`, risk level `safe`) takes the parameters
+that every connector's log read shares (`connectors/log_read.py`):
+`source`, `since`, `until`, `lines`, `filter`. It calls `k8s_logs` and
+changes only the shape. `k8s.logs` keeps its own parameters.
+
+- `source` is `<namespace>/<pod>` or `<namespace>/<pod>/<container>`.
+- Without `since`: the newest `lines` lines (default 200, at most 5000),
+  no times. With `since` (a span like `15m`, or an RFC 3339 time) and
+  optional `until`: the window is read with `since_time` / `until_time`,
+  oldest first, each row with its time.
+- `filter` is a plain text match, case counts. Without `since` it reads
+  the newest 5000 lines and filters them.
+- The answer: `rows` of `{time, line}`, `total`, `truncated`, `covered`
+  (`{from, to}`, or `null` without times) and `continuation`. In a window,
+  `continuation` is the time to pass as `since` to read on: the
+  `next_since_time` of `k8s.logs`, or the time of the first row that
+  `lines` cut off.
+- No result handle is built here; the result reduction does it.
+
 ### Init container logs in `k8s.logs` (#3686)
 
 `k8s.logs` passes `include_init_containers=True` to

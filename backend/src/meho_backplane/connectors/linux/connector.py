@@ -522,6 +522,17 @@ class LinuxSshConnector(SshConnector):
 
         return await linux_journal_tail(self, target, params, operator)
 
+    async def logs_read(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.logs.read`` (group ``logs``)."""
+        from meho_backplane.connectors.linux.ops_logs_read import linux_logs_read
+
+        return await linux_logs_read(self, target, params, operator)
+
     async def fs_usage(
         self,
         target: Target,

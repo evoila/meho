@@ -153,6 +153,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
+| `linux.logs.read` | `logs` | `source`, `since?`, `until?`, `lines?`, `filter?` | `{rows, total, truncated, covered, continuation}`; row = `{time, line}` (see "Shared log read") |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 | `linux.tool.which` | `system` | `names` (1 to 20 program names) | `{tools: [{name, found, path}]}` |
@@ -182,6 +183,33 @@ the host does not answer is `null`.
 back with no content. Those files always report size 0, so empty content is
 the kernel's empty answer, not an empty file. An empty regular file has
 `size_bytes: 0` and `zero_length: false`.
+
+### Shared log read (`ops_logs_read.py`)
+
+`linux.logs.read` (group `logs`, risk level `safe`) is the log read with
+the parameters and the answer that every connector shares
+(`connectors/log_read.py`). `linux.log.tail` and `linux.journal.tail`
+stay, with their own names and parameters.
+
+- `source` is an absolute path (a file, confined like `log.tail`),
+  `journal` (the whole systemd journal) or a systemd unit name.
+- A file has no times. `since` and `until` on a file raise an error
+  instead of being ignored. For the journal and a unit, `since` is a
+  span (`15m`) or an RFC 3339 time, `until` an RFC 3339 time; both go to
+  `linux.journal.tail` as exact UTC times.
+- `lines` (default 200, at most 5000) keeps the newest lines. `filter`
+  is a plain text match, case counts. With a filter the handler reads
+  the newest 10000 lines (the cap of the older ops) and filters them.
+- The answer: `rows` of `{time, line}` (oldest first; `time` is `null`
+  for a file), `total`, `truncated`, `covered` (`{from, to}` of the rows
+  with a time, else `null`) and `continuation`. `truncated` is true when
+  lines were dropped by `lines` or when the source may hold older lines
+  than were read. The journal has no continuation marker here, so
+  `continuation` is `null`: an earlier part is read with `until`.
+- The handler builds no result handle. The normal result reduction
+  makes one when the rows are many. A secret in a line is hidden by the
+  redaction of the result (`docs/codebase/redaction.md`); a test checks
+  it.
 
 ### Journal, filesystem usage and directory listing (`ops_inspect.py`)
 

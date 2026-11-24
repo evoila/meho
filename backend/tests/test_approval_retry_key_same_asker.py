@@ -310,8 +310,9 @@ async def _park(
     target_id: uuid.UUID | None = None,
     params: dict[str, Any] | None = None,
     reveal_secret: bool = False,
+    key: str = _KEY,
 ) -> ApprovalRequest:
-    """Park a request with the shared key straight through ``create_pending_request``."""
+    """Park a request with *key* straight through ``create_pending_request``."""
     call_params = params if params is not None else {"name": "web-01"}
     target = SimpleNamespace(id=target_id) if target_id is not None else None
     async with get_sessionmaker()() as session:
@@ -323,7 +324,7 @@ async def _park(
             target=target,
             params=call_params,
             params_hash=compute_params_hash(call_params),
-            idempotency_key=_KEY,
+            idempotency_key=key,
             reveal_secret=reveal_secret,
             proposed_effect={"safety_level": "caution"},
         )
@@ -387,5 +388,48 @@ async def test_a_request_with_a_linked_key_refuses_another_call(
     assert refused.value.request_id == second.id
     assert [(row.id, row.status) for row in await _rows()] == [
         (first.id, "rejected"),
+        (second.id, "pending"),
+    ]
+
+
+@pytest.mark.parametrize("retry_of", ["first", "second"])
+@pytest.mark.asyncio
+async def test_a_key_linked_to_two_calls_refuses_a_retry_of_either(
+    monkeypatch: pytest.MonkeyPatch, retry_of: str
+) -> None:
+    """A key that gets back live requests of two calls refuses a retry of each of them.
+
+    The first request holds the key in its own column. The second one, for
+    another target and asked by other people, has the key in a linked row.
+    A retry asked exactly like one of them still meets the other one.
+    """
+    _behind(monkeypatch, {"agent:nightly": ["person-a"]})
+    first = await _park(_agent())
+    other_target = uuid.uuid4()
+    _behind(monkeypatch, {"agent:nightly": ["person-b"]})
+    second = await _park(_agent(), target_id=other_target, key="another-key")
+    async with get_sessionmaker()() as session:
+        session.add(
+            ApprovalRequestKey(
+                approval_request_id=second.id,
+                idempotency_key=_KEY,
+                created_at=approval_queue_module._now(),
+            )
+        )
+        await session.commit()
+
+    if retry_of == "first":
+        _behind(monkeypatch, {"agent:nightly": ["person-a"]})
+        retry: dict[str, Any] = {}
+        other = second
+    else:
+        retry = {"target_id": other_target}
+        other = first
+    with pytest.raises(approval_queue_module.IdempotencyKeyConflictError) as refused:
+        await _park(_agent(), **retry)
+
+    assert refused.value.request_id == other.id
+    assert [(row.id, row.status) for row in await _rows()] == [
+        (first.id, "pending"),
         (second.id, "pending"),
     ]

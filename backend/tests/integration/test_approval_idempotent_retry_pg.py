@@ -18,6 +18,10 @@ the first one committed. A helper lets each retry wait a short time after
 its first key lookup for the other one: the two meet there when the lock is
 missing, and the test then shows two requests.
 
+A late retry for another call, asked another way, meets an approve the
+same way. It must wait for the approve to commit and then be refused: the
+approved request still holds the key.
+
 A third race is two retries whose key a request of other people behind
 the login holds. Each gets its own request beside the holder; the two end
 with one new request. A fourth one rejects the holder while the first
@@ -45,6 +49,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -61,6 +66,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
+    IdempotencyKeyConflictError,
     approve_request,
     create_pending_request,
     reject_request,
@@ -115,7 +121,12 @@ def _reviewer() -> Operator:
     )
 
 
-async def _submit(*, expires_at: datetime | None = None) -> ApprovalRequest:
+async def _submit(
+    *,
+    expires_at: datetime | None = None,
+    target_id: uuid.UUID | None = None,
+    reveal_secret: bool = False,
+) -> ApprovalRequest:
     """One ``call_operation`` park with the shared key, in its own transaction."""
     async with get_sessionmaker()() as session:
         request = await create_pending_request(
@@ -123,11 +134,12 @@ async def _submit(*, expires_at: datetime | None = None) -> ApprovalRequest:
             operator=_requester(),
             connector_id="rectest-1.x",
             op_id=_OP_ID,
-            target=None,
+            target=SimpleNamespace(id=target_id) if target_id is not None else None,
             params=_PARAMS,
             params_hash=compute_params_hash(_PARAMS),
             expires_at=expires_at,
             idempotency_key=_KEY,
+            reveal_secret=reveal_secret,
             proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
@@ -274,6 +286,72 @@ async def test_late_retry_that_waits_on_an_approval_gets_the_approved_row(
     decisions = await _audit_rows("approval.decision", original.id)
     assert [d.payload.get("decision") for d in decisions] == ["approved"]
     assert len(await _audit_rows("approval.request", original.id)) == 1
+
+
+@_skip_no_docker
+async def test_a_late_retry_for_another_call_that_waits_on_an_approval_is_refused(
+    pg_engine: None,  # noqa: F811 — fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late retry for another call, asked another way, waits for the approve and is refused.
+
+    The approve starts before the deadline and holds the row lock. The
+    retry runs after the deadline with another target and
+    ``reveal_secret``, so it does not get the request back. It reads the
+    row as overdue, locks it again and waits for the approve to commit.
+    The approved request still holds the key for another call, so the
+    retry is refused and MEHO stores no second request.
+    """
+    await give_known_person(_requester())
+    original = await _submit(expires_at=datetime.now(UTC) + timedelta(hours=1))
+    assert original.expires_at is not None
+    late: datetime = original.expires_at + timedelta(seconds=1)
+    real_now = approval_queue_module._now
+    clock = {"now": real_now}
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: clock["now"]())
+
+    about_to_lock = asyncio.Event()
+    real_lock = approval_queue_module._holds_key_after_lock
+
+    async def _signal_then_lock(*args: Any, **kwargs: Any) -> bool:
+        about_to_lock.set()
+        return await real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(approval_queue_module, "_holds_key_after_lock", _signal_then_lock)
+
+    async with get_sessionmaker()() as approver:
+        # Before the deadline: approve and hold the row lock, do not commit yet.
+        await approve_request(approver, original.id, operator=_reviewer(), params=None)
+        await approver.flush()
+
+        clock["now"] = lambda: late
+        retry_task = asyncio.create_task(_submit(target_id=uuid.uuid4(), reveal_secret=True))
+        await asyncio.wait_for(about_to_lock.wait(), timeout=10)
+        # Give the retry time to block on the lock before the approve commits.
+        await asyncio.sleep(0.5)
+        assert not retry_task.done()
+        await approver.commit()
+
+        with pytest.raises(IdempotencyKeyConflictError) as refused:
+            await asyncio.wait_for(retry_task, timeout=10)
+
+    assert refused.value.request_id == original.id
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalRequest).where(ApprovalRequest.tenant_id == _TENANT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [(row.id, row.status) for row in rows] == [
+            (original.id, ApprovalRequestStatus.APPROVED.value)
+        ]
+
+    decisions = await _audit_rows("approval.decision", original.id)
+    assert [d.payload.get("decision") for d in decisions] == ["approved"]
 
 
 @_skip_no_docker

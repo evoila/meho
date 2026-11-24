@@ -1240,11 +1240,16 @@ async def _refuse_key_held_for_another_call(
 ) -> None:
     """Refuse the call when *idempotency_key* gets back a request of another call.
 
-    Runs when no request asked the same way holds the key. A request asked
-    another way (:class:`_Asker`) that holds the key for the same call lets
-    this call get its own request. One that holds it for another call
-    (*is_this_call* is false) refuses it, the same as for a request asked
-    the same way. A ``pending`` request past its deadline does not count.
+    Runs before the call gets a request back for the key or stores its own.
+    Every live request the key gets back is checked: the one that holds the
+    key in its own column and every linked one, asked the same way or
+    another way (:class:`_Asker`). One that holds the key for another call
+    (*is_this_call* is false) refuses the call.
+
+    A ``pending`` request past its deadline does not count, but only after
+    a locked re-read (:func:`_holds_key_after_lock`): an approve that
+    started before the deadline holds the row lock until it commits, and
+    the approved request keeps the key.
 
     Raises:
         IdempotencyKeyConflictError: a live request of another call holds
@@ -1257,8 +1262,32 @@ async def _refuse_key_held_for_another_call(
         idempotency_key=idempotency_key,
     )
     for holder in holders:
-        if not _is_overdue_pending(holder) and not is_this_call(holder):
-            raise IdempotencyKeyConflictError(holder.id)
+        if is_this_call(holder):
+            continue
+        if _is_overdue_pending(holder) and not await _holds_key_after_lock(session, holder):
+            continue
+        raise IdempotencyKeyConflictError(holder.id)
+
+
+async def _holds_key_after_lock(session: AsyncSession, request: ApprovalRequest) -> bool:
+    """Lock *request*, read it again, and say whether it still holds its key.
+
+    ``SELECT ... FOR UPDATE`` waits for a decision that holds the row lock
+    (:func:`_load_for_tenant` with ``for_update``) to commit. The request holds
+    its key when it is ``approved``, or ``pending`` within its deadline.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.id == request.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    return (
+        locked is not None
+        and locked.status in _IDEMPOTENT_LIVE_STATUSES
+        and not _is_overdue_pending(locked)
+    )
 
 
 async def _link_reuse_key(
@@ -2114,8 +2143,6 @@ async def create_pending_request(
             idempotency_key=idempotency_key,
             asker=asker,
         )
-        if live is not None:
-            return _reuse(live)
         await _refuse_key_held_for_another_call(
             session,
             tenant_id=operator.tenant_id,
@@ -2130,6 +2157,8 @@ async def create_pending_request(
                 preview_hash=preview_hash,
             ),
         )
+        if live is not None:
+            return _reuse(live)
 
     if _same_call_reuse_applies(run_id, resume_parent, requester):
         same_call = await _find_same_call_pending_request(

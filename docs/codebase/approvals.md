@@ -2807,8 +2807,12 @@ for approval.
   is parked. The refusal writes a `denied` audit row. This holds for every
   live request the key gets back, in its own column or in
   `approval_request_key`, also for one asked another way
-  (`_refuse_key_held_for_another_call`). A `pending` request past its
-  deadline does not count.
+  (`_refuse_key_held_for_another_call`). MEHO checks all of them before it
+  gives a request back, so a key that gets back requests of two calls
+  refuses a retry of each. A `pending` request past its deadline does not
+  count, but only after MEHO locked it and read it again
+  (`_holds_key_after_lock`): an approve that started before the deadline
+  holds the row lock, and the request it approves keeps the key.
 - **When the key is free again.** A `rejected` or `expired` request no
   longer holds its key, so the same key parks a new request. An `approved`
   request keeps its key even after it ran: a retry then returns the request
@@ -2948,7 +2952,8 @@ retry waits for the lock: the row is now `approved`, and the retry returns
 it. With the cached `pending` state it would try to expire the row again,
 miss again, and never return.
 `tests/integration/test_approval_idempotent_retry_pg.py` runs these races
-(two late retries; a late retry against an approve; two retries beside a
+(two late retries; a late retry against an approve; a late retry for
+another call, asked another way, against an approve; two retries beside a
 holder asked another way; the same two retries with the holder rejected in
 between) on a real Postgres.
 

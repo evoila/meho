@@ -3609,8 +3609,11 @@ approver sees its redacted summary (program path, argument size,
 env-var names) at approval time instead.</p>
 <p>With the backplane switch <code>PREVIEW_TYPED_WRITES</code> on (off by default),
 every write previews, also one that runs without approval. A
-credential operation then previews only when it has its own safe
-preview, and it shows only that plan, never the params.
+credential operation with its own safe preview gives a
+<code>preview_hash</code> and never copies the params. It shows the plan only
+when that preview builds one; otherwise <code>plan_shown</code> is <code>false</code>.
+Without its own safe preview, a destructive one shows the redacted
+params and a <code>preview_hash</code>; any other stays <code>unavailable</code>.
 <code>guest.program.run</code> has none of its own, so it stays <code>unavailable</code>.</p>
 </div>
 <h2 id="safety-tiers-of-the-write-operations">Safety tiers of the write operations<a class="headerlink" href="#safety-tiers-of-the-write-operations" title="Permanent link">&para;</a></h2>

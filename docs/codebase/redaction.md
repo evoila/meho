@@ -1087,19 +1087,29 @@ before a reviewer reads the pull request.
   approved file already. The exit code is the same as without the flag.
 - **See the differences locally.** Without `--summary-only` the judge
   prints each difference that is not approved (input id, step, kind) and
-  the counts. From the repo root, with the pull request branch checked out:
+  the counts. From the repo root, with the pull request branch checked out,
+  run the block below. It works in a new private folder from `mktemp -d`,
+  stops when a step fails (also either record build), and removes the
+  folder and the second checkout when it ends, so no record file is left
+  behind or read again by a later run.
 
   ```bash
-  git worktree add --detach /tmp/rc-base origin/main
-  (cd /tmp/rc-base/backend && uv sync --frozen \
-    && uv run python /tmp/rc-base/scripts/ci/redaction_compare.py --records /tmp/rc-base.jsonl)
-  (cd backend && uv run python /tmp/rc-base/scripts/ci/redaction_compare.py --records /tmp/rc-head.jsonl)
-  git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml > /tmp/rc-base-approved.yaml
-  python3 -I /tmp/rc-base/scripts/ci/redaction_compare.py \
-    --judge /tmp/rc-base.jsonl /tmp/rc-head.jsonl \
-    --approved backend/tests/snapshots/redaction_compare_approved.yaml \
-    --base-approved /tmp/rc-base-approved.yaml
-  git worktree remove /tmp/rc-base
+  (
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    git worktree add --detach "$tmp/base" origin/main
+    rules="$tmp/base/scripts/ci/redaction_compare.py"
+    (cd "$tmp/base/backend" && uv sync --frozen \
+      && uv run python "$rules" --records "$tmp/base.jsonl")
+    (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
+    git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
+      > "$tmp/base-approved.yaml"
+    python3 -I "$rules" \
+      --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      --approved backend/tests/snapshots/redaction_compare_approved.yaml \
+      --base-approved "$tmp/base-approved.yaml"
+  )
   ```
 
 ## Known issues / future work

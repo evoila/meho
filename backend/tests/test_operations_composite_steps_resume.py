@@ -392,7 +392,11 @@ async def test_change_before_a_waiting_credential_write_is_sent_once(
     (waiting,) = await _requests()
     assert waiting.op_id == s.CREDENTIAL_WRITE_STEP
     assert waiting.execution_handle is not None
-    assert waiting.resume_parent == {"op_id": s.CREDENTIAL_WRITE_WAIT_OP_ID}
+    # The row holds no params, only that a step was sent before the wait.
+    assert waiting.resume_parent == {
+        "op_id": s.CREDENTIAL_WRITE_WAIT_OP_ID,
+        "request_sent": True,
+    }
 
     second = await _approve_and_resume(first)
 

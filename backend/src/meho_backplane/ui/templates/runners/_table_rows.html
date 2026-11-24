@@ -16,6 +16,8 @@
   ``_rel`` macro; no JS, no client date library. Liveness is server-derived
   (revoked / dead-man ``unknown`` / live) -- never recomputed here.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
   {%- if ago < 60 -%}just now
@@ -46,9 +48,7 @@
         </td>
         <td class="text-xs">
           {% if row.wire_version_mismatch %}
-            <span class="badge badge-warning badge-sm" title="central MEHO needs wire version {{ row.central_wire_version }}">
-              {{ row.wire_version }} (central needs {{ row.central_wire_version }})
-            </span>
+            {{ badge(row.wire_version ~ " (central needs " ~ row.central_wire_version ~ ")", variant="warning", title="central MEHO needs wire version " ~ row.central_wire_version) }}
           {% elif row.wire_version %}
             <span>{{ row.wire_version }}</span>
           {% else %}
@@ -57,9 +57,7 @@
         </td>
         <td class="text-xs font-mono">
           {% if row.package_set_mismatch %}
-            <span class="badge badge-warning badge-sm" title="runner {{ row.package_set_digest }}, central MEHO {{ row.central_package_set_digest }}">
-              {{ row.package_set_digest[:19] }}… (differs from central)
-            </span>
+            {{ badge(row.package_set_digest[:19] ~ "… (differs from central)", variant="warning", title="runner " ~ row.package_set_digest ~ ", central MEHO " ~ row.central_package_set_digest) }}
           {% elif row.package_set_digest %}
             <span title="{{ row.package_set_digest }}">{{ row.package_set_digest[:19] }}…</span>
           {% else %}
@@ -68,7 +66,7 @@
         </td>
         <td class="text-xs">
           {% if row.revoked %}
-            <span class="badge badge-neutral badge-sm">revoked</span>
+            {{ badge("revoked", variant="neutral") }}
           {% else %}
             <span class="text-subtle">no</span>
           {% endif %}

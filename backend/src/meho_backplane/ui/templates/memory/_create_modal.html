@@ -46,6 +46,8 @@
   so the script reads it from the DOM without re-hardcoding the
   enum on the client.
 -#}
+
+{% from "_components.html" import button %}
 <dialog id="memory-create-modal" class="modal">
   <div class="modal-box max-w-3xl">
     <h3 class="font-semibold text-lg" id="memory-create-modal-title">Create memory</h3>
@@ -59,7 +61,7 @@
       </div>
       <div class="modal-action">
         <form method="dialog">
-          <button class="btn btn-sm" type="submit">Close</button>
+          {{ button("Close", variant="default", type="submit") }}
         </form>
       </div>
     {% else %}
@@ -103,7 +105,7 @@
           <span class="text-sm font-medium">Scope</span>
           <select
             name="scope"
-            class="select select-bordered select-sm w-full"
+            class="select select-sm w-full"
             required
             data-action="scope-select"
           >
@@ -123,7 +125,7 @@
             type="text"
             name="target_name"
             maxlength="{{ target_name_max_length }}"
-            class="input input-bordered input-sm w-full"
+            class="input input-sm w-full"
             placeholder="Required for user-target and target scopes"
             aria-describedby="memory-create-target-name-hint"
           />
@@ -138,7 +140,7 @@
             type="text"
             name="slug"
             maxlength="{{ slug_max_length }}"
-            class="input input-bordered input-sm font-mono w-full"
+            class="input input-sm font-mono w-full"
             placeholder="Auto-generated when omitted"
             pattern="[A-Za-z0-9_\-\.]*"
             aria-describedby="memory-create-slug-hint"
@@ -155,7 +157,7 @@
               name="body"
               required
               maxlength="{{ body_max_length }}"
-              class="textarea textarea-bordered min-h-[16rem] w-full font-mono text-sm"
+              class="textarea min-h-[16rem] w-full font-mono text-sm"
               hx-post="/ui/memory/preview"
               hx-trigger="keyup changed delay:300ms"
               hx-target="#memory-create-preview"
@@ -189,7 +191,7 @@ Markdown body. Bare URLs (https://example.com) are linkified."
             <input
               type="datetime-local"
               name="expires_at"
-              class="input input-bordered input-sm w-full"
+              class="input input-sm w-full"
               aria-describedby="memory-create-expires-hint"
             />
             <span id="memory-create-expires-hint" class="text-xs text-subtle">
@@ -203,7 +205,7 @@ Markdown body. Bare URLs (https://example.com) are linkified."
               type="text"
               name="tags"
               maxlength="{{ tags_max_length }}"
-              class="input input-bordered input-sm w-full"
+              class="input input-sm w-full"
               placeholder="wine, preference, runbook"
               aria-describedby="memory-create-tags-hint"
             />

@@ -23,9 +23,11 @@
     lineage(refs, surface)       -- parent / replay / run / cross-drawer links
 -#}
 
+
+{% from "_components.html" import badge %}
 {%- macro _unresolved(raw) -%}
   <span class="font-mono text-xs break-all" title="{{ raw }}">{{ raw }}</span>
-  <span class="badge badge-ghost badge-xs align-middle" title="This id could not be resolved to a named entity (deleted, cross-tenant, or unknown).">unresolved</span>
+  {{ badge("unresolved", variant="quiet", size="xs", class="align-middle", title="This id could not be resolved to a named entity (deleted, cross-tenant, or unknown).") }}
 {%- endmacro -%}
 
 {%- macro what_happened(refs) -%}
@@ -45,7 +47,7 @@
       <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded for this row)">{{ principal.sub }}</span>
     {% endif %}
     {% if principal.is_service %}
-      <span class="badge badge-outline badge-xs" title="Non-interactive principal (agent session or delegated actor), not a person.">service</span>
+      {{ badge("service", variant="outline", size="xs", title="Non-interactive principal (agent session or delegated actor), not a person.") }}
     {% endif %}
   </span>
 {%- endmacro -%}
@@ -80,11 +82,11 @@
       <span>{{ operation.summary }}</span>
     {% endif %}
     {% if operation.group_name %}
-      <span class="badge badge-ghost badge-xs" title="Operation group">{{ operation.group_name }}</span>
+      {{ badge(operation.group_name, variant="quiet", size="xs", title="Operation group") }}
     {% endif %}
     <span class="font-mono text-xs text-subtle break-all">{{ operation.op_id }}</span>
     {% if not operation.resolved %}
-      <span class="badge badge-ghost badge-xs" title="No connector operation descriptor matched this op id (e.g. a chassis HTTP route or UI view).">no summary</span>
+      {{ badge("no summary", variant="quiet", size="xs", title="No connector operation descriptor matched this op id (e.g. a chassis HTTP route or UI view).") }}
     {% endif %}
   </span>
 {%- endmacro -%}

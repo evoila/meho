@@ -17,6 +17,8 @@
   timestamp for forensic clarity. Pure server-side via a small
   ``_relative_time`` macro further down; no JS needed.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _relative_time(ts) -%}
   {#- A tiny self-contained renderer for "X ago" copy. Server-side so
       the surface stays HTMX-pure (no client-side date library). The
@@ -62,11 +64,11 @@
         </td>
         <td>
           {% if row.status == "ok" %}
-            <span class="badge badge-success badge-sm">ok</span>
+            {{ badge("ok", variant="success") }}
           {% elif row.status == "stale" %}
-            <span class="badge badge-warning badge-sm">stale</span>
+            {{ badge("stale", variant="warning") }}
           {% else %}
-            <span class="badge badge-ghost badge-sm">never</span>
+            {{ badge("never", variant="quiet") }}
           {% endif %}
         </td>
         <td class="text-xs text-muted">
@@ -77,7 +79,7 @@
           {% endif %}
         </td>
         <td>
-          <span class="badge badge-ghost badge-xs">{{ row.auth_model }}</span>
+          {{ badge(row.auth_model, variant="quiet", size="xs") }}
         </td>
         <td>
           {% if row.vpn_required %}

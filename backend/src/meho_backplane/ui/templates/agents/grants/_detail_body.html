@@ -18,6 +18,8 @@
   -- "edit" is revoke + re-create). The revoke button opens the
   HTMX-loaded confirm dialog.
 -#}
+
+{% from "_components.html" import badge %}
 {% from "_references.html" import subject %}
 <div id="grant-detail-body" class="space-y-4">
   <header
@@ -39,7 +41,7 @@
             {% if grant.is_elevation %}
               <span class="badge badge-outline badge-warning badge-sm">elevation</span>
             {% else %}
-              <span class="badge badge-outline badge-sm">permanent</span>
+              {{ badge("permanent", variant="outline") }}
             {% endif %}
           </div>
         </div>

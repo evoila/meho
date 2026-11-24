@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# TEMPORARY. Checks the step "Install the GBK locale data" of ci.yml on a
+# machine without the data. The next commit removes this file.
+name: Temporary GBK locale check
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  cold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - &extract
+        name: Take the step script and its limit from ci.yml
+        id: extract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, yaml
+          steps = yaml.safe_load(open(".github/workflows/ci.yml"))["jobs"]["python-unit-shard"]["steps"]
+          step = next(s for s in steps if s.get("name") == "Install the GBK locale data")
+          open(os.environ["RUNNER_TEMP"] + "/step.sh", "w").write(step["run"])
+          open(os.environ["GITHUB_OUTPUT"], "a").write(f"limit={step['timeout-minutes']}\n")
+          print("limit in minutes:", step["timeout-minutes"])
+          PY
+          sha256sum "${RUNNER_TEMP}/step.sh"
+      - &remove
+        name: Remove the locale data from this machine
+        shell: bash
+        run: |
+          sudo apt-get purge -y locales
+          sudo rm -rf /usr/share/i18n
+          ls /usr/share/i18n 2>&1 || true
+      - &restore
+        name: Restore the package files from the cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-locale-debs
+          key: tmp-gbk-check-${{ github.run_id }}
+      - name: Run the step (cold cache)
+        id: step
+        shell: bash
+        timeout-minutes: ${{ fromJSON(steps.extract.outputs.limit) }}
+        env:
+          LOCALE_DEBS_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          bash "${RUNNER_TEMP}/step.sh"
+          ls -l ~/.cache/meho-ci-locale-debs
+          echo "step output:"; cat "${GITHUB_OUTPUT}"
+      - name: Save the package files to the cache
+        if: steps.step.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-locale-debs
+          key: tmp-gbk-check-${{ github.run_id }}
+  warm:
+    needs: cold
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - *checkout
+      - *extract
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          add-problem-matchers: false
+      - name: Sync Python environment
+        working-directory: backend
+        run: uv sync --locked --all-groups
+      - *remove
+      - name: The GBK test must fail when the data is missing
+        working-directory: backend
+        shell: bash
+        env:
+          MEHO_REQUIRE_GBK_LOCALE: "1"
+        run: |
+          set +e
+          uv run pytest -q -p no:cacheprovider -o tmp_path_retention_policy=failed --tb=line -rfEs \
+            tests/test_connectors_linux_script_env_locale.py | tee "${RUNNER_TEMP}/out.txt"
+          code="${PIPESTATUS[0]}"
+          echo "pytest exit code with the data missing: ${code}"
+          [ "${code}" = "1" ] && grep -q "MEHO_REQUIRE_GBK_LOCALE=1 but" "${RUNNER_TEMP}/out.txt"
+      - *restore
+      - name: Replace apt-get, so any call to it fails
+        shell: bash
+        run: |
+          printf '#!/bin/sh\necho "apt-get WAS CALLED: $*"\nexit 99\n' | sudo tee /usr/bin/apt-get
+      - name: Run the step (warm cache)
+        shell: bash
+        timeout-minutes: ${{ fromJSON(steps.extract.outputs.limit) }}
+        env:
+          LOCALE_DEBS_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          bash "${RUNNER_TEMP}/step.sh" | tee "${RUNNER_TEMP}/warm.txt"
+          grep -q "locale data ready from the package cache" "${RUNNER_TEMP}/warm.txt"
+          ! grep -q "apt-get WAS CALLED" "${RUNNER_TEMP}/warm.txt"
+      - name: The GBK test must pass with the data
+        working-directory: backend
+        env:
+          MEHO_REQUIRE_GBK_LOCALE: "1"
+        run: uv run pytest -q -p no:cacheprovider -o tmp_path_retention_policy=failed tests/test_connectors_linux_script_env_locale.py
+  slow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - *checkout
+      - *extract
+      - *remove
+      - name: Make dpkg and apt-get hang
+        shell: bash
+        run: |
+          mkdir -p ~/.cache/meho-ci-locale-debs
+          touch ~/.cache/meho-ci-locale-debs/locales.deb
+          for f in dpkg apt-get; do
+            printf '#!/bin/sh\necho "%s hangs: $*"\nexec sleep 3600\n' "$f" | sudo tee "/usr/bin/$f"
+          done
+      - name: Run the step (every call hangs)
+        id: step
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: ${{ fromJSON(steps.extract.outputs.limit) }}
+        run: |
+          start=$SECONDS
+          set +e
+          bash "${RUNNER_TEMP}/step.sh" | while IFS= read -r l; do echo "$(date -u +%T) $l"; done | tee "${RUNNER_TEMP}/slow.txt"
+          code="${PIPESTATUS[0]}"
+          echo "step exit code: ${code}; seconds: $((SECONDS - start))"
+          exit "${code}"
+      - name: The step must end by itself with its own error line
+        shell: bash
+        run: |
+          echo "outcome: ${{ steps.step.outcome }}"
+          [ "${{ steps.step.outcome }}" = "failure" ]
+          grep "SETUP FAILURE, not a test failure" "${RUNNER_TEMP}/slow.txt"

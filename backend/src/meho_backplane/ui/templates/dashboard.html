@@ -39,12 +39,12 @@
   {# -------- Greeting -------- #}
   <header class="meho-reveal">
     <h1 class="font-display text-3xl font-bold tracking-tight">Operator Console</h1>
-    <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-base-content/60">
+    <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-subtle">
       <span>Signed in as</span>
-      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10">{{ operator_sub }}</code>
+      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-muted ring-1 ring-base-content/10">{{ operator_sub }}</code>
       <span>in tenant</span>
       <code
-        class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10"
+        class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-muted ring-1 ring-base-content/10"
         title="{{ tenant_id }}"
       >{% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}{{ tenant_id }}{% endif %}</code>
     </p>
@@ -87,16 +87,16 @@
       >
         <div class="flex h-full flex-col gap-3 p-5{% if loop.first %} min-h-40{% endif %}">
           <div class="flex items-center justify-between">
-            <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-base-content/80 ring-1 ring-base-content/10{% if loop.first %} bg-primary/15 text-primary ring-primary/25{% endif %}">
+            <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-muted ring-1 ring-base-content/10{% if loop.first %} bg-primary/15 text-primary ring-primary/25{% endif %}">
               {{ icon(tile.icon, class="size-4.5") }}
             </span>
-            <span class="text-base-content/25 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-base-content/60">
+            <span class="text-base-content/25 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-subtle">
               {{ icon("arrow-right", class="size-4") }}
             </span>
           </div>
           <div class="mt-auto">
             <h2 class="text-base font-semibold">{{ tile.title }}</h2>
-            <p class="mt-1 text-sm leading-snug text-base-content/65">{{ tile.summary }}</p>
+            <p class="mt-1 text-sm leading-snug text-muted">{{ tile.summary }}</p>
           </div>
         </div>
       </a>
@@ -109,7 +109,7 @@
     <article class="meho-card meho-reveal col-span-1 md:col-span-12 lg:col-span-12">
       <div class="flex h-full flex-col gap-3 p-5">
         <div class="flex items-center justify-between">
-          <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-base-content/80 ring-1 ring-base-content/10">
+          <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-muted ring-1 ring-base-content/10">
             {{ icon("package", class="size-4.5") }}
           </span>
           <span
@@ -120,10 +120,10 @@
         </div>
         <div class="mt-auto">
           <h2 class="text-base font-semibold">Deploy</h2>
-          <dl class="mt-2 space-y-1 text-sm text-base-content/65">
+          <dl class="mt-2 space-y-1 text-sm text-muted">
             <div class="flex items-center justify-between gap-4">
               <dt>Deployed version</dt>
-              <dd><code class="font-mono text-xs text-base-content/80">{{ app_version }}</code></dd>
+              <dd><code class="font-mono text-xs text-muted">{{ app_version }}</code></dd>
             </div>
             {# Connector packages this image carries (#5036): the same list
                GET /version shows. Empty for the plain public image. #}
@@ -132,8 +132,8 @@
               <dt>Connector packages</dt>
               <dd class="text-right">
                 {% for package in packages %}
-                  <code class="block font-mono text-xs text-base-content/80">{{ package.name }} {{ package.version }}</code>
-                  <code class="block max-w-64 truncate font-mono text-[0.65rem] text-base-content/50" title="{{ package.wheel_digest }}">{{ package.wheel_digest }}</code>
+                  <code class="block font-mono text-xs text-muted">{{ package.name }} {{ package.version }}</code>
+                  <code class="block max-w-64 truncate font-mono text-[0.65rem] text-subtle" title="{{ package.wheel_digest }}">{{ package.wheel_digest }}</code>
                 {% else %}
                   <span class="text-xs">none</span>
                 {% endfor %}
@@ -164,9 +164,9 @@
                   class="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full {% if check.ok %}bg-success{% else %}bg-warning{% endif %}"
                   aria-hidden="true"
                 ></span>
-                <span class="font-mono text-xs leading-5 text-base-content/80">{{ check.name }}</span>
+                <span class="font-mono text-xs leading-5 text-muted">{{ check.name }}</span>
                 {% if check.detail %}
-                  <span class="min-w-0 truncate text-xs leading-5 text-base-content/50">{{ check.detail }}</span>
+                  <span class="min-w-0 truncate text-xs leading-5 text-subtle">{{ check.detail }}</span>
                 {% endif %}
               </li>
             {% endfor %}

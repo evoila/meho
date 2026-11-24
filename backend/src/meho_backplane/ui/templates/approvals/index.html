@@ -33,7 +33,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Approvals{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Review pending agent actions and browse the decision history for
         {% if session_tenant is not none %}tenant
         <span class="font-mono" data-tenant>{{ tenant_label(session_tenant) }}</span>{% else %}this tenant{% endif %}.

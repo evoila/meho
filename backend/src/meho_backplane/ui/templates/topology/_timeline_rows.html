@@ -24,19 +24,19 @@
 {% if rows %}
   {% for row in rows %}
     <li class="flex flex-wrap items-center gap-2 border-base-300 border-b pb-1" data-test="timeline-row">
-      <time class="text-xs opacity-70 font-mono" datetime="{{ row.valid_from.isoformat() }}">
+      <time class="text-xs text-muted font-mono" datetime="{{ row.valid_from.isoformat() }}">
         {{ row.valid_from.isoformat() }}
       </time>
       <span class="badge badge-outline badge-xs">{{ row.source }}</span>
       <span class="badge badge-ghost badge-xs">{{ row.change_kind }}</span>
-      <span class="opacity-90">{{ row.summary }}</span>
+      <span class="text-muted">{{ row.summary }}</span>
       {% if row.resource_id %}
-        <span class="text-xs opacity-50 font-mono">{{ row.resource_id }}</span>
+        <span class="text-xs text-subtle font-mono">{{ row.resource_id }}</span>
       {% endif %}
     </li>
   {% endfor %}
 {% elif not load_more_href %}
-  <li class="text-sm opacity-60" data-test="timeline-empty">
+  <li class="text-sm text-subtle" data-test="timeline-empty">
     No graph changes recorded for this window.
   </li>
 {% endif %}

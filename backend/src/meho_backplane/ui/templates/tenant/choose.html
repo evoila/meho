@@ -12,9 +12,10 @@
   marker: it is not made for one tenant.
 -#}
 <!doctype html>
-<html lang="en" data-theme="evoila" class="h-full">
+<html lang="en" data-theme="evoila-system" class="h-full">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Choose a tenant &middot; MEHO Operator Console</title>
     {% include "_head_assets.html" %}
@@ -23,7 +24,7 @@
     <main class="mx-auto max-w-xl space-y-6 px-4 py-12">
       <header class="space-y-1">
         <h1 class="text-xl font-semibold">Choose a tenant</h1>
-        <p class="text-sm opacity-70">
+        <p class="text-sm text-muted">
           MEHO works in one tenant at a time. You see only the systems,
           approvals and records of the tenant you choose. You can switch
           later from the tenant box in the sidebar.
@@ -45,7 +46,7 @@
             <div class="card-body flex-row items-center justify-between gap-3 p-4">
               <div class="min-w-0">
                 <div class="truncate font-medium" data-field="tenant-name">{{ choice.name }}</div>
-                <div class="text-xs opacity-60" data-field="tenant-role">{{ choice.role }}</div>
+                <div class="text-xs text-subtle" data-field="tenant-role">{{ choice.role }}</div>
               </div>
               {% if choice.id == current_id %}
               <span class="badge badge-primary badge-outline" data-field="tenant-current">Current</span>

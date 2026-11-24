@@ -125,7 +125,7 @@ async def render_body_preview(
         placeholder = (
             '<article id="memory-create-preview" '
             'class="prose prose-sm max-w-none bg-base-100 '
-            'border-base-300 border rounded-box p-4 opacity-50">'
+            'border-base-300 border rounded-box p-4 text-subtle">'
             "Preview will render here as you type."
             "</article>"
         )

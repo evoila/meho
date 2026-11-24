@@ -72,22 +72,22 @@
                 Timestamps are stored tz-aware UTC. -#}
             <time datetime="{{ node.last_seen.isoformat() }}" class="block leading-tight">
               <span class="block tabular-nums">{{ node.last_seen.strftime("%Y-%m-%d") }}</span>
-              <span class="block text-xs tabular-nums opacity-60">{{ node.last_seen.strftime("%H:%M UTC") }}</span>
+              <span class="block text-xs tabular-nums text-subtle">{{ node.last_seen.strftime("%H:%M UTC") }}</span>
             </time>
           {% else %}
-            <span class="opacity-50">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           <time datetime="{{ node.first_seen.isoformat() }}" class="block leading-tight">
             <span class="block tabular-nums">{{ node.first_seen.strftime("%Y-%m-%d") }}</span>
-            <span class="block text-xs tabular-nums opacity-60">{{ node.first_seen.strftime("%H:%M UTC") }}</span>
+            <span class="block text-xs tabular-nums text-subtle">{{ node.first_seen.strftime("%H:%M UTC") }}</span>
           </time>
         </td>
         <td>
           {# ``discovered_by`` doubles as the product / connector slug --
              the same column the table column header labels "Product". #}
-          <span class="text-xs opacity-80">{{ node.discovered_by }}</span>
+          <span class="text-xs text-muted">{{ node.discovered_by }}</span>
         </td>
         <td>
           {# Parent badges -- T1 emits the immediate parent inferred
@@ -96,7 +96,7 @@
              traversal is deferred to T3); render the placeholder so the
              column reserves space and a future projection can fill it
              without a template rewrite. #}
-          <span class="text-xs opacity-50">—</span>
+          <span class="text-xs text-subtle">—</span>
         </td>
         <td class="text-right tabular-nums">{{ node.children_count }}</td>
         <td class="flex items-center gap-1">
@@ -127,7 +127,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="9" class="text-center text-sm opacity-70">
+      <td colspan="9" class="text-center text-sm text-muted">
         No nodes match the current filter.
       </td>
     </tr>

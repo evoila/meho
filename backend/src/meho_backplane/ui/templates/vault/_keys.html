@@ -45,18 +45,18 @@
         </p>
         <dl class="mt-2 space-y-1 text-xs">
           <div class="flex gap-2">
-            <dt class="opacity-60">Handle id</dt>
+            <dt class="text-subtle">Handle id</dt>
             <dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd>
           </div>
           {% if handle.total_rows is not none %}
             <div class="flex gap-2">
-              <dt class="opacity-60">Keys</dt>
+              <dt class="text-subtle">Keys</dt>
               <dd data-handle-total-rows>{{ handle.total_rows }}</dd>
             </div>
           {% endif %}
           {% if handle.ttl_seconds is not none %}
             <div class="flex gap-2">
-              <dt class="opacity-60">TTL</dt>
+              <dt class="text-subtle">TTL</dt>
               <dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd>
             </div>
           {% endif %}
@@ -124,7 +124,7 @@
       </ul>
     {% else %}
       <div
-        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60"
+        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm text-subtle"
         data-vault-keys="empty"
       >
         No keys at <code>{{ mount }}/{{ path }}</code>.

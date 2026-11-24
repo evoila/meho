@@ -2165,7 +2165,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
 - `meho targets outside-folder [--tenant <id>]` — calls
   `GET /api/v1/targets/checks/outside-tenant-folder` and lists the targets whose
   secret path is outside the tenant's folder (tenant admin; a platform admin
-  sees every tenant). See `connectors-vault-tenant-scope.md`.
+  sees every tenant). For one member tenant: `meho tenants use <name>`, then
+  `--tenant <its id>`. See `connectors-vault-tenant-scope.md`.
 - `meho targets discover <product> [--seed-target <name>]` — calls
   `GET /api/v1/targets/discover` (G9.1-T6 #454, the verb #256
   explicitly deferred here). Iterates every connector registered for

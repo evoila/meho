@@ -81,6 +81,33 @@ func TestRunOutsideFolderSendsTenantAndEmitsJSON(t *testing.T) {
 	}
 }
 
+func TestRunOutsideFolderSendsChosenTenantAndItsID(t *testing.T) {
+	tenant := "00000000-0000-0000-0000-00000000a0a0"
+	var gotHeader, gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets/checks/outside-tenant-folder", func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get(api.TenantHeader)
+		gotQuery = r.URL.Query().Get("tenant_id")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.OutsideTenantFolderList{Items: []api.OutsideTenantFolderItem{}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetContext(api.WithTenant(cmd.Context(), tenant))
+	if err := runOutsideFolder(cmd, outsideFolderOptions{Tenant: tenant, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runOutsideFolder: %v; stderr=%s", err, stderr.String())
+	}
+	if gotHeader != tenant {
+		t.Errorf("%s header: got %q; want %q", api.TenantHeader, gotHeader, tenant)
+	}
+	if gotQuery != tenant {
+		t.Errorf("tenant_id query: got %q; want %q", gotQuery, tenant)
+	}
+}
+
 func TestRunOutsideFolderRejectsBadTenant(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	var stderr bytes.Buffer

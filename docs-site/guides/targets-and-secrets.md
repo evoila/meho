@@ -460,10 +460,18 @@ meho targets outside-folder
 ```
 
 A tenant admin sees their own tenant. A platform admin sees every tenant,
-or one tenant with `--tenant <tenant-id>`. For a tenant you are a member
-of, choose it with `meho tenants use <name>` instead, so your own role
-there applies. The list of every tenant leaves out a tenant where you are
-a member without the admin role. Each row has the target name, the
+or one tenant with `--tenant <tenant-id>`. To list one tenant you are a
+member of, choose it first, so your own role there applies, and then name
+its ID:
+
+```bash
+meho tenants use <name>
+meho targets outside-folder --tenant <tenant-id>
+```
+
+Without `--tenant`, a platform admin still sees every tenant. The list of
+every tenant leaves out each other tenant where you are a member without
+the admin role. Each row has the target name, the
 tenant, the `secret_ref` and why it is outside. The same list is at
 `GET /api/v1/targets/checks/outside-tenant-folder`.
 

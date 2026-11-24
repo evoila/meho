@@ -36,8 +36,10 @@ func newOutsideFolderCmd() *cobra.Command {
 		Long: "outside-folder lists the targets whose secret path is outside the " +
 			"tenant's folder in the secret store (Vault or OpenBao). A tenant admin " +
 			"sees their own tenant. A platform admin sees every tenant, or one tenant " +
-			"with --tenant. For a tenant you are a member of, use `meho tenants use` " +
-			"instead, so your own role there applies. Each row shows the target name, the tenant, the secret_ref " +
+			"with --tenant. To list one tenant you are a member of, run " +
+			"`meho tenants use <name>` first, so your own role there applies, and then " +
+			"`meho targets outside-folder --tenant <tenant-id>`. Without --tenant, a " +
+			"platform admin still sees every tenant. Each row shows the target name, the tenant, the secret_ref " +
 			"and why it is outside. Move each secret into the folder, then update the " +
 			"target's secret_ref. When the folder check is off on this install, the " +
 			"command says so and lists nothing.",
@@ -53,7 +55,7 @@ func newOutsideFolderCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&tenant, "tenant", "",
-		"tenant id to list (platform admin only, for a tenant you are not a member of; default: your own tenant, or every tenant for a platform admin)")
+		"tenant id to list (platform admin: a tenant you are not a member of, or the tenant chosen with `meho tenants use`; default: your own tenant, or every tenant for a platform admin)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",

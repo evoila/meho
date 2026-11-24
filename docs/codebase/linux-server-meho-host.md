@@ -1,17 +1,17 @@
-# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738, #4746)
+# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638, #4738, #4746, #6828)
 
 ## Overview
 
 `meho-host` is the customer's tool for the work on a form-2 machine after
 the install. `install.sh` copies it to `/usr/local/sbin/meho-host` in
-step 2, with the two files of `lib/` it sources in
+step 2, with the three files of `lib/` it sources in
 `/usr/local/lib/meho-host/`, and every later run installs the version of
 its download. The
 customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (the internal
 form-2 design note).
 
-This version has nine commands:
+This version has ten commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
@@ -28,6 +28,13 @@ This version has nine commands:
   or one address. `none` closes SSH from every address, so only the console
   works. Only the SSH rule changes. Over SSH, the command asks first when
   the new range does not hold the admin's own address.
+- **`meho-host target-networks <list>`** and **`meho-host target-networks none`**
+  (#6828) set the networks of the systems that MEHO manages. MEHO's target
+  guard accepts a target on a private address only inside them. The
+  command checks the list with the rule of `lib/targets.sh`, writes it to
+  `install.json` and `values-place.yaml`, puts it into the ConfigMap
+  `meho-config` and restarts the `meho` Deployment. A wrong entry changes
+  nothing.
 - **`meho-host log-server <host>[:<port>] [--tls <ca.pem>]`** and
   **`meho-host log-server none`** (#5752) work only on the MEHO appliance
   (install form 1). They send the logs of the machine to the customer's log
@@ -86,16 +93,18 @@ the operating system against the CIS Linux benchmark, is not built yet
 
 | File | What it holds |
 | --- | --- |
-| `meho-host` | One bash script: the output helpers, the checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the log server (rsyslog's file and its firewall rule), the uninstall, the certificate install, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh` and `lib/cis.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
+| `meho-host` | One bash script: the output helpers, the checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the log server (rsyslog's file and its firewall rule), the uninstall, the certificate install, the target networks, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh`, `lib/cis.sh` and `lib/targets.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
 | `lib/firewall.sh` | `firewall_state` (the firewall line) and the firewall paths `MEHO_FIREWALL_FILE`, `MEHO_FIREWALL_UNIT` and the others. |
 | `lib/cis.sh` | `cis_state` (the CIS profile line), and for the uninstall the paths of the CIS host changes and the `etcd` look-ups (`etcd_user_exists`, `etcd_group_exists`, `etcd_account_recorded`). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
-| `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the two lib files to `/usr/local/lib/meho-host`, mode 0644. |
+| `lib/targets.sh` | `parse_target_networks`, the rule of the target networks that `install.sh --target-networks` uses too. It calls `is_ipv4`, `is_ipv4_network`, `cidrs_overlap` and `PREFIX_RE`, which `meho-host` defines as `lib/net.sh` does. |
+| `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the three lib files to `/usr/local/lib/meho-host`, mode 0644. |
 | `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
 | `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `getent`, `rsyslogd`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates, and `certificate_with_key()` also gives the key of the server certificate. `make_appliance()` turns the form-2 machine into the appliance. `environment()` is the environment meho-host runs with, and `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
 | `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network`, `log-server` and `uninstall`, of each check line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fake_cluster.py`, `tests/cluster_harness.py` | A fake `kubectl` that keeps state: the Secrets and ConfigMaps of namespace `meho`, the restarts of `deployment/meho`, and the one OpenBao pod, with its seal state, its uid and the chart's unseal helper. `ClusterHost` is the fake machine with it. |
 | `tests/test_meho_host_certificate.py` | The tests of `certificate`. |
+| `tests/test_meho_host_target_networks.py` | The tests of `target-networks`: the two files, the ConfigMap key and the restart, `none`, a record of an older `install.sh`, and each refusal and failure. |
 | `tests/test_meho_host_second_factor.py` | The tests of `reset-second-factor`: root only (exit code 2 otherwise), the call into the core pod, and the exit codes it passes on. The reset module itself is tested in `backend/tests/test_core_reset_second_factor.py`, with saved Keycloak answers. |
 | `tests/test_meho_host_unseal.py` | The tests of `keyholder on`, `keyholder off` and `unseal`, and of the unseal key, which never appears in a command line, the output or a file. |
 | `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network`, `log-server` and `uninstall` tests start from it. |
@@ -330,6 +339,44 @@ too. Output that is not this JSON gives one red doctor line. See
    which unit loads the file: on the appliance that is `nftables.service`.
    Packets of connections that are already open always pass the rules, so
    the SSH session that runs the command stays open.
+
+### `target-networks`
+
+1. Take one value: a comma-separated list, or `none`. No value or more
+   than one is a usage error. Check root.
+2. Read the pod range and the service range from `install.json`
+   (`install_option`). Without them, stop with a `[FAIL]` line: the rule
+   needs them.
+3. Check the list with `parse_target_networks` of `lib/targets.sh`, the
+   rule of `install.sh --target-networks` (see
+   [linux-server-install.md](linux-server-install.md#the-target-networks)):
+   IPv4 ranges that start at their first address, addresses and host
+   names, a port only on an address or a name, nothing that overlaps the
+   two ranges, `0.0.0.0/8`, `127.0.0.0/8` or `169.254.0.0/16`, and no
+   `localhost` or `cluster.local` name. A wrong entry is a usage error
+   that names it, and nothing changes.
+4. Write the new install record and the new values file next to the old
+   ones with `mktemp`. `record_with_target_networks` changes the line of
+   `target_networks`, or adds it in front of `from_disk` in a record of an
+   older `install.sh`. `values_with_target_networks` replaces the last
+   block, `config` with `targetSsrfAllowlist`, as `render_target_values` of
+   `lib/core.sh` writes it, or removes it for `none`. A record without the
+   new line afterwards, or a `config` block that holds more than the list,
+   is not in the form `install.sh` writes: the new files are removed and
+   the command stops with a `[FAIL]` line. Otherwise both files move into
+   place, mode 0600.
+5. Patch `MEHO_TARGET_SSRF_ALLOWLIST` in the ConfigMap `meho-config` with
+   a JSON merge patch on standard input, so every other key stays. Helm
+   owns the ConfigMap; the next update renders the same list from
+   `install.json`, so the value stays.
+6. Restart the `meho` Deployment with `rollout restart`, as `certificate`
+   does (`restart_meho`): a pod reads its environment from a ConfigMap
+   only when it starts. A failed patch or restart is a `[WARN]` line that
+   says MEHO still uses the old list, or uses the new one only after its
+   next restart, and to run the command again. The exit code stays 0:
+   the files hold the new list, and the next update puts it in force too.
+7. Print the list in force, and that the console is away for about a
+   minute.
 
 ### `log-server`
 
@@ -716,9 +763,10 @@ timeout is 2 minutes for this call, not RKE2's usual 10 seconds.
 
 ### How meho-host finds its lib files
 
-`meho-host` sources `lib/firewall.sh` and `lib/cis.sh`, the files that
-`install.sh` uses too, so the firewall line and the CIS line have one
-source of truth with the install. Both files only define constants and
+`meho-host` sources `lib/firewall.sh`, `lib/cis.sh` and `lib/targets.sh`,
+the files that `install.sh` uses too, so the firewall line, the CIS line
+and the rule of the target networks have one source of truth with the
+install. The files only define constants, variables and
 functions when they are sourced. `meho-host` looks for them in two places,
 both relative to its own folder (`cd -P` and `pwd -P` of
 `dirname "${BASH_SOURCE[0]}"`):
@@ -730,9 +778,9 @@ both relative to its own folder (`cd -P` and `pwd -P` of
 Step 2 of `install.sh` (`install_meho_host`) copies the files of
 `MEHO_HOST_LIB_FILES` there, so every install and every later run of
 `install.sh` brings the versions of its download. It takes the first
-place that holds both files. When neither does, `meho-host` stops at once
-with a `[FAIL]` line that names both places and the folder to copy the
-files to. Because `lib/firewall.sh` defines the
+place that holds all three files. When neither does, `meho-host` stops at
+once with a `[FAIL]` line that names both places and the folder to copy
+the files to. Because `lib/firewall.sh` defines the
 firewall paths as `readonly`, `meho-host` takes them from there and keeps
 no copy of its own. A function that `meho-host` defines after the
 `source` lines would replace a function of the same name from `lib/`;

@@ -289,10 +289,13 @@ async def count_results(
                 result_uid=item.result_uid,
             )
             continue
+        # Compare runner time only with runner time: the produced_at of the
+        # last result counted for this check. Results of one check in a batch
+        # keep their order, so the newest one wins.
         if (
             item.produced_at is not None
-            and sensor.last_evaluated_at is not None
-            and _as_utc(item.produced_at) <= _as_utc(sensor.last_evaluated_at)
+            and sensor.runner_produced_at is not None
+            and _as_utc(item.produced_at) <= _as_utc(sensor.runner_produced_at)
         ):
             _count("old")
             continue
@@ -306,6 +309,8 @@ async def count_results(
             _count("too_large")
         else:
             _count("counted")
+        if item.produced_at is not None:
+            sensor.runner_produced_at = _as_utc(item.produced_at)
         # Several results of one Sensor in a batch get times a microsecond
         # apart, so the guard against a repeat keeps each of them.
         counted.append(

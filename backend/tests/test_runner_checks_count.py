@@ -402,6 +402,48 @@ async def test_replayed_and_old_results_are_dropped(client: TestClient, switch_o
 
 
 @pytest.mark.asyncio
+async def test_two_results_of_one_check_in_one_batch_keep_the_newest_state(
+    client: TestClient, switch_on: None
+) -> None:
+    await _seed_identities()
+    sensor_id = await _seed_sensor()
+    now = datetime.now(UTC)
+    older = _result(
+        sensor_id, uid="b-1", payload={"count": 1}, produced_at=now - timedelta(seconds=20)
+    )
+    newer = _result(
+        sensor_id, uid="b-2", payload={"count": 50}, produced_at=now - timedelta(seconds=10)
+    )
+
+    resp = _post(client, _RUNNER_A_ID, "runner-a", older, newer)
+
+    assert resp.json() == {"accepted": 2, "duplicates": 0}
+    assert (await _sensor(sensor_id)).last_state == "critical"
+
+
+@pytest.mark.asyncio
+async def test_results_count_when_the_runner_clock_is_behind(
+    client: TestClient, switch_on: None
+) -> None:
+    await _seed_identities()
+    sensor_id = await _seed_sensor()
+    behind = datetime.now(UTC) - timedelta(minutes=5)
+
+    first = _result(sensor_id, uid="c-1", payload={"count": 50}, produced_at=behind)
+    assert _post(client, _RUNNER_A_ID, "runner-a", first).json() == {"accepted": 1, "duplicates": 0}
+    assert (await _sensor(sensor_id)).last_state == "critical"
+
+    second = _result(
+        sensor_id, uid="c-2", payload={"count": 1}, produced_at=behind + timedelta(seconds=30)
+    )
+    assert _post(client, _RUNNER_A_ID, "runner-a", second).json() == {
+        "accepted": 1,
+        "duplicates": 0,
+    }
+    assert (await _sensor(sensor_id)).last_state != "critical"
+
+
+@pytest.mark.asyncio
 async def test_results_without_a_runner_time_still_count(
     client: TestClient, switch_on: None
 ) -> None:
@@ -607,7 +649,7 @@ async def test_binding_makes_an_assignment_row_so_the_sweeper_watches_the_runner
 
 
 @pytest.mark.asyncio
-async def test_central_loop_does_not_claim_a_sensor_with_a_runner() -> None:
+async def test_central_loop_does_not_claim_a_sensor_with_a_runner(switch_on: None) -> None:
     await _seed_identities()
     now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
@@ -639,6 +681,39 @@ async def test_central_loop_does_not_claim_a_sensor_with_a_runner() -> None:
     async with get_sessionmaker()() as session:
         claimed = await claim_due_sensors(session, now=now, limit=10)
     assert [s.name for s in claimed] == ["central"]
+
+
+@pytest.mark.asyncio
+async def test_central_loop_runs_a_sensor_with_a_runner_while_the_switch_is_off() -> None:
+    await _seed_identities()
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        await create_sensor(
+            session,
+            tenant_id=_TENANT,
+            name="at-site",
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_SAFE,
+            target=None,
+            params={},
+            assertion=_ASSERTION,
+            cadence_kind=SensorCadenceKind.INTERVAL,
+            interval_seconds=5,
+            cron_expr=None,
+            timezone="UTC",
+            severity="critical",
+            for_seconds=0,
+            retry_times=0,
+            retry_backoff_seconds=15,
+            identity_sub="__sensor__",
+            created_by_sub="op-admin",
+            runner_name="runner-a",
+            base=now - timedelta(minutes=5),
+        )
+        await session.commit()
+    async with get_sessionmaker()() as session:
+        claimed = await claim_due_sensors(session, now=now, limit=10)
+    assert [s.name for s in claimed] == ["at-site"]
 
 
 # ---------------------------------------------------------------------------

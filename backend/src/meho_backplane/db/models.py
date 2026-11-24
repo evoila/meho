@@ -9571,6 +9571,11 @@ class Sensor(Base):
     # this check at a site. ``NULL`` means the central check loop runs it.
     # A soft reference: the runner row is never hard-deleted.
     runner_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The runner's own time (``produced_at``) of the last result counted for
+    # this check. Only runner times are compared with it, never MEHO's clock.
+    runner_produced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

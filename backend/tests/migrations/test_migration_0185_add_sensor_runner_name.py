@@ -79,7 +79,7 @@ def test_upgrade_adds_the_column_and_the_index(
 
     columns, indexes = _schema(sync_url)
     assert columns == set(Sensor.__table__.columns.keys())
-    assert "runner_name" in columns
+    assert {"runner_name", "runner_produced_at"} <= columns
     assert _INDEX in indexes
 
 
@@ -91,7 +91,7 @@ def test_downgrade_removes_the_column_and_the_index(
     command.downgrade(cfg, _DOWN_REVISION)
 
     columns, indexes = _schema(sync_url)
-    assert "runner_name" not in columns
+    assert not {"runner_name", "runner_produced_at"} & columns
     assert _INDEX not in indexes
 
 
@@ -104,5 +104,5 @@ def test_upgrade_round_trips(
     command.upgrade(cfg, _REVISION)
 
     columns, indexes = _schema(sync_url)
-    assert "runner_name" in columns
+    assert {"runner_name", "runner_produced_at"} <= columns
     assert _INDEX in indexes

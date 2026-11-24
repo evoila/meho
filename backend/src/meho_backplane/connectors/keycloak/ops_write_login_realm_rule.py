@@ -35,7 +35,9 @@ no ``harmless_keys_only`` fact does not run either, in every realm.
 
 Which realm a write changes: the ``realm`` param (and for
 ``keycloak.realm.create`` the ``realm`` of the representation) when the
-write has one, else the target's managed realm
+write has one, else the target's managed realm. A ``keycloak.realm.create``
+that names no realm makes the managed realm, so it is judged by that name
+like a create that names it
 (:func:`~.ops_write_grant.is_login_realm`). A realm that a param names is
 judged by the name Keycloak answers with for it
 (:func:`~.ops_write_grant.named_realm_is_protected`). When MEHO cannot read
@@ -48,7 +50,7 @@ A caller (``preview_operation``, ``meho_approvals_get``,
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from meho_backplane.connectors.keycloak.ops_write_grant import (
     GRANT_OPS,
@@ -65,6 +67,7 @@ from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,
     RIGHTS_CHANGE_OPS,
 )
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations._preview import (
     register_agent_preview_filter,
@@ -78,6 +81,7 @@ from meho_backplane.operations.grant_approval import (
 from meho_backplane.operations.grant_cover_check import register_grant_cover_check
 
 if TYPE_CHECKING:
+    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
@@ -154,14 +158,15 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
             if op_id == "keycloak.realm.create" and isinstance(representation, dict):
                 names.append(_text(representation.get("realm")))
             given = [name for name in names if name is not None]
+            new = op_id == "keycloak.realm.create"
+            if new and not given:
+                # The handler makes the managed realm when the call names none.
+                given = [resolve_realm_config(cast("KeycloakTargetLike", ctx.target)).managed_realm]
             if given:
-                new = op_id == "keycloak.realm.create"
                 for name in given:
                     if await named_realm_is_protected(ctx, name, new=new):
                         return True
                 return False
-            if op_id == "keycloak.realm.create":
-                return True
         return await is_login_realm(ctx)
     except Exception:
         return True

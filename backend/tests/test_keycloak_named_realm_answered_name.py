@@ -151,12 +151,18 @@ async def test_a_named_realm_that_keycloak_answers_as_the_login_realm_at_run_sta
 _NEW = _Write(_CREATE, {"realm": "{realm}", "representation": {"realm": "{realm}"}})
 
 
+#: The same create with no name: the handler makes the target's managed realm.
+_NEW_UNNAMED = _Write(_CREATE, {"representation": {"enabled": True}}, target_realm="team-new")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("write", [_NEW, _NEW_UNNAMED], ids=["named", "unnamed"])
 async def test_a_new_realm_with_a_plain_name_needs_only_a_tenant_admin(
+    write: _Write,
     fake: _FakeKeycloak,  # noqa: F811
 ) -> None:
     fake.missing_realms.add("team-new")
-    effect, params = await _effect(fake, _NEW, "team-new")
+    effect, params = await _effect(fake, write, "team-new")
     assert effect["preview"]["grant"]["login_realm"] is False
     request_id = await _park(params, effect, op_id=_CREATE)
 
@@ -173,6 +179,18 @@ async def test_a_new_realm_that_keycloak_answers_as_a_protected_realm_needs_a_pl
 ) -> None:
     fake.realm_answers["Meho"] = answered
     effect, params = await _effect(fake, _NEW, "Meho")
+    assert effect["preview"]["grant"]["login_realm"] is True
+    request_id = await _park(params, effect, op_id=_CREATE)
+
+    assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_new_realm_on_a_target_of_the_login_realm_needs_a_platform_admin(
+    fake: _FakeKeycloak,  # noqa: F811
+) -> None:
+    write = _Write(_CREATE, {"representation": {"enabled": True}}, target_realm=_REALM)
+    effect, params = await _effect(fake, write, _REALM)
     assert effect["preview"]["grant"]["login_realm"] is True
     request_id = await _park(params, effect, op_id=_CREATE)
 

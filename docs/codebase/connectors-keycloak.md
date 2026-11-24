@@ -1739,6 +1739,11 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
     a target is a different Keycloak. A realm with the same name on another
     Keycloak cannot be deleted through MEHO.
   - Names are compared without case.
+- **The answered name.** MEHO reads the realm first. The `realm` in
+  Keycloak's answer must be exactly the managed realm; another name, or no
+  name, is refused with the `realm_name_mismatch` code. That runs before
+  the request waits for approval and again when the approved call runs.
+- **Approval** cannot be turned off for this operation.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
   true}`.
@@ -2236,7 +2241,9 @@ is sent to Keycloak. `realm_param`, with the target, refuses again in the
 handler, for a call that does not wait for approval. The text says: use a
 target that names that realm as its managed realm. It never repeats the
 value the caller gave. The `realm` parameter stays so that a call that names
-the managed realm still works; it will be removed. So `keycloak.realm.delete`
+the managed realm still works; it will be removed. `keycloak.realm.create`
+always sends the managed realm as the name of the new realm, also when the
+call names none; that name must be plain ASCII. So `keycloak.realm.delete`
 deletes only the managed realm of its target. `check_realm_guards` still
 refuses `master`, the target's admin realm and MEHO's own login realm. Its
 approval card names the realm, with the user, client and group counts.
@@ -2244,24 +2251,31 @@ Every other op takes no realm value and always acts on the managed realm.
 The secret broker refs follow the same fence: `managed_realm_problem`
 (`secret_endpoint.py`) refuses a `keycloak:` ref whose `<realm>` is not the
 managed realm of its target. `check_secret_move_realms`
-(`connectors/secret/move_preview.py`) is the park check of `secret.move`, so
-the move is refused before it waits for approval; the sink and the source
-refuse it again when the move runs, before any call to Keycloak.
+(`connectors/secret/move_preview.py`) runs in the check of `secret.move`
+before it waits for approval, and it is that check for the source of
+`secret.handoff.export`. It also refuses a target name that fits more than
+one target. When an approved move runs, the sink's `check_target` compares
+the realm again before the source is read, and the sink and the source
+refuse it again before any call to Keycloak.
 
 **Every answer names the realm.** `answer_realm.py` (`name_the_realm`,
 applied to `KeycloakConnector`) wraps each op handler. With the switch
 `KEYCLOAK_ANSWER_REALM` on (`Settings.keycloak_answer_realm`, off by
 default), a dict answer gets the field `managed_realm` first, set to the
-realm the call acted on. A read answer, a write answer and a refused write
-show the same field. With the switch off, every answer is as before. The
-field changes what an AI agent reads, so it stays off until it is measured.
-The
-approval card of a Keycloak write shows the realm in its first line: the
-dispatcher stamps `target_realm` on `proposed_effect`
+realm the call acted on. A read answer and a write answer show the same
+field. With the switch off, no answer has the field. The field changes what
+an AI agent reads, so it stays off until it is measured. The `meho keycloak`
+commands print it as `managed realm:` when the answer has it.
+The approval card of a Keycloak write shows the realm in its opening
+summary: the dispatcher stamps `target_realm` on `proposed_effect`
 (`target_managed_realm` in `targets/keycloak_realm_warnings.py`) and the
-console renders it under "Proposed effect". `meho targets describe` shows a
-`realms:` line with the admin realm and the managed realm of a Keycloak
-target; `meho targets probe` shows both in its `extras` line.
+console renders it in the "What this request does" box. A person always sees
+it. `meho_approvals_get`, `meho_approvals_list` and the REST reads of an
+agent login return it only while the switch is on (`SWITCHED_EFFECT_KEYS` in
+`operations/_preview.py`). `meho targets describe` shows a `realms:` line
+with the admin realm and the managed realm of a Keycloak target; `meho
+targets probe` shows both in its `extras` line, also next to the error when
+the probe fails. The `targets.probe` operation returns no extras.
 
 A Keycloak target with no managed realm, or a realm that is not a plain
 name, is refused like this:

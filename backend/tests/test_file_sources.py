@@ -295,6 +295,32 @@ def test_the_source_host_matches_in_any_case_and_with_a_trailing_dot(
     assert caught.value.rule == "address_blocked"
 
 
+@pytest.mark.parametrize(
+    ("configured", "requested", "expected"),
+    [
+        ("files.example.com.", "files.example.com", "93.184.216.34"),
+        ("files.example.com", "files.example.com.", "10.0.0.7"),
+    ],
+)
+def test_the_lookup_uses_the_source_spelling_of_the_host(
+    monkeypatch: pytest.MonkeyPatch, configured: str, requested: str, expected: str
+) -> None:
+    answers = {"files.example.com.": "93.184.216.34", "files.example.com": "10.0.0.7"}
+    looked_up: list[str] = []
+
+    def _resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        looked_up.append(host)
+        return [ipaddress.ip_address(answers[host])]
+
+    monkeypatch.setattr(ssrf_guard, "_resolve_addrs", _resolve)
+    source = file_sources_from_map({"a": f"https://{configured}/x"}, private_network_allowed=True)[
+        0
+    ]
+    assert resolve_file_source(f"https://{requested}/x/a.iso", [source]) is source
+    assert file_source_resolver(source)(requested, 443) == [expected]
+    assert looked_up == [configured]
+
+
 def test_public_address_passes_for_every_source(monkeypatch: pytest.MonkeyPatch) -> None:
     _resolving_to(monkeypatch, "93.184.216.34")
     closed = file_sources_from_map({"a": BASE})[0]
@@ -376,6 +402,72 @@ async def test_kit_transport_connects_only_to_checked_addresses_of_the_source() 
     ]
     for source, url, rule in cases:
         async with httpx.AsyncClient(transport=kit.file_source_transport(source)) as client:
+            with pytest.raises(kit.FileSourceError) as caught:
+                await client.get(url)
+        assert caught.value.rule == rule
+
+
+def _fake_server_redirecting_to(monkeypatch: pytest.MonkeyPatch, location: str) -> list[str]:
+    """Put a fake server under the public transport: it answers every request with a redirect.
+
+    The fake replaces the step that sends a request on a new or a reused
+    connection, so it sees only the requests that passed the check.
+    """
+    seen: list[str] = []
+
+    async def _send(self: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"Location": location})
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _send)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("location", "rule"),
+    [
+        ("https://files.example.com/other/a.iso", "path_outside_source"),
+        ("https://files.example.com/isosx/a.iso", "path_outside_source"),
+        ("https://files.example.com/isos/%252e%252e/etc/a", "path_dots"),
+        ("http://files.example.com:443/isos/a.iso", "other_host"),
+        ("http://files.example.com/isos/a.iso", "other_host"),
+        ("https://other.example.com/isos/a.iso", "other_host"),
+    ],
+)
+async def test_a_redirect_is_checked_before_it_is_sent(
+    monkeypatch: pytest.MonkeyPatch, location: str, rule: str
+) -> None:
+    source = kit.file_sources_from_map({"isos": BASE})[0]
+    seen = _fake_server_redirecting_to(monkeypatch, location)
+    transport = kit.file_source_transport(source)
+    async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+        with pytest.raises(FileSourceError) as caught:
+            await client.get(f"{BASE}/a.iso")
+    assert caught.value.rule == rule
+    assert seen == [f"{BASE}/a.iso"]
+
+
+async def test_a_redirect_under_the_source_is_followed(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = kit.file_sources_from_map({"isos": BASE})[0]
+    seen = _fake_server_redirecting_to(monkeypatch, f"{BASE}/b.iso")
+    transport = kit.file_source_transport(source)
+    async with httpx.AsyncClient(
+        transport=transport, follow_redirects=True, max_redirects=1
+    ) as client:
+        with pytest.raises(httpx.TooManyRedirects):
+            await client.get(f"{BASE}/a.iso")
+    assert seen == [f"{BASE}/a.iso", f"{BASE}/b.iso"]
+
+
+async def test_kit_transport_checks_each_request_before_it_connects() -> None:
+    """The public transport refuses a request outside the source before any connection."""
+    public = kit.file_sources_from_map({"a": "https://192.0.2.10/files"})[0]
+    cases = [
+        ("https://192.0.2.10/other/a.iso", "path_outside_source"),
+        ("http://192.0.2.10:443/files/a.iso", "other_host"),
+    ]
+    for url, rule in cases:
+        async with httpx.AsyncClient(transport=kit.file_source_transport(public)) as client:
             with pytest.raises(kit.FileSourceError) as caught:
                 await client.get(url)
         assert caught.value.rule == rule

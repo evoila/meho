@@ -16,7 +16,8 @@ it and keeps no list of its own.
 
 - `FileSource`: `name`, `base` and `private_network_allowed` (false by
   default). `base` is a `FileSourceBase`: `scheme`, `host`, `port` and
-  `path_prefix`.
+  `path_prefix`. `host` is in lower case and keeps a trailing `.` when the
+  admin wrote one. Matching ignores that dot.
 - `file_sources_from_map(mapping)`: reads a map of name to base address.
 - `file_sources_from_hosts(entries)`: reads a list of `host` or
   `host:port` entries, each as `https://host:port/`.
@@ -51,11 +52,23 @@ When more than one source fits, the one with the longest path prefix wins.
 The address guard (see the target address guard page) still runs for
 every source, at connect time, with pinned addresses. A connector passes
 `file_source_transport(source)` to `httpx.AsyncClient(transport=...)`.
-Each new connection runs `file_source_resolver(source)`:
+
+Every request through that transport is checked before it is sent. This
+holds for a redirect and for a request on a reused connection too:
+
+- The scheme, host and port must be the source's (rule `other_host`).
+- The path must pass the path rules above and lie under the path prefix
+  of the source (rules `path_dots`, `path_undecodable`,
+  `path_outside_source`).
+
+Each new connection also runs `file_source_resolver(source)`:
 
 - The host and port must be the host and port of the source (rule
-  `other_host`). So a redirect to another host or port is refused.
-- The host is checked with the address guard's address classes. A host name is always
+  `other_host`).
+- The host is checked with the address guard's address classes. MEHO
+  looks up the host name exactly as the source spells it, never as the
+  request spells it: with or without a trailing `.`, DNS can answer
+  differently. A host name is always
   resolved, every answer is checked, and only the checked addresses are
   dialed. A name that does not resolve is refused (rule
   `address_blocked`).

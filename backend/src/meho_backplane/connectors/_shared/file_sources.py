@@ -25,8 +25,12 @@ can carry a token.
 
 The address guard still runs for every source, at connect time.
 :func:`file_source_transport` gives an httpx transport for one source. It
-connects only to the host and port of that source, checks every address
-the host resolves to, and dials only those checked addresses. A source
+checks every request, also a redirect and a request on a reused
+connection: the scheme, host and port must be the source's, and the path
+must be under the source's path prefix. It connects only to the host and
+port of that source, looks up the host name exactly as the source spells
+it, checks every address the name resolves to, and dials only those
+checked addresses. A source
 that says ``private_network_allowed`` accepts private addresses (RFC 1918
 and unique-local IPv6). Loopback, link-local and cloud metadata addresses
 are always refused. The install-wide address allowlist does not count for
@@ -54,7 +58,7 @@ from typing import Final
 
 import httpx
 
-from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
+from meho_backplane.connectors._shared.pinned_transport import pin_async_transport_ports
 from meho_backplane.targets import ssrf_guard as _guard
 
 __all__ = [
@@ -87,7 +91,7 @@ _RULES: Final[dict[str, str]] = {
     "(scheme, host or port differ)",
     "path_outside_source": "the file address path is not under the path of the named file source",
     "bad_source": "a named file source setting is not a valid base address",
-    "other_host": "the connection goes to a host or port that is not the named file source's",
+    "other_host": "the request goes to a scheme, host or port that is not the named file source's",
     "address_blocked": "the named file source host does not resolve, or is not at an address "
     "MEHO may connect to (a private address needs private_network_allowed; loopback, "
     "link-local and cloud metadata addresses are always refused)",
@@ -110,8 +114,10 @@ class FileSourceError(ValueError):
 class FileSourceBase:
     """The base address of a file source.
 
-    ``path_prefix`` has no trailing ``/``. It is empty when the source covers
-    the whole host.
+    ``host`` is in lower case and keeps a trailing ``.`` when the admin
+    wrote one: MEHO looks up the name exactly as written. Matching ignores
+    the trailing ``.``. ``path_prefix`` has no trailing ``/``. It is empty
+    when the source covers the whole host.
     """
 
     scheme: str
@@ -168,7 +174,7 @@ def _origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int]:
         raise FileSourceError("unparseable") from None
     if not host:
         raise FileSourceError("unparseable")
-    return scheme, host.rstrip(".").lower(), port if port is not None else _DEFAULT_PORTS[scheme]
+    return scheme, host.lower(), port if port is not None else _DEFAULT_PORTS[scheme]
 
 
 def _parse_base(name: str, address: str, *, private_network_allowed: bool) -> FileSource:
@@ -285,8 +291,9 @@ def resolve_file_source(url: str, sources: Sequence[FileSource]) -> FileSource:
     if parts.fragment or "#" in url:
         raise FileSourceError("fragment")
     _check_path(parts.path)
+    origin = (scheme, host.rstrip("."), port)
     origin_matches = [
-        s for s in sources if (s.base.scheme, s.base.host, s.base.port) == (scheme, host, port)
+        s for s in sources if (s.base.scheme, s.base.host.rstrip("."), s.base.port) == origin
     ]
     if not origin_matches:
         raise FileSourceError("no_source")
@@ -351,21 +358,26 @@ def _screen_host(host: str, *, allow_private: bool) -> list[str]:
     return [str(addr) for addr in addrs]
 
 
-def _host_key(host: str) -> str:
-    """The host as the transport dials it: ASCII, lower case, no trailing dot or brackets."""
+def _dns_name(host: str) -> str:
+    """The host in ASCII and lower case, without brackets. A trailing dot stays."""
     text = host.strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
     with contextlib.suppress(httpx.InvalidURL, UnicodeError):
         text = httpx.URL(scheme="https", host=text, path="/").raw_host.decode("ascii")
-    return text.rstrip(".").lower()
+    return text.lower()
+
+
+def _host_key(host: str) -> str:
+    """The host for matching: :func:`_dns_name` without a trailing dot."""
+    return _dns_name(host).rstrip(".")
 
 
 def file_source_resolver(source: FileSource) -> Callable[[str, int], list[str]]:
     """Return the connect-time screen for *source*.
 
     The result fits
-    :func:`~meho_backplane.connectors._shared.pinned_transport.build_port_pinned_async_transport`.
+    :func:`~meho_backplane.connectors._shared.pinned_transport.pin_async_transport_ports`.
     It refuses, with :class:`FileSourceError`:
 
     * a host or port that is not the host and port of *source* (rule
@@ -373,31 +385,73 @@ def file_source_resolver(source: FileSource) -> Callable[[str, int], list[str]]:
     * a host that is, or resolves to, an address a file source may not
       reach (rule ``address_blocked``).
 
-    Every address of the host is checked, and only those addresses are
-    dialed. A private address passes only when the source says
+    The name looked up is the host as *source* spells it, never the
+    spelling of the request: with or without a trailing ``.``, DNS can
+    answer differently. Every address of the host is checked, and only
+    those addresses are dialed. A private address passes only when the source says
     ``private_network_allowed``. The install-wide address allowlist does not
     count.
     """
     allowed = (_host_key(source.base.host), source.base.port)
+    lookup = _dns_name(source.base.host)
     allow_private = source.private_network_allowed
 
     def _screen(host: str, port: int) -> list[str]:
         if (_host_key(host), port) != allowed:
             raise FileSourceError("other_host")
-        return _screen_host(host, allow_private=allow_private)
+        return _screen_host(lookup, allow_private=allow_private)
 
     return _screen
+
+
+def _check_request(url: httpx.URL, source: FileSource) -> None:
+    """Refuse a request that does not lie under *source*.
+
+    The scheme, host and port must be the source's (rule ``other_host``).
+    The path must pass the same checks as in :func:`resolve_file_source`
+    and lie under the source's path prefix (rule ``path_outside_source``).
+    """
+    scheme = url.scheme.lower()
+    port = url.port if url.port is not None else _DEFAULT_PORTS.get(scheme)
+    base = source.base
+    if (scheme, _host_key(url.host), port) != (
+        base.scheme,
+        _host_key(base.host),
+        base.port,
+    ):
+        raise FileSourceError("other_host")
+    # httpx encodes the path its own way, so compare the decoded forms.
+    path = url.raw_path.decode("ascii").split("?", 1)[0]
+    _check_path(path)
+    if not _under(_fully_decoded(path), _fully_decoded(base.path_prefix)):
+        raise FileSourceError("path_outside_source")
+
+
+class _FileSourceTransport(httpx.AsyncHTTPTransport):
+    """An httpx transport that checks every request against one source before it sends it."""
+
+    def __init__(self, source: FileSource, *, verify: ssl.SSLContext | str | bool) -> None:
+        super().__init__(verify=verify)
+        self._source = source
+        pin_async_transport_ports(self, file_source_resolver(source))
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        _check_request(request.url, self._source)
+        return await super().handle_async_request(request)
 
 
 def file_source_transport(
     source: FileSource, *, verify: ssl.SSLContext | str | bool = True
 ) -> httpx.AsyncHTTPTransport:
-    """Return an httpx transport that connects only to *source*, through the address guard.
+    """Return an httpx transport that sends requests only to *source*, through the address guard.
 
     Hand it to ``httpx.AsyncClient(transport=...)`` for the download of an
-    address that :func:`resolve_file_source` accepted. Every new connection
-    runs :func:`file_source_resolver`: it goes only to the host and port of
-    *source*, and only to checked addresses. A refused connection raises
+    address that :func:`resolve_file_source` accepted. Every request is
+    checked before it is sent, also a redirect and a request on a reused
+    connection: the scheme, host and port must be the source's, and the
+    path must lie under the source's path prefix. Every new connection runs
+    :func:`file_source_resolver`: it goes only to the host and port of
+    *source*, and only to checked addresses. A refused request raises
     :class:`FileSourceError`. *verify* is passed to httpx unchanged.
     """
-    return build_port_pinned_async_transport(file_source_resolver(source), verify=verify)
+    return _FileSourceTransport(source, verify=verify)

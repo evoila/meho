@@ -2530,9 +2530,18 @@ async def _handle_http_status_error(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
+    redirect_on_change = is_redirect_on_change(http_exc)
+    if (
+        redirect_on_change
+        and callable(invalidate_session)
+        and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
+    ):
+        # The login ended, so the kept session is dropped. The change is not
+        # sent again; the redirect result below tells the caller what happened.
+        await invalidate_session(target, rejected=http_exc.request)
     if (
         callable(invalidate_session)
-        and not is_redirect_on_change(http_exc)
+        and not redirect_on_change
         and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
     ):
         # One rule for both paths: repeat only when it cannot send a change twice.

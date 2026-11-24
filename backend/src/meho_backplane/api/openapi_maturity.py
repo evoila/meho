@@ -95,6 +95,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # POLICY_CLASSIFICATION switch, so they ride the beta ``write_surfaces``
     # tier, like the settings file.
     "policy": "write_surfaces",
+    "principals": "auth_tenancy",
     "retrieval": "memory_knowledge",
     "runbooks": "write_surfaces",
     "runner-principals": "satellite_gateway",

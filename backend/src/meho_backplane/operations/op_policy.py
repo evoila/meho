@@ -15,11 +15,18 @@ The rules:
   classification and every override that applies. An edit can never set a
   level below the classification; that needs a pull request.
 * **Approval.** Approval is required when the classification says so or
-  an override requires it. The one way to turn it off is an install-wide
-  override with ``requires_approval=False``, set by a platform admin with a
-  reason and a fresh sign-in. Every edit that ends approval (also removing
-  an override) passes these checks. A destructive operation always waits
-  for approval.
+  an override requires it. The one way to turn it off is an override with
+  ``requires_approval=False`` that a platform admin sets with a reason, for
+  the whole install or for one tenant's own copy of the operation. The REST
+  API and the CLI also need a fresh sign-in; the web console accepts the
+  admin's signed-in session. Every edit that ends
+  approval (also removing an override) passes these checks. A destructive operation always waits
+  for approval. This edit also ends the per-call wait of an operation that a
+  connector marked with ``declare_per_call_approval``: a ``caution``
+  operation then runs at once for a person in the web console, a
+  ``dangerous`` operation still waits because of its risk level, and a
+  change of rights is refused. A credential write or mint keeps its
+  approval (see below).
 * **Scope.** A tenant admin's override (``tenant_id`` = the tenant) applies
   to that tenant only. A platform admin's override on a built-in operation
   (``tenant_id IS NULL``) applies to the whole install. Each scope's

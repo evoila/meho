@@ -104,6 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.principal_block import checking_logins_for_steps
 from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
@@ -144,6 +145,7 @@ from meho_backplane.operations._errors import (
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
+from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._target_connector_limit import (
     restored_connector_limit,
@@ -268,6 +270,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_asker_blocked",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -2257,7 +2260,9 @@ async def create_pending_request(
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
-            stored_resume_parent = {"op_id": resume_parent["op_id"]}
+            stored_resume_parent = {
+                key: resume_parent[key] for key in ("op_id", "request_sent") if key in resume_parent
+            }
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -3242,6 +3247,10 @@ async def resume_dispatch_after_approval(
     if release_refusal is not None:
         return release_refusal
 
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        return blocked_refusal
+
     resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
     if target_refusal is not None:
         return target_refusal
@@ -3400,6 +3409,41 @@ async def refuse_resume_if_release_changed(
         request,
         refusal,
         audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_asker_blocked(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> OperationResult | None:
+    """Refuse an approved run when the login that asked is blocked.
+
+    Returns ``None`` when the asker (``request.principal_sub``) is not
+    blocked, so the caller runs the request. Otherwise the operation never
+    runs and the vendor gets no call. The refusal is recorded like the
+    release refusal (:func:`refuse_resume_if_release_changed`): the claim
+    is taken, so the request never runs later, the stored run input is
+    deleted, one audit row records it, and the refusal is the stored run
+    result. A block-list read that fails refuses the run the same way.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    refusal = await refuse_if_principal_blocked(
+        request.op_id,
+        request.principal_sub,
+        request.tenant_id,
+        # The multi-step operation sent a step before it waited.
+        earlier_sent=(request.resume_parent or {}).get("request_sent") is True,
+    )
+    if refusal is None:
+        return None
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"asker_sub": request.principal_sub},
     )
 
 
@@ -3820,7 +3864,11 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+        with composite_resume_steps(
+            parent_op_id,
+            resume_parent.get("steps"),
+            earlier_sent=resume_parent.get("request_sent") is True,
+        ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)
@@ -3937,6 +3985,8 @@ async def _dispatch_resume_with_bound_context(
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
+            # Each step of the run also checks the person who asked.
+            checking_logins_for_steps(request.principal_sub, request.tenant_id),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

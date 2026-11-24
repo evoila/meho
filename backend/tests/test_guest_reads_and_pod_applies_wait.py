@@ -248,8 +248,11 @@ def test_an_apply_of_other_kinds_waits_too(kind: str, api_version: str) -> None:
     assert call_always_waits("k8s.apply", {"manifest": _manifest(kind, api_version)}) is True
 
 
-def test_only_the_manifest_of_a_secret_is_hidden_after_the_run() -> None:
-    assert manifest_holds_credential({"manifest": _DEPLOYMENT}) is False
+def test_only_the_manifest_with_a_credential_is_hidden_after_the_run() -> None:
+    plain_spec = {"containers": [{"name": "web", "image": "web:1", "args": ["--port", "80"]}]}
+    plain = _manifest("Deployment", "apps/v1", spec={"template": {"spec": plain_spec}})
+    assert manifest_holds_credential({"manifest": plain}) is False
+    assert manifest_holds_credential({"manifest": _DEPLOYMENT}) is True
     assert manifest_holds_credential({"manifest": _manifest("Secret")}) is True
 
 

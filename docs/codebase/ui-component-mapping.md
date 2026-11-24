@@ -169,8 +169,8 @@ precedent: `meho-ui` 0.7.0 adds `quiet-outline`, emitting
 Per P2.1's own rule, a template needing a cut variant **opens an issue
 against the component set** rather than reaching for raw markup. Four
 elements is small enough that converting them to the nearest surviving
-variant is likely right, but it is still a visible change and belongs in a
-batch's screenshot review.
+variant is likely right, but it is still a visible change and wants a
+deliberate look before it lands.
 
 ## Two rules the first batch settled
 
@@ -333,6 +333,33 @@ takes `body` the same way, so the 73 modals have the same shape.
 
 Neither is a conversion. Both are a redesign of the component or of the call
 sites, and they belong in their own ticket rather than inside a batch.
+
+## Why there are no screenshots
+
+The task's original wording asked for a before-and-after screenshot pair per
+batch. **That requirement was dropped by the ticket owner on 2026-11-24.** It
+is recorded here rather than quietly skipped, because the task text still
+carries it and a reader will otherwise go looking.
+
+The reasoning is that for this particular change a screenshot pair would show
+two identical images and prove nothing beyond what is already proven more
+tightly. A conversion batch does not restyle anything: it replaces markup
+with a macro that emits the same classes, and that claim is checked per
+element by rendering both the original markup and the generated call and
+comparing them node by node — tag, attributes with classes sorted, text —
+then again per template, rendered whole before and after. A difference of one
+class or one attribute fails that check; it cannot fail a screenshot
+comparison that a human eye signs off.
+
+Where the markup *does* change appearance, this page says so explicitly and
+the change is named rather than pictured: the cut variants above, and the
+empty-label behaviour below. Those are the cases worth a deliberate look.
+
+What a screenshot would still add is the thing no markup check covers — that
+the rendered page is not broken in a way the DOM cannot express, a layout
+collapse from a dropped wrapper, for instance. That risk is real but small
+here, because no batch has removed a wrapper element; the node comparison
+would have caught it if one had.
 
 ## Dead v4 classes — remove on sight
 

@@ -9,6 +9,8 @@
   value / evidence. Read-only. An acknowledged member (#4128) also shows who
   acknowledged it, until when and why, next to its real state.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ dashboard.name }} &middot; Checks &middot; MEHO Operator Console{% endblock %}
@@ -64,18 +66,18 @@
                 <div class="font-medium">{{ m.name }}</div>
                 <div class="font-mono text-xs text-subtle">{{ m.connector_id }} &middot; {{ m.op_id }}</div>
                 {% if m.status == "paused" %}
-                  <span class="badge badge-outline badge-xs">paused</span>
+                  {{ badge("paused", variant="outline", size="xs") }}
                 {% endif %}
               </td>
               <td><span class="badge {{ m.raw_state_badge }} badge-sm">{{ m.raw_state }}</span></td>
               <td>
                 <span class="badge {{ m.effective_state_badge }} badge-sm">{{ m.effective_state }}</span>
                 {% if m.pending %}
-                  <span class="badge badge-warning badge-xs" title="Failing, but held by the for: window">pending</span>
+                  {{ badge("pending", variant="warning", size="xs", title="Failing, but held by the for: window") }}
                 {% endif %}
                 {% if m.acknowledgement %}
                   <div class="mt-1 text-xs" data-testid="member-acknowledgement">
-                    <span class="badge badge-info badge-xs">acknowledged</span>
+                    {{ badge("acknowledged", variant="info", size="xs") }}
                     by {{ m.acknowledgement.by }}
                     until {{ m.acknowledgement.until.strftime("%Y-%m-%d %H:%M UTC") }}
                     &middot; {{ m.acknowledgement.reason }}: {{ m.acknowledgement.note }}

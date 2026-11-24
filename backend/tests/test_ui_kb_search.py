@@ -41,6 +41,7 @@ focus on the UI layer.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, timedelta
@@ -401,6 +402,45 @@ def test_kb_search_post_returns_hits() -> None:
     assert "BM25 score" not in body
     assert "Cosine score" not in body
     assert "0.900" not in body
+
+
+def test_kb_search_hit_view_link_targets_the_entry() -> None:
+    """The View link on a search card points at the entry, not at Jinja source.
+
+    A regression guard, not a style check. Converting this card to the shared
+    button component first wrote the href as a quoted string holding a Jinja
+    expression -- the call is itself inside ``{{ ... }}``, so the braces stayed
+    literal and every View link pointed at ``/ui/kb/{{ hit.slug }}``. It
+    compiled, it rendered, and the link went nowhere; nothing in the suite
+    exercised the href, so CI stayed green over it.
+
+    The link is found by its visible label so another anchor on the page
+    cannot satisfy this on its own.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with patch(
+            "meho_backplane.ui.routes.kb.routes.KbService.search_entries",
+            new_callable=AsyncMock,
+            return_value=[_make_search_hit("vcenter-snapshots")],
+        ):
+            response = client.post(
+                "/ui/kb/search",
+                data={"q": "vcenter"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    view_links = re.findall(r'<a\b[^>]*href="([^"]*)"[^>]*>\s*View\s*</a>', body)
+    assert view_links, "no anchor labelled View on the search card"
+    assert view_links == ["/ui/kb/vcenter-snapshots"], view_links
+    assert "{{" not in body, "a Jinja expression reached the rendered page"
 
 
 def test_kb_search_post_empty_query_returns_list() -> None:

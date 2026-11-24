@@ -34,6 +34,8 @@
   would 403 the start POST (``value_mismatch``). On the typed-error
   re-render the token is re-minted + cookie refreshed so the retry matches.
 -#}
+
+{% from "_components.html" import button %}
 <dialog id="runbook-run-start-modal" class="modal">
   <div class="modal-box max-w-2xl">
     <h3 class="font-semibold text-lg" id="runbook-run-start-modal-title">Start a run</h3>
@@ -70,7 +72,7 @@
           list="runbook-run-published-slugs"
           required
           maxlength="256"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="e.g. drain-node"
           autocomplete="off"
           aria-describedby="runbook-run-start-slug-hint"
@@ -99,7 +101,7 @@
           name="target"
           required
           maxlength="512"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="the run's subject -- host, cluster, cert thumbprint"
           autocomplete="off"
           aria-describedby="runbook-run-start-target-hint"
@@ -139,7 +141,7 @@
         <textarea
           name="params"
           maxlength="16384"
-          class="textarea textarea-bordered min-h-[8rem] w-full font-mono text-sm"
+          class="textarea min-h-[8rem] w-full font-mono text-sm"
           placeholder='{"namespace": "prod", "replicas": 3}'
           aria-describedby="runbook-run-start-params-hint"
           x-on:blur="formatParams($event.target)"
@@ -155,7 +157,7 @@
         <input
           type="text"
           name="work_ref"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="gh:evoila/meho#9, a Jira key, a CR id"
           autocomplete="off"
           aria-describedby="runbook-run-start-work-ref-hint"
@@ -174,9 +176,7 @@
         >
           Cancel
         </button>
-        <button type="submit" class="btn btn-sm btn-primary">
-          Start run
-        </button>
+        {{ button("Start run", variant="primary", type="submit") }}
       </div>
     </form>
   </div>

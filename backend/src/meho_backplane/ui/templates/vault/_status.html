@@ -22,6 +22,7 @@
       vault connector is visible (the three envelopes are then None).
     * ``seal`` / ``health`` / ``mounts`` (dict|None) -- the op envelopes.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
 
@@ -43,13 +44,9 @@
       {%- set sealed = s.get("sealed") -%}
       <div class="flex items-center gap-2" data-vault-seal="{{ 'sealed' if sealed else 'unsealed' }}">
         {% if sealed %}
-          <span class="badge badge-warning gap-1">
-            {{ icon("lock", class="size-3.5") }} Sealed
-          </span>
+          {{ badge((icon("lock", class="size-3.5")) ~ " Sealed", variant="warning", size="md", class="gap-1") }}
         {% else %}
-          <span class="badge badge-success gap-1">
-            {{ icon("check", class="size-3.5") }} Unsealed
-          </span>
+          {{ badge((icon("check", class="size-3.5")) ~ " Unsealed", variant="success", size="md", class="gap-1") }}
         {% endif %}
         {% if s.get("initialized") is not none %}
           <span class="badge badge-ghost gap-1" data-vault-initialized="{{ 'true' if s.get('initialized') else 'false' }}">
@@ -86,9 +83,9 @@
       {%- set h = health.get("result") or {} -%}
       <div class="flex items-center gap-2" data-vault-health="{{ 'ok' if h.get('ok') else 'unhealthy' }}">
         {% if h.get("ok") %}
-          <span class="badge badge-success gap-1">{{ icon("check", class="size-3.5") }} Serving</span>
+          {{ badge((icon("check", class="size-3.5")) ~ " Serving", variant="success", size="md", class="gap-1") }}
         {% else %}
-          <span class="badge badge-error gap-1">{{ icon("x", class="size-3.5") }} Not serving</span>
+          {{ badge((icon("x", class="size-3.5")) ~ " Not serving", variant="error", size="md", class="gap-1") }}
         {% endif %}
       </div>
       <dl class="mt-3 space-y-1 text-xs">

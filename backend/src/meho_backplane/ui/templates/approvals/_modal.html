@@ -122,6 +122,7 @@
                              (#3329: an approve refusal says the web interface is
                              the normal place to approve)
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "_references.html" import subject %}
 {#- Mirror of the ops-launcher ``safety_badge`` mold (``operations/_results.html``):
@@ -134,13 +135,13 @@
     context at its top level. -#}
 {%- macro proposed_effect_safety_badge(level) -%}
   {%- if level == "destructive" -%}
-    <span class="badge badge-error badge-sm font-semibold" title="Destructive — deletes objects; mandatory human approval, irreversible">{{ level }}</span>
+    {{ badge(level, variant="error", class="font-semibold", title="Destructive — deletes objects; mandatory human approval, irreversible") }}
   {%- elif level == "dangerous" -%}
-    <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ level }}</span>
+    {{ badge(level, variant="error", title="Dangerous — irreversible or high-impact") }}
   {%- elif level == "caution" -%}
-    <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ level }}</span>
+    {{ badge(level, variant="warning", title="Caution — state-changing") }}
   {%- else -%}
-    <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ level }}</span>
+    {{ badge(level, variant="quiet", title="Safe — read or non-impacting") }}
   {%- endif -%}
 {%- endmacro -%}
 <dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Review approval request">
@@ -355,7 +356,7 @@
               </label>
               <textarea
                 name="note"
-                class="textarea textarea-bordered textarea-sm w-full"
+                class="textarea textarea-sm w-full"
                 maxlength="2000"
                 required
                 placeholder="What did you check?"
@@ -575,10 +576,10 @@
             {{ proposed_effect_safety_badge(effect.get("safety_level")) }}
           {% endif %}
           {% if effect.get("op_class") %}
-            <span class="badge badge-ghost badge-sm font-mono" title="Operation class">{{ effect.get("op_class") }}</span>
+            {{ badge(effect.get("op_class"), variant="quiet", class="font-mono", title="Operation class") }}
           {% endif %}
           {% if effect.get("category") %}
-            <span class="badge badge-outline badge-sm font-mono" title="Category">{{ effect.get("category") }}</span>
+            {{ badge(effect.get("category"), variant="outline", class="font-mono", title="Category") }}
           {% endif %}
         </div>
       </div>
@@ -751,7 +752,7 @@
           <div class="flex items-center justify-between gap-3">
             <h4 class="text-sm font-semibold text-error">Blast radius — what this destroys</h4>
             {% if blast.get("irreversibility") %}
-              <span class="badge badge-error badge-sm font-mono" title="Irreversibility class">{{ blast.get("irreversibility") }}</span>
+              {{ badge(blast.get("irreversibility"), variant="error", class="font-mono", title="Irreversibility class") }}
             {% endif %}
           </div>
           {% if blast.get("object") %}

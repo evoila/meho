@@ -25,6 +25,7 @@
   ``meho_csrf`` cookie + the header the swapping element already carries,
   so the double-submit gate passes on the next revoke from the swapped DOM.
 -#}
+{% from "_components.html" import button %}
 {% from "_icons.html" import icon %}
 
 {%- macro relative_time(ts) -%}
@@ -118,7 +119,7 @@
             {% endif %}
             <div class="modal-action">
               <form method="dialog">
-                <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+                {{ button("Cancel", variant="quiet", type="submit") }}
               </form>
               <button
                 type="button"

@@ -108,6 +108,10 @@ from meho_backplane.mcp.tools._kb_similar_text import (
     SIMILAR_CHECK_TEXT,
     similar_check_for_settings,
 )
+from meho_backplane.mcp.tools._kb_wiki_order_text import (
+    PARTIAL_REMEDIATION_IN_TURNS,
+    with_wiki_order_text,
+)
 from meho_backplane.mcp.tools._kb_word_hint import with_word_hint, word_hint_extra
 from meho_backplane.mcp.tools._search_filters import (
     FILTER_PROPERTIES,
@@ -252,6 +256,7 @@ async def _search_knowledge_handler(
         [payload for payload, _ in ordered],
         get_settings().result_complete_response_wire_max_bytes,
         extra={**extra, **word_hint_extra(hits)},
+        in_turns=get_settings().kb_wiki_interleave,
     )
     delivered = [hit for _, hit in ordered[: len(response["hits"])] if hit is not None]
     await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
@@ -318,12 +323,18 @@ _PARTIAL_SEARCH_REMEDIATION: Final[str] = (
 
 
 def _bounded_search_response(
-    hits: list[dict[str, Any]], max_bytes: int, *, extra: dict[str, Any] | None = None
+    hits: list[dict[str, Any]],
+    max_bytes: int,
+    *,
+    extra: dict[str, Any] | None = None,
+    in_turns: bool = False,
 ) -> dict[str, Any]:
     """Keep the response within *max_bytes* on the wire, dropping the lowest-ranked hits.
 
     *extra* holds more keys of the response (the ``wiki`` status). They are
     measured with the hits, so the whole answer stays within *max_bytes*.
+    *in_turns* is ``KB_WIKI_INTERLEAVE``: the cut text then says the hits at
+    the end of the list were left out, as the list is not in rank order.
 
     Uses the shared wire measurement (#3641) and its ``delivery`` states:
     ``complete`` when every hit fits, ``partial`` when some lower-ranked
@@ -337,9 +348,8 @@ def _bounded_search_response(
             omitted = len(hits) - kept
             response["delivery"] = "partial"
             response["omitted_hits"] = omitted
-            response["remediation"] = _PARTIAL_SEARCH_REMEDIATION.format(
-                omitted=omitted, limit=max_bytes
-            )
+            template = PARTIAL_REMEDIATION_IN_TURNS if in_turns else _PARTIAL_SEARCH_REMEDIATION
+            response["remediation"] = template.format(omitted=omitted, limit=max_bytes)
         if kept == 0 or measure_delivered_wire_bytes(response, structured=False) <= max_bytes:
             return response
         kept -= 1
@@ -502,7 +512,7 @@ register_mcp_tool(
         name="search_knowledge",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT)),
+        for_settings=with_wiki_order_text(with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT))),
         description=(
             "Search the tenant's knowledge base: vendor API patterns, lab "
             "conventions, known-good runbooks, post-incident learnings. "

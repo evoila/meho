@@ -85,7 +85,12 @@ from meho_backplane.kb.schemas import (
 from meho_backplane.kb.service import KbSearchScope, KbService
 from meho_backplane.kb.similar import KbSimilarCheck, check_new_entry
 from meho_backplane.kb.stale_revision import KbStaleRevisionError
-from meho_backplane.kb.wiki_search import KbWikiSearch, search_wiki, wiki_note_for
+from meho_backplane.kb.wiki_search import (
+    KbWikiSearch,
+    search_wiki,
+    wiki_exact_filters,
+    wiki_note_for,
+)
 from meho_backplane.lesson_header import LessonHeaderError, may_confirm
 from meho_backplane.lessons.retrievals import record_kb_retrievals
 from meho_backplane.mcp.registry import (
@@ -103,6 +108,7 @@ from meho_backplane.mcp.tools._kb_similar_text import (
     SIMILAR_CHECK_TEXT,
     similar_check_for_settings,
 )
+from meho_backplane.mcp.tools._kb_word_hint import with_word_hint, word_hint_extra
 from meho_backplane.mcp.tools._search_filters import (
     FILTER_PROPERTIES,
     FILTER_TOOL_TEXT,
@@ -232,18 +238,47 @@ async def _search_knowledge_handler(
         limit=limit,
         stored=[(hit.tenant_id, hit.slug, hit.metadata) for hit in hits],
         filtered=bool(filters) or time_window is not None or scope == "shared",
+        exact=wiki_exact_filters(
+            filters, has_time_window=time_window is not None, shared_scope=scope == "shared"
+        ),
     )
-    payloads = [_hit_payload(hit) for hit in hits]
-    if wiki is not None:
-        payloads.extend(_wiki_hit_payload(chunk) for chunk in wiki.hits)
+    ordered = _ordered_hits(
+        hits,
+        [_wiki_hit_payload(chunk) for chunk in wiki.hits] if wiki is not None else [],
+        interleave=get_settings().kb_wiki_interleave,
+    )
+    extra: dict[str, Any] = {"wiki": _wiki_status_payload(wiki)} if wiki is not None else {}
     response = _bounded_search_response(
-        payloads,
+        [payload for payload, _ in ordered],
         get_settings().result_complete_response_wire_max_bytes,
-        extra={"wiki": _wiki_status_payload(wiki)} if wiki is not None else None,
+        extra={**extra, **word_hint_extra(hits)},
     )
-    delivered = hits[: len(response["hits"])]
+    delivered = [hit for _, hit in ordered[: len(response["hits"])] if hit is not None]
     await record_kb_retrievals(operator.tenant_id, [(hit.slug, hit.tenant_id) for hit in delivered])
     return response
+
+
+def _ordered_hits(
+    store: list[KbEntrySearchHit], wiki: list[dict[str, Any]], *, interleave: bool
+) -> list[tuple[dict[str, Any], KbEntrySearchHit | None]]:
+    """Put the store hits and the wiki hits in one list, each with its store hit.
+
+    The store hit is ``None`` for a wiki hit. With *interleave* off, the
+    store hits come first and the wiki hits follow. With it on, the two
+    lists take turns (store 1, wiki 1, store 2, ...) and the rest of the
+    longer list follows (``KB_WIKI_INTERLEAVE``). The size limit leaves out
+    the last places first, and the caller records only the store hits that
+    are in the delivered part.
+    """
+    stored = [(_hit_payload(hit), hit) for hit in store]
+    wikis: list[tuple[dict[str, Any], KbEntrySearchHit | None]] = [(item, None) for item in wiki]
+    if not interleave:
+        return [*stored, *wikis]
+    turns: list[tuple[dict[str, Any], KbEntrySearchHit | None]] = []
+    for position in range(max(len(stored), len(wikis))):
+        turns.extend(stored[position : position + 1])
+        turns.extend(wikis[position : position + 1])
+    return turns
 
 
 def _hit_payload(hit: KbEntrySearchHit) -> dict[str, Any]:
@@ -467,7 +502,7 @@ register_mcp_tool(
         name="search_knowledge",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(SEARCH_KNOWLEDGE_SHORT),
+        for_settings=with_word_hint(with_short_text(SEARCH_KNOWLEDGE_SHORT)),
         description=(
             "Search the tenant's knowledge base: vendor API patterns, lab "
             "conventions, known-good runbooks, post-incident learnings. "

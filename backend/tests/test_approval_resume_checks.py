@@ -70,6 +70,7 @@ _PREVIEW: dict[str, Any] = {
     "query": {},
     "redacted_body": None,
 }
+_PREVIEW["preview_hash"] = preview_module.compute_preview_hash(_PREVIEW)
 
 
 @pytest.fixture(autouse=True)

@@ -24,7 +24,7 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
-Two of these calls always wait for a person, and no standing grant, no
+Six of these calls always wait for a person, and no standing grant, no
 agent grant and no run approval covers them
 ([service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
@@ -39,8 +39,23 @@ agent grant and no run approval covers them
   `k8s.apply`. Grant create, agent grant create and run approval create
   refuse `k8s.apply`. A person's own call waits for approval, as every
   `k8s.apply` call does.
+- every `k8s.delete` call: it deletes a Pod, a Job or a ReplicaSet.
+- every `k8s.label` call: on a Namespace it can set or remove the labels
+  that decide how the cluster checks the pods in it. This holds for
+  every kind of object.
+- every `k8s.annotate` call, for the same reason as `k8s.label`.
+- every `k8s.namespace.create` call: it makes a new namespace, and MEHO
+  sets no labels on it.
 
-Both are declared in `op_classes.py` of the connector. The approval card
+Grant create, agent grant create and run approval create refuse all six.
+In sandbox mode a delete grant still covers `k8s.delete`, and only that
+one of the six (`declare_sandbox_delete_grant`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`k8s.scale`, `k8s.rollout.restart` and `k8s.cordon` (also with
+`uncordon: true`) keep their rules: a standing grant and a run approval
+still cover them.
+
+All six are declared in `op_classes.py` of the connector. The approval card
 says in one line why the call waits; only a person reads that line. The
 card of a `k8s.apply` also names, for a person only, what each container
 runs: the object, the container, the image, the `command` and `args`, and
@@ -52,14 +67,34 @@ is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
-The stored request of a `k8s.apply` of a Secret keeps its manifest only
-in the encrypted one-time handoff of the run, as a credential write does.
+The stored request of a `k8s.apply` of a Secret, or of a manifest with a
+secret-looking value, keeps its manifest only in the encrypted one-time
+handoff of the run, as a credential write does. Such a call needs
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
+(`manifest_holds_credential` in `op_classes.py`) when:
+
+- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
+  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
+  example a ConfigMap;
+- an `env` entry at any depth (the object itself, the containers and init
+  containers of a pod template) has a secret name and a value of its own; an entry that
+  reads its value from a Secret (`valueFrom`) does not count;
+- a text at any depth has a secret shape of its own: the rule of
+  `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
+  token with a known vendor prefix).
+
+The check reads each value of the manifest once, and the names of each
+`data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
+them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
+holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of
 the parent's params either. A row stored before this rule keeps its
-manifest until the run starts or the request ends; then MEHO replaces it
-with the same marker it writes for a secret-named value. A new run of a
-failed apply needs the params sent again.
+manifest until the run starts or the request ends, or until the start-up
+clean-up when it cannot run (see "Approval-TTL lifecycle" in
+`approvals.md`); then MEHO replaces it with the same marker it writes for
+a secret-named value. A new run of a failed apply needs the params sent
+again.
 
 `k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
 defines, unchanged, so the caller does not choose what runs. Writing the

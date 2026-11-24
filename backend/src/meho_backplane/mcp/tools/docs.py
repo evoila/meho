@@ -121,6 +121,7 @@ from meho_backplane.docs_search import (
     UnknownCollectionError,
     build_docs_scope,
     citation_link_payload,
+    exact_read_scope,
     parse_collection_scope,
     read_docs,
     resolve_entitled_ready_collection,
@@ -840,6 +841,7 @@ async def _read_docs_handler(
             before=before,
             after=after,
             cursor=cursor,
+            exact_scope=exact_read_scope(scope, arguments.get("product"), arguments.get("version")),
         )
     except DocsReadNotFoundError as exc:
         raise McpInvalidParamsError(f"read_docs: {DOCS_SOURCE_NOT_FOUND}") from exc

@@ -230,6 +230,9 @@ from meho_backplane.operations.approval_presence import (
     stop_presence_challenge_cleanup,
 )
 from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
+from meho_backplane.operations.approval_stored_values import (
+    hide_values_of_requests_that_cannot_run,
+)
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -262,6 +265,10 @@ from meho_backplane.request_usage.retention import (
     stop_request_usage_retention_sweeper,
 )
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.embedding_state import (
+    check_embedding_model_at_start,
+    embedding_model_probe,
+)
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.session_store.config import load_config as load_session_store_config
@@ -430,6 +437,18 @@ async def _expire_approvals_from_older_release() -> None:
         await expire_approvals_from_older_release()
     except Exception:
         structlog.get_logger().exception("approval_release_expiry_failed")
+
+
+async def _hide_values_of_requests_that_cannot_run() -> None:
+    """Drop the stored values of approval requests that cannot run.
+
+    Fail-open: a failure here is logged and the start goes on. The next
+    start runs the clean-up again.
+    """
+    try:
+        await hide_values_of_requests_that_cannot_run()
+    except Exception:
+        structlog.get_logger().exception("approval_stored_values_clean_up_failed")
 
 
 async def _recover_interrupted_approvals() -> None:
@@ -618,9 +637,19 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Warn when the stored vectors come from another model than the set one.
+    # The readiness check is added only then, and only with the switch
+    # EMBEDDING_MODEL_HEALTH_CHECK on, so by default the health answer (and
+    # so meho_status) stays as it was.
+    model_differs = await check_embedding_model_at_start()
+    if model_differs and get_settings().embedding_model_health_check:
+        register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
+    # A request that ended without a run, or an approved request of another
+    # release, keeps no secret value and no encrypted handoff row.
+    await _hide_values_of_requests_that_cannot_run()
     # #5025: an approved run that a restart cut short has no result. MEHO
     # does not know if the change happened, so mark it uncertain.
     await _recover_interrupted_approvals()

@@ -24,6 +24,7 @@ from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.store_errors import (
     _KNOWN_REASONS,
+    HEADER_ERROR_TEXT,
     has_store_detail,
     hide_store_address,
     log_without_store_text,
@@ -67,7 +68,9 @@ _PASSWORD = "made-up-" + "pass-4411"
 _SHORT_PASSWORD = "pw" + "41"
 _TOKEN = "hvs." + "MADEUP" * 5
 _OTHER_TOKEN = "made-up-" + "token-7722"
-_SECRET_VALUES = (_PASSWORD, _SHORT_PASSWORD, _TOKEN, _OTHER_TOKEN)
+#: Made at run time: a token that Requests refuses in a header.
+_HEADER_TOKEN = "hvs." + "".join(secrets.choice(string.ascii_letters) for _ in range(24))
+_SECRET_VALUES = (_PASSWORD, _SHORT_PASSWORD, _TOKEN, _OTHER_TOKEN, _HEADER_TOKEN)
 #: What a store can write: its words, the address and secret values in several shapes.
 _STORE_MESSAGE = (
     f"{_STORE_TEXT} at {_ADDR}: "
@@ -224,6 +227,10 @@ def test_a_one_word_host_in_a_certificate_error_is_replaced(
         ("http://vault:8200", "hostname 'vault.other.example' doesn't match 'x'"),
         ("http://vault:8200", "Failed to resolve 'vault-2.example' (no such host)"),
         (_ADDR, f"GET https://{_HOST}.other.example/v1/x failed"),
+        ("https://vault", "GET https://vault.other.example/v1/x failed"),
+        ("https://vault", "GET https://vault-2/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example.org/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example-2/v1/x failed"),
     ],
 )
 def test_a_longer_host_name_that_starts_with_the_store_host_stays(
@@ -234,6 +241,25 @@ def test_a_longer_host_name_that_starts_with_the_store_host_stays(
     assert hide_store_address(text) == text
     assert _sanitize_free_text(text) == text
     assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    ("store_addr", "text"),
+    [
+        ("https://vault", "GET https://vault/v1/x failed"),
+        ("https://vault", "GET https://vault:443/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example/v1/x failed"),
+    ],
+)
+def test_the_store_address_with_the_default_port_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, store_addr: str, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", store_addr)
+    get_settings.cache_clear()
+    host = store_addr.removeprefix("https://")
+    for shown in (hide_store_address(text), _sanitize_free_text(text)):
+        assert "<secret store>" in shown
+        assert host not in shown
 
 
 @pytest.mark.parametrize(
@@ -617,6 +643,8 @@ async def _raise_store_failure(operator: Operator, target: Any, params: dict[str
             pytest.fail("body must not run when login raises")
     if case == "failed":
         raise _store_error(hvac.exceptions.InternalServerError)
+    if case == "header":
+        raise _header_error(_HEADER_TOKEN + " \n")
     if case == "own_ref":
         own = TargetSecretForbiddenError(target_name="app", secret_ref="tenants/t/app")
         raise own from _store_error()
@@ -919,6 +947,61 @@ def test_a_header_error_is_withheld_from_the_log(kind: str) -> None:
             exc = outer
     assert has_store_detail(exc)
     assert value not in store_text_for_log(exc)
+
+
+def _wrapped_header_error() -> BaseException:
+    try:
+        try:
+            raise _header_error(_HEADER_TOKEN + "\r")
+        except requests.exceptions.InvalidHeader as inner:
+            raise RuntimeError(f"the store call failed: {inner}") from inner
+    except RuntimeError as outer:
+        return outer
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_an_answer_for_a_header_error_holds_no_token(wrapped: bool) -> None:
+    exc = _wrapped_header_error() if wrapped else _header_error(_HEADER_TOKEN + " \n")
+    assert _HEADER_TOKEN in str(exc)
+
+    result = result_connector_error("vault.kv.versions", exc, 1.0)
+
+    assert result.extras["exception_message"] == HEADER_ERROR_TEXT
+    _assert_clean(result)
+    reason = preview_failure_reason(exc)
+    assert HEADER_ERROR_TEXT in reason
+    assert _HEADER_TOKEN not in reason
+
+
+@pytest.mark.usefixtures("_clean_dispatcher")
+async def test_a_header_error_through_the_dispatcher_answers_without_the_token() -> None:
+    register_connector_v2(product="storefail", version="", impl_id="", cls=_StoreConnector)
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    await register_typed_operation(
+        product="storefail",
+        version="1.x",
+        impl_id="storefail",
+        op_id="storefail.item.read",
+        handler=_raise_store_failure,
+        summary="Fail with a header error.",
+        description="The handler raises an HTTP header error.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=service,
+    )
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id="storefail-1.x",
+        op_id="storefail.item.read",
+        target=None,
+        params={"case": "header"},
+    )
+
+    assert result.extras["error_code"] == "connector_error", result
+    assert result.extras["exception_message"] == HEADER_ERROR_TEXT
+    _assert_clean(result)
 
 
 def test_a_traceback_stays_for_an_error_without_a_header() -> None:

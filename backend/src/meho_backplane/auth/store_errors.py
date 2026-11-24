@@ -27,6 +27,7 @@ from meho_backplane.redaction.secret_text import hide_secret_text
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "HEADER_ERROR_TEXT",
     "STORE_ADDRESS_MARK",
     "STORE_FAILED_TEXT",
     "STORE_REFUSED_TEXT",
@@ -51,6 +52,9 @@ STORE_REFUSED_TEXT: Final = "The secret store refused the request."
 
 #: What an answer says for any other failure of the store.
 STORE_FAILED_TEXT: Final = "The secret store returned an error."
+
+#: What an answer says for an HTTP header error: its text can hold a token.
+HEADER_ERROR_TEXT: Final = "The request was not sent: an HTTP header value is not valid."
 
 _TEXT_WITHHELD: Final = "<store text withheld>"
 
@@ -194,7 +198,8 @@ def log_holds_store_text() -> bool:
 def hide_store_address(text: str) -> str:
     """Replace the configured secret store address in *text* with a fixed mark.
 
-    The full address, the host with its port and the bare host are replaced.
+    The full address, the host with its port and the bare host are replaced,
+    each only as a whole name.
     A one-word host (``vault``) is replaced only where it is used as an
     address (after ``//`` or ``@``, in ``host='...'``, ``resolve '...'``,
     ``hostname '...'`` and ``not valid for '...'``), so the same word in a
@@ -208,7 +213,7 @@ def hide_store_address(text: str) -> str:
         return text
     if addr is None:
         return text
-    patterns = [re.escape(str(addr).rstrip("/"))]
+    patterns = [re.escape(str(addr).rstrip("/")) + _HOST_END]
     if addr.host:
         host = re.escape(addr.host)
         if addr.port:
@@ -379,13 +384,18 @@ def text_without_store_detail(exc: BaseException) -> str:
     """Return the text of *exc* with MEHO's sentence in place of any store text.
 
     A store error becomes the sentence. So does the part of a wrapper's text
-    that repeats the store error behind it. The store address is replaced in
-    what is left. The caller still runs its own redaction.
+    that repeats the store error behind it. An HTTP header error, or an error
+    caused by one, becomes a fixed sentence too, since its text can hold the
+    header's value. The store address is replaced in what is left. The caller
+    still runs its own redaction.
     """
     if _is_store_answer(exc):
         return _store_sentence(exc)
+    links = _chain(exc)
+    if any(_quotes_header(link) for link in links):
+        return HEADER_ERROR_TEXT
     text = str(exc)
-    for link in _chain(exc)[1:]:
+    for link in links[1:]:
         if _is_store_answer(link):
             for shown in (str(link), repr(link)):
                 text = text.replace(shown, _store_sentence(link))

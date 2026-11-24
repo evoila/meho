@@ -451,7 +451,8 @@ when you leave it out.
 MEHO keeps each tenant's secrets under the tenant's own folder in the
 secret store (Vault or OpenBao). When a target's `secret_ref` points
 outside that folder, MEHO writes a warning to the server log, at most once
-an hour for each target. The call still works.
+an hour for each target. The call still works. Move the secret into the
+tenant's folder: a later MEHO refuses this read.
 
 To list these targets, run this as an admin:
 

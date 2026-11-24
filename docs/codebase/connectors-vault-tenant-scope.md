@@ -135,6 +135,7 @@ keep that inside each sensor's tenant:
 The check-runner and a tenant with its own Vault role are refused when a
 target's own path is outside the tenant's folder. Every other caller is
 checked too, and gets a warning instead of a refusal. The read goes on.
+Move the secret into the tenant's folder: a later MEHO refuses this read.
 
 - **Where.** The shared loader (`_resolve_and_load` in
   `connectors/_shared/vault_creds.py`) calls
@@ -144,7 +145,9 @@ checked too, and gets a warning instead of a refusal. The read goes on.
   and `PLATFORM_EXEMPT_PATHS` for reads. A test pins the two together.
 - **The warning.** The server log gets `target_secret_ref_outside_tenant_folder`
   with the target id and name, the tenant id and `secret_ref_prefix`, the
-  first part of the path. There is at most one warning per target per
+  first part of the path. A slash, a backslash, a percent sign, a question
+  mark and a number sign each end the first part. A path with one part
+  shows only `…`. There is at most one warning per target per
   process per hour. Nothing goes into the answer, the trace or the audit
   row.
 - **Check off.** When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty and the tenant

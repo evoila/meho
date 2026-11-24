@@ -2550,7 +2550,7 @@ class Settings(BaseModel):
     # central check: they set the state of the check, show on the dashboard,
     # send mails and can start the investigator. Off by default: results are
     # only stored. Set via ``RUNNER_CHECKS_ENABLED``.
-    runner_checks_enabled: bool = False
+    runner_checks_enabled: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     # Days the clean-up job keeps raw ``runner_check_results`` rows while
     # ``RUNNER_CHECKS_ENABLED`` is on. ``0``, or the switch off, keeps them for
     # ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.

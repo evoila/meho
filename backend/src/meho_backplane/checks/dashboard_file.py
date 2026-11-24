@@ -275,26 +275,25 @@ async def _operation_problem(
     return None
 
 
-async def _require_runner_can_run(tenant_id: uuid.UUID, index: int, body: SensorCreate) -> None:
-    """Refuse an update that gives a Sensor bound to a runner an op the runner cannot run."""
+async def _runner_problem(
+    tenant_id: uuid.UUID, index: int, body: SensorCreate
+) -> ImportProblem | None:
+    """The problem when an update gives a Sensor bound to a runner an op the runner cannot run."""
     product, version, impl_id = parse_connector_id(body.connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=body.op_id
     )
     if descriptor is None:
-        return  # _lock_and_require_operation refuses it
+        return None  # _lock_and_require_operation refuses it
     try:
         require_runner_can_run(descriptor, body.op_id, body.params)
     except SensorRunnerBindingError as exc:
-        raise DashboardImportRefusedError(
-            [
-                ImportProblem(
-                    kind="dashboard_import_runner_cannot_run",
-                    loc=("body", "file", "sensors", str(index), "op_id"),
-                    message=f"sensor {body.name!r}: {exc}",
-                )
-            ]
-        ) from exc
+        return ImportProblem(
+            kind="dashboard_import_runner_cannot_run",
+            loc=("body", "file", "sensors", str(index), "op_id"),
+            message=f"sensor {body.name!r}: {exc}",
+        )
+    return None
 
 
 async def _check_file(tenant_id: uuid.UUID, request: DashboardImportRequest) -> list[SensorCreate]:
@@ -382,7 +381,12 @@ async def _sync_sensors(
     write: bool,
     now: datetime,
 ) -> tuple[list[ImportedSensor], dict[str, uuid.UUID | None]]:
-    """Create or update each Sensor; return what happened and each Sensor's id."""
+    """Create or update each Sensor; return what happened and each Sensor's id.
+
+    Raises:
+        DashboardImportRefusedError: with every Sensor bound to a runner that
+            the file gives an op the runner cannot run. Nothing is written.
+    """
     names = [b.name for b in bodies]
     query = select(Sensor).where(Sensor.tenant_id == tenant_id, Sensor.name.in_(names))
     if write:
@@ -390,6 +394,7 @@ async def _sync_sensors(
     existing = {row.name: row for row in (await session.scalars(query)).all()}
     report: list[ImportedSensor] = []
     ids: dict[str, uuid.UUID | None] = {}
+    runner_problems: list[ImportProblem] = []
     for index, body in enumerate(bodies):
         row = existing.get(body.name)
         if row is None:
@@ -423,7 +428,10 @@ async def _sync_sensors(
         ids[body.name] = row.id
         changed = _changed(_current_sensor(row), _wanted_sensor(body))
         if row.runner_name is not None and changed:
-            await _require_runner_can_run(tenant_id, index, body)
+            problem = await _runner_problem(tenant_id, index, body)
+            if problem is not None:
+                runner_problems.append(problem)
+                continue
         action: ImportAction = "update" if changed else "unchanged"
         identity_sub = identity_after_change(row.identity_sub, created_by_sub, changed)
         reset = identity_sub != row.identity_sub
@@ -440,6 +448,8 @@ async def _sync_sensors(
             await _lock_and_require_operation(session, tenant_id, body)
             _update_sensor(row, body, now)
             row.identity_sub = identity_sub
+    if runner_problems:
+        raise DashboardImportRefusedError(runner_problems)
     return report, ids
 
 

@@ -81,6 +81,7 @@ unpinned target's key is unchanged in its pin slot from the #1781 shape.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import os
 import ssl
@@ -481,6 +482,13 @@ def _stopped_read_done(task: asyncio.Future[Any]) -> None:
         task.exception()
 
 
+#: True inside a read that :func:`_run_stop_safe` already protects, so a
+#: nested call (the stream read calls the client's ``send``) adds no task.
+_inside_stop_safe: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_inside_stop_safe", default=False
+)
+
+
 async def _run_stop_safe[T](work: Callable[[], Awaitable[T]]) -> T:
     """Run *work* so that a stop cannot cut the close of an answer.
 
@@ -492,22 +500,29 @@ async def _run_stop_safe[T](work: Callable[[], Awaitable[T]]) -> T:
     which respects httpcore's shield, and the close runs to its end. Then
     the caller gets the stop (``CancelledError``) as before.
     """
+    if _inside_stop_safe.get():
+        return await work()
     scope = anyio.CancelScope()
 
     async def _inside_scope() -> T | None:
+        # The task runs in a copy of the caller's context, so this stays inside it.
+        _inside_stop_safe.set(True)
+        result: T | None = None
         with scope:
-            return await work()
-        return None
+            result = await work()
+        return result
 
     task: asyncio.Future[T | None] = asyncio.ensure_future(_inside_scope())
     _stopped_reads.add(task)
     task.add_done_callback(_stopped_read_done)
     try:
-        result = await asyncio.shield(task)
+        # Not asyncio.shield: it logs an error when the read fails after a stop.
+        await asyncio.wait({task})
     except asyncio.CancelledError:
         scope.cancel()
         await asyncio.wait({task}, timeout=_STOP_CLOSE_LIMIT_S)
         raise
+    result = task.result()
     if result is None:
         raise RuntimeError("the read ended without an answer")
     return result
@@ -622,9 +637,10 @@ async def _read_capped_json_response(
     """Issue the request with a streamed, byte-capped read (see the worker).
 
     The worker runs through :func:`_run_stop_safe`, so a stop that comes while
-    an answer closes (after a time limit, or on a 3xx before the next hop)
-    leaves no connection open and no pool slot taken. The caller still gets
-    the stop.
+    an answer closes leaves no connection open and no pool slot taken. The
+    client's ``send`` has the same protection, but the stream is read and
+    closed after ``send`` returns, so this read needs its own. The caller
+    still gets the stop.
     """
     return await _run_stop_safe(
         lambda: _stream_capped_json_response(
@@ -746,6 +762,14 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         stream: bool = False,
         auth: Any = httpx.USE_CLIENT_DEFAULT,
         follow_redirects: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        # Every request of the pooled client passes here, also a direct
+        # ``client.request(...)``: a stop cannot cut the close of an answer
+        # (after a time limit, or of a 3xx before the next hop).
+        return await _run_stop_safe(lambda: self._send_same_origin(request, stream, auth))
+
+    async def _send_same_origin(
+        self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:
         # Always issue the underlying request without httpx's own redirect
         # following; this class owns the redirect decision so the

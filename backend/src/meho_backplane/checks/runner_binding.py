@@ -11,23 +11,26 @@ tenant, and the switch ``RUNNER_CHECKS_ENABLED`` must be on.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.db.models import RunnerPrincipal
+from meho_backplane.db.models import EndpointDescriptor, RunnerPrincipal
+from meho_backplane.gateway.assignment_service import runner_op_refusal
 from meho_backplane.gateway.repository import ensure_assignment_row
 from meho_backplane.settings import get_settings
 
-__all__ = ["SensorRunnerBindingError", "bind_sensor_to_runner"]
+__all__ = ["SensorRunnerBindingError", "bind_sensor_to_runner", "require_runner_can_run"]
 
 
 class SensorRunnerBindingError(Exception):
     """A Sensor cannot be bound to the runner it names.
 
-    ``error_code`` is ``sensor_runner_checks_disabled`` (the switch is off)
-    or ``sensor_runner_unknown`` (no live runner of that name in the tenant).
-    The boundary maps both to 422.
+    ``error_code`` is ``sensor_runner_checks_disabled`` (the switch is off),
+    ``sensor_runner_unknown`` (no live runner of that name in the tenant) or
+    ``sensor_runner_op_unsupported`` (a runner cannot run the operation
+    unattended). The boundary maps each to 422.
     """
 
     def __init__(self, error_code: str, message: str) -> None:
@@ -64,3 +67,20 @@ async def bind_sensor_to_runner(
             f"no runner named {runner_name!r} in this tenant",
         )
     await ensure_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+
+
+def require_runner_can_run(
+    descriptor: EndpointDescriptor, op_id: str, params: dict[str, Any]
+) -> None:
+    """Refuse an operation a runner cannot run unattended.
+
+    A runner runs only an op with a handler it can import, that is ``safe``,
+    needs no approval, is not a write and does not wait for a person
+    (:func:`~meho_backplane.gateway.assignment_service.runner_op_refusal`).
+    """
+    refusal = runner_op_refusal(descriptor, op_id, params)
+    if refusal is not None:
+        raise SensorRunnerBindingError(
+            "sensor_runner_op_unsupported",
+            f"a runner cannot run {op_id!r} ({refusal})",
+        )

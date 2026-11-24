@@ -390,7 +390,11 @@ async def edit_sensor(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"{exc.error_code}: {exc}",
         ) from exc
-    except (SensorOperationNotFoundError, SensorRequiresSafeOperationError) as exc:
+    except (
+        SensorOperationNotFoundError,
+        SensorRequiresSafeOperationError,
+        SensorRunnerBindingError,
+    ) as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.error_code,

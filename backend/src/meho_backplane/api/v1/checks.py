@@ -64,12 +64,8 @@ from meho_backplane.gateway.errors import (
     AssignmentTargetUnknownError,
     AssignmentValidationError,
 )
-from meho_backplane.gateway.repository import ingest_new_results
-from meho_backplane.gateway.runner_checks import (
-    count_results,
-    investigate_counted,
-    screen_batch,
-)
+from meho_backplane.gateway.repository import ingest_results, lock_assignment_row
+from meho_backplane.gateway.runner_checks import ingest_and_count, screen_batch
 from meho_backplane.gateway.schemas import (
     AssignmentDocument,
     AssignmentDocumentResponse,
@@ -198,7 +194,7 @@ async def get_assignment(
     return assignment
 
 
-@router.post("/results", response_model=ResultIngestResponse)
+@router.post("/results", response_model=ResultIngestResponse, response_model_exclude_none=True)
 async def post_results(
     batch: wire.RunnerResultBatch,
     operator: Annotated[Operator, _require_runner],
@@ -226,30 +222,32 @@ async def post_results(
             package_set=package_set,
         )
         results = list(batch.results)
-        runner_checks = get_settings().runner_checks_enabled
-        received_at = datetime.now(UTC)
-        too_large: set[str] = set()
-        if runner_checks:
+        if get_settings().runner_checks_enabled:
+            # Clear the stale mark first, under the runner's row lock, then
+            # store and count each result in its own transaction.
+            await lock_assignment_row(
+                session, tenant_id=operator.tenant_id, runner_name=batch.runner_id
+            )
+            await clear_runner_stale(
+                session, tenant_id=operator.tenant_id, runner_name=batch.runner_id
+            )
+            await session.commit()
+            received_at = datetime.now(UTC)
             screened = screen_batch(results, received_at, runner_name=batch.runner_id)
-            results, too_large = screened.results, screened.too_large
-        stored = await ingest_new_results(
+            accepted, duplicates = await ingest_and_count(
+                tenant_id=operator.tenant_id,
+                runner_name=batch.runner_id,
+                screened=screened,
+                received_at=received_at,
+            )
+            return ResultIngestResponse(
+                accepted=accepted, duplicates=duplicates, refused=screened.refused or None
+            )
+        accepted, duplicates = await ingest_results(
             session,
             tenant_id=operator.tenant_id,
             runner_name=batch.runner_id,
             results=results,
-        )
-        accepted, duplicates = len(stored), len(results) - len(stored)
-        counted = (
-            await count_results(
-                session,
-                tenant_id=operator.tenant_id,
-                runner_name=batch.runner_id,
-                stored=stored,
-                too_large=too_large,
-                received_at=received_at,
-            )
-            if runner_checks
-            else []
         )
         # Recovery clear seam (#2501): an accepted result batch proves the
         # runner is alive and reporting, so reset any dead-man flip marker
@@ -257,7 +255,6 @@ async def post_results(
         # only clear path. Idempotent when the runner was never flipped.
         await clear_runner_stale(session, tenant_id=operator.tenant_id, runner_name=batch.runner_id)
         await session.commit()
-    await investigate_counted(operator.tenant_id, counted)
     return ResultIngestResponse(accepted=accepted, duplicates=duplicates)
 
 

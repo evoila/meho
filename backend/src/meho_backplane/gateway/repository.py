@@ -28,6 +28,7 @@ __all__ = [
     "get_stale_markers",
     "ingest_new_results",
     "ingest_results",
+    "lock_assignment_row",
     "upsert_assignment_row",
 ]
 
@@ -97,6 +98,29 @@ async def upsert_assignment_row(
         row.items = items
         row.updated_at = datetime.now(UTC)
     return row
+
+
+async def lock_assignment_row(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    runner_name: str,
+) -> None:
+    """Lock the assignment row of ``(tenant_id, runner_name)`` until the commit.
+
+    The result ingest and the dead-man sweeper both take this lock first, so
+    a result and a stale mark of the same runner never write its checks at
+    the same time. A no-op when the runner has no row, and on SQLite (no row
+    locks; its writes are serial).
+    """
+    await session.execute(
+        select(RunnerAssignmentRow.id)
+        .where(
+            RunnerAssignmentRow.tenant_id == tenant_id,
+            RunnerAssignmentRow.runner_name == runner_name,
+        )
+        .with_for_update()
+    )
 
 
 async def ensure_assignment_row(

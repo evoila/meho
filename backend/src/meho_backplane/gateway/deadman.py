@@ -82,7 +82,12 @@ from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerAssignmentRow, RunnerPrincipal
 from meho_backplane.gateway.queue import GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
-from meho_backplane.gateway.runner_checks import investigate_counted, mark_runner_sensors_unknown
+from meho_backplane.gateway.repository import lock_assignment_row
+from meho_backplane.gateway.runner_checks import (
+    CountedSensor,
+    after_commit,
+    mark_runner_sensors_unknown,
+)
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     SYSTEM_OPERATOR_SUB,
@@ -165,6 +170,10 @@ async def _run_one_tick() -> None:
     Commits the flips once, then writes one internal audit row per won flip
     (the memory-sweeper ordering: mutate + commit, then audit). An audit-
     write failure is logged loud but never rolls back a flip.
+
+    With ``RUNNER_CHECKS_ENABLED`` on, each runner is flipped in its own
+    transaction together with the ``unknown`` states of its checks
+    (:func:`_flip_and_mark`).
     """
     tick_started = time.perf_counter()
     now = datetime.now(UTC)
@@ -172,6 +181,9 @@ async def _run_one_tick() -> None:
     sessionmaker = get_sessionmaker()
     # (tenant_id, runner_name, lapse_seconds) for each flip this tick won.
     flipped: list[tuple[uuid.UUID, str, float]] = []
+    # The checks set to ``unknown`` per flipped runner (switch on only).
+    marked: list[tuple[uuid.UUID, list[CountedSensor]]] = []
+    runner_checks = get_settings().runner_checks_enabled
     # #3010: the lock rides a dedicated pinned connection — the tick's
     # commit would strand a lock taken on the work session.
     async with advisory_lock(_DEADMAN_ADVISORY_LOCK_KEY, subsystem="gateway_deadman") as locked:
@@ -200,28 +212,18 @@ async def _run_one_tick() -> None:
                 .order_by(RunnerPrincipal.last_seen_at.asc())
             )
             candidates = (await session.execute(candidate_stmt)).all()
-            for assignment_id, tenant_id, runner_name, last_seen_at in candidates:
-                # Conditional flip: the ``stale_at IS NULL`` predicate makes
-                # the audit gate exact even when the advisory lock is a
-                # no-op (SQLite) or two replicas race -- only the tick whose
-                # UPDATE matches a still-fresh row (rowcount == 1) audits.
-                result = await session.execute(
-                    update(RunnerAssignmentRow)
-                    .where(
-                        RunnerAssignmentRow.id == assignment_id,
-                        RunnerAssignmentRow.stale_at.is_(None),
-                    )
-                    .values(stale_at=now)
-                )
-                # ``rowcount`` is only typed on the concrete ``CursorResult``
-                # subclass an UPDATE produces at runtime, not on the
-                # ``Result`` the ``AsyncSession.execute`` stub advertises --
-                # the ignore mirrors the sibling ``gateway/queue.py``.
-                won_flip: int = result.rowcount  # type: ignore[attr-defined]
-                if won_flip == 1:
-                    lapse_seconds = (now - _as_utc(last_seen_at)).total_seconds()
-                    flipped.append((tenant_id, runner_name, lapse_seconds))
-            await session.commit()
+            if not runner_checks:
+                for assignment_id, tenant_id, runner_name, last_seen_at in candidates:
+                    lapse = await _flip(session, assignment_id, last_seen_at, now)
+                    if lapse is not None:
+                        flipped.append((tenant_id, runner_name, lapse))
+                await session.commit()
+        if runner_checks:
+            for assignment_id, tenant_id, runner_name, _last_seen in candidates:
+                outcome = await _flip_and_mark(assignment_id, tenant_id, runner_name, cutoff, now)
+                if outcome is not None:
+                    flipped.append((tenant_id, runner_name, outcome[0]))
+                    marked.append((tenant_id, outcome[1]))
 
     if not flipped:
         _log.debug("gateway_deadman_tick_clean")
@@ -229,8 +231,8 @@ async def _run_one_tick() -> None:
 
     duration_ms = (time.perf_counter() - tick_started) * 1000.0
     await _audit_flips(flipped, duration_ms=duration_ms)
-    if get_settings().runner_checks_enabled:
-        await _mark_sensors_unknown(flipped)
+    for tenant_id, counted in marked:
+        await after_commit(tenant_id, counted)
     _log.info(
         "gateway_deadman_tick_done",
         flipped=len(flipped),
@@ -239,30 +241,81 @@ async def _run_one_tick() -> None:
     )
 
 
-async def _mark_sensors_unknown(flipped: list[tuple[uuid.UUID, str, float]]) -> None:
-    """Set the Sensors of each stale runner to ``unknown``, one runner at a time.
+async def _flip(
+    session: AsyncSession,
+    assignment_id: uuid.UUID,
+    last_seen_at: datetime,
+    now: datetime,
+) -> float | None:
+    """Flip one assignment row stale; return the lapse in seconds, or ``None`` if lost.
 
-    Runs after the flips committed. A failure for one runner is logged and
-    does not stop the others.
+    Conditional flip: the ``stale_at IS NULL`` predicate makes the audit gate
+    exact even when the advisory lock is a no-op (SQLite) or two replicas
+    race -- only the tick whose UPDATE matches a still-fresh row
+    (rowcount == 1) audits.
     """
-    sessionmaker = get_sessionmaker()
-    for tenant_id, runner_name, _lapse in flipped:
-        try:
-            async with sessionmaker() as session:
-                marked = await mark_runner_sensors_unknown(
-                    session,
-                    tenant_id=tenant_id,
-                    runner_name=runner_name,
-                    now=datetime.now(UTC),
+    result = await session.execute(
+        update(RunnerAssignmentRow)
+        .where(
+            RunnerAssignmentRow.id == assignment_id,
+            RunnerAssignmentRow.stale_at.is_(None),
+        )
+        .values(stale_at=now)
+    )
+    # ``rowcount`` is only typed on the concrete ``CursorResult`` subclass an
+    # UPDATE produces at runtime, not on the ``Result`` the
+    # ``AsyncSession.execute`` stub advertises -- the ignore mirrors the
+    # sibling ``gateway/queue.py``.
+    won_flip: int = result.rowcount  # type: ignore[attr-defined]
+    if won_flip != 1:
+        return None
+    return (now - _as_utc(last_seen_at)).total_seconds()
+
+
+async def _flip_and_mark(
+    assignment_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    runner_name: str,
+    cutoff: datetime,
+    now: datetime,
+) -> tuple[float, list[CountedSensor]] | None:
+    """Flip one runner stale and set its checks to ``unknown``, in one transaction.
+
+    Runs with ``RUNNER_CHECKS_ENABLED`` on. First it locks the runner's
+    assignment row, the same lock a result batch takes
+    (:func:`~meho_backplane.gateway.repository.lock_assignment_row`), and reads
+    the runner's last contact again. A runner that reported since the
+    candidate query is left alone, so a recovery is never overwritten. The
+    flip and the ``unknown`` states commit together: when the marking fails,
+    the flip rolls back too and the next sweep tries again. A failure is
+    logged and returns ``None``.
+    """
+    try:
+        async with get_sessionmaker()() as session:
+            await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+            last_seen_at = await session.scalar(
+                select(RunnerPrincipal.last_seen_at).where(
+                    RunnerPrincipal.tenant_id == tenant_id,
+                    RunnerPrincipal.name == runner_name,
                 )
-                await session.commit()
-            await investigate_counted(tenant_id, marked)
-        except Exception:
-            _log.exception(
-                "gateway_deadman_mark_sensors_failed",
-                tenant_id=str(tenant_id),
-                runner=runner_name,
             )
+            if last_seen_at is None or _as_utc(last_seen_at) >= cutoff:
+                return None
+            lapse = await _flip(session, assignment_id, last_seen_at, now)
+            if lapse is None:
+                return None
+            counted = await mark_runner_sensors_unknown(
+                session, tenant_id=tenant_id, runner_name=runner_name, now=now
+            )
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "gateway_deadman_mark_sensors_failed",
+            tenant_id=str(tenant_id),
+            runner=runner_name,
+        )
+        return None
+    return lapse, counted
 
 
 async def _audit_flips(

@@ -146,11 +146,13 @@ async def _delete_runner_results_older_than(cutoff: datetime) -> int:
 async def _prune_runner_results() -> None:
     """Keep raw runner results for ``RUNNER_CHECK_RESULTS_RETENTION_DAYS`` days.
 
-    ``0`` keeps them. Runs in every prune tick, also when the evidence
-    retention is off.
+    Deletes only while ``RUNNER_CHECKS_ENABLED`` is on: turning the switch on
+    is the opt-in. With the switch off, or with ``0`` days, every row stays.
+    Runs in every prune tick, also when the evidence retention is off.
     """
-    days = get_settings().runner_check_results_retention_days
-    if days == 0:
+    settings = get_settings()
+    days = settings.runner_check_results_retention_days
+    if not settings.runner_checks_enabled or days == 0:
         return
     cutoff = datetime.now(UTC) - timedelta(days=days)
     dropped = await _delete_runner_results_older_than(cutoff)

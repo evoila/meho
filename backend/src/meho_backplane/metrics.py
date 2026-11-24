@@ -117,9 +117,10 @@ TOPOLOGY_REFRESH_TOTAL: Counter = Counter(
 #: with them: ``counted`` (set the state of a check), ``not_in_list`` (not a
 #: check of this runner and tenant: stored, not counted), ``too_large``
 #: (answer over the size cap: the check reads ``unknown``), ``future_time``
-#: (the runner time is in the future: refused) and ``old`` (made before the
-#: last counted result: dropped). Only counted while ``RUNNER_CHECKS_ENABLED``
-#: is on.
+#: (the runner time is later than MEHO's clock: refused, not stored),
+#: ``no_time`` (no runner time: stored, not counted) and ``old`` (made at or
+#: before the last counted result: dropped). Only counted while
+#: ``RUNNER_CHECKS_ENABLED`` is on.
 RUNNER_CHECK_RESULTS_TOTAL: Counter = Counter(
     "runner_check_results_total",
     "Runner check results by outcome.",

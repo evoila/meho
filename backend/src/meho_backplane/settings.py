@@ -1678,8 +1678,10 @@ class Settings(BaseModel):
         checks as ``unknown``. When off, MEHO only stores runner results.
         Env ``RUNNER_CHECKS_ENABLED``.
     runner_check_results_retention_days:
-        Days the clean-up job keeps raw runner result rows (default 7;
-        ``0`` keeps them). Env ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+        Days the clean-up job keeps raw runner result rows while
+        ``RUNNER_CHECKS_ENABLED`` is on (default 7; ``0`` keeps them). With
+        the switch off, the job deletes none. Env
+        ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2549,8 +2551,9 @@ class Settings(BaseModel):
     # send mails and can start the investigator. Off by default: results are
     # only stored. Set via ``RUNNER_CHECKS_ENABLED``.
     runner_checks_enabled: bool = False
-    # Days the clean-up job keeps raw ``runner_check_results`` rows. ``0``
-    # keeps them for ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+    # Days the clean-up job keeps raw ``runner_check_results`` rows while
+    # ``RUNNER_CHECKS_ENABLED`` is on. ``0``, or the switch off, keeps them for
+    # ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
     runner_check_results_retention_days: int = Field(default=7, ge=0, le=3650)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks

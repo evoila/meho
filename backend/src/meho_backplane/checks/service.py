@@ -69,7 +69,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.checks.connector_fit import connector_fit_for_target, with_connector_fit
 from meho_backplane.checks.repository import create_sensor, list_sensor_results
-from meho_backplane.checks.runner_binding import bind_sensor_to_runner
+from meho_backplane.checks.runner_binding import bind_sensor_to_runner, require_runner_can_run
 from meho_backplane.checks.schemas import (
     SensorConnectorFit,
     SensorCreate,
@@ -476,6 +476,8 @@ async def _precheck_create(
     if descriptor is None:
         raise SensorOperationNotFoundError(payload.connector_id, payload.op_id)
     _require_read(payload, descriptor)
+    if payload.runner_name is not None:
+        require_runner_can_run(descriptor, payload.op_id, payload.params)
     fit = await connector_fit_for_target(tenant_id, payload.connector_id, payload.target)
     if fit is not None and fit.warning is not None and not payload.force:
         raise SensorConnectorMismatchError(fit.warning, fit.matching_connector_id)

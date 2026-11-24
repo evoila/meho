@@ -149,7 +149,11 @@ def _result(
     produced_at: datetime | None = None,
     op_id: str = _OP_SAFE,
     status: str = "ok",
+    with_time: bool = True,
 ) -> dict[str, Any]:
+    """A wire result; its runner time is *produced_at*, else now (left out without *with_time*)."""
+    if produced_at is None and with_time:
+        produced_at = datetime.now(UTC)
     body: dict[str, Any] = {
         "result_uid": uid or uuid.uuid4().hex,
         "check_ref": str(sensor_id),
@@ -363,11 +367,15 @@ async def test_runner_time_in_the_future_is_refused(client: TestClient, switch_o
         client,
         _RUNNER_A_ID,
         "runner-a",
-        _result(sensor_id, payload={"count": 50}, produced_at=future),
+        _result(sensor_id, uid="future-1", payload={"count": 50}, produced_at=future),
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"accepted": 0, "duplicates": 0}
+    assert resp.json() == {
+        "accepted": 0,
+        "duplicates": 0,
+        "refused": [{"result_uid": "future-1", "reason": "future_time"}],
+    }
     assert await _stored_count() == 0
     assert (await _sensor(sensor_id)).last_state == "ok"
     assert _outcome("future_time") - before == 1
@@ -444,14 +452,20 @@ async def test_results_count_when_the_runner_clock_is_behind(
 
 
 @pytest.mark.asyncio
-async def test_results_without_a_runner_time_still_count(
+async def test_results_without_a_runner_time_are_stored_not_counted(
     client: TestClient, switch_on: None
 ) -> None:
-    """A runner that sends no ``produced_at`` is accepted."""
+    """Without a runner time MEHO cannot tell a new result from a replay."""
     await _seed_identities()
     sensor_id = await _seed_sensor()
-    _post(client, _RUNNER_A_ID, "runner-a", _result(sensor_id, payload={"count": 50}))
-    assert (await _sensor(sensor_id)).last_state == "critical"
+    before = _outcome("no_time")
+    resp = _post(
+        client, _RUNNER_A_ID, "runner-a", _result(sensor_id, payload={"count": 50}, with_time=False)
+    )
+    assert resp.json() == {"accepted": 1, "duplicates": 0}
+    assert await _stored_count() == 1
+    assert (await _sensor(sensor_id)).last_state == "ok"
+    assert _outcome("no_time") - before == 1
     assert (
         wire.RunnerResult(result_uid="u", check_ref="c", op_id="o", status="ok").produced_at is None
     )
@@ -723,7 +737,7 @@ async def test_central_loop_runs_a_sensor_with_a_runner_while_the_switch_is_off(
 
 @pytest.mark.asyncio
 async def test_clean_up_removes_raw_rows_older_than_seven_days(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, switch_on: None
 ) -> None:
     from meho_backplane.checks.evidence_retention import _run_one_prune_tick
 

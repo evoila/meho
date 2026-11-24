@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.resolver import resolve_connector_or_label
-from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorStatus
+from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorCadenceKind, SensorStatus
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.gateway import repository
 from meho_backplane.gateway.errors import (
@@ -56,6 +56,7 @@ from meho_backplane.gateway.errors import (
     AssignmentTargetUnknownError,
 )
 from meho_backplane.gateway.schemas import AssignmentDocument, AuthoredCheckItem
+from meho_backplane.op_classes import call_always_waits, is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations._secret_values import split_reveal_secret
 from meho_backplane.runner import wire
@@ -72,6 +73,7 @@ __all__ = [
     "compute_assignment_version",
     "descriptor_from_target",
     "materialize_assignment",
+    "runner_op_refusal",
     "store_assignment",
 ]
 
@@ -305,10 +307,11 @@ async def _materialize_item(
         impl_id=cls.impl_id,
         op_id=authored.op,
     )
-    if not _is_runnable_safe(descriptor):
+    refusal = runner_op_refusal(descriptor, authored.op, authored.params)
+    if refusal is not None:
         _log.warning(
             "assignment_item_dropped",
-            reason="op_unresolved_or_unsafe",
+            reason=refusal,
             check_ref=authored.check_ref,
             op=authored.op,
         )
@@ -402,16 +405,17 @@ async def _materialize_sensor(
         impl_id=impl_id,
         op_id=sensor.op_id,
     )
-    if not _is_runnable_safe(descriptor):
+    refusal = runner_op_refusal(descriptor, sensor.op_id, sensor.params)
+    if refusal is not None:
         _log.warning(
             "assignment_item_dropped",
-            reason="op_unresolved_or_unsafe",
+            reason=refusal,
             sensor_id=str(sensor.id),
             op=sensor.op_id,
         )
         return None
     params, _ = split_reveal_secret(dict(sensor.params))
-    return _work_item(
+    item = _work_item(
         check_ref=str(sensor.id),
         op=sensor.op_id,
         params=params,
@@ -422,6 +426,14 @@ async def _materialize_sensor(
         descriptor=descriptor,
         principal=principal,
     )
+    return item.model_copy(update=_sensor_schedule(sensor))
+
+
+def _sensor_schedule(sensor: Sensor) -> dict[str, Any]:
+    """The cadence of *sensor* as work item fields, so the runner runs it only when due."""
+    if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
+        return {"cron_expr": sensor.cron_expr, "timezone": sensor.timezone}
+    return {"interval_seconds": sensor.interval_seconds}
 
 
 def _sensor_target_name(sensor: Sensor) -> str | None:
@@ -445,6 +457,30 @@ def _package_set_matches(item: wire.RunnerWorkItem, runner_package_set: str) -> 
         message=package_set_mismatch_message(runner_package_set, item.package_set),
     )
     return False
+
+
+def runner_op_refusal(
+    descriptor: EndpointDescriptor | None, op_id: str, params: dict[str, Any]
+) -> str | None:
+    """Why a runner cannot run *op_id* unattended, or ``None`` when it can.
+
+    *descriptor* carries the effective policy of the tenant
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`), so an
+    operator's rule that makes the op wait for approval counts at once. The
+    rules are those of the central check loop, plus a handler the runner can
+    import: the op is ``safe``, needs no approval, is not a write, and is not
+    a call that waits for a person on every call.
+    """
+    if not _is_runnable_safe(descriptor):
+        return "op_unresolved_or_unsafe"
+    assert descriptor is not None
+    if descriptor.requires_approval:
+        return "op_requires_approval"
+    if is_safe_write(op_id):
+        return "op_is_write"
+    if call_always_waits(op_id, params):
+        return "op_waits_for_person"
+    return None
 
 
 def _is_runnable_safe(descriptor: EndpointDescriptor | None) -> bool:

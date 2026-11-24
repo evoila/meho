@@ -11,6 +11,8 @@
   "tests/acceptance/test_g41_kb_canary.py": 23.09,
   "tests/acceptance/test_g51_memory_canary.py": 24.59,
   "tests/acceptance/test_g81_audit_query_acceptance.py": 41.63,
+  "tests/migrations/test_migration_0185_add_audit_log_secret_read_as.py": 0.32,
+  "tests/migrations/test_migration_0185_audit_log_secret_read_as_trigger.py": 4.45,
   "tests/retrieval_eval/test_ci_run_eval_gate.py": 8.3,
   "tests/retrieval_eval/test_retrieval_eval_corpus.py": 1.08,
   "tests/retrieval_eval/test_retrieval_eval_memory_corpus.py": 0.19,

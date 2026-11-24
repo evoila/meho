@@ -27,11 +27,13 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
 from meho_backplane.operations._secret_values import REVEAL_SECRET_PARAM
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "SensorConnectorFit",
@@ -109,6 +111,15 @@ def _refuse_reveal_secret(params: dict[str, object]) -> dict[str, object]:
 SensorParams = Annotated[dict[str, object], AfterValidator(_refuse_reveal_secret)]
 
 
+def hide_runner_name(value: str | None) -> bool:
+    """True when an answer leaves ``runner_name`` out.
+
+    It is left out when no runner runs the check: the name is not set, or
+    ``RUNNER_CHECKS_ENABLED`` is off (then the central check loop runs it).
+    """
+    return value is None or not get_settings().runner_checks_enabled
+
+
 class SensorCreate(BaseModel):
     """Request body for ``POST /api/v1/sensors``.
 
@@ -161,6 +172,12 @@ class SensorCreate(BaseModel):
     ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
+    #: Name of a runner of this tenant that runs the check at its site. Needs
+    #: ``RUNNER_CHECKS_ENABLED``. ``None`` means the central check loop runs it.
+    #: Not nullable in the schema, so a typed client leaves it out when unset.
+    runner_name: (
+        Annotated[str, Field(min_length=1, max_length=_NAME_MAX_LENGTH)] | SkipJsonSchema[None]
+    ) = None
     #: Create the Sensor even when its connector does not fit the target's
     #: product and version. Without it such a create is refused with
     #: ``sensor_connector_mismatch``. Not stored on the row.
@@ -270,6 +287,9 @@ class SensorRead(BaseModel):
     pending_count: int
     identity_sub: str
     created_by_sub: str
+    #: The runner that runs this check at its site. Left out of the answer
+    #: unless it is set and ``RUNNER_CHECKS_ENABLED`` is on.
+    runner_name: str | SkipJsonSchema[None] = Field(default=None, exclude_if=hide_runner_name)
     created_at: datetime
     updated_at: datetime
     # Not a column: filled by the service on list and create from the

@@ -71,6 +71,7 @@ from meho_backplane.checks.rollup import (
 from meho_backplane.checks.service import _is_unique_violation
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard, Sensor, SensorSeverity, SensorStatus
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CheckDashboardAdminService",
@@ -147,6 +148,7 @@ def _member_view(
         name=sensor.name,
         connector_id=sensor.connector_id,
         op_id=sensor.op_id,
+        runner_name=sensor.runner_name if get_settings().runner_checks_enabled else None,
         raw_state=evaluation.raw_state,
         effective_state=evaluation.effective_state,
         pending=evaluation.pending,

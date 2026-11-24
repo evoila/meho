@@ -34557,7 +34557,6 @@
           },
           "runner_name": {
             "type": "string",
-            "nullable": true,
             "title": "Runner Name"
           },
           "raw_state": {
@@ -41189,6 +41188,25 @@
         "title": "RefreshResult",
         "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle.\n\n``no_populator_for_product`` discriminates the two all-zero-count\nno-op classes (#2093): ``None`` means the resolved connector ships a\ntopology populator (a ``discover_topology`` override) and the counts\nreflect a real reconcile \u2014 all-zero is \"populator ran clean, nothing\nchanged\". A product slug means the connector inherits the base-class\nno-op default, so the refresh was a no-op **by coverage gap**, not by\ngraph convergence; ``populated_products`` then lists the registered\nproducts that DO ship a populator so a consumer can identify the gap\nwithout reading meho source."
       },
+      "RefusedResult": {
+        "properties": {
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "result_uid",
+          "reason"
+        ],
+        "title": "RefusedResult",
+        "description": "A result MEHO refused, named in the answer to a result batch.\n\n``reason`` is ``future_time``: the runner time of the result is later\nthan MEHO's clock. MEHO neither stores nor counts such a result."
+      },
       "RejectRequestBody": {
         "properties": {
           "reason": {
@@ -41674,6 +41692,13 @@
           "duplicates": {
             "type": "integer",
             "title": "Duplicates"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/RefusedResult"
+            },
+            "type": "array",
+            "title": "Refused"
           }
         },
         "type": "object",
@@ -41682,7 +41707,7 @@
           "duplicates"
         ],
         "title": "ResultIngestResponse",
-        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``accepted + duplicates`` equals the batch length."
+        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``refused`` names the results MEHO refused and did not\nstore (with ``RUNNER_CHECKS_ENABLED`` on: a runner time later than\nMEHO's clock). It is left out of the answer when there is none.\n``accepted + duplicates + len(refused)`` equals the batch length."
       },
       "ResultQueryBody": {
         "properties": {
@@ -42692,6 +42717,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Produced At"
+          },
+          "error_code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error Code"
           }
         },
         "type": "object",
@@ -42784,6 +42814,21 @@
             "type": "string",
             "nullable": true,
             "title": "Package Set"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "nullable": true,
+            "title": "Timezone"
           }
         },
         "type": "object",
@@ -43558,7 +43603,6 @@
             "type": "string",
             "maxLength": 128,
             "minLength": 1,
-            "nullable": true,
             "title": "Runner Name"
           },
           "force": {
@@ -43744,7 +43788,6 @@
           },
           "runner_name": {
             "type": "string",
-            "nullable": true,
             "title": "Runner Name"
           },
           "created_at": {

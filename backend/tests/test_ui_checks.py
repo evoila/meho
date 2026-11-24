@@ -326,8 +326,7 @@ def test_detail_renders_member_table() -> None:
     assert "degraded" in body  # the member + rollup badge
 
 
-def test_detail_shows_where_a_runner_check_runs() -> None:
-    """A member bound to a runner says "runs at: runner <name>"; a central member does not."""
+def _detail_of_mixed_dashboard() -> str:
     _seed_tenant(_TENANT_A, "tenant-a")
     at_site = _seed_sensor(tenant_id=_TENANT_A, name="site-disk", runner_name="runner-site-1")
     central = _seed_sensor(tenant_id=_TENANT_A, name="central-disk")
@@ -338,8 +337,21 @@ def test_detail_shows_where_a_runner_check_runs() -> None:
     finally:
         mock.stop()
     assert response.status_code == 200, response.text
-    assert response.text.count("runs at: runner") == 1
-    assert "runs at: runner runner-site-1" in response.text
+    return response.text
+
+
+def test_detail_shows_where_a_runner_check_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With runner checks on, a member bound to a runner says "runs at: runner <name>"."""
+    monkeypatch.setenv("RUNNER_CHECKS_ENABLED", "true")
+    get_settings.cache_clear()
+    text = _detail_of_mixed_dashboard()
+    assert text.count("runs at: runner") == 1
+    assert "runs at: runner runner-site-1" in text
+
+
+def test_detail_shows_no_runner_while_runner_checks_are_off() -> None:
+    """With the switch off the central loop runs a bound check, so no member names a runner."""
+    assert "runs at: runner" not in _detail_of_mixed_dashboard()
 
 
 def test_detail_shows_who_acknowledged_a_member_until_when_and_why() -> None:

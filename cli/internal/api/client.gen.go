@@ -5681,7 +5681,7 @@ type DashboardMemberView struct {
 	OpId            string                            `json:"op_id"`
 	Pending         bool                              `json:"pending"`
 	RawState        DashboardMemberViewRawState       `json:"raw_state"`
-	RunnerName      *string                           `json:"runner_name"`
+	RunnerName      *string                           `json:"runner_name,omitempty"`
 	SensorId        openapi_types.UUID                `json:"sensor_id"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
@@ -9585,6 +9585,15 @@ type RefreshResult struct {
 	UpdatedNodes      int                `json:"updated_nodes"`
 }
 
+// RefusedResult A result MEHO refused, named in the answer to a result batch.
+//
+// “reason“ is “future_time“: the runner time of the result is later
+// than MEHO's clock. MEHO neither stores nor counts such a result.
+type RefusedResult struct {
+	Reason    string `json:"reason"`
+	ResultUid string `json:"result_uid"`
+}
+
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
 	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
@@ -9774,10 +9783,14 @@ type ResolvedTargetDescriptor struct {
 //
 // “accepted“ counts rows newly persisted; “duplicates“ counts rows
 // whose “result_uid“ was already ingested for this runner (a re-posted
-// spool batch). “accepted + duplicates“ equals the batch length.
+// spool batch). “refused“ names the results MEHO refused and did not
+// store (with “RUNNER_CHECKS_ENABLED“ on: a runner time later than
+// MEHO's clock). It is left out of the answer when there is none.
+// “accepted + duplicates + len(refused)“ equals the batch length.
 type ResultIngestResponse struct {
-	Accepted   int `json:"accepted"`
-	Duplicates int `json:"duplicates"`
+	Accepted   int              `json:"accepted"`
+	Duplicates int              `json:"duplicates"`
+	Refused    *[]RefusedResult `json:"refused,omitempty"`
 }
 
 // ResultQueryBody POST body for “/api/v1/operations/result-query“ (#3179).
@@ -10334,6 +10347,7 @@ type RunnerPrincipalRead struct {
 type RunnerResult struct {
 	CheckRef   string                  `json:"check_ref"`
 	Error      *string                 `json:"error"`
+	ErrorCode  *string                 `json:"error_code"`
 	OpId       string                  `json:"op_id"`
 	ProducedAt *time.Time              `json:"produced_at"`
 	Result     *map[string]interface{} `json:"result"`
@@ -10375,13 +10389,15 @@ type RunnerResultBatch struct {
 // the runner refuses the item when its own digest differs. “None“ for an
 // op built into MEHO.
 type RunnerWorkItem struct {
-	CheckRef   string                  `json:"check_ref"`
-	ExpiresAt  *time.Time              `json:"expires_at"`
-	HandlerRef string                  `json:"handler_ref"`
-	ImplId     *string                 `json:"impl_id,omitempty"`
-	OpId       string                  `json:"op_id"`
-	PackageSet *string                 `json:"package_set"`
-	Params     *map[string]interface{} `json:"params,omitempty"`
+	CheckRef        string                  `json:"check_ref"`
+	CronExpr        *string                 `json:"cron_expr"`
+	ExpiresAt       *time.Time              `json:"expires_at"`
+	HandlerRef      string                  `json:"handler_ref"`
+	ImplId          *string                 `json:"impl_id,omitempty"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	OpId            string                  `json:"op_id"`
+	PackageSet      *string                 `json:"package_set"`
+	Params          *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
 	//
@@ -10419,6 +10435,7 @@ type RunnerWorkItem struct {
 	// is ever embedded (the runner spools assignments on disk, so a value
 	// would durably persist — a locked no-durable-artifact violation).
 	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Timezone         *string                   `json:"timezone"`
 	Version          *string                   `json:"version,omitempty"`
 }
 
@@ -11027,7 +11044,7 @@ type SensorCreate struct {
 	Params              *map[string]interface{} `json:"params,omitempty"`
 	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
 	RetryTimes          *int                    `json:"retry_times,omitempty"`
-	RunnerName          *string                 `json:"runner_name"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -11117,7 +11134,7 @@ type SensorRead struct {
 	PendingState        *SensorReadPendingState `json:"pending_state"`
 	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
 	RetryTimes          int                     `json:"retry_times"`
-	RunnerName          *string                 `json:"runner_name"`
+	RunnerName          *string                 `json:"runner_name,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//

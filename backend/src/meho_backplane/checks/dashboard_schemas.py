@@ -31,6 +31,7 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 from meho_backplane.checks.acknowledgement import SensorAcknowledgementRead
 from meho_backplane.checks.assertions import CheckState
@@ -188,6 +189,10 @@ def normalise_notify_email(value: str) -> str:
     return ",".join(validated)
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class DashboardMemberView(BaseModel):
     """One member Sensor as rendered on a Dashboard detail read.
 
@@ -206,8 +211,9 @@ class DashboardMemberView(BaseModel):
     connector_id: str
     op_id: str
     #: The runner that runs this check at its site, or ``None`` for a check
-    #: that the central check loop runs.
-    runner_name: str | None = None
+    #: that the central check loop runs (also every check while
+    #: ``RUNNER_CHECKS_ENABLED`` is off). Left out of the answer when ``None``.
+    runner_name: str | SkipJsonSchema[None] = Field(default=None, exclude_if=_is_none)
     #: The member's current derived state (paused -> ``skip``, stale ->
     #: ``unknown``, else the persisted ``last_state``).
     raw_state: CheckState

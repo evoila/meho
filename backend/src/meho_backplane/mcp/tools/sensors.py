@@ -35,6 +35,7 @@ identical in shape (modulo the ``method="MCP"`` distinction).
 
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import Any, Final
 
@@ -57,6 +58,7 @@ from meho_backplane.checks.service import (
 )
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.settings import get_settings
 
 #: Canonical operation identifiers bound into ``audit_op_id`` per tool.
 #: The same identifiers the REST routes use so a row's op_id is
@@ -70,13 +72,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
 
 
 def _row_to_dict(entry: SensorRead) -> dict[str, Any]:
-    """Serialise a :class:`SensorRead` to the MCP wire dict.
-
-    ``runner_name`` is left out for a check that no runner runs, so the answer
-    for such a check keeps its fields.
-    """
-    if entry.runner_name is None:
-        return entry.model_dump(mode="json", exclude={"runner_name"})
+    """Serialise a :class:`SensorRead` to the MCP wire dict."""
     return entry.model_dump(mode="json")
 
 
@@ -239,6 +235,32 @@ async def _create_handler(
     return {"sensor_id": str(entry.id), "sensor": _row_to_dict(entry)}
 
 
+_RUNNER_NAME_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 128,
+    "description": (
+        "Name of a runner of this tenant that runs the check at its site "
+        "(the central check loop does not run it). The runner must exist "
+        "('sensor_runner_unknown') and be able to run the op unattended "
+        "('sensor_runner_op_unsupported'). Omit it for a central check."
+    ),
+}
+
+
+def _create_for_settings(definition: ToolDefinition, _operator: Operator) -> ToolDefinition:
+    """``meho_sensor_create`` as shown under the current settings.
+
+    With ``RUNNER_CHECKS_ENABLED`` on, the input has ``runner_name``. With it
+    off, the tool is the registered one, unchanged.
+    """
+    if not get_settings().runner_checks_enabled:
+        return definition
+    schema = copy.deepcopy(definition.inputSchema)
+    schema["properties"]["runner_name"] = _RUNNER_NAME_PROPERTY
+    return definition.model_copy(update={"inputSchema": schema})
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
@@ -390,6 +412,7 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=_create_for_settings,
     ),
     handler=_create_handler,
 )

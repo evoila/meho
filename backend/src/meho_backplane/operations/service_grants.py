@@ -470,15 +470,23 @@ def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
     """
     if needs_per_call_approval(descriptor.op_id):
         return True
-    from meho_backplane.operations.ingest.spec_corrections import apply_spec_correction
+    from meho_backplane.operations.ingest.spec_corrections import (
+        apply_spec_correction,
+        has_spec_correction,
+    )
 
+    product = getattr(descriptor, "product", None)
+    impl_id = getattr(descriptor, "impl_id", None)
+    if not isinstance(product, str) or not isinstance(impl_id, str):
+        return False
+    if not has_spec_correction(product=product, impl_id=impl_id):
+        return False
     try:
-        proto = _stored_proto(descriptor)
         corrected = apply_spec_correction(
-            product=descriptor.product,
+            product=product,
             version=descriptor.version,
-            impl_id=descriptor.impl_id,
-            proto=proto,
+            impl_id=impl_id,
+            proto=_stored_proto(descriptor),
         )
     except Exception:
         return True

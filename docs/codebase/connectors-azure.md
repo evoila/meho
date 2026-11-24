@@ -204,8 +204,8 @@ package.
 `AzureConnector` keeps two caches:
 
 - **Secret cache**, per MEHO tenant, target and secret reference.
-- **Token cache**, per MEHO tenant, target, Azure tenant, client ID and token
-  scope. MEHO asks for a new token five minutes before the old one runs out
+- **Token cache**, per MEHO tenant, target, secret reference, Azure tenant,
+  client ID and token scope. MEHO asks for a new token five minutes before the old one runs out
   (Microsoft's own SDK uses the same margin).
 
 Each cache key has its own lock. When ten calls need a new token at the same

@@ -583,6 +583,10 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # The id (``sub``) of the login that a secret store accepted for the call
+    # (``meho`` when the store saw MEHO's own identity). NULL when the call
+    # read no secret. Never a token, a store path or a store address.
+    secret_read_as: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
     # redaction engine, and stores the raw payload here so an auditor can
@@ -5315,6 +5319,31 @@ class MachineLogin(Base):
     )
 
 
+class PrincipalBlock(Base):
+    """One admin block of a person in MEHO.
+
+    ``sub`` is the person's login id. ``scope`` is ``"*"`` for a block of a
+    platform admin (every tenant) or the tenant id as text for a block of a
+    tenant admin (that tenant only). MEHO reads the whole table with a cache
+    of a few seconds (:mod:`meho_backplane.auth.principal_block`) and refuses
+    every request of a blocked login. ``tenant_id`` has no foreign key: a
+    block must still hold when the tenant row is gone.
+    """
+
+    __tablename__ = "principal_block"
+
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+
 class RunnerWriteAllowlistEntry(Base):
     """One ``remote-write`` capability a runner principal is allowed to execute (#3190).
 
@@ -7798,7 +7827,10 @@ class ApprovalRequestKey(Base):
     the waiting request of the same call that was made with key A. That
     request row holds only key A in ``idempotency_key``. This row keeps key
     B, so a later retry with key B gets the same request, also after it was
-    approved. Read by the key lookup in
+    approved. A call that gets its own request while a request of another
+    kind of login, other people behind the login or another choice to reveal
+    secret values holds its key keeps that key here too. Read by the key
+    lookup in
     :mod:`meho_backplane.operations.approval_queue`. Added by migration
     ``0183``.
 

@@ -1116,7 +1116,26 @@ jobs:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
+      - name: Name the GBK locale package cache
+        # Same pattern as "Name the PHP package cache". Bump the -v1 at
+        # the end to drop a bad cache entry.
+        id: locale-debs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "key=locales-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the GBK locale package files from the cache
+        id: locale-debs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-locale-debs
+          key: ${{ steps.locale-debs.outputs.key }}
+
       - name: Install the GBK locale data
+        id: locale-install
         # The linux.script.run locale test
         # (tests/test_connectors_linux_script_env_locale.py) builds the
         # zh_CN.GBK and zh_CN.GB18030 locales with `localedef` and runs the
@@ -1124,8 +1143,25 @@ jobs:
         # of the `locales` package. MEHO_REQUIRE_GBK_LOCALE below makes the
         # test fail, not skip, when they are missing. The apt calls use the
         # same short waits as the Install PHP CLI step.
+        #
+        # How the data gets on the runner, in this order:
+        # 1. The runner already has it: nothing to do.
+        # 2. The package files are in the cache (the step before restores
+        #    them): `dpkg -i` installs them. This needs no network.
+        # 3. Else apt downloads `locales` into the cache folder and
+        #    installs it, and the step after saves the folder.
+        # In each download try, `apt-get update` runs first and the install
+        # second, so the install uses the package lists of the same try.
+        # If the last try fails, the step prints "SETUP FAILURE" and exits 1.
+        #
+        # Time limits: 60 s for `dpkg -i`, and 150 s for each update and
+        # each install, so at most 60 + 2 * (150 + 150) = 660 s. The step
+        # limit is above that sum, so both tries can finish and the step
+        # can print "SETUP FAILURE". Change them together.
         shell: bash
-        timeout-minutes: 6
+        timeout-minutes: 12
+        env:
+          LOCALE_DEBS_CACHE_HIT: ${{ steps.locale-debs-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           ready() {
@@ -1138,19 +1174,48 @@ jobs:
             echo "locale data ready"
             exit 0
           fi
+          debs="${HOME}/.cache/meho-ci-locale-debs"
+          shopt -s nullglob
+          cached=("${debs}"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ]; then
+            if timeout 60 sudo -n DEBIAN_FRONTEND=noninteractive dpkg -i "${cached[@]}" && ready; then
+              echo "locale data ready from the package cache"
+              exit 0
+            fi
+            echo "::warning::the cached locales package files did not install; downloading locales"
+          fi
+          mkdir -p "${debs}/partial"
           apt_opts=(-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0)
           for attempt in 1 2; do
+            echo "try ${attempt} of 2: apt-get update, then install"
+            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
+              echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2); installing locales from the indexes that did download"
+            fi
             if timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" \
-                install -y --no-install-recommends locales && ready; then
+                -o Dir::Cache::archives="${debs}" -o APT::Keep-Downloaded-Packages=true \
+                install -y --fix-broken --no-install-recommends locales && ready; then
+              # apt ran as root; the cache save runs as the runner user.
+              sudo -n chown -R "$(id -u):$(id -g)" "${debs}"
+              if [ "${LOCALE_DEBS_CACHE_HIT:-}" != "true" ]; then
+                echo "save=true" >> "$GITHUB_OUTPUT"
+              fi
               echo "locale data ready"
               exit 0
             fi
-            if ! timeout 150 sudo -n DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" update -y; then
-              echo "::warning::apt-get update could not refresh every package index (try ${attempt} of 2)"
-            fi
+            echo "::warning::locales install failed or timed out (try ${attempt} of 2)"
           done
           echo "::error::SETUP FAILURE, not a test failure: the locales package did not install after 2 tries (package mirror problem on the runner)"
           exit 1
+
+      - name: Save the GBK locale package files to the cache
+        # Only after a download into an empty cache. A cache entry cannot
+        # be changed, so a bad one needs a new key (see "Name the GBK
+        # locale package cache").
+        if: steps.locale-install.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-locale-debs
+          key: ${{ steps.locale-debs.outputs.key }}
 
       - name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
@@ -1482,6 +1547,129 @@ jobs:
           fi
           uv run pytest -n 3 --dist loadscope \
             --timeout=180 --timeout-method=signal "${FILES[@]}"
+
+  redaction-compare:
+    name: Secret hiding compared with the base branch
+    # Builds, for the base branch and for this pull request, the list of
+    # hidden and shown parts of each fixed input on each secret-hiding step,
+    # each side from its own code and input set, and judges the two lists.
+    # It fails when the base hides a part that the pull request shows, when a
+    # plain part that the base shows is now hidden, when an answer changed in
+    # another way, or when an input of the base is gone, unless
+    # backend/tests/snapshots/redaction_compare_approved.yaml lists the
+    # difference with a reason. A secret part that the pull request newly
+    # hides passes. The checked-in file backend/tests/snapshots/
+    # redaction_compare.jsonl holds only one checksum per input; the lists
+    # are built here, stay under RUNNER_TEMP, and are never uploaded.
+    # See docs/codebase/redaction.md, "Compare with main".
+    #
+    # The rule script comes from the base commit (`git show`), so a pull
+    # request cannot weaken the check that judges it. The judge runs with
+    # `python3 -I` and uses only the standard library. The rule script, the
+    # base's approved file and the pull request's committed approved file
+    # are read from git before any code of the pull request runs.
+    #
+    # The pull request's code runs in a container with no mounted folder:
+    # its files go in on stdin and its records come out on stdout. So it can
+    # write only its own records, and never the rule script, the base
+    # records or the approved files that the judge reads.
+    #
+    # The job log is public, so the judge runs with --summary-only: on
+    # purpose the log shows no input, no step, no part and no number, only
+    # one closing line (and any stale approved entry, which is committed
+    # already). To see the differences, run the steps locally (see
+    # docs/codebase/redaction.md, "Compare with main").
+    #
+    # It passes with "no compare on the base branch yet" only when a git
+    # lookup of the base tree succeeds and finds no rule script. Otherwise
+    # any failed step fails the job.
+    #
+    # Non-required check. Only when the change touches backend/.
+    needs: changes
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.backend_python == 'true'
+    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+    # One environment sync on the runner (with the uv cache), one image pull
+    # and one sync in the container (no cache), and two record builds
+    # (seconds each); the cap is a hang backstop.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        # On a pull request or a merge-queue run, HEAD is a merge commit.
+        # Its first parent (HEAD^1) is the base branch, so depth 2 is enough.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          add-problem-matchers: false
+
+      - name: Build and judge the records of the base and of the pull request
+        shell: bash
+        env:
+          # The Python base image of backend/Dockerfile (same digest).
+          IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse --verify "HEAD^1^{commit}")"
+          head="$(git rev-parse --verify "HEAD^{commit}")"
+          script=scripts/ci/redaction_compare.py
+          approved=backend/tests/snapshots/redaction_compare_approved.yaml
+          # ls-tree fails when git cannot read the tree; an empty answer means no such file.
+          listed="$(git ls-tree --name-only "${base}" -- "${script}")"
+          if [ -z "${listed}" ]; then
+            echo "no compare on the base branch yet"
+            exit 0
+          fi
+          dir="$(mktemp -d "${RUNNER_TEMP}/redaction-compare.XXXXXX")"
+          git show "${base}:${script}" > "${dir}/redaction_compare.py"
+          # The committed approved file of a commit; no file counts as empty.
+          committed_approved() {
+            local found
+            found="$(git ls-tree --name-only "$1" -- "${approved}")"
+            if [ -n "${found}" ]; then
+              git show "$1:${approved}" > "$2"
+            else
+              printf 'approved: []\n' > "$2"
+            fi
+          }
+          # The base's approved entries are already merged: they approve
+          # nothing and are never stale.
+          committed_approved "${base}" "${dir}/base-approved.yaml"
+          committed_approved "${head}" "${dir}/head-approved.yaml"
+          # The base: its own code and input set, on the runner.
+          git worktree add --detach "${dir}/base" "${base}"
+          (cd "${dir}/base/backend" && uv sync --frozen \
+            && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
+          # The pull request: its own code and input set, with the base's
+          # rule script, in a container with no mounts and no runner files.
+          stage="${dir}/head-input"
+          mkdir "${stage}"
+          git archive "${head}" backend | tar -x -C "${stage}"
+          cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
+          tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+            work="$(mktemp -d)"
+            tar -x -C "${work}"
+            cd "${work}/backend"
+            "${work}/uv" sync --frozen >&2
+            "${work}/uv" run python "${work}/redaction_compare.py" --records "${work}/head.jsonl" >&2
+            cat "${work}/head.jsonl"
+          ' > "${dir}/head.jsonl"
+          python3 -I "${dir}/redaction_compare.py" \
+            --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
+            --approved "${dir}/head-approved.yaml" \
+            --base-approved "${dir}/base-approved.yaml" \
+            --summary-only
 
   connector-package-template:
     name: Connector package template

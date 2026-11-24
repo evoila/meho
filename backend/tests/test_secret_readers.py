@@ -6,11 +6,17 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.secret_read_as import (
+    KEPT_LOGIN_READER_UNKNOWN,
+    current_secret_read_as,
+    record_secret_read_as,
+    track_secret_read_as,
+)
 from meho_backplane.auth.vault import VaultRoleDeniedError
 from meho_backplane.connectors._shared.secret_readers import SecretReaders, caller_id
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
@@ -167,3 +173,180 @@ def test_forget_drops_one_target_and_clear_drops_all() -> None:
     readers.clear()
 
     assert not readers.has_read(other, alice)
+
+
+# ---------------------------------------------------------------------------
+# The login a kept entry was read with, for the audit row
+# ---------------------------------------------------------------------------
+
+
+def test_has_read_notes_the_login_that_read_the_kept_secret() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_kept_entry_with_no_known_reader_notes_the_fixed_word() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == KEPT_LOGIN_READER_UNKNOWN
+        assert current_secret_read_as() != alice.sub
+
+
+def test_a_record_outside_a_call_scope_notes_the_fixed_word() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    readers.record(target, alice)
+
+    with track_secret_read_as():
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == KEPT_LOGIN_READER_UNKNOWN
+
+
+def test_has_read_that_answers_no_notes_nothing() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, _person("alice"))
+
+    with track_secret_read_as():
+        assert not readers.has_read(target, _person("bob"))
+        assert not readers.has_read(_Target(), _person("alice"))
+        assert current_secret_read_as() is None
+
+
+def test_the_system_operator_notes_nothing() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    system = synthesise_system_operator()
+    with track_secret_read_as():
+        record_secret_read_as("system-login-id")
+        readers.record(target, system)
+
+    with track_secret_read_as():
+        assert not readers.has_read(target, system)
+        assert current_secret_read_as() is None
+
+
+def test_each_caller_keeps_their_own_login() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    for sub in ("alice", "bob"):
+        with track_secret_read_as():
+            record_secret_read_as(f"{sub}-login-id")
+            readers.record(target, _person(sub))
+
+    for sub in ("bob", "alice"):
+        with track_secret_read_as():
+            assert readers.has_read(target, _person(sub))
+            assert current_secret_read_as() == f"{sub}-login-id"
+    assert readers.callers(target) == frozenset({("operator", "alice"), ("operator", "bob")})
+
+
+def test_the_fixed_word_never_takes_the_place_of_a_noted_login() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    readers.record(target, alice)
+
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_store_read_takes_the_place_of_the_fixed_word() -> None:
+    with track_secret_read_as():
+        record_secret_read_as(KEPT_LOGIN_READER_UNKNOWN)
+        record_secret_read_as("alice-login-id")
+        assert current_secret_read_as() == "alice-login-id"
+
+
+def test_a_known_reader_of_a_kept_entry_takes_the_place_of_an_earlier_note() -> None:
+    readers = SecretReaders()
+    target = _Target()
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(target, alice)
+
+    with track_secret_read_as():
+        record_secret_read_as("earlier-login-id")
+        assert readers.has_read(target, alice)
+        assert current_secret_read_as() == "alice-login-id"
+
+
+# ---------------------------------------------------------------------------
+# A read counts for one secret reference
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RefTarget(_Target):
+    secret_ref: str | None = "tenants/test/first"
+
+
+def test_a_read_counts_only_for_its_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    without = replace(first, secret_ref=None)
+    alice = _person("alice")
+    with track_secret_read_as():
+        record_secret_read_as("alice-login-id")
+        readers.record(first, alice)
+
+    with track_secret_read_as():
+        assert not readers.has_read(second, alice)
+        assert not readers.has_read(without, alice)
+        assert current_secret_read_as() is None
+        assert readers.has_read(first, alice)
+        assert current_secret_read_as() == "alice-login-id"
+    assert readers.callers(first) == frozenset({("operator", "alice")})
+    assert readers.callers(second) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_ensure_read_reads_again_for_another_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    alice = _person("alice")
+    reads: list[str] = []
+
+    async def _read() -> None:
+        reads.append("read")
+
+    for target in (first, second, first, second):
+        await readers.ensure_read(target, alice, _read)
+
+    assert len(reads) == 2
+
+
+def test_forget_drops_the_readers_of_every_secret_reference() -> None:
+    readers = SecretReaders()
+    first = _RefTarget()
+    second = replace(first, secret_ref="tenants/test/second")
+    alice = _person("alice")
+    readers.record(first, alice)
+    readers.record(second, alice)
+
+    readers.forget(second)
+
+    assert not readers.has_read(first, alice)
+    assert not readers.has_read(second, alice)

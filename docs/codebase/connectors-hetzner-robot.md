@@ -216,7 +216,7 @@ Vault path as `{"username": ..., "password": ...}`.
    Vault read runs under the operator's login. The Robot request itself
    uses the Webservice-user credential, not the operator's OIDC token.
 2. `_load_credentials(target, operator)` checks `_creds_cache` (keyed by
-   tenant and target id). It hands out a cached entry only to a caller
+   tenant, target id and secret reference). It hands out a cached entry only to a caller
    whose own Vault read of the target's secret passed once in this
    process (`SecretReaders`). Any other caller, and the system caller
    always, runs the loader first.

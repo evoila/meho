@@ -40,7 +40,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -341,8 +341,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
     # Each tenant minted its own token — no cross-tenant cache hit.
     assert token_route.call_count == 2
     assert set(connector._admin_tokens) == {
-        target_cache_key(tenant_one),
-        target_cache_key(tenant_two),
+        target_secret_cache_key(tenant_one),
+        target_secret_cache_key(tenant_two),
     }
 
     # Same-tenant re-fetch is a cache HIT — token endpoint not re-hit.

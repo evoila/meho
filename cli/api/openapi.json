@@ -10800,6 +10800,157 @@
         }
       }
     },
+    "/api/v1/principals/blocked": {
+      "get": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "List Blocked Principals",
+        "description": "List the blocked logins the admin may see.",
+        "operationId": "list_blocked_principals_api_v1_principals_blocked_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "Block Principal Route",
+        "description": "Block a login. Blocking again in the same scope updates the reason.",
+        "operationId": "block_principal_route_api_v1_principals_blocked_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlockCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/principals/blocked/{sub}": {
+      "delete": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "Unblock Principal Route",
+        "description": "Unblock a login. A platform admin removes every block of it.",
+        "operationId": "unblock_principal_route_api_v1_principals_blocked__sub__delete",
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "title": "Sub"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnblockResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sessions/retention": {
       "get": {
         "tags": [
@@ -29053,6 +29204,11 @@
             "nullable": true,
             "title": "Actor Name"
           },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -29222,6 +29378,11 @@
             "type": "string",
             "nullable": true,
             "title": "Actor Name"
+          },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
           },
           "broadcast_event_id": {
             "type": "string",
@@ -29701,6 +29862,82 @@
         ],
         "title": "BackendReadiness",
         "description": "Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).\n\nThe liveness snapshot a probe reads back from a collection's backend.\nThe collection-probe route persists ``doc_count`` / ``last_ingested_at``\n/ ``readiness`` onto the ``doc_collections`` row and transitions\n``status`` from this result **on success only** \u2014 modelled on\n:class:`~meho_backplane.connectors.schemas.FingerprintResult`, which\n``probe_target`` caches onto ``Target.fingerprint`` the same way.\n\n``index_built`` is the managed-RAG footgun this surface exists to\nhide: a managed-RAG ANN index answers searches only once it has been\nexplicitly (re)built, and rebuilds serialize per project. ``False``\nmeans the backend is reachable but the index is not yet answerable \u2014\nthe probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so\nthe search path can fail typed rather than return a silent empty 200.\n\nFrozen so a persisted snapshot cannot be mutated after the probe\nreads it. ``detail`` is the free-form JSON the ``readiness`` column\nstores verbatim for operator diagnostics (never agent-facing)."
+      },
+      "BlockCreate": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sub",
+          "reason"
+        ],
+        "title": "BlockCreate",
+        "description": "Body of ``POST /api/v1/principals/blocked``."
+      },
+      "BlockListResponse": {
+        "properties": {
+          "blocked": {
+            "items": {
+              "$ref": "#/components/schemas/BlockRead"
+            },
+            "type": "array",
+            "title": "Blocked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "blocked"
+        ],
+        "title": "BlockListResponse",
+        "description": "Response of ``GET /api/v1/principals/blocked``."
+      },
+      "BlockRead": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "blocked_by_sub": {
+            "type": "string",
+            "title": "Blocked By Sub"
+          },
+          "blocked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Blocked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "scope",
+          "reason",
+          "blocked_by_sub",
+          "blocked_at"
+        ],
+        "title": "BlockRead",
+        "description": "One block of the list."
       },
       "Body__create_ui_event_sources_post": {
         "properties": {
@@ -41460,6 +41697,11 @@
             "nullable": true,
             "title": "Actor Name"
           },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -47172,6 +47414,25 @@
         "title": "UISessionContext",
         "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID).\n\n``tenant_id`` is the session's current tenant (#5240).\n``tenant_chosen`` is ``False`` while a person with several tenants\nhas not picked one; the middleware then lets the request reach only\nthe tenant picker. ``can_switch_tenant`` makes the sidebar tenant box\na switch."
       },
+      "UnblockResponse": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "removed": {
+            "type": "integer",
+            "title": "Removed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "removed"
+        ],
+        "title": "UnblockResponse",
+        "description": "Response of ``DELETE /api/v1/principals/blocked/{sub}``."
+      },
       "UsageReport": {
         "properties": {
           "since": {
@@ -47799,6 +48060,10 @@
     {
       "name": "policy",
       "x-maturity": "beta"
+    },
+    {
+      "name": "principals",
+      "x-maturity": "ga"
     },
     {
       "name": "retrieval",

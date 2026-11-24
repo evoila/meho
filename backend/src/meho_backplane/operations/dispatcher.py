@@ -308,6 +308,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.auth.principal_block_run import (
+    mark_request_sent,
+    raise_if_step_was_refused,
+    tracking_run,
+)
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import (
     classify_op,
@@ -443,6 +450,11 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
+from meho_backplane.operations._principal_block_gate import (
+    refusal_for_blocked_step,
+    refuse_if_principal_blocked,
+    refuse_step_if_blocked,
+)
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
@@ -496,6 +508,7 @@ from meho_backplane.operations.composite import (
 )
 from meho_backplane.operations.composite_steps import (
     child_read_sent_again,
+    earlier_run_sent_a_request,
     mark_child_cleared_by_person,
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
@@ -850,6 +863,36 @@ async def _run_source_kind_branch(
     params: dict[str, Any],
     audit_id: uuid.UUID,
 ) -> Any:
+    """Run the operation's branch; a step the block list refused stops it.
+
+    Raises that refusal (:exc:`PrincipalBlockedStepError`) also when the
+    handler caught the error of the step and went on or failed another way.
+    """
+    try:
+        raw = await _run_source_kind_handler(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except Exception:
+        raise_if_step_was_refused()
+        raise
+    raise_if_step_was_refused()
+    return raw
+
+
+async def _run_source_kind_handler(
+    *,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    audit_id: uuid.UUID,
+) -> Any:
     """Execute the descriptor's source_kind branch and return the raw response.
 
     Composite branches additionally bind the
@@ -863,6 +906,10 @@ async def _run_source_kind_branch(
     extended the bind to the direct seam so its parked children are no
     longer orphaned).
     """
+    if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
+        # Only the HTTP connector base notes each request it sends. Any other
+        # client (SSH, a vendor library) counts as sent from its start.
+        mark_request_sent()
     if descriptor.source_kind == "ingested":
         assert connector_instance is not None  # resolver miss handled by caller
         return await dispatch_ingested(
@@ -1017,7 +1064,11 @@ async def _execute_and_audit(
     try:
         # A multi-step run keeps a log of its steps, so its error result is
         # stored as uncertain when a step ended uncertain (_composite_steps).
-        with track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"):
+        with (
+            track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
+            # What this operation sent, and the step the block list refused.
+            tracking_run(is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL),
+        ):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
                 connector_id=connector_id,
@@ -1780,6 +1831,20 @@ async def _run_branch_with_error_handling(
             params=params,
             audit_id=audit_id,
         )
+    except PrincipalBlockedStepError as blocked_exc:
+        # A step or a request was not sent: a login of the step is blocked,
+        # or the list cannot be read.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
     except (ImportError, TypeError) as exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
@@ -2288,6 +2353,38 @@ async def _audit_returned_result(
     return raw.model_copy(update={"audit_id": receipt})
 
 
+async def _audit_blocked_step_and_return(
+    blocked_exc: PrincipalBlockedStepError,
+    *,
+    op_id: str,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    started: float,
+) -> OperationResult:
+    """Write the audit row of an operation the block list stopped, and return its answer.
+
+    The row has the status the caller gets: ``denied`` (403) with the code
+    ``principal_blocked`` for a blocked login, ``error`` when the list cannot
+    be read.
+    """
+    refusal = refusal_for_blocked_step(op_id, blocked_exc)
+    audited: OperationResult = await _audit_returned_result(
+        refusal.model_copy(update={"duration_ms": _elapsed_ms(started)}),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        started=started,
+    )
+    return audited
+
+
 async def _audit_error_and_return(
     result: OperationResult,
     *,
@@ -2675,6 +2772,20 @@ async def _retry_after_expired_session_answer(
             params=params,
             audit_id=audit_id,
         )
+    except PrincipalBlockedStepError as blocked_exc:
+        # The person was blocked before the repeat: the same answer as on the
+        # first try.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)
         if session_expired_by_hook(connector_instance, retry_exc.response):
@@ -2779,6 +2890,20 @@ async def _retry_after_session_invalidation(
             target=target,
             params=params,
             audit_id=audit_id,
+        )
+    except PrincipalBlockedStepError as blocked_exc:
+        # The person was blocked before the repeat: the same answer as on the
+        # first try.
+        return await _audit_blocked_step_and_return(
+            blocked_exc,
+            op_id=op_id,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
         )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)
@@ -4111,6 +4236,11 @@ async def dispatch(
     claim was already taken are not new work and go on. Every top-level
     call is kept in the list of running calls, so the stopping pod can wait
     for it and record it when it does not finish.
+
+    A call of a person an admin blocked is refused before anything is sent
+    (:mod:`._principal_block_gate`). Each step of a multi-step operation
+    checks the block list again, so a block made while the operation runs
+    stops its next step.
     """
     # #6044: no policy rule until this call's own policy gate runs. A step
     # of a multi-step operation that is refused before its gate (wrong
@@ -4118,39 +4248,65 @@ async def dispatch(
     # its audit row. The reset puts the parent's rule back.
     rule_token = policy_rule_var.set(None)
     try:
-        if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
-            with agent_no_grant_log_scope():
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
-                    op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
+        # Each call notes only the secret reads it made itself, from its first
+        # check on, so a refusal row of a step never takes the parent's value.
+        with track_secret_read_as():
+            if composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL:
+                # A step of a multi-step operation: the person may be blocked
+                # since the operation started, so each step checks again, with
+                # the person who asked when an approver runs it.
+                blocked_step = await refuse_step_if_blocked(op_id, operator)
+                if blocked_step is not None:
+                    _log.info(
+                        "dispatch_step_refused_principal_blocked",
+                        op_id=op_id,
+                        operator_sub=operator.sub,
+                    )
+                    return blocked_step
+                with agent_no_grant_log_scope():
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
+            blocked_result = await refuse_if_principal_blocked(
+                op_id,
+                operator.sub,
+                operator.tenant_id,
+                # After an approval: what the run that waited had sent.
+                earlier_sent=earlier_run_sent_a_request(op_id),
+            )
+            if blocked_result is not None:
+                _log.info(
+                    "dispatch_refused_principal_blocked", op_id=op_id, operator_sub=operator.sub
                 )
-        if is_draining() and not _approved:
-            _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
-            return shutting_down_result(op_id)
-        with agent_no_grant_log_scope(new=True):
-            async with track_operation(
-                op_id=op_id,
-                connector_id=connector_id,
-                operator_sub=operator.sub,
-                tenant_id=operator.tenant_id,
-                approved_run=_approved,
-            ):
-                return await _dispatch_now(
-                    operator=operator,
-                    connector_id=connector_id,
+                return blocked_result
+            if is_draining() and not _approved:
+                _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
+                return shutting_down_result(op_id)
+            with agent_no_grant_log_scope(new=True):
+                async with track_operation(
                     op_id=op_id,
-                    target=target,
-                    params=params,
-                    _approved=_approved,
-                    preview_hash=preview_hash,
-                    idempotency_key=idempotency_key,
-                )
+                    connector_id=connector_id,
+                    operator_sub=operator.sub,
+                    tenant_id=operator.tenant_id,
+                    approved_run=_approved,
+                ):
+                    return await _dispatch_now(
+                        operator=operator,
+                        connector_id=connector_id,
+                        op_id=op_id,
+                        target=target,
+                        params=params,
+                        _approved=_approved,
+                        preview_hash=preview_hash,
+                        idempotency_key=idempotency_key,
+                    )
     finally:
         policy_rule_var.reset(rule_token)
 

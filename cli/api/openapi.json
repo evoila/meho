@@ -10453,7 +10453,7 @@
           "runner-principals"
         ],
         "summary": "Enroll Runner",
-        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``. A bad key gets 422.",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``. A good code with a bad\nkey gets 422. A repeat of a used code with the key it enrolled gives the\nsame answer again.",
         "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
         "requestBody": {
           "content": {
@@ -42553,8 +42553,6 @@
         "properties": {
           "enrollment_code": {
             "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
             "title": "Enrollment Code"
           },
           "public_key": {

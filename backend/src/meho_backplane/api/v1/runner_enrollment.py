@@ -16,8 +16,9 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi import status as http_status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.keycloak_admin import (
     KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
     KeycloakAdminError,
@@ -33,8 +34,12 @@ __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/runner-principals", tags=["runner-principals"])
 
-#: Bounds the body: a code is about 90 characters; a P-256 key is small.
-_CODE_MAX_LENGTH = 256
+register_error(
+    EnrollmentKeyInvalidError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag="runner_public_key_invalid",
+    loc=("body", "public_key"),
+)
 
 
 class RunnerEnrollRequest(BaseModel):
@@ -42,7 +47,7 @@ class RunnerEnrollRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enrollment_code: str = Field(min_length=1, max_length=_CODE_MAX_LENGTH)
+    enrollment_code: str
     public_key: dict[str, Any]
 
 
@@ -62,8 +67,10 @@ class RunnerEnrollResponse(BaseModel):
 async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     """Register a runner's public key with its one-time code.
 
-    No login is needed: the code is the proof. A wrong, used, expired or
-    revoked code all get 403 ``enrollment_code_invalid``. A bad key gets 422.
+    No login is needed: the code is the proof. A wrong, empty, used, expired or
+    revoked code all get 403 ``enrollment_code_invalid``. A good code with a bad
+    key gets 422. A repeat of a used code with the key it enrolled gives the
+    same answer again.
     """
     try:
         result = await enroll_runner_key(body.enrollment_code, body.public_key)
@@ -73,9 +80,7 @@ async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
             status_code=http_status.HTTP_403_FORBIDDEN, detail="enrollment_code_invalid"
         ) from exc
     except EnrollmentKeyInvalidError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+        raise http_for(exc) from exc
     except KeycloakAdminNotConfiguredError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,

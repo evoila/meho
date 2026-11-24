@@ -7,12 +7,14 @@ Revision ID: 0185
 Revises: 0184
 Create Date: 2026-11-23
 
-Three nullable columns on ``runner_principal``:
+Four nullable columns on ``runner_principal``:
 
 * ``enrollment_code_hash`` -- the SHA-256 of the one-time code that
   ``meho runner-principal register`` prints. The code itself is never stored.
-  The column is emptied when the code is used.
+  The column is emptied when the runner is revoked.
 * ``enrollment_code_expires_at`` -- when the code stops working.
+* ``enrolled_key_id`` -- the id of the public key that the code enrolled. The
+  code is used when this is set.
 * ``key_enrolled_at`` -- when the runner registered its public key.
 
 Existing rows start as ``NULL``. ``downgrade()`` drops the columns.
@@ -49,6 +51,7 @@ def upgrade() -> None:
         "runner_principal",
         sa.Column("enrollment_code_expires_at", sa.DateTime(timezone=True), nullable=True),
     )
+    op.add_column("runner_principal", sa.Column("enrolled_key_id", sa.Text(), nullable=True))
     op.add_column(
         "runner_principal",
         sa.Column("key_enrolled_at", sa.DateTime(timezone=True), nullable=True),
@@ -58,5 +61,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop the enrollment columns."""
     op.drop_column("runner_principal", "key_enrolled_at")
+    op.drop_column("runner_principal", "enrolled_key_id")
     op.drop_column("runner_principal", "enrollment_code_expires_at")
     op.drop_column("runner_principal", "enrollment_code_hash")

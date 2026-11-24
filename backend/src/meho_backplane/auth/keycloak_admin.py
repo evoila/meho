@@ -733,6 +733,9 @@ class KeycloakAdminClient:
     async def clear_client_signed_jwt_key(self, keycloak_internal_id: str) -> None:
         """Remove the client's public key and go back to the client secret login.
 
+        Sends each key attribute with an empty value: Keycloak keeps an
+        attribute that the ``PUT`` leaves out, and removes one that is empty.
+
         Raises :class:`KeycloakClientNotFoundError` on an unknown id.
         """
 
@@ -745,7 +748,7 @@ class KeycloakAdminClient:
                 "jwks.string",
                 "token.endpoint.auth.signing.alg",
             ):
-                attributes.pop(name, None)
+                attributes[name] = ""
             representation["attributes"] = attributes
 
         await self._update_client(keycloak_internal_id, _apply, "clear_client_signed_jwt_key")

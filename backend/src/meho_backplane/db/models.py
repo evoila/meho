@@ -5267,12 +5267,14 @@ class RunnerPrincipal(Base):
     # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The one-time enrollment code (migration 0185): only its SHA-256 is
-    # stored, and the column is emptied when the code is used. The expiry and
-    # the time the runner enrolled its public key sit beside it.
+    # stored, and the column is emptied when the runner is revoked. The id of
+    # the enrolled public key marks the code as used: the code then answers
+    # only a repeat with that same key.
     enrollment_code_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     enrollment_code_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    enrolled_key_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     key_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (

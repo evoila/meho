@@ -12,13 +12,14 @@ client authentication), so the runner gets short tokens without any person
 handing it a new token.
 
 The code has the form ``<runner id>.<secret>``. Only its SHA-256 is stored.
-It works once, and only until it expires. A wrong, used, expired or revoked
-code all get the same refusal, so a caller learns nothing from the answer.
+It enrolls one key, and only until it expires. A wrong, used, expired or
+revoked code all get the same refusal, so a caller learns nothing from the
+answer. The runner that holds the enrolled key can send the same code and key
+again: it gets the same answer and nothing changes.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -31,12 +32,14 @@ from typing import Any, Final
 import structlog
 from cryptography.hazmat.primitives.asymmetric import ec
 from jwt.algorithms import ECAlgorithm
-from sqlalchemy import select, update
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
+from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -47,6 +50,7 @@ __all__ = [
     "RunnerEnrollment",
     "enroll_runner_key",
     "new_enrollment_code",
+    "take_runner_lock",
 ]
 
 #: How long a code works after it is made.
@@ -55,6 +59,9 @@ ENROLLMENT_CODE_TTL: Final[timedelta] = timedelta(minutes=30)
 #: The signature type of the runner's login. ES256 is an elliptic-curve key
 #: that Keycloak accepts for signed JWT client login.
 SIGNING_ALG: Final[str] = "ES256"
+
+#: A longer text is no code. A real one has about 80 characters.
+_CODE_MAX_LENGTH: Final[int] = 256
 
 _ENROLL_AUDIT_PATH: Final[str] = "runner.principal.key_enrolled"
 _PRIVATE_JWK_MEMBERS: Final[frozenset[str]] = frozenset({"d", "p", "q", "dp", "dq", "qi", "k"})
@@ -118,97 +125,114 @@ def _public_jwks(public_jwk: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if not isinstance(key, ec.EllipticCurvePublicKey) or key.curve.name != "secp256r1":
         raise EnrollmentKeyInvalidError("the public key must be an EC P-256 public key")
     clean = {k: public_jwk[k] for k in ("kty", "crv", "x", "y")}
-    key_id = _thumbprint(clean)
+    key_id = ec_key_id(clean)
     jwk = {**clean, "use": "sig", "alg": SIGNING_ALG, "kid": key_id}
     return {"keys": [jwk]}, key_id
 
 
-def _thumbprint(clean: dict[str, str]) -> str:
-    """RFC 7638 thumbprint of an EC public key (base64url SHA-256)."""
-    canonical = json.dumps(
-        {k: clean[k] for k in ("crv", "kty", "x", "y")}, separators=(",", ":"), sort_keys=True
-    )
-    digest = hashlib.sha256(canonical.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+def _is_enrolled_key(public_jwk: dict[str, Any], enrolled_key_id: str) -> bool:
+    try:
+        return _public_jwks(public_jwk)[1] == enrolled_key_id
+    except EnrollmentKeyInvalidError:
+        return False
 
 
-async def _consume_code(code: str) -> RunnerPrincipal:
-    """Use the code up in one step; refuse it when it is not good."""
+def _runner_lock_key(runner_id: uuid.UUID) -> int:
+    """Map a runner to a stable, non-negative 63-bit advisory-lock key."""
+    digest = hashlib.blake2b(b"meho:runner-key\0" + runner_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def take_runner_lock(session: AsyncSession, runner_id: uuid.UUID) -> None:
+    """Make enrollment and revocation of one runner take turns.
+
+    Both read the runner's Keycloak client and write it back, so each holds
+    this lock from its read of the row until its commit. PostgreSQL releases
+    the lock when the transaction ends. An advisory lock is used, not a row
+    lock, so the calls of other runners and the heartbeat of this one do not
+    wait. On other databases (the single-writer SQLite test path) there is no
+    lock.
+    """
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _runner_lock_key(runner_id)}
+        )
+
+
+async def _row_of_code(session: AsyncSession, code: str) -> RunnerPrincipal:
+    """The current row of the not revoked runner that *code* belongs to."""
+    if len(code) > _CODE_MAX_LENGTH:
+        raise EnrollmentCodeInvalidError
     runner_id = _parse_runner_id(code)
     presented = _hash_code(code)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        row = (
-            await session.execute(select(RunnerPrincipal).where(RunnerPrincipal.id == runner_id))
-        ).scalar_one_or_none()
-        stored = row.enrollment_code_hash if row is not None else None
-        # Compare in constant time; do the same work for a missing row.
-        if row is None or stored is None or not hmac.compare_digest(stored, presented):
-            raise EnrollmentCodeInvalidError
-        expires = row.enrollment_code_expires_at
-        if row.revoked or expires is None or _as_utc(expires) <= datetime.now(UTC):
-            raise EnrollmentCodeInvalidError
-        # The condition on the stored hash makes the code work once, also
-        # when two requests arrive together: only one update matches.
-        result = await session.execute(
-            update(RunnerPrincipal)
-            .where(
-                RunnerPrincipal.id == runner_id,
-                RunnerPrincipal.enrollment_code_hash == presented,
-            )
-            .values(enrollment_code_hash=None)
+    row = (
+        await session.execute(
+            select(RunnerPrincipal)
+            .where(RunnerPrincipal.id == runner_id)
+            .execution_options(populate_existing=True)
         )
-        if result.rowcount != 1:  # type: ignore[attr-defined]
-            raise EnrollmentCodeInvalidError
-        await session.commit()
-        await session.refresh(row)
-        session.expunge(row)
-        row.enrollment_code_expires_at = expires
+    ).scalar_one_or_none()
+    stored = row.enrollment_code_hash if row is not None else None
+    if row is None or stored is None or not hmac.compare_digest(stored, presented):
+        raise EnrollmentCodeInvalidError
+    if row.revoked:
+        raise EnrollmentCodeInvalidError
     return row
 
 
-async def _give_code_back(row: RunnerPrincipal, code: str) -> None:
-    """Put the code back when the key could not be stored, so the runner can retry."""
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        await session.execute(
-            update(RunnerPrincipal)
-            .where(RunnerPrincipal.id == row.id, RunnerPrincipal.revoked.is_(False))
-            .values(
-                enrollment_code_hash=_hash_code(code),
-                enrollment_code_expires_at=row.enrollment_code_expires_at,
-            )
+async def _enroll_under_lock(
+    session: AsyncSession, row: RunnerPrincipal, public_jwk: dict[str, Any]
+) -> str:
+    """Put the key on the runner's Keycloak client, use the code up, return the key id.
+
+    The code is used up by the commit, after Keycloak has stored the key. When
+    Keycloak fails, the transaction rolls back and the runner can try again.
+    """
+    expires = row.enrollment_code_expires_at
+    if expires is None or _as_utc(expires) <= datetime.now(UTC):
+        raise EnrollmentCodeInvalidError
+    jwks, key_id = _public_jwks(public_jwk)
+    async with KeycloakAdminClient.from_settings() as kc:
+        await kc.set_client_signed_jwt_key(
+            row.keycloak_internal_id, jwks=jwks, signing_alg=SIGNING_ALG
         )
-        await session.commit()
+    now = datetime.now(UTC)
+    row.enrolled_key_id = key_id
+    row.key_enrolled_at = now
+    row.updated_at = now
+    await session.commit()
+    return key_id
 
 
 async def enroll_runner_key(code: str, public_jwk: dict[str, Any]) -> RunnerEnrollment:
     """Check *code* and put *public_jwk* on the runner's Keycloak client.
 
-    Raises :class:`EnrollmentKeyInvalidError` for a bad key (the code is kept),
-    :class:`EnrollmentCodeInvalidError` for a bad code, and a
+    The code enrolls one key. A repeat of the same code with that same key
+    changes nothing and gives the same answer again, also after the code's
+    end, so a runner that did not get the answer can ask for it again.
+
+    Raises :class:`EnrollmentCodeInvalidError` for a bad code or for a used
+    code with another key, :class:`EnrollmentKeyInvalidError` for a bad key
+    (the code is kept), and a
     :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminError` when
     Keycloak cannot store the key (the code is kept, so the runner can retry).
     """
     log = structlog.get_logger()
-    jwks, key_id = _public_jwks(public_jwk)
-    row = await _consume_code(code)
-    try:
-        async with KeycloakAdminClient.from_settings() as kc:
-            await kc.set_client_signed_jwt_key(
-                row.keycloak_internal_id, jwks=jwks, signing_alg=SIGNING_ALG
-            )
-    except BaseException:
-        await _give_code_back(row, code)
-        raise
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        await session.execute(
-            update(RunnerPrincipal)
-            .where(RunnerPrincipal.id == row.id)
-            .values(key_enrolled_at=datetime.now(UTC), updated_at=datetime.now(UTC))
-        )
-        await session.commit()
+    async with get_sessionmaker()() as session:
+        # Check the code first, so only a caller with a good code takes the
+        # lock. Then read the row again under the lock: a revoke or another
+        # enrollment may have changed it.
+        row = await _row_of_code(session, code)
+        await take_runner_lock(session, row.id)
+        row = await _row_of_code(session, code)
+        repeated = row.enrolled_key_id is not None
+        if row.enrolled_key_id is None:
+            key_id = await _enroll_under_lock(session, row, public_jwk)
+        elif _is_enrolled_key(public_jwk, row.enrolled_key_id):
+            key_id = row.enrolled_key_id
+        else:
+            raise EnrollmentCodeInvalidError
     await write_internal_audit_row(
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator_sub=row.keycloak_client_id,
@@ -218,9 +242,15 @@ async def enroll_runner_key(code: str, public_jwk: dict[str, Any]) -> RunnerEnro
         path=_ENROLL_AUDIT_PATH,
         status_code=200,
         duration_ms=0.0,
-        payload={"runner": row.name, "key_id": key_id},
+        payload={"runner": row.name, "key_id": key_id, "repeated": repeated},
     )
-    log.info("runner_key_enrolled", tenant_id=str(row.tenant_id), name=row.name, key_id=key_id)
+    log.info(
+        "runner_key_enrolled",
+        tenant_id=str(row.tenant_id),
+        name=row.name,
+        key_id=key_id,
+        repeated=repeated,
+    )
     issuer = str(get_settings().keycloak_issuer_url).rstrip("/")
     return RunnerEnrollment(
         client_id=row.keycloak_client_id,

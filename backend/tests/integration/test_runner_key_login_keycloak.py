@@ -92,7 +92,18 @@ async def test_runner_signs_its_own_login_and_renews(
     assert second and second != first
 
     async with admin:
-        await admin.clear_client_signed_jwt_key(internal_id)
         await admin.disable_client(internal_id)
+        await admin.clear_client_signed_jwt_key(internal_id)
+        assert admin._http is not None
+        stored = await admin._http.get(
+            f"{keycloak_bootstrap.admin_url}/clients/{internal_id}",
+            headers=admin._auth_headers(),
+        )
+    assert stored.status_code == 200
+    client = stored.json()
+    assert client["enabled"] is False
+    assert client["clientAuthenticatorType"] == "client-secret"
+    assert not client["attributes"].get("jwks.string")
+    assert client["attributes"]["kind"] == "runner"
     with pytest.raises(RunnerLoginError):
         await provider.refresh()

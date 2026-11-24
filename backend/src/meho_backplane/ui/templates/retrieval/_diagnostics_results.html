@@ -33,6 +33,8 @@
     candidate_limit -- int: the per-signal candidate pull (CANDIDATE_LIMIT, 50)
     error_message   -- str | None: a non-auth failure detail
 -#}
+
+{% from "_components.html" import badge %}
 {#- Per-signal breakdown row macro: renders one signal's (score, rank) pair,
     or the explicit absent marker when the rank is None. -#}
 {% macro signal_row(label, score, rank, candidate_limit) %}
@@ -81,9 +83,9 @@
                 link (#2457). -#}
             <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Hit provenance">
               <span class="text-subtle">Source</span>
-              <span class="badge badge-ghost badge-outline" title="Source namespace">{{ hit.source }}</span>
+              {{ badge(hit.source, variant="quiet-outline", size="md", title="Source namespace") }}
               <span class="text-subtle">Kind</span>
-              <span class="badge badge-ghost badge-outline" title="Document kind">{{ hit.kind }}</span>
+              {{ badge(hit.kind, variant="quiet-outline", size="md", title="Document kind") }}
               <span class="text-subtle">Source id</span>
               {% if hit.source == "kb" %}
                 <a
@@ -93,7 +95,7 @@
                   aria-label="Open KB entry {{ hit.source_id }}"
                 >{{ hit.source_id }}</a>
               {% else %}
-                <span class="badge badge-ghost badge-outline font-mono" title="Source id">{{ hit.source_id }}</span>
+                {{ badge(hit.source_id, variant="quiet-outline", size="md", class="font-mono", title="Source id") }}
               {% endif %}
             </div>
             <span

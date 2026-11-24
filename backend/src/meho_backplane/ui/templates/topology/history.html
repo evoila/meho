@@ -12,6 +12,8 @@
   The raw ``snapshot`` JSON (the resource's state at that point) collapses
   behind a <details> for forensic shape without flooding the panel.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Topology &middot; History &middot; MEHO Operator Console{% endblock %}
@@ -22,7 +24,7 @@
     <div>
       <h1 class="text-2xl font-semibold">
         History
-        <span class="badge badge-ghost badge-sm align-middle">{{ node_kind or "node" }}</span>
+        {{ badge(node_kind or "node", variant="quiet", class="align-middle") }}
         <span class="font-mono text-lg align-middle">{{ node_name }}</span>
       </h1>
       <p class="text-sm text-muted">
@@ -44,8 +46,8 @@
               <time class="text-xs text-muted font-mono" datetime="{{ row.valid_from.isoformat() }}">
                 {{ row.valid_from.isoformat() }}
               </time>
-              <span class="badge badge-outline badge-xs">{{ row.source }}</span>
-              <span class="badge badge-ghost badge-xs">{{ row.change_kind }}</span>
+              {{ badge(row.source, variant="outline", size="xs") }}
+              {{ badge(row.change_kind, variant="quiet", size="xs") }}
             </div>
             {% if row.snapshot %}
               <details class="mt-1">

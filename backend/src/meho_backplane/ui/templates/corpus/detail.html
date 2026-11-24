@@ -23,6 +23,8 @@
     * ``is_tenant_admin`` -- bool: gates the actions + the backend card.
     * ``csrf_token``      -- str: minted double-submit token.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ collection.collection_key }} &middot; Collections &middot; MEHO Operator Console{% endblock %}
@@ -46,7 +48,7 @@
         {% if collection.products %}
           <span class="text-subtle">&middot;</span>
           {% for product in collection.products %}
-            <span class="badge badge-outline badge-sm">{{ product }}</span>
+            {{ badge(product, variant="outline") }}
           {% endfor %}
         {% endif %}
       </p>

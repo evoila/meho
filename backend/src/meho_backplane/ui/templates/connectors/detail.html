@@ -16,6 +16,8 @@
       gated). The recent-ops card is server-rendered and refreshed
       every 5 seconds while the page is visible (#3758).
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ target.name }} &middot; Targets &middot; MEHO Operator Console{% endblock %}
@@ -41,7 +43,7 @@
     <div>
       <h1 class="text-2xl font-semibold font-mono">{{ target.name }}</h1>
       <p class="text-sm text-muted">
-        <span class="badge badge-outline badge-sm">{{ target.product }}</span>
+        {{ badge(target.product, variant="outline") }}
         <span class="font-mono">{{ target.host }}</span>
         {% if target.vpn_required %}<span aria-label="VPN required" title="VPN required">&#x1F512;</span>{% endif %}
       </p>
@@ -116,7 +118,7 @@
             <dt class="text-subtle">FQDN</dt>
             <dd>{{ target.fqdn or "—" }}</dd>
             <dt class="text-subtle">Auth model</dt>
-            <dd><span class="badge badge-ghost badge-xs">{{ target.auth_model }}</span></dd>
+            <dd>{{ badge(target.auth_model, variant="quiet", size="xs") }}</dd>
             <dt class="text-subtle">VPN required</dt>
             <dd>{{ "yes" if target.vpn_required else "no" }}</dd>
             <dt class="text-subtle">Secret ref</dt>

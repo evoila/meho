@@ -1041,18 +1041,12 @@ async def test_register_of_a_revoked_name_is_409_before_anything_is_made(
     ):
         mock_discovery_and_jwks(r, public_jwks(key))
         headers = {"Authorization": f"Bearer {_token(key)}"}
-        assert (
-            client.post(
-                "/api/v1/runner-principals", json={"name": "gone-runner"}, headers=headers
-            ).status_code
-            == 201
+        registered = client.post(
+            "/api/v1/runner-principals", json={"name": "gone-runner"}, headers=headers
         )
-        assert (
-            client.delete(
-                "/api/v1/runner-principals/gone-runner/revoke", headers=headers
-            ).status_code
-            == 200
-        )
+        assert registered.status_code == 201, registered.text
+        revoked = client.delete("/api/v1/runner-principals/gone-runner/revoke", headers=headers)
+        assert revoked.status_code == 200, revoked.text
 
     writes = _recording_vault_write(monkeypatch)
     for tenant in (_TENANT_A, _TENANT_B):

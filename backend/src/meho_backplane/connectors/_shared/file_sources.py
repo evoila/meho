@@ -277,7 +277,18 @@ def _check_path(path: str) -> None:
 
 
 def _under(path: str, prefix: str) -> bool:
-    return not prefix or path == prefix or path.startswith(prefix + "/")
+    """Whether *path* lies under *prefix*, compared part by part.
+
+    Both are split at each literal ``/`` first, and only then is each part
+    decoded. So an encoded slash stays inside its part: ``/isos%2Fa`` is
+    not under ``/isos``. The same rule holds for the first address and for
+    every request the transport sends.
+    """
+    if not prefix:
+        return True
+    parts = [_fully_decoded(part) for part in path.split("/")]
+    prefix_parts = [_fully_decoded(part) for part in prefix.split("/")]
+    return parts[: len(prefix_parts)] == prefix_parts
 
 
 def resolve_file_source(url: str, sources: Sequence[FileSource]) -> FileSource:
@@ -420,10 +431,10 @@ def _check_request(url: httpx.URL, source: FileSource) -> None:
         base.port,
     ):
         raise FileSourceError("other_host")
-    # httpx encodes the path its own way, so compare the decoded forms.
+    # httpx encodes the path its own way; _under decodes each part.
     path = url.raw_path.decode("ascii").split("?", 1)[0]
     _check_path(path)
-    if not _under(_fully_decoded(path), _fully_decoded(base.path_prefix)):
+    if not _under(path, base.path_prefix):
         raise FileSourceError("path_outside_source")
 
 

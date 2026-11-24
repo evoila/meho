@@ -95,6 +95,8 @@ def test_longest_path_prefix_wins() -> None:
         ("https://files.example.com/isos-evil/a", "path_outside_source"),
         ("https://files.example.com/isosx", "path_outside_source"),
         ("https://files.example.com/", "path_outside_source"),
+        ("https://files.example.com/isos%2Fa.iso", "path_outside_source"),
+        ("https://files.example.com/isos%252Fa.iso", "path_outside_source"),
         ("ftp://files.example.com/isos/a", "scheme"),
         ("file:///etc/passwd", "scheme"),
         ("//files.example.com/isos/a", "scheme"),
@@ -429,6 +431,9 @@ def _fake_server_redirecting_to(monkeypatch: pytest.MonkeyPatch, location: str) 
         ("https://files.example.com/other/a.iso", "path_outside_source"),
         ("https://files.example.com/isosx/a.iso", "path_outside_source"),
         ("https://files.example.com/isos/%252e%252e/etc/a", "path_dots"),
+        ("https://files.example.com/isos%2Fa.iso", "path_outside_source"),
+        ("https://files.example.com/isos%2fsub/a.iso", "path_outside_source"),
+        ("https://files.example.com/isos%252Fa.iso", "path_outside_source"),
         ("http://files.example.com:443/isos/a.iso", "other_host"),
         ("http://files.example.com/isos/a.iso", "other_host"),
         ("https://other.example.com/isos/a.iso", "other_host"),
@@ -445,6 +450,11 @@ async def test_a_redirect_is_checked_before_it_is_sent(
             await client.get(f"{BASE}/a.iso")
     assert caught.value.rule == rule
     assert seen == [f"{BASE}/a.iso"]
+
+
+def test_an_encoded_letter_under_the_source_is_accepted() -> None:
+    assert resolve_file_source(f"{BASE}/%61.iso", SOURCES) is SOURCES[0]
+    assert resolve_file_source("https://files.example.com/is%6Fs/a.iso", SOURCES) is SOURCES[0]
 
 
 async def test_a_redirect_under_the_source_is_followed(monkeypatch: pytest.MonkeyPatch) -> None:

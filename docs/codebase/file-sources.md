@@ -37,7 +37,9 @@ it and keeps no list of its own.
 - a user name or password (`userinfo`) or a fragment (`fragment`);
 - an address whose scheme, host or port differ from every source
   (`no_source`), or whose path is not under the path of a matching source
-  on a `/` boundary (`path_outside_source`);
+  on a `/` boundary (`path_outside_source`). MEHO splits the path at each
+  literal `/` first and decodes each part after that, so an encoded slash
+  (`%2F`) stays inside its part: `/isos%2Fa.iso` is not under `/isos`;
 - a path with a `.` or `..` part after full decoding (`path_dots`). A
   path is decoded until it stops changing, so `%252e` counts as a dot. A
   part may carry `;` parameters, so `..;x` counts as `..`;

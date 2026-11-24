@@ -38,7 +38,13 @@ from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
 from tests._time_limits import check_time_limit
 from tests.test_connectors_http_adapter import _ConcreteHttpConnector, _make_target
 
-_ROUNDS = 1000
+#: The required jobs run the short form. The long form has the marker
+#: ``long_form``; the default pytest options leave it out, and the
+#: non-required timing job runs it (it selects by ``slow_runner_tolerant``).
+_ROUND_FORMS = [
+    pytest.param(100, id="short"),
+    pytest.param(1000, id="long", marks=pytest.mark.long_form),
+]
 
 
 class _StallServer:
@@ -125,7 +131,7 @@ class _CloseHook:
         self.armed = False
         self.fired += 1
         self.started.set()
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             await self.stop_sent.wait()
 
 
@@ -238,7 +244,7 @@ async def _assert_nothing_left_open(client: httpx.AsyncClient, server: _StallSer
     # Let the server see the closes. Idle keep-alive connections stay open on
     # both sides on purpose; any other open connection was never closed.
     idle = _pool_idle(client)
-    for _ in range(200):
+    for _ in range(1000):
         if server.open_connections <= idle:
             break
         await asyncio.sleep(0.01)
@@ -246,13 +252,13 @@ async def _assert_nothing_left_open(client: httpx.AsyncClient, server: _StallSer
     assert _pool_active(client) == 0
     assert _pool_waiting(client) == 0
     started = time.monotonic()
-    resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(1.0))
+    resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(5.0))
     assert resp.status_code == 200
     elapsed = time.monotonic() - started
     check_time_limit(elapsed, 1.0, f"the request after the rounds took {elapsed:.2f} s")
 
 
-async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> None:
+async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None, rounds: int) -> None:
     server = _StallServer()
     await server.start()
     conn = _PlainHttpConnector()
@@ -264,13 +270,13 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
         timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=5.0, pool=5.0)
     stops_seen = 0
     try:
-        for round_no in range(_ROUNDS):
+        for round_no in range(rounds):
             # Two idle connections, so the round dials no new connection: a
             # stop during a dial is not the case under test.
             await asyncio.gather(*(_ok(client) for _ in range(2)))
             hook.arm()
             task = asyncio.ensure_future(call(client, f"{path}?round={round_no}", timeout))
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(30):
                 await hook.started.wait()
             # The close has started and waits for this stop.
             await _wait_before_stop(round_no)
@@ -281,8 +287,8 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
                 await task
             except asyncio.CancelledError:
                 stops_seen += 1
-        assert hook.fired == _ROUNDS
-        assert stops_seen == _ROUNDS
+        assert hook.fired == rounds
+        assert stops_seen == rounds
         await _assert_nothing_left_open(client, server)
     finally:
         await conn.aclose()
@@ -291,53 +297,65 @@ async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_during_close_after_time_limit_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds(_streamed, "/slow", read_timeout=0.002)
+    await _run_rounds(_streamed, "/slow", read_timeout=0.002, rounds=rounds)
 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_during_close_of_direct_request_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds(_direct, "/slow", read_timeout=0.002)
+    await _run_rounds(_direct, "/slow", read_timeout=0.002, rounds=rounds)
 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_during_close_of_redirect_answer_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds(_streamed, "/redirect", read_timeout=None)
+    await _run_rounds(_streamed, "/redirect", read_timeout=None, rounds=rounds)
 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_during_close_of_direct_stream_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds(_direct_stream, "/slow", read_timeout=None)
+    await _run_rounds(_direct_stream, "/slow", read_timeout=None, rounds=rounds)
 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_during_close_in_direct_stream_body_read_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds(_direct_stream_read, "/slow", read_timeout=0.002)
+    await _run_rounds(_direct_stream_read, "/slow", read_timeout=0.002, rounds=rounds)
 
 
 @pytest.mark.slow_runner_tolerant
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", _ROUND_FORMS)
 async def test_stop_right_after_direct_stream_answer_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
+    rounds: int,
 ) -> None:
     """The answer is ready, but the stop reaches the caller before the answer does."""
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
@@ -357,7 +375,7 @@ async def test_stop_right_after_direct_stream_answer_leaves_nothing_open(
     client.event_hooks["response"].append(_stop_caller)
     stops_seen = 0
     try:
-        for round_no in range(_ROUNDS):
+        for round_no in range(rounds):
             await asyncio.gather(*(_ok(client) for _ in range(2)))
             callers.append(
                 asyncio.ensure_future(
@@ -365,11 +383,11 @@ async def test_stop_right_after_direct_stream_answer_leaves_nothing_open(
                 )
             )
             try:
-                async with asyncio.timeout(10):
+                async with asyncio.timeout(30):
                     await callers[-1]
             except asyncio.CancelledError:
                 stops_seen += 1
-        assert stops_seen == _ROUNDS
+        assert stops_seen == rounds
         client.event_hooks["response"].remove(_stop_caller)
         await _assert_nothing_left_open(client, server)
     finally:

@@ -74,6 +74,7 @@ from fastapi.responses import Response
 from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
+from meho_backplane.checks.runner_binding import SensorRunnerBindingError
 from meho_backplane.checks.schemas import (
     SensorCadenceFilter,
     SensorCreate,
@@ -244,6 +245,12 @@ async def create_sensor(
         # list shape, so the typed CLI client can read it; ``msg`` is the
         # plain warning, naming the connector that fits when there is one.
         raise http_for(exc) from exc
+    except SensorRunnerBindingError as exc:
+        # 422 -- the runner is unknown in this tenant, or runner checks are off.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.error_code,
+        ) from exc
     except SensorNameConflictError as exc:
         # 409 -- the (tenant_id, name) pair is already taken.
         raise HTTPException(
@@ -383,7 +390,11 @@ async def edit_sensor(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"{exc.error_code}: {exc}",
         ) from exc
-    except (SensorOperationNotFoundError, SensorRequiresSafeOperationError) as exc:
+    except (
+        SensorOperationNotFoundError,
+        SensorRequiresSafeOperationError,
+        SensorRunnerBindingError,
+    ) as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.error_code,

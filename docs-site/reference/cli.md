@@ -4300,6 +4300,48 @@ meho policy validate FILE [flags]
 - `--json` — print the server's answer as JSON
 - `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
+## `meho principal`
+
+Block and unblock people in MEHO (tenant_admin)
+
+```
+meho principal
+```
+
+### `meho principal block`
+
+Block a person in MEHO (tenant_admin)
+
+```
+meho principal block <sub> --reason <text> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the person is blocked (required)
+
+### `meho principal blocked`
+
+List the blocked people (tenant_admin)
+
+```
+meho principal blocked [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+
+### `meho principal unblock`
+
+Unblock a person in MEHO (tenant_admin)
+
+```
+meho principal unblock <sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+
 ## `meho promote`
 
 Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)
@@ -4951,6 +4993,7 @@ meho sensor create [flags]
 - `--params` — optional op-params JSON object (inline JSON, @<path>, or @-)
 - `--retry-backoff-seconds` — accelerated re-check spacing in seconds while a state change is pending, 5..300 (omitted when unset; the server then applies its default of 15)
 - `--retry-times` — consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)
+- `--runner` — name of a runner that runs the check at its site (needs RUNNER_CHECKS_ENABLED)
 - `--severity` — worst rollup state a failing assertion drives: degraded | critical (default critical)
 - `--target` — optional dispatch-target JSON object (inline JSON, @<path>, or @-)
 - `--tenant` — target tenant UUID (platform_admin cross-tenant create)

@@ -91,6 +91,7 @@ def _project_member(member: DashboardMemberView) -> dict[str, object]:
         "name": member.name,
         "connector_id": member.connector_id,
         "op_id": member.op_id,
+        "runner_name": member.runner_name,
         "raw_state": member.raw_state,
         "raw_state_badge": state_badge_class(member.raw_state),
         "effective_state": member.effective_state,

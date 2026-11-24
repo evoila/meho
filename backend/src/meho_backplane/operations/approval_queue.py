@@ -273,6 +273,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_claimed_run_unless_row_params_match",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -3436,6 +3437,31 @@ async def consume_stored_run_input(
         return await _record_claimed_refusal(operator, request, refusal, audit_payload={})
     resume_parent = handoff.get("resume_parent")
     return params, resume_parent if isinstance(resume_parent, dict) else None
+
+
+async def refuse_claimed_run_unless_row_params_match(
+    operator: Operator, request: ApprovalRequest
+) -> OperationResult | None:
+    """Refuse a claimed *request* whose stored params do not match ``params_hash``.
+
+    For a request without a store entry, whose params the run reads from
+    the row (the step of a multi-step operation). *request* is the row as
+    it was read before the claim. ``None`` when the params match. Else the
+    refusal :func:`~meho_backplane.operations._errors.result_resume_params_unavailable`
+    is recorded like every refusal after the claim and returned, and
+    nothing runs.
+    """
+    if _stored_params_can_run(request):
+        return None
+    _log().warning(
+        "approval_resume_stored_params_changed",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        operator_sub=operator.sub,
+    )
+    refusal = result_resume_params_unavailable(request.op_id, approval_request_id=request.id)
+    return await _record_claimed_refusal(operator, request, refusal, audit_payload={})
 
 
 async def _discard_refused_handoff(request: ApprovalRequest) -> None:

@@ -485,6 +485,7 @@ from meho_backplane.operations._vendor_text import (
 )
 from meho_backplane.operations.approval_secret_values import (
     current_call_secret_values,
+    hide_call_secret_keys,
     hide_call_secret_values,
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
@@ -1221,9 +1222,12 @@ async def _protect_secret_values(
         mark_answer_holds_secret()
     else:
         caller = redacted
-    return redaction.model_copy(
-        update={"raw": fingerprint_hidden_values(redaction.raw, shown), "redacted": caller}
+    # A secret value the connector sends back as a key (a license key that
+    # names its own entry) is hidden in the raw copy's keys too.
+    raw = hide_call_secret_keys(
+        fingerprint_hidden_values(redaction.raw, shown), current_call_secret_values()
     )
+    return redaction.model_copy(update={"raw": raw, "redacted": caller})
 
 
 def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView | None:
@@ -1387,7 +1391,12 @@ def _is_error_issue(item: Any) -> bool:
 
 
 def _cut_text_to_bytes(text: str, cap: int) -> str:
-    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes."""
+    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes.
+
+    The secret values of the approved call that runs now are hidden first,
+    so a cut never leaves a part of one.
+    """
+    text = hide_call_secret_values(text, current_call_secret_values())
     if json_text_bytes(text) - 2 <= cap:  # minus the enclosing quotes
         return text
     budget = cap - len(_TERMINAL_ERROR_TEXT_CUT_MARK)
@@ -2276,6 +2285,8 @@ async def _audit_returned_result(
         )
     if raw.status not in ("awaiting_approval", "denied"):
         return raw
+    # A connector's reason for a deny can quote a secret value of the call.
+    raw = _hide_call_secrets_in_error(raw)
     try:
         receipt = await audit_safe(
             audit_id=audit_id,
@@ -2299,17 +2310,32 @@ async def _audit_returned_result(
     return raw.model_copy(update={"audit_id": receipt})
 
 
-#: The fields of an error result that MEHO sets itself; they keep their value.
-_MEHO_ERROR_FIELDS = frozenset({"error_code", "http_status"})
+#: The fields of an error, deny or wait result that MEHO sets itself. They
+#: keep their value, so MEHO still reads the result right: for example an
+#: ``execution_outcome`` of ``uncertain`` still stops a second run.
+_MEHO_ERROR_FIELDS = frozenset(
+    {
+        "error_code",
+        "http_status",
+        "execution_outcome",
+        "retry",
+        "reason_code",
+        "approval_request_id",
+        "retry_after_seconds",
+        MESSAGE_SOURCE_KEY,
+    }
+)
 
 
 def _hide_call_secrets_in_error(result: OperationResult) -> OperationResult:
     """*result* with the secret values of the approved call that runs now hidden.
 
     A connector can send a secret value of the call back in its error text
-    (an HTTP 422 that repeats the note it refused). The caller's answer, the
-    audit row and the stored approval result all take this copy. Outside an
-    approved run there are no such values and *result* is returned as is.
+    (an HTTP 422 that repeats the note it refused), or in the reason of a
+    deny. The caller's answer, the audit row and the stored approval result
+    all take this copy. The fields MEHO sets itself
+    (:data:`_MEHO_ERROR_FIELDS`) keep their value. Outside an approved run
+    there are no such values and *result* is returned as is.
     """
     values = current_call_secret_values()
     if not values:

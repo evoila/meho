@@ -623,7 +623,10 @@ async def _take_stored_run_input(
     of secret values use them.
 
     A request without a store entry keeps its stored parent and the agent's
-    call; a step takes its params from the row. With an entry, the store is
+    call; a step takes its params from the row, and only when they match
+    the approved ``params_hash``
+    (:func:`~meho_backplane.operations.approval_queue.refuse_claimed_run_unless_row_params_match`):
+    else the refusal is recorded and nothing runs. With an entry, the store is
     read and emptied
     (:func:`~meho_backplane.operations.approval_queue.consume_stored_run_input`).
     Its params match the approved ``params_hash``. A step takes its parent
@@ -636,7 +639,10 @@ async def _take_stored_run_input(
     from meho_backplane.connectors.schemas import OperationResult
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
-    from meho_backplane.operations.approval_queue import consume_stored_run_input
+    from meho_backplane.operations.approval_queue import (
+        consume_stored_run_input,
+        refuse_claimed_run_unless_row_params_match,
+    )
 
     resume_parent = cast("dict[str, Any] | None", request.resume_parent)
     if request.execution_handle is None:
@@ -644,6 +650,9 @@ async def _take_stored_run_input(
             await discard_handoff(session, request.id, request.tenant_id)
             await session.commit()
         if resume_parent is not None:
+            refusal = await refuse_claimed_run_unless_row_params_match(operator, request)
+            if refusal is not None:
+                return refusal
             step_params = cast("dict[str, Any]", request.params or {})
             return resume_parent, call_arguments, step_params
         return None, call_arguments, cast("dict[str, Any]", call_arguments.get("params") or {})

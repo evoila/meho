@@ -445,7 +445,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     call the agent runs the checked params and not its copy in memory. For
     a step it uses the step's own params (from the handoff, or from the
     row) for the preview check and for hiding secret values, and the
-    parent's params to run the parent. When the handoff cannot be read
+    parent's params to run the parent. Step params read from the row must
+    match `params_hash` too
+    (`refuse_claimed_run_unless_row_params_match`); else nothing runs. When the handoff cannot be read
     after the claim (it is gone, or the key changed while the request
     waited) or does not match, nothing runs: the request ends as a failed
     run with `approval_resume_params_unavailable`, with an audit row and
@@ -457,17 +459,28 @@ Two kinds of rows carry a keyed hash of a call's params:
     (`proposed_effect`) shows the marker in place of each one, and while
     the approved call runs, the dispatcher hides each one in the answer, in
     the stored result and in the audit row of the run (a connector that
-    sends back the note it saved). An error the connector returns gets the
-    same hiding (`_hide_call_secrets_in_error`), except `error_code` and
-    `http_status`. These are the values under a name whose
+    sends back the note it saved). An error, a deny or a wait the
+    connector returns gets the same hiding (`_hide_call_secrets_in_error`),
+    except the fields MEHO sets itself (`error_code`, `http_status`,
+    `execution_outcome`, `retry`, `reason_code`, ...): a write that timed
+    out stays `uncertain`, so a second run is still refused. An error text
+    is hidden before MEHO shortens it (`_sanitize_free_text`), so a cut
+    leaves no part of a value. These are the values under a name whose
     last word names the secret (`password`, not `password_secret_ref`,
     which names where the secret is), each item of a list under such a
-    name, and the values of marked fields. A secret text is replaced also
-    inside a longer text (`Saved note: <marker>`); a secret number only
-    where it stands as a number of its own. On the card, the fields MEHO
-    sets itself (`MEHO_CARD_FIELDS`: `safety_level`, `op_class`, the
-    classification, ...) keep their value, so the approval rules read the
-    card as it was built.
+    name, the text of each secret name/value pair (also `community`), a
+    text under an SNMP `community`, and the values of marked fields. A
+    secret text is replaced also inside a longer text
+    (`Saved note: <marker>`) and in the keys of an object; two keys that
+    become the same text keep apart (`<marker> (2)`). The audit row's raw
+    copy gets the same keys. A secret number is replaced only where it
+    stands as a number of its own. The matcher is built for each masking
+    and dropped after it, so no copy of a secret stays in a shared cache.
+    On the card, the fields MEHO sets itself (`MEHO_CARD_FIELDS`:
+    `safety_level`, `op_class`, the classification, the `client` block,
+    ...) and the requester record in `permission_preflight` keep their
+    value, so the approval rules read the card as it was built and an
+    approvals surface can still check the agent's grants.
   - For other operations, and for rows stored by an older release, they are
     stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim

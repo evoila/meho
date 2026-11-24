@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors import OperationResult
 from meho_backplane.operations import register_typed_operation
 from meho_backplane.operations.composite import enforce_subop_policy
 
@@ -119,3 +120,60 @@ async def step_with_note_composite(operator: Operator, target: Any, params: dict
     if gated is not None:
         return gated
     return {"done": True, "message": f"Saved note: {COMPUTED_NOTE}"}
+
+
+SETTINGS_ECHO_OP_ID = "vault.things.settings_echo"
+TIMEOUT_OP_ID = "vault.things.note_timeout"
+DENY_OP_ID = "vault.things.note_deny"
+
+
+async def settings_echo_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Send the settings back under other names, and the license keys as object keys."""
+    received.append((SETTINGS_ECHO_OP_ID, dict(params)))
+    return {
+        "applied": [setting.get("value") for setting in params.get("settings", [])],
+        "licenses": {key: {"status": "active"} for key in params.get("licenseKeys", [])},
+    }
+
+
+async def timeout_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Send the write, then lose the answer: MEHO cannot know if it was applied."""
+    received.append((TIMEOUT_OP_ID, dict(params)))
+    request = httpx.Request("POST", "https://vault.test/v1/notes")
+    raise httpx.ReadTimeout("read timed out", request=request)
+
+
+async def deny_handler(target: Any, params: dict[str, Any]) -> OperationResult:
+    """Refuse the call with a reason that quotes the note."""
+    received.append((DENY_OP_ID, dict(params)))
+    reason = f"the note {params.get('note')} is not allowed"
+    return OperationResult(
+        status="denied",
+        op_id=DENY_OP_ID,
+        duration_ms=0.0,
+        error=f"denied: {reason}",
+        extras={"error_code": "denied", "reason": reason},
+    )
+
+
+async def register_more_note_ops(embedding: Any) -> None:
+    """Register the three typed writes above: every call waits for a person."""
+    for op_id, handler in (
+        (SETTINGS_ECHO_OP_ID, settings_echo_handler),
+        (TIMEOUT_OP_ID, timeout_handler),
+        (DENY_OP_ID, deny_handler),
+    ):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id=op_id,
+            handler=handler,
+            summary="Update a note.",
+            description="Update a note.",
+            parameter_schema={"type": "object"},
+            when_to_use=None,
+            safety_level="caution",
+            requires_approval=True,
+            embedding_service=embedding,
+        )

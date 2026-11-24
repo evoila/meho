@@ -54,6 +54,10 @@ from meho_backplane.connectors.base import (
     ConnectorResourceNotFoundError,
     ConnectorUpstreamError,
 )
+from meho_backplane.operations.approval_secret_values import (
+    current_call_secret_values,
+    hide_call_secret_values,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -196,8 +200,14 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     replaced (``"password": "..."`` in a vendor's JSON error body, #5031):
     the Tier-1 patterns need the name right before the ``:`` and do not see
     it behind a quote.
+
+    First of all, the secret values of the approved call that runs now are
+    replaced (:func:`~meho_backplane.operations.approval_secret_values.current_call_secret_values`):
+    a cut or a redaction pass could leave only a part of such a value, and
+    a part does not match the value.
     """
     try:
+        text = hide_call_secret_values(text, current_call_secret_values())
         redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
@@ -3062,7 +3072,7 @@ def result_connector_vault_forbidden(
             "convention."
         )
         # Target-less denial: the raw Vault text is the only detail.
-        msg = str(exc)
+        msg = hide_call_secret_values(str(exc), current_call_secret_values())
         if len(msg) > _EXC_MESSAGE_CAP:
             msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
         if msg:
@@ -3154,7 +3164,7 @@ def result_connector_vault_write_forbidden(
     secret material — and tails the operator-facing string under the
     :data:`_EXC_MESSAGE_CAP` discipline.
     """
-    msg = str(exc)
+    msg = hide_call_secret_values(str(exc), current_call_secret_values())
     if len(msg) > _EXC_MESSAGE_CAP:
         msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
     path_clause = f" on {write_path!r}" if write_path else ""

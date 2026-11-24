@@ -102,8 +102,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block_run import (
+    mark_request_sent,
+    raise_if_step_was_refused,
+    request_was_sent,
+)
 from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations._principal_block_gate import refuse_step_if_blocked
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
     STEP_DONE_NO_RESULT,
@@ -499,6 +505,8 @@ def get_dispatch_child(
         params: dict[str, Any],
         target: Any = None,
     ) -> OperationResult:
+        # After a step was refused by the block list, no further step starts.
+        raise_if_step_was_refused()
         attempted_depth = _check_composite_depth(
             parent_op_id=parent_op_id,
             child_op_id=op_id,
@@ -541,6 +549,8 @@ def get_dispatch_child(
                 journal.finish(
                     entry, result.model_dump(mode="json"), ended_well=_child_ended_well(result)
                 )
+            # A step the block list refused stops the whole operation.
+            raise_if_step_was_refused()
             return result
         finally:
             if journal is not None:
@@ -718,7 +728,8 @@ def _resume_parent_for_current_composite(
     the steps this run of the composite went through, with their results
     (:class:`~meho_backplane.operations.composite_steps.StepJournal`), so the
     re-entry does not send them again; the key is left out when there are
-    none. ``None`` when no composite is on the stack, so the park keeps the
+    none. ``request_sent: true`` says that this run sent a step or a request
+    before the wait. ``None`` when no composite is on the stack, so the park keeps the
     unchanged generic re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
@@ -735,6 +746,8 @@ def _resume_parent_for_current_composite(
         steps = journal.stored()
         if steps:
             resume_parent["steps"] = steps
+    if request_was_sent():
+        resume_parent["request_sent"] = True
     return resume_parent
 
 
@@ -913,7 +926,15 @@ async def enforce_subop_policy(
     no person; otherwise the run stops with ``composite_resume_read_not_sent``.
     A read that a person approved is not sent again: the run stops with that
     error.
+
+    **A blocked person.** Before anything else, the seam reads the admin
+    block list (:mod:`._principal_block_gate`). When the operator is blocked,
+    or on an approved run the person who asked, or the list cannot be read,
+    it returns the refusal and the step is not sent, also on a resume.
     """
+    blocked = await refuse_step_if_blocked(op_id, operator)
+    if blocked is not None:
+        return blocked
     journal = current_step_journal()
     replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
     if journal is not None and replayed is not None:
@@ -931,6 +952,7 @@ async def enforce_subop_policy(
         )
         if refused is None:
             journal.start(connector_id, op_id, target, params, may_send_again=True)
+            mark_request_sent()
         return refused
     # The rows the gate writes for this step hold only what the step read.
     with track_secret_read_as():
@@ -951,6 +973,7 @@ async def enforce_subop_policy(
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
         )
+    mark_request_sent()
     return None
 
 
@@ -1006,7 +1029,14 @@ async def run_governed_subop(
     kept, stops the run with ``composite_resume_step_outcome_unknown``. An
     exception from *call* passes to the handler, and the step stays
     "started".
+
+    When the operator is blocked, or on an approved run the person who
+    asked, or the block list cannot be read, the step stops with the refusal
+    and *call* is not awaited, also on a resume.
     """
+    blocked = await refuse_step_if_blocked(op_id, operator)
+    if blocked is not None:
+        return SubopStep(stopped=blocked)
     journal = current_step_journal()
     replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
     if journal is not None and replayed is not None:
@@ -1046,6 +1076,7 @@ async def run_governed_subop(
         if journal is not None
         else None
     )
+    mark_request_sent()
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)

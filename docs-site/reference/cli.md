@@ -4302,6 +4302,48 @@ meho policy validate FILE [flags]
 - `--json` — print the server's answer as JSON
 - `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
+## `meho principal`
+
+Block and unblock people in MEHO (tenant_admin)
+
+```
+meho principal
+```
+
+### `meho principal block`
+
+Block a person in MEHO (tenant_admin)
+
+```
+meho principal block <sub> --reason <text> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the person is blocked (required)
+
+### `meho principal blocked`
+
+List the blocked people (tenant_admin)
+
+```
+meho principal blocked [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+
+### `meho principal unblock`
+
+Unblock a person in MEHO (tenant_admin)
+
+```
+meho principal unblock <sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+
 ## `meho promote`
 
 Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)

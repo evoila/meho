@@ -580,7 +580,17 @@ def test_corpus_search_card_header_prefers_upstream_title() -> None:
     body = response.text
     # The human title is the link text; the raw document_id is not the header.
     assert "Quiescing VM Snapshots" in body
-    assert ">vsphere-snapshots<" not in body
+    # Scoped to the card heading on purpose. The id is *expected* elsewhere on
+    # the card: when a title heads it, ``_results.html`` deliberately surfaces
+    # the demoted id as a "Document id" badge so provenance stays visible. A
+    # bare `">vsphere-snapshots<" not in body` therefore asserts the opposite
+    # of the template's documented behaviour, and only passed because that
+    # badge used to be written across three lines -- the newlines, not the
+    # markup, kept the string from matching.
+    heading = re.search(r'<h3[^>]*class="card-title[^"]*"[^>]*>(.*?)</h3>', body, re.S)
+    assert heading, "the result card lost its heading"
+    assert "Quiescing VM Snapshots" in heading.group(1)
+    assert "vsphere-snapshots" not in heading.group(1)
 
 
 def _render_results(**context: object) -> str:

@@ -135,7 +135,7 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Stub the Vault read and the Valkey counters for the endpoint.
 
     The Vault read returns the known secret (no socket); the rate limits run
-    for real against an in-memory fake Valkey. Individual tests re-patch a
+    for real against an in-memory fake Valkey, in one fixed window. Individual tests re-patch a
     seam to drive its failure path.
     """
 
@@ -151,6 +151,13 @@ def _stub_service_seams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     )
     monkeypatch.setattr(
         "meho_backplane.events.ingest.secret_cache.get_broadcast_client", lambda: fake
+    )
+    # One fixed clock for the rate-limit module, so all its counters stay in
+    # one window when the wall clock passes a full minute while a test runs.
+    # Signature timestamps still use the real clock.
+    monkeypatch.setattr(
+        "meho_backplane.events.ingest.rate_limit.time",
+        SimpleNamespace(time=lambda: 60_030.0),
     )
     clear_secret_cache()
     yield

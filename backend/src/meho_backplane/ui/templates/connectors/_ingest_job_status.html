@@ -35,6 +35,7 @@
                           "re-check the registry list" panel, no poll.
     * ``poll_interval_seconds`` -- int: the self-poll cadence.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <div
   id="ingest-job-{{ job_id }}"
@@ -91,19 +92,11 @@
         </p>
         {% if job.ingestion %}
           <div class="mt-2 flex flex-wrap items-center gap-2">
-            <span class="badge badge-success badge-sm">
-              {{ job.ingestion.inserted_count }} inserted
-            </span>
-            <span class="badge badge-ghost badge-sm">
-              {{ job.ingestion.updated_count }} updated
-            </span>
-            <span class="badge badge-ghost badge-sm">
-              {{ job.ingestion.skipped_count }} skipped
-            </span>
+            {{ badge(job.ingestion.inserted_count ~ " inserted", variant="success") }}
+            {{ badge(job.ingestion.updated_count ~ " updated", variant="quiet") }}
+            {{ badge(job.ingestion.skipped_count ~ " skipped", variant="quiet") }}
             {% if job.grouping %}
-              <span class="badge badge-ghost badge-sm">
-                {{ job.grouping.groups_created }} groups
-              </span>
+              {{ badge(job.grouping.groups_created ~ " groups", variant="quiet") }}
             {% endif %}
           </div>
         {% endif %}
@@ -127,15 +120,9 @@
         </p>
         {% if job.ingestion %}
           <div class="mt-2 flex flex-wrap items-center gap-2">
-            <span class="badge badge-ghost badge-sm">
-              {{ job.ingestion.inserted_count }} inserted
-            </span>
-            <span class="badge badge-ghost badge-sm">
-              {{ job.ingestion.updated_count }} updated
-            </span>
-            <span class="badge badge-ghost badge-sm">
-              {{ job.ingestion.skipped_count }} skipped
-            </span>
+            {{ badge(job.ingestion.inserted_count ~ " inserted", variant="quiet") }}
+            {{ badge(job.ingestion.updated_count ~ " updated", variant="quiet") }}
+            {{ badge(job.ingestion.skipped_count ~ " skipped", variant="quiet") }}
           </div>
         {% endif %}
       </div>

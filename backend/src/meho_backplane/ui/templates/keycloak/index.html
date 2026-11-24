@@ -29,6 +29,7 @@
 -#}
 {% extends "base.html" %}
 
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 {% block page_title %}Keycloak &middot; MEHO Operator Console{% endblock %}
@@ -56,11 +57,11 @@
     hx-target="body"
     hx-push-url="true"
   >
-    <label class="form-control">
-      <span class="label-text mb-1 text-xs text-muted">Keycloak target</span>
+    <label>
+      <span class="mb-1 text-xs text-muted">Keycloak target</span>
       <select
         name="target"
-        class="select select-bordered select-sm w-full font-mono"
+        class="select select-sm w-full font-mono"
         aria-label="Keycloak target"
         hx-get="/ui/keycloak"
         hx-target="body"
@@ -109,9 +110,9 @@
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-lg font-semibold">{{ realm.get("realm") | default("—", true) }}</span>
             {% if realm.get("enabled") %}
-              <span class="badge badge-success badge-sm">enabled</span>
+              {{ badge("enabled", variant="success") }}
             {% else %}
-              <span class="badge badge-ghost badge-sm">disabled</span>
+              {{ badge("disabled", variant="quiet") }}
             {% endif %}
           </div>
           {% if realm.get("displayName") %}
@@ -174,16 +175,16 @@
                   <td class="font-mono">{{ client.get("clientId") | default("—", true) }}</td>
                   <td>
                     {% if client.get("enabled") %}
-                      <span class="badge badge-success badge-xs">yes</span>
+                      {{ badge("yes", variant="success", size="xs") }}
                     {% else %}
-                      <span class="badge badge-ghost badge-xs">no</span>
+                      {{ badge("no", variant="quiet", size="xs") }}
                     {% endif %}
                   </td>
                   <td>
                     {% if client.get("publicClient") %}
-                      <span class="badge badge-ghost badge-xs">public</span>
+                      {{ badge("public", variant="quiet", size="xs") }}
                     {% else %}
-                      <span class="badge badge-outline badge-xs">confidential</span>
+                      {{ badge("confidential", variant="outline", size="xs") }}
                     {% endif %}
                   </td>
                   <td class="text-xs text-muted">{{ client.get("protocol") | default("openid-connect", true) }}</td>

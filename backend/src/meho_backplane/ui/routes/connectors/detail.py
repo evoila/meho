@@ -76,6 +76,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from meho_backplane.connectors.registry import connectors_for_tenant, registered_product_tokens
 from meho_backplane.connectors.resolver import resolve_connector_or_label
@@ -389,6 +390,8 @@ async def _load_recent_ops(
         )
         .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
         .limit(limit)
+        # The card never shows the stored raw answer (#6818).
+        .options(defer(AuditLog.raw_payload, raiseload=True))
     )
     result = await db_session.execute(stmt)
     return list(result.scalars().all())

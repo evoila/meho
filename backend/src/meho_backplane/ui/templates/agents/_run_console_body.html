@@ -18,6 +18,7 @@
   incurs provider cost -- the form surfaces the agent's turn budget so the
   operator sees the cost ceiling before pressing Run.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <div id="agent-run-console" class="space-y-4">
   <nav class="text-sm" aria-label="Breadcrumb">
@@ -63,7 +64,7 @@
         <span class="text-sm font-medium">Prompt</span>
         <textarea
           name="input"
-          class="textarea textarea-bordered min-h-28 font-mono text-sm w-full"
+          class="textarea min-h-28 font-mono text-sm w-full"
           placeholder="What should this agent do?"
           required
           {% if not enabled %}disabled{% endif %}
@@ -76,7 +77,7 @@
         <input
           type="text"
           name="work_ref"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="gh:evoila/meho#123"
           {% if not enabled %}disabled{% endif %}
           aria-label="External change-ticket reference"
@@ -88,7 +89,7 @@
 
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span class="text-xs text-muted" aria-live="polite">
-          Turn budget: <span class="badge badge-outline badge-sm font-mono">{{ turn_budget }}</span>
+          Turn budget: {{ badge(turn_budget, variant="outline", class="font-mono") }}
           &mdash; the maximum model turns this run may take.
         </span>
         <button

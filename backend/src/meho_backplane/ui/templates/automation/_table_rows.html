@@ -19,6 +19,8 @@
   The empty state is the inactive surface — no paired, contract-healthy
   automation add-on.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
   {%- if ago < 60 -%}just now
@@ -51,7 +53,7 @@
           {% if row.surfaces %}
             <div class="flex flex-wrap gap-1">
               {% for surface in row.surfaces %}
-                <span class="badge badge-ghost badge-sm font-mono" title="{{ surface.display_label or surface.name }}">{{ surface.kind }}:{{ surface.name }}</span>
+                {{ badge(surface.kind ~ ":" ~ surface.name, variant="quiet", class="font-mono", title=(surface.display_label or surface.name)) }}
               {% endfor %}
             </div>
           {% else %}

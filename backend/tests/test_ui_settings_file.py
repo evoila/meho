@@ -668,3 +668,12 @@ def test_a_failed_audit_write_saves_nothing(
     assert "settings_revision_id" not in failure.payload
     assert "settings_summary" not in failure.payload
     assert "settings_failed" not in failure.payload
+    assert failure.payload["settings_tenant_ids"] == [str(_TENANT_A)]
+    assert "settings_file_sha256" in failure.payload
+    changes = [
+        key
+        for key in failure.payload
+        if key.endswith(("_before", "_after", "_changed")) or key.startswith("announce_gate_")
+    ]
+    assert changes == []
+    assert "tenant_id" not in failure.payload

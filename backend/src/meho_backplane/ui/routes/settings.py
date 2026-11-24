@@ -320,13 +320,23 @@ async def _preview_handler(
     return _render(request, session_ctx, "settings/_preview.html", _preview_context(plan, content))
 
 
-#: The audit keys of ``apply_import`` that describe what it wrote. A rolled
-#: back apply wrote nothing, so its failure record must not carry them.
-_ROLLED_BACK_AUDIT_KEYS: Final[tuple[str, ...]] = (
-    "audit_settings_revision_id",
-    "audit_settings_summary",
-    "audit_settings_failed",
+#: The audit keys that name the attempted import. A rolled back apply keeps
+#: only these: every other key the apply bound describes a saved change.
+_ATTEMPT_AUDIT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "audit_op_id",
+        "audit_op_class",
+        "audit_settings_import",
+        "audit_settings_file_sha256",
+        "audit_settings_tenant_ids",
+    }
 )
+
+
+def _drop_saved_change_keys(before: set[str]) -> None:
+    """Unbind the keys the rolled back apply bound, except the attempt keys."""
+    added = set(structlog.contextvars.get_contextvars()) - before - _ATTEMPT_AUDIT_KEYS
+    structlog.contextvars.unbind_contextvars(*added)
 
 
 async def _apply_handler(
@@ -345,10 +355,12 @@ async def _apply_handler(
     content = await _read_file(request)
     if content is None:
         return _refused(request, session_ctx, _NO_FILE)
+    keys_before = set(structlog.contextvars.get_contextvars())
     try:
         result = await apply_import(db_session, operator, content)
     except SettingsForbiddenError as exc:
         await db_session.rollback()
+        _drop_saved_change_keys(keys_before)
         return _refused(request, session_ctx, str(exc), status_code=status.HTTP_403_FORBIDDEN)
     if result.plan.mistakes:
         await db_session.rollback()
@@ -366,7 +378,7 @@ async def _apply_handler(
         except SQLAlchemyError:
             _log.exception("ui_settings_apply_audit_failed")
             await db_session.rollback()
-            structlog.contextvars.unbind_contextvars(*_ROLLED_BACK_AUDIT_KEYS)
+            _drop_saved_change_keys(keys_before)
             return _refused(
                 request,
                 session_ctx,

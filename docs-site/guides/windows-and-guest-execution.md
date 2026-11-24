@@ -236,9 +236,11 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
 
     With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
     every write previews, also one that runs without approval. A
-    credential operation then previews only when it has its own safe
-    preview. It never shows the params, and it shows the plan only when
-    that preview builds one; otherwise `plan_shown` is `false`.
+    credential operation with its own safe preview gives a
+    `preview_hash` and never copies the params. It shows the plan only
+    when that preview builds one; otherwise `plan_shown` is `false`.
+    Without its own safe preview, a destructive one shows the redacted
+    params and a `preview_hash`; any other stays `unavailable`.
     `guest.program.run` has none of its own, so it stays `unavailable`.
 
 ## Safety tiers of the write operations

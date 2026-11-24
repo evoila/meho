@@ -40,7 +40,7 @@
       {{ icon("user", class="size-5 opacity-70") }}
       <span>Account</span>
     </h1>
-    <p class="text-sm opacity-70">
+    <p class="text-sm text-muted">
       Your signed-in identity and active sessions. Role is owned by
       Keycloak and shown read-only; revoke a session to sign that device out.
     </p>
@@ -81,7 +81,7 @@
             {% if expires_at is not none %}
               <span title="{{ expires_at.isoformat() }}">
                 {{ expires_at.strftime("%Y-%m-%d %H:%M UTC") }}
-                <span class="opacity-60">({{ expires_in(expires_at) }})</span>
+                <span class="text-subtle">({{ expires_in(expires_at) }})</span>
               </span>
             {% else %}
               <span class="text-warning">expired</span>
@@ -131,7 +131,7 @@
           <span>Revoke others</span>
         </button>
       </div>
-      <p class="text-xs opacity-60">
+      <p class="text-xs text-subtle">
         These devices are signed in to your account. Revoking a session
         signs that device out on its next request.
       </p>
@@ -150,7 +150,7 @@
   <div class="card bg-base-100 border-base-300 border shadow-sm" data-field="install-hint">
     <div class="card-body space-y-3">
       <h2 class="card-title text-base">Install MEHO as an app</h2>
-      <p class="text-xs opacity-60">
+      <p class="text-xs text-subtle">
         Install MEHO on your phone or laptop. It opens in its own window,
         on the approvals page. You still need the VPN to load pages.
       </p>
@@ -184,7 +184,7 @@
   <dialog id="account-revoke-others-modal" class="modal">
     <div class="modal-box">
       <h3 class="text-lg font-semibold">Revoke all other sessions?</h3>
-      <p class="py-2 text-sm opacity-80">
+      <p class="py-2 text-sm text-muted">
         Every other device signed in to your account, in any tenant, will be
         signed out on its next request. The device you are using now stays
         signed in.

@@ -60,7 +60,7 @@
 
   {# ---------- Status bar -- connection + visible/cap row counts ---------- #}
   <div
-    class="flex items-center justify-end gap-3 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
+    class="flex items-center justify-end gap-3 border-b border-base-300 px-3 py-1.5 text-xs text-muted"
   >
     <span class="flex items-center gap-1" aria-live="polite">
       <span
@@ -75,7 +75,7 @@
 
   {# ---------- Column header row -- mirrors the grid in _event_row.html. ---------- #}
   <div
-    class="hidden grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60 sm:grid"
+    class="hidden grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-subtle sm:grid"
   >
     <span class="col-span-2">Time</span>
     <span class="col-span-2">Agent</span>
@@ -89,7 +89,7 @@
      Shown until the first matching announcement lands. -#}
   <div
     x-show="visibleEvents.length === 0"
-    class="px-3 py-10 text-center text-sm opacity-70"
+    class="px-3 py-10 text-center text-sm text-muted"
     id="broadcast-empty-state"
   >
     No agent announcements match your filters yet. Agents publish them when

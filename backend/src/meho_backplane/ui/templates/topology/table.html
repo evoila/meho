@@ -48,12 +48,12 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Topology{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Tenant inventory of nodes (targets, VMs, hosts, clusters, networks, datastores, ...).
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <div class="text-sm opacity-70">
+      <div class="text-sm text-muted">
         <span x-text="'Selected: ' + selected.size" aria-live="polite"></span>
       </div>
       {#- Bulk-import affordance -- soft-hidden for non-admins (Task #1954).
@@ -215,7 +215,7 @@
     aria-live="polite"
     aria-label="Node detail drawer"
   >
-    <div class="card-body text-sm opacity-70">
+    <div class="card-body text-sm text-muted">
       Click <strong>View</strong> on any row for details.
     </div>
   </aside>

@@ -86,7 +86,7 @@
         run yet.
       </p>
       {% if approval_id %}
-        <p class="mt-1 text-xs opacity-70">
+        <p class="mt-1 text-xs text-muted">
           Request id <code data-approval-request-id>{{ approval_id }}</code>
         </p>
         {% if chain %}
@@ -165,19 +165,19 @@
       </div>
       <dl class="space-y-1 text-xs">
         <div class="flex gap-2">
-          <dt class="opacity-60">Status</dt>
+          <dt class="text-subtle">Status</dt>
           <dd class="font-mono" data-move-status>{{ result.get("status") }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="opacity-60">Value fingerprint</dt>
+          <dt class="text-subtle">Value fingerprint</dt>
           <dd class="font-mono [overflow-wrap:anywhere]" data-move-value-fingerprint>{{ result.get("value_fingerprint") }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="opacity-60">Length</dt>
+          <dt class="text-subtle">Length</dt>
           <dd class="font-mono" data-move-length>{{ result.get("length") }}</dd>
         </div>
       </dl>
-      <p class="text-xs opacity-60">
+      <p class="text-xs text-subtle">
         The value was moved server-side and never returned &mdash; only its
         SHA-256 + byte length are shown as provenance.
       </p>
@@ -189,10 +189,10 @@
       <div class="flex items-center gap-2">
         <span class="badge badge-success badge-sm">executed</span>
         {% if envelope.get("duration_ms") is not none %}
-          <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
+          <span class="text-xs text-subtle">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
         {% endif %}
       </div>
-      <p class="text-xs opacity-70">
+      <p class="text-xs text-muted">
         The {{ verb }} completed. {% if verb == "put" %}A new version was written.{% else %}The named versions were soft-deleted.{% endif %}
       </p>
     </div>

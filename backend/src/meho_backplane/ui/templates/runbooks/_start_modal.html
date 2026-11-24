@@ -37,7 +37,7 @@
 <dialog id="runbook-run-start-modal" class="modal">
   <div class="modal-box max-w-2xl">
     <h3 class="font-semibold text-lg" id="runbook-run-start-modal-title">Start a run</h3>
-    <p class="text-sm opacity-70 mt-1">
+    <p class="text-sm text-muted mt-1">
       Begin a run on a published runbook template. You are assigned as the
       run's operator.
     </p>
@@ -83,7 +83,7 @@
             <option value="{{ slug }}"></option>
           {% endfor %}
         </datalist>
-        <span id="runbook-run-start-slug-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-slug-hint" class="text-xs text-subtle">
           {% if published_slugs %}
             Pick a published template or type its slug.
           {% else %}
@@ -104,7 +104,7 @@
           autocomplete="off"
           aria-describedby="runbook-run-start-target-hint"
         />
-        <span id="runbook-run-start-target-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-target-hint" class="text-xs text-subtle">
           Substituted into the steps as <code>${run.target}</code>.
         </span>
       </label>
@@ -135,7 +135,7 @@
           }
         }"
       >
-        <span class="text-sm font-medium">Params <span class="opacity-60">(optional, JSON object)</span></span>
+        <span class="text-sm font-medium">Params <span class="text-subtle">(optional, JSON object)</span></span>
         <textarea
           name="params"
           maxlength="16384"
@@ -144,14 +144,14 @@
           aria-describedby="runbook-run-start-params-hint"
           x-on:blur="formatParams($event.target)"
         ></textarea>
-        <span id="runbook-run-start-params-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-params-hint" class="text-xs text-subtle">
           A JSON object of <code>${run.params.X}</code> substitutions. Leave
           blank for none.
         </span>
       </label>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Work ref <span class="opacity-60">(optional)</span></span>
+        <span class="text-sm font-medium">Work ref <span class="text-subtle">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
@@ -160,7 +160,7 @@
           autocomplete="off"
           aria-describedby="runbook-run-start-work-ref-hint"
         />
-        <span id="runbook-run-start-work-ref-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-work-ref-hint" class="text-xs text-subtle">
           The external change ticket this run executes under. Pinned on the
           run and every step's audit row.
         </span>

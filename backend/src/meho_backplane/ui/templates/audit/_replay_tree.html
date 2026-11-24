@@ -48,7 +48,7 @@
         <div class="min-w-0 space-y-1">
           <div class="flex items-center gap-2">
             {% if node.depth > 0 %}
-              <span class="text-base-content/40" aria-hidden="true">&#8627;</span>
+              <span class="text-subtle" aria-hidden="true">&#8627;</span>
             {% endif %}
             <span
               class="badge badge-sm {{ node.badge_class }}"
@@ -59,7 +59,7 @@
               {{ node.result_status }}
             </span>
           </div>
-          <p class="truncate text-xs text-base-content/55">
+          <p class="truncate text-xs text-subtle">
             <span data-tenant title="Tenant">{{ node.tenant_label }}</span>
             <span aria-hidden="true">&middot;</span>
             <span>{{ node.principal_name or node.principal_sub }}</span>

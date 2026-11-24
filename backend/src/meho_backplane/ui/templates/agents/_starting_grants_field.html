@@ -29,9 +29,9 @@
 <fieldset class="flex flex-col gap-1" data-field="starting_grants" aria-describedby="starting-grants-hint">
   <legend class="text-sm font-medium">
     Starting grants
-    {% if not mark_required %}<span class="opacity-60 font-normal">(optional)</span>{% endif %}
+    {% if not mark_required %}<span class="text-subtle font-normal">(optional)</span>{% endif %}
   </legend>
-  <span id="starting-grants-hint" class="text-xs opacity-60">
+  <span id="starting-grants-hint" class="text-xs text-subtle">
     What this agent may run. You can change its grants later.
     {% if for_definition and mode == "edit" %}MEHO needs this pick when you change the identity reference to an agent that has no grants yet.
     {% elif for_definition %}MEHO needs this pick when the agent has no grants yet.{% endif %}
@@ -49,7 +49,7 @@
       />
       <span class="flex flex-col">
         <span class="text-sm">{{ choice.label }}</span>
-        <span class="text-xs opacity-60">{{ choice.help }}</span>
+        <span class="text-xs text-subtle">{{ choice.help }}</span>
       </span>
     </label>
   {% endfor %}
@@ -71,7 +71,7 @@
         {% endfor %}
       </div>
     {% else %}
-      <span class="text-xs opacity-60" data-no-targets>This tenant has no targets yet.</span>
+      <span class="text-xs text-subtle" data-no-targets>This tenant has no targets yet.</span>
     {% endif %}
   </div>
   {% if errors and 'starting_grants' in errors %}

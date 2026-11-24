@@ -217,7 +217,8 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   A Sensor on such a target gets the fit warning that names the range
   (`checks/connector_fit.py`). Caches one
   `kubernetes_asyncio.client.ApiClient` per target, keyed on the
-  target's `(tenant_id, id)` from `target_cache_key` (see
+  target's `(tenant_id, id)` and secret reference from
+  `target_secret_cache_key` (see
   [`kubernetes-connector.md`](kubernetes-connector.md) for why). The
   credential loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
@@ -575,7 +576,7 @@ Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
 through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
 connector therefore keeps a **parallel** per-target cache
 (`KubernetesConnector._ws_api_clients`, keyed on the target's
-`(tenant_id, id)` exactly like `_api_clients`), built lazily from the
+`(tenant_id, id)` and secret reference exactly like `_api_clients`), built lazily from the
 same operator-identity kubeconfig via `_get_ws_api_client` and closed
 alongside the read clients in `aclose` (no open sockets left behind).
 

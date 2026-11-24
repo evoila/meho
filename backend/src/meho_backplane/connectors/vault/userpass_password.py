@@ -27,9 +27,14 @@ import asyncio
 import secrets
 import string
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import hvac.exceptions
+
+from meho_backplane.auth.secret_read_as import record_caller_secret_read
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
 
 __all__ = [
     "DEFAULT_PASSWORD_FIELD",
@@ -130,14 +135,20 @@ def generate_password_value(length: int = DEFAULT_PASSWORD_LENGTH) -> str:
             return candidate
 
 
-def _read_kv(client: Any, plan: PasswordPlan) -> tuple[dict[str, Any], int] | None:
-    """Return ``(data, version)`` of the KV secret, or ``None`` when absent."""
+def _read_kv(
+    client: Any, plan: PasswordPlan, operator: Operator
+) -> tuple[dict[str, Any], int] | None:
+    """Return ``(data, version)`` of the KV secret, or ``None`` when absent.
+
+    A read that returns the secret notes *operator*'s login on the audit row.
+    """
     try:
         payload = client.secrets.kv.v2.read_secret_version(
             path=plan.path, mount_point=plan.mount, raise_on_deleted_version=True
         )
     except hvac.exceptions.InvalidPath:
         return None
+    record_caller_secret_read(operator)
     data = payload["data"]["data"]
     version = int(payload["data"]["metadata"]["version"])
     return (data if isinstance(data, dict) else {}), version
@@ -204,6 +215,7 @@ def _set_user(
 def _apply_sync(
     client: Any,
     plan: PasswordPlan,
+    operator: Operator,
     *,
     username: str,
     mount: str,
@@ -221,7 +233,7 @@ def _apply_sync(
         )
         return {"changed": True, "credential_generated": False}
 
-    found = _read_kv(client, plan)
+    found = _read_kv(client, plan, operator)
     stored = _stored_password(found, plan)
 
     if plan.source == "kv_path":
@@ -260,6 +272,7 @@ def _apply_sync(
 async def apply_credential_source(
     client: Any,
     plan: PasswordPlan,
+    operator: Operator,
     *,
     username: str,
     mount: str,
@@ -271,6 +284,7 @@ async def apply_credential_source(
         _apply_sync,
         client,
         plan,
+        operator,
         username=username,
         mount=mount,
         token_policies=token_policies,

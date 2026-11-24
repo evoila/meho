@@ -178,6 +178,7 @@ def _seed_audit_row(
     row_id: uuid.UUID | None = None,
     method: str = "POST",
     path: str = "/mcp",
+    secret_read_as: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id.
 
@@ -210,6 +211,7 @@ def _seed_audit_row(
                     target_id=target_id,
                     run_id=run_id,
                     actor_sub=actor_sub,
+                    secret_read_as=secret_read_as,
                 )
             )
         return resolved_id
@@ -870,6 +872,45 @@ def test_drawer_shows_via_from_the_client_block() -> None:
     assert "<dd data-via>meho-mcp (token)</dd>" in shown.text
     assert older.status_code == 200, older.text
     assert "data-via" not in older.text
+
+
+def test_drawer_shows_secret_read_as_with_the_switch_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With AUDIT_SECRET_READ_AS on, the drawer names the login the store accepted."""
+    monkeypatch.setenv("AUDIT_SECRET_READ_AS", "true")
+    get_settings.cache_clear()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with_read = _seed_audit_row(tenant_id=_TENANT_A, secret_read_as="approver-sub")
+    without_read = _seed_audit_row(tenant_id=_TENANT_A, second=1)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        shown = client.get(f"/ui/audit/show/{with_read}")
+        no_read = client.get(f"/ui/audit/show/{without_read}")
+        deep_link = client.get(f"/ui/audit?audit_id={with_read}")
+
+    assert shown.status_code == 200, shown.text
+    assert "Secret read as" in shown.text
+    assert ">approver-sub</dd>" in shown.text
+    assert deep_link.status_code == 200, deep_link.text
+    assert ">approver-sub</dd>" in deep_link.text
+    assert no_read.status_code == 200, no_read.text
+    assert "Secret read as" not in no_read.text
+    assert "data-secret-read-as" not in no_read.text
+
+
+def test_drawer_hides_secret_read_as_with_the_switch_off() -> None:
+    """With AUDIT_SECRET_READ_AS off, the drawer of a row with a value shows nothing new."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, secret_read_as="approver-sub")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        shown = client.get(f"/ui/audit/show/{row_id}")
+
+    assert shown.status_code == 200, shown.text
+    assert "Secret read as" not in shown.text
+    assert "data-secret-read-as" not in shown.text
+    assert "approver-sub" not in shown.text
 
 
 # ===========================================================================

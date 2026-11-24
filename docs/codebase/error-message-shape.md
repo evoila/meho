@@ -435,6 +435,62 @@ v0.6.0):
 A non-compliant bare error is one that *should* have been
 shaped but wasn't. The audit table below distinguishes the two.
 
+## HTML or JSON: decided by route, never by `Accept`
+
+Everything above describes the *content* of an error body. This section
+is about its *format*, which is a separate decision and is made in
+`meho_backplane/ui/error_pages.py`.
+
+A browser that reaches a wrong console address gets a branded page. A
+client that reaches a wrong API address gets JSON — because something is
+parsing that answer: an agent, a script, a retry loop. Handing HTML to an
+API caller turns a clean 404 into a parse error, and the caller then
+reports something unrelated to what actually happened.
+
+**The split cannot be made on the `Accept` header.** A browser sends
+`Accept: text/html` to every address it is pointed at, including an API
+one. Deciding on the header would hand a browser-shaped client an HTML
+body from `/api/v1/...` and break exactly the contract above. So the
+question asked is "is this path a web page?":
+
+```python
+WEB_PREFIXES: Final[tuple[str, ...]] = ("/ui",)
+```
+
+Matched on a segment boundary, so `/ui` and `/ui/agents` are web while
+`/uitest` is not. Listing the *web* prefixes rather than the machine ones
+is deliberate: a machine surface added tomorrow keeps its JSON by
+default, instead of silently inheriting HTML because nobody updated a
+deny-list.
+
+Three statuses get a page — 404, 403 and 500. Every other status, and
+every path outside the list, keeps the behaviour it had.
+
+### Two things that are easy to get wrong here
+
+**The 500 path is not an `HTTPException`.** An unhandled exception never
+becomes one. Starlette's `ServerErrorMiddleware` catches it, calls the
+handler registered for `Exception`, sends that response, and then
+**re-raises** so the server still logs the traceback. Two consequences:
+the handler must not raise (a failure there replaces the page with a
+bare 500), and a test must pass `raise_server_exceptions=False` to the
+test client or the re-raise surfaces in the test instead of the
+response under assertion.
+
+**The page is reached signed *in*, not signed out.** `UISessionMiddleware`
+runs in front of routing, so a signed-out visitor on any `/ui/*` address
+is redirected to the login before a 404 can be raised. The branded page
+therefore serves someone already in the console who followed a dead or
+renamed link. A test pins the login bounce as well, because registering
+a 404 handler on the app is precisely the change that could turn that
+bounce into a dead end.
+
+The handler wraps `ui_session_expired_exception_handler` rather than
+competing with it: only one handler can hold the `HTTPException` key.
+The two act on disjoint statuses — 401, 400 and 409 there, 403 and 404
+here — so neither can swallow the other and the order between them
+cannot change behaviour.
+
 ## Audit table (v0.6.0)
 
 The audit covers the consumer-cited entries plus a sweep over `api/v1/`,

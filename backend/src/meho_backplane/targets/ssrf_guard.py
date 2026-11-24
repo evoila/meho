@@ -400,6 +400,12 @@ _PRIVATE_SOURCE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Netw
     ipaddress.ip_network("fc00::/7"),
 )
 
+#: Instance-service addresses that sit inside the ranges above. A named
+#: file source never reaches them, even with ``allow_private``.
+_INSTANCE_SERVICE_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = (
+    ipaddress.ip_network("fd00:ec2::/32"),
+)
+
 
 def _reject_blocked(
     addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
@@ -425,7 +431,11 @@ def _reject_blocked(
     for addr in addrs:
         if not _is_blocked(addr):
             continue
-        if allow_private and any(addr in network for network in _PRIVATE_SOURCE_NETWORKS):
+        if (
+            allow_private
+            and not any(addr in network for network in _INSTANCE_SERVICE_NETWORKS)
+            and any(addr in network for network in _PRIVATE_SOURCE_NETWORKS)
+        ):
             continue
         if any(addr in network for network in allow.networks):
             continue

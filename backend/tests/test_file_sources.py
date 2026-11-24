@@ -183,7 +183,17 @@ def test_private_address_is_refused_unless_the_source_allows_it(
 
 @pytest.mark.parametrize(
     "address",
-    ["127.0.0.1", "::1", "169.254.169.254", "169.254.1.1", "fe80::1", "100.64.0.1", "0.0.0.0"],
+    [
+        "127.0.0.1",
+        "::1",
+        "169.254.169.254",
+        "169.254.1.1",
+        "fe80::1",
+        "100.64.0.1",
+        "0.0.0.0",
+        "fd00:ec2::254",
+        "fd00:ec2::23",
+    ],
 )
 def test_loopback_link_local_and_metadata_are_refused_even_when_private_is_allowed(
     monkeypatch: pytest.MonkeyPatch, address: str

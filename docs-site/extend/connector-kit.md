@@ -173,7 +173,9 @@ More to read:
 - secrets:
   [connectors-shared-vault-creds.md](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-shared-vault-creds.md);
 - error texts:
-  [error-message-shape.md](https://github.com/evoila/meho/blob/main/docs/codebase/error-message-shape.md).
+  [error-message-shape.md](https://github.com/evoila/meho/blob/main/docs/codebase/error-message-shape.md);
+- file sources:
+  [file-sources.md](https://github.com/evoila/meho/blob/main/docs/codebase/file-sources.md).
 
 ## 5. Add operations
 

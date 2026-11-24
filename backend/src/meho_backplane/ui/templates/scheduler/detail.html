@@ -20,6 +20,8 @@
   "UTC" suffix is accurate on both the PostgreSQL (tz-aware) and SQLite
   (naive round-trip) paths.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Scheduled trigger &middot; MEHO Operator Console{% endblock %}
@@ -35,7 +37,7 @@
     <div class="space-y-1">
       <a href="/ui/scheduler" class="link link-hover text-sm text-muted">&larr; Scheduler</a>
       <h1 class="text-xl font-semibold flex items-center gap-3">
-        <span class="badge badge-ghost">{{ trigger.kind }}</span>
+        {{ badge(trigger.kind, variant="quiet", size="md") }}
         <span class="badge {{ trigger.status_badge }}">{{ trigger.status }}</span>
         <span class="font-mono text-sm text-muted">{{ trigger.id }}</span>
       </h1>
@@ -104,7 +106,7 @@
           {% if trigger.skip_count and trigger.skip_count > 0 %}
             <dt class="text-subtle">Skips</dt>
             <dd>
-              <span class="badge badge-warning badge-sm">{{ trigger.skip_count }} consecutive</span>
+              {{ badge(trigger.skip_count ~ " consecutive", variant="warning") }}
             </dd>
             <dt class="text-subtle">Skip reason</dt>
             <dd class="font-mono text-xs">{{ trigger.last_skip_reason or "—" }}</dd>
@@ -149,7 +151,7 @@
           <dt class="text-subtle">Change ticket</dt>
           <dd>
             {% if trigger.work_ref %}
-              <span class="badge badge-outline badge-sm font-mono">{{ trigger.work_ref }}</span>
+              {{ badge(trigger.work_ref, variant="outline", class="font-mono") }}
             {% else %}
               <span class="text-subtle">—</span>
             {% endif %}

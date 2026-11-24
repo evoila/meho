@@ -135,8 +135,8 @@ the public cloud; see
 errors). `EntraConnector` keeps two caches, like the Azure connector:
 
 - **Secret cache**, per MEHO tenant, target and secret reference.
-- **Token cache**, per MEHO tenant, target, Entra tenant, client ID and token
-  scope. MEHO asks for a new token five minutes before the old one runs out.
+- **Token cache**, per MEHO tenant, target, secret reference, Entra tenant,
+  client ID and token scope. MEHO asks for a new token five minutes before the old one runs out.
 
 Each cache key has its own lock, so many calls at the same moment start one
 login. A call without a person's token never gets a cached secret or token.

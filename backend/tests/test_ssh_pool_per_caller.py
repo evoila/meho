@@ -350,3 +350,53 @@ async def test_aclose_closes_every_caller_login(harness: Any) -> None:
 
     assert all(login.closed for login in harness.logins)
     assert conn._connections == {}
+
+
+@pytest.mark.asyncio
+async def test_a_caller_uses_only_the_login_made_from_the_secret_its_target_names() -> None:
+    """A login opened with an old secret reference is not used for the new one.
+
+    A call that loaded the target before its change opens a login with the
+    old secret reference, after the drop of the target's logins. The same
+    caller's next call with the changed target reads the new secret and
+    logs in with it.
+    """
+    secrets = {
+        "tenants/test/old": {**_SECRET, "username": "old-login"},
+        "tenants/test/new": {**_SECRET, "username": "new-login"},
+    }
+    reads: list[str] = []
+    logins: list[_FakeLogin] = []
+
+    async def read_secret(target: Any, operator: Operator, **_kwargs: Any) -> dict[str, Any]:
+        del operator
+        reads.append(target.secret_ref)
+        return dict(secrets[target.secret_ref])
+
+    async def connect(*_args: Any, **kwargs: Any) -> _FakeLogin:
+        login = _FakeLogin(kwargs["username"])
+        logins.append(login)
+        return login
+
+    conn = LinuxSshConnector()
+    old = _Target(secret_ref="tenants/test/old")
+    new = _Target(secret_ref="tenants/test/new", id=old.id)
+    alice = _person("alice")
+    with (
+        patch("meho_backplane.connectors.adapters.ssh.load_vault_secret_data", read_secret),
+        patch("asyncssh.connect", connect),
+    ):
+        await conn.invalidate_credentials(new)  # type: ignore[arg-type]
+        await _run(conn, old, alice)
+        await _run(conn, new, alice)
+        await _run(conn, new, alice)
+        await _run(conn, old, alice)
+
+    assert reads == ["tenants/test/old", "tenants/test/new"]
+    assert [login.sub for login in logins] == ["old-login", "new-login"]
+    assert conn._connections[_pool_key(new, alice)][0] is logins[1]
+    assert conn._connections[_pool_key(old, alice)][0] is logins[0]
+
+    await conn.invalidate_credentials(new)  # type: ignore[arg-type]
+    assert conn._connections == {}
+    assert all(login.closed for login in logins)

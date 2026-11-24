@@ -102,6 +102,7 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import record_caller_kv_read
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
     WRAPPED_CREDENTIAL_SCHEME,
@@ -605,6 +606,7 @@ class VaultCredentialBackend:
                 mount_point=mount,
                 raise_on_deleted_version=False,
             )
+        record_caller_kv_read(operator, payload)
 
         return _structural_unwrap(payload, target_name=target_name)
 

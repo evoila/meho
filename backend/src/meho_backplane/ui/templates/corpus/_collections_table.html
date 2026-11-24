@@ -24,6 +24,8 @@
       ``vendor`` / ``products`` (list[str]) / ``status`` / ``doc_count``
       (int | None) / ``last_ingested_at`` (datetime | None).
 -#}
+
+{% from "_components.html" import badge %}
 <tbody id="corpus-collections-table-body">
   {% if collection_rows %}
     {% for row in collection_rows %}
@@ -46,15 +48,15 @@
         </td>
         <td>
           {% if row.status == "ready" %}
-            <span class="badge badge-success badge-sm">ready</span>
+            {{ badge("ready", variant="success") }}
           {% elif row.status == "provisioning" %}
-            <span class="badge badge-info badge-sm">provisioning</span>
+            {{ badge("provisioning", variant="info") }}
           {% elif row.status == "rebuilding" %}
-            <span class="badge badge-warning badge-sm">rebuilding</span>
+            {{ badge("rebuilding", variant="warning") }}
           {% elif row.status == "disabled" %}
-            <span class="badge badge-ghost badge-sm">disabled</span>
+            {{ badge("disabled", variant="quiet") }}
           {% else %}
-            <span class="badge badge-ghost badge-sm">{{ row.status }}</span>
+            {{ badge(row.status, variant="quiet") }}
           {% endif %}
         </td>
         <td class="text-right tabular-nums">

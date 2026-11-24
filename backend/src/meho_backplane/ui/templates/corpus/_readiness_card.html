@@ -40,6 +40,8 @@
     * ``is_tenant_admin`` -- bool: gates the re-probe button.
     * ``csrf_token``      -- str: minted double-submit token.
 -#}
+
+{% from "_components.html" import badge %}
 <article
   id="collection-readiness-card"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -75,24 +77,24 @@
       <dt class="text-subtle">status</dt>
       <dd>
         {% if collection.status == "ready" %}
-          <span class="badge badge-success badge-sm">ready</span>
+          {{ badge("ready", variant="success") }}
         {% elif collection.status == "provisioning" %}
-          <span class="badge badge-info badge-sm">provisioning</span>
+          {{ badge("provisioning", variant="info") }}
         {% elif collection.status == "rebuilding" %}
-          <span class="badge badge-warning badge-sm">rebuilding</span>
+          {{ badge("rebuilding", variant="warning") }}
         {% elif collection.status == "disabled" %}
-          <span class="badge badge-ghost badge-sm">disabled</span>
+          {{ badge("disabled", variant="quiet") }}
         {% else %}
-          <span class="badge badge-ghost badge-sm">{{ collection.status }}</span>
+          {{ badge(collection.status, variant="quiet") }}
         {% endif %}
       </dd>
 
       <dt class="text-subtle">index built</dt>
       <dd>
         {% if collection.readiness and collection.readiness.get("index_built") %}
-          <span class="badge badge-success badge-xs">yes</span>
+          {{ badge("yes", variant="success", size="xs") }}
         {% elif collection.readiness is not none %}
-          <span class="badge badge-warning badge-xs">no</span>
+          {{ badge("no", variant="warning", size="xs") }}
           <span class="text-xs text-muted">(reachable, not yet answerable)</span>
         {% else %}
           <span class="text-subtle">never probed</span>

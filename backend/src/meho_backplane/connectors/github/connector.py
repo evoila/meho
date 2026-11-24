@@ -100,7 +100,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
@@ -203,15 +206,16 @@ class GitHubRestConnector(HttpConnector):
         """
         super().__init__()
         # Per-target installation-token cache. Keyed on the tenant-unique
-        # ``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672)
-        # so two same-named targets in different tenants never share a
-        # cached token; the value's ``expires_at_monotonic`` drives
-        # cache-validity checks.
-        self._installation_tokens: dict[tuple[str, str], InstallationToken] = {}
+        # ``(tenant_id, target.id)`` tuple plus the secret reference
+        # (``target_secret_cache_key``, #1642/#1672) so two same-named targets
+        # in different tenants never share a cached token, and a call uses
+        # only a token made from the secret its caller read; the value's
+        # ``expires_at_monotonic`` drives cache-validity checks.
+        self._installation_tokens: dict[tuple[str, str, str], InstallationToken] = {}
         # Per-target PAT cache — same shape and tenant-unique key but the
         # token never expires from MEHO's side (the PAT carries its own
         # GitHub-set TTL). Caching keeps the Vault read off the hot path.
-        self._pat_tokens: dict[tuple[str, str], str] = {}
+        self._pat_tokens: dict[tuple[str, str, str], str] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._token_lock = asyncio.Lock()
@@ -311,7 +315,7 @@ class GitHubRestConnector(HttpConnector):
         / ``GitHubRateLimitedError``) when the App-mint round-trip
         itself fails.
         """
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._token_lock:
             now = time.monotonic()
             cached_app = self._installation_tokens.get(cache_key)
@@ -376,7 +380,7 @@ class GitHubRestConnector(HttpConnector):
             installation_id=creds.installation_id,
             api_base_url=self._BASE_URL,
         )
-        self._installation_tokens[target_cache_key(target)] = installation
+        self._installation_tokens[target_secret_cache_key(target)] = installation
         _log.info(
             "github_installation_token_minted",
             target=target.name,
@@ -527,10 +531,10 @@ class GitHubRestConnector(HttpConnector):
         a target change, so a new or narrower credential is used at once
         instead of after the kept token expires.
         """
-        cache_key = target_cache_key(target)
         async with self._token_lock:
-            self._installation_tokens.pop(cache_key, None)
-            self._pat_tokens.pop(cache_key, None)
+            for cache in (self._installation_tokens, self._pat_tokens):
+                for key in target_entry_keys(cache, target):
+                    del cache[key]
             self._readers.forget(target)
 
     async def aclose(self) -> None:

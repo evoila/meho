@@ -29098,6 +29098,11 @@
             "nullable": true,
             "title": "Actor Name"
           },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -29267,6 +29272,11 @@
             "type": "string",
             "nullable": true,
             "title": "Actor Name"
+          },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
           },
           "broadcast_event_id": {
             "type": "string",
@@ -41543,6 +41553,11 @@
             "type": "string",
             "nullable": true,
             "title": "Actor Name"
+          },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
           },
           "broadcast_event_id": {
             "type": "string",

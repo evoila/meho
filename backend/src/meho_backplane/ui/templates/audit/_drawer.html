@@ -51,7 +51,12 @@
                        row is gone (#5238)
     via_label      -- str | None: "<client> (<channel>)" from the row's
                        ``client`` block, or None when it has none
+    secret_read_as -- str | None: the login the secret store accepted for
+                       the call; None when the call read no secret or
+                       AUDIT_SECRET_READ_AS is off
 -#}
+
+{% from "_components.html" import badge %}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
   id="audit-drawer"
@@ -96,6 +101,10 @@
           <dt class="text-subtle">Via</dt>
           <dd data-via>{{ via_label }}</dd>
         {% endif %}
+        {% if secret_read_as %}
+          <dt class="text-subtle">Secret read as</dt>
+          <dd data-secret-read-as class="font-mono text-xs break-all">{{ secret_read_as }}</dd>
+        {% endif %}
         <dt class="text-subtle">Operation</dt>
         <dd>{{ operation_ref(references.operation) }}</dd>
         {% if references.target.present %}
@@ -104,7 +113,7 @@
         {% endif %}
         <dt class="text-subtle">Method</dt>
         <dd>
-          <span class="badge badge-outline badge-xs">{{ row.method }}</span>
+          {{ badge(row.method, variant="outline", size="xs") }}
           <span class="font-mono text-xs break-all">{{ row.path }}</span>
         </dd>
         <dt class="text-subtle">Record type</dt>
@@ -193,17 +202,14 @@
                       <span class="text-xs text-subtle">{{ span.duration_ms }} ms</span>
                     {% endif %}
                     {% if span.truncated %}
-                      <span
-                        class="badge badge-warning badge-xs"
-                        title="Body exceeded the capture cap and was truncated at capture time."
-                      >truncated</span>
+                      {{ badge("truncated", variant="warning", size="xs", title="Body exceeded the capture cap and was truncated at capture time.") }}
                     {% endif %}
                   </summary>
                   <div class="mt-2 space-y-2 text-xs">
                     <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
                       {% if span.method %}
                         <dt class="text-subtle">Method</dt>
-                        <dd><span class="badge badge-outline badge-xs">{{ span.method }}</span></dd>
+                        <dd>{{ badge(span.method, variant="outline", size="xs") }}</dd>
                       {% endif %}
                       {% if span.url %}
                         <dt class="text-subtle">URL</dt>

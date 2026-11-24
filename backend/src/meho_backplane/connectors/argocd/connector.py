@@ -86,7 +86,10 @@ import structlog
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.argocd.redaction import redact_argocd_credentials
@@ -202,7 +205,8 @@ class ArgoCdConnector(HttpConnector):
     """ArgoCD 3.x REST connector with bearer-token auth.
 
     Per-target token cached in :attr:`_creds_cache` keyed on the
-    tenant-unique ``(tenant_id, target.id)`` tuple (#1642/#1672), loaded
+    tenant-unique ``(tenant_id, target.id)`` tuple and the secret reference
+    (#1642/#1672), loaded
     once via the injectable :class:`ArgoCdCredentialsLoader`. The bearer
     token is sent
     on every request via ``Authorization: Bearer <token>`` — no session is
@@ -230,10 +234,12 @@ class ArgoCdConnector(HttpConnector):
         credentials_loader: ArgoCdCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple
-        # (``target_cache_key``) so two same-named targets in different
-        # tenants never share a cached token (#1642/#1672).
-        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple and the
+        # secret reference (``target_secret_cache_key``) so two same-named
+        # targets in different tenants never share a cached token
+        # (#1642/#1672), and a call uses only a token from the secret its
+        # caller read.
+        self._creds_cache: dict[tuple[str, str, str], dict[str, str]] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
@@ -292,7 +298,7 @@ class ArgoCdConnector(HttpConnector):
         the loader. A caller who has read keeps cold load → cache →
         reuse.
         """
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
             if cached is not None and self._readers.has_read(target, operator):
@@ -822,7 +828,8 @@ class ArgoCdConnector(HttpConnector):
         pop is serialised against an in-flight load.
         """
         async with self._creds_lock:
-            self._creds_cache.pop(target_cache_key(target), None)
+            for key in target_entry_keys(self._creds_cache, target):
+                del self._creds_cache[key]
             self._readers.forget(target)
 
     async def aclose(self) -> None:

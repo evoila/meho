@@ -36,7 +36,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.registry import register_connector_v2
@@ -291,12 +291,12 @@ async def test_a_second_process_uses_the_new_credential_on_its_next_call() -> No
         response = _patch(TestClient(_build_app()), "gh", {"secret_ref": _NARROW_REF})
         assert response.status_code == 200
         # The serving process dropped the kept token in the route.
-        assert target_cache_key(row) not in serving_conn._pat_tokens
+        assert target_secret_cache_key(row) not in serving_conn._pat_tokens
         assert await _token_after_check(serving_conn, "gh") == "Bearer pat-one-repo"
 
     with _in_process(other):
         # The other process still holds the old token ...
-        assert other_conn._pat_tokens[target_cache_key(row)] == "pat-wide-scope"
+        assert other_conn._pat_tokens[target_secret_cache_key(row)] == "pat-wide-scope"
         # ... and drops it on its next call, because the row's updated_at changed.
         assert await _token_after_check(other_conn, "gh") == "Bearer pat-one-repo"
 

@@ -26,7 +26,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.hetzner_robot import (
     HetznerRobotConnector,
@@ -419,8 +419,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_credentials()
     assert user_two == f"svc-{tenant_two.tenant_id}"
     assert len(call_log) == 2
     assert set(connector._creds_cache) == {
-        target_cache_key(tenant_one),
-        target_cache_key(tenant_two),
+        target_secret_cache_key(tenant_one),
+        target_secret_cache_key(tenant_two),
     }
 
     # Same-tenant re-fetch is a cache HIT — loader not re-invoked.
@@ -665,7 +665,7 @@ async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert target_cache_key(_TARGET_A) in connector._creds_cache
+    assert target_secret_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}

@@ -153,14 +153,15 @@ class PhpipamConnector(HttpConnector):
         key = self._key(target)
         use_cache = _may_use_cache(operator)
         async with self._locks.setdefault(key, asyncio.Lock()):
-            if use_cache and not self._readers.has_read(target, operator):
-                # The caller's own Vault read, once per caller and target.
-                self._credentials[key] = await self._credentials_loader(target, operator)
-                self._readers.record(target, operator)
             credentials = self._credentials.get(key) if use_cache else None
-            if credentials is None:
+            # A saved secret is used by a caller only after their own Vault
+            # read passed once. ``has_read`` is asked only when a saved secret
+            # is there, because a yes notes the caller's kept login.
+            if credentials is None or not self._readers.has_read(target, operator):
                 credentials = await self._credentials_loader(target, operator)
                 self._credentials[key] = credentials
+                if use_cache:
+                    self._readers.record(target, operator)
             if credentials.app_token:
                 return {TOKEN_HEADER: credentials.app_token}
             token = self._tokens.get(key) if use_cache else None

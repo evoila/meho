@@ -66,7 +66,10 @@ from kubernetes_asyncio import client, config
 from kubernetes_asyncio.stream.ws_client import WsApiClient
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
@@ -509,15 +512,15 @@ class KubernetesConnector(Connector):
             self._credential_loader = _adapt_kubeconfig_loader(kubeconfig_loader)
         else:
             self._credential_loader = load_kubernetes_credential
-        self._api_clients: dict[tuple[str, str], client.ApiClient] = {}
+        self._api_clients: dict[tuple[str, str, str], client.ApiClient] = {}
         # Parallel cache of websocket-transport clients, keyed the same
         # way as ``_api_clients`` (the tenant-unique ``(tenant_id, id)``
-        # tuple from :func:`target_cache_key`). Only ``k8s.exec``
+        # tuple plus the secret reference, from :meth:`_cache_key`). Only ``k8s.exec``
         # populates it -- pod exec is an HTTP Upgrade to the
         # ``v4.channel.k8s.io`` sub-protocol, which the ordinary
         # ``ApiClient`` cannot speak. Built lazily from the same
         # operator-identity kubeconfig and closed in :meth:`aclose`.
-        self._ws_api_clients: dict[tuple[str, str], WsApiClient] = {}
+        self._ws_api_clients: dict[tuple[str, str, str], WsApiClient] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._lock = asyncio.Lock()
@@ -2172,11 +2175,11 @@ class KubernetesConnector(Connector):
             self._readers.clear()
 
     @staticmethod
-    def _cache_key(target: KubernetesTargetLike) -> tuple[str, str]:
-        """Tenant-unique ``(tenant_id, id)`` cache key for *target*.
+    def _cache_key(target: KubernetesTargetLike) -> tuple[str, str, str]:
+        """Tenant-unique ``(tenant_id, id, secret_ref)`` cache key for *target*.
 
         Delegates to the shared
-        :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
+        :func:`~meho_backplane.connectors._shared.cache_key.target_secret_cache_key`
         so both client caches derive the identical key and no
         two-cache-keying-skew can creep in. ``id`` is the targets-table
         primary key and ``(tenant_id, name)`` is its only uniqueness
@@ -2189,13 +2192,14 @@ class KubernetesConnector(Connector):
         onto one entry, so the second tenant was served the first
         tenant's authenticated client without ever passing its own
         credential-store authorization. ``(tenant_id, id)`` is the row's
-        stable identity and subsumes the credential reference (the
-        ``secret_ref`` column is a property of that row); an operator
-        repointing the secret, rotating the credential, or the target
-        being revoked is handled by :meth:`invalidate_credentials`, not by
-        folding a mutable column into the key.
+        stable identity. The secret reference is part of the key too, so a
+        call uses only a client built from the secret its own target holds:
+        a call that started before the reference changed never takes a
+        client built from the new secret. Rotating the credential or
+        revoking the target is handled by :meth:`invalidate_credentials`,
+        which drops the clients of every secret reference of the target.
         """
-        return target_cache_key(target)
+        return target_secret_cache_key(target)
 
     async def _get_api_client(
         self,
@@ -2386,8 +2390,8 @@ class KubernetesConnector(Connector):
         (evoila/meho#266) requirement that credential rotation, target
         mutation and revocation invalidate both cache types: dropping the
         cached :class:`ApiClient` (REST) *and* :class:`WsApiClient`
-        (exec/websocket) for the target's tenant-unique
-        :meth:`_cache_key` forces the next :meth:`_get_api_client` /
+        (exec/websocket) of the target, for every secret reference of its
+        :meth:`_cache_key`, forces the next :meth:`_get_api_client` /
         :meth:`_get_ws_api_client` to re-read the (possibly rotated or
         re-pointed) credential and rebuild.
 
@@ -2399,16 +2403,20 @@ class KubernetesConnector(Connector):
         refresh hook (out of scope for this eviction); only a genuine
         rotation / mutation / revocation drops the whole client.
         """
-        key = self._cache_key(target)
         async with self._lock:
-            api_client = self._api_clients.pop(key, None)
-            if api_client is not None:
+            api_clients = [
+                self._api_clients.pop(key) for key in target_entry_keys(self._api_clients, target)
+            ]
+            for api_client in api_clients:
                 await api_client.close()
-            ws_client = self._ws_api_clients.pop(key, None)
-            if ws_client is not None:
+            ws_clients = [
+                self._ws_api_clients.pop(key)
+                for key in target_entry_keys(self._ws_api_clients, target)
+            ]
+            for ws_client in ws_clients:
                 await ws_client.close()
             self._readers.forget(target)
-            if api_client is not None or ws_client is not None:
+            if api_clients or ws_clients:
                 _log.info(
                     "kubernetes_client_cache_invalidated",
                     target=target.name,

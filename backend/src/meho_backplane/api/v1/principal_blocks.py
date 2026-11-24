@@ -162,12 +162,10 @@ async def unblock_principal_route(
     sub: Annotated[str, Path(min_length=1, max_length=_SUB_MAX_LENGTH)],
     operator: Operator = Depends(_require_unblock_caller),
 ) -> UnblockResponse:
-    """Unblock a login. A platform admin removes every block of it.
-
-    A caller who is blocked in this tenant may remove only their own
-    block, and only as a platform admin: a blocked tenant admin never
-    reaches this point.
-    """
+    """Unblock a login. A platform admin removes every block of it."""
+    # A caller who is blocked in this tenant may remove only their own
+    # block, and only as a platform admin: a blocked tenant admin never
+    # reaches this point.
     structlog.contextvars.bind_contextvars(audit_op_id="principal.unblock", audit_op_class="write")
     if sub != operator.sub:
         try:

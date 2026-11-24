@@ -92,7 +92,7 @@
       <span class="flex items-center gap-2">
         <template x-if="runId">
           <a
-            class="link link-hover font-mono opacity-80"
+            class="link link-hover font-mono text-muted"
             :href="'/ui/agents/runs/' + runId"
             x-text="'run ' + runId.slice(0, 8)"
             data-role="run-link"
@@ -159,7 +159,7 @@
     <dialog x-ref="stopConfirm" class="modal" data-role="stop-confirm" data-auto-open="false">
       <div class="modal-box max-w-md">
         <h3 class="text-base font-semibold">Stop this run?</h3>
-        <p class="py-3 text-sm opacity-80">
+        <p class="py-3 text-sm text-muted">
           Stop run
           <span class="font-mono" x-text="runId ? runId.slice(0, 8) : ''"></span>?
           The agent halts after its current step; partial work is kept.
@@ -216,11 +216,11 @@
               x-text="entry.kind"
               data-role="entry-kind"
             ></span>
-            <span class="font-mono opacity-80" x-show="entry.title" x-text="entry.title"></span>
+            <span class="font-mono text-muted" x-show="entry.title" x-text="entry.title"></span>
           </div>
           <pre
             x-show="entry.body"
-            class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90"
+            class="mt-1 whitespace-pre-wrap break-words font-mono text-muted"
             x-text="entry.body"
           ></pre>
         </li>
@@ -229,7 +229,7 @@
 
     <p
       x-show="entries.length === 0 && !finalStatus"
-      class="px-1 py-4 text-center opacity-60 text-xs"
+      class="px-1 py-4 text-center text-subtle text-xs"
       data-state="streaming"
     >
       Waiting for the agent's first turn…

@@ -46,7 +46,7 @@
         <h3 class="truncate font-mono text-lg font-semibold" id="vault-put-title">
           Write secret
         </h3>
-        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+        <p class="mt-0.5 text-sm text-muted">{{ op_id }}</p>
       </div>
       <form method="dialog">
         <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
@@ -105,7 +105,7 @@
 
         <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_1fr]">
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+            <span class="label-text mb-1 text-xs text-muted">Mount</span>
             <input
               type="text"
               name="mount"
@@ -117,7 +117,7 @@
             />
           </label>
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Path</span>
+            <span class="label-text mb-1 text-xs text-muted">Path</span>
             <input
               type="text"
               name="path"
@@ -132,8 +132,8 @@
         </div>
 
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            Secret data <span class="opacity-50">(JSON object; replaces the latest version)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            Secret data <span class="text-subtle">(JSON object; replaces the latest version)</span>
           </span>
           <textarea
             name="data"
@@ -147,8 +147,8 @@
         </label>
 
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">
-            CAS <span class="opacity-50">(optional Check-And-Set; 0 = write only if absent, N = only if current version is N; blank = unconditional)</span>
+          <span class="label-text mb-1 text-xs text-muted">
+            CAS <span class="text-subtle">(optional Check-And-Set; 0 = write only if absent, N = only if current version is N; blank = unconditional)</span>
           </span>
           <input
             type="number"

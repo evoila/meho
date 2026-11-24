@@ -202,10 +202,10 @@ async def _approval_users(
     An approved request counts exactly while
     :func:`~meho_backplane.operations.approval_queue.claim_resume` could
     still claim it and run the operation: the status is ``approved`` and
-    ``resumed_at`` is empty. That claim has no time limit (the approval
-    time limit expires waiting requests only), so this check has none
-    either. An approved request that nobody ever started blocks the
-    delete until someone runs it, however old it is.
+    ``resumed_at`` is empty. An approved request that nobody starts ends
+    as ``expired`` after ``APPROVAL_DEFAULT_TTL``
+    (:func:`~meho_backplane.operations.approval_stored_values.expire_unclaimed_approved_requests`);
+    until then it blocks the delete.
     """
     rows = await session.execute(
         select(ApprovalRequest.id, ApprovalRequest.op_id, ApprovalRequest.tenant_id)

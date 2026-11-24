@@ -38,26 +38,26 @@
 
       <div class="grid gap-3 md:grid-cols-2">
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Slug <span class="opacity-60 font-normal">(read-only)</span></span>
+          <span class="text-sm font-medium">Slug <span class="text-subtle font-normal">(read-only)</span></span>
           <input
             type="text"
             value="{{ convention.slug }}"
             readonly
-            class="input input-bordered input-sm font-mono opacity-70 w-full"
+            class="input input-bordered input-sm font-mono text-muted w-full"
             data-readonly-slug
           />
         </label>
 
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Kind <span class="opacity-60 font-normal">(read-only)</span></span>
+          <span class="text-sm font-medium">Kind <span class="text-subtle font-normal">(read-only)</span></span>
           <input
             type="text"
             value="{{ convention.kind }}"
             readonly
-            class="input input-bordered input-sm font-mono opacity-70 w-full"
+            class="input input-bordered input-sm font-mono text-muted w-full"
             data-readonly-kind
           />
-          <span class="text-xs opacity-60">
+          <span class="text-xs text-subtle">
             Delete + recreate to change the kind.
           </span>
         </label>

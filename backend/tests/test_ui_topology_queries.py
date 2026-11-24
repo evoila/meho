@@ -965,8 +965,12 @@ def test_topology_graph_js_defines_node_highlight_style() -> None:
     # The selector exists in the overlay style table.
     assert 'selector: "node.highlight"' in source
     # And it carries a non-empty visual treatment (bold red border
-    # matches the path-edge stroke colour for visual consistency).
-    assert '"border-color": "#dc2626"' in source
+    # matches the path-edge stroke colour for visual consistency). The
+    # colour comes from the theme (``--meho-graph-highlight``); the red
+    # is its light value and the fallback, and the path edges use the
+    # same variable.
+    assert '"border-color": graphColour("highlight", "#dc2626")' in source
+    assert '"line-color": graphColour("highlight", "#dc2626")' in source
 
 
 def test_topology_graph_js_wheel_sensitivity_raised_via_named_constant() -> None:

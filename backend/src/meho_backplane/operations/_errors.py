@@ -45,6 +45,7 @@ from uuid import UUID
 
 import httpx
 
+from meho_backplane.auth.tenant_admins import NEEDS_SECOND_ADMIN
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
@@ -1290,9 +1291,12 @@ def result_awaiting_approval(
     absent without a note.
 
     *already_approved* is ``True`` when a retry with the same key got back a
-    request that a person already approved. Only the ``error`` text changes:
-    it says only that the request is already approved. ``status`` and every
-    ``extras`` key stay the same.
+    request that a person already approved. The ``error`` text then says
+    that the request is already approved. A *note* leaves out the sentence
+    :data:`~meho_backplane.auth.tenant_admins.NEEDS_SECOND_ADMIN`, which is
+    false for an approved request, and keeps the rest, in ``error`` and in
+    ``extras["approval_note"]``. ``status`` and the ``extras`` keys stay the
+    same.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1303,6 +1307,7 @@ def result_awaiting_approval(
     error = f"awaiting_approval: {op_id!r} requires approval before execution"
     if already_approved:
         error = f"awaiting_approval: the approval request {approval_request_id} is already approved"
+        note = note and note.removeprefix(NEEDS_SECOND_ADMIN).lstrip()
     if note:
         extras["approval_note"] = note
         error = f"{error}. {note}"

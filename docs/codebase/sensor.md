@@ -211,9 +211,10 @@ flapping reading that never commits still lands in history.
 
 ### A check that runs at a site (`runner_name`)
 
-with a `runner_name` runs on that runner, never in the central check loop while `RUNNER_CHECKS_ENABLED` is on
-(`claim_due_sensors` then leaves it out; with the switch off the central loop runs it). Create accepts `runner_name` only when
-(`claim_due_sensors` leaves it out). Create accepts `runner_name` only when
+`sensor.runner_name` (nullable) names a runner of the same tenant. A Sensor
+with a `runner_name` runs on that runner, never in the central check loop
+while `RUNNER_CHECKS_ENABLED` is on (`claim_due_sensors` then leaves it out;
+with the switch off the central loop runs it). Create accepts `runner_name` only when
 `RUNNER_CHECKS_ENABLED` is on and the runner exists, is not revoked and
 belongs to the tenant (`checks/runner_binding.py`, 422
 `sensor_runner_checks_disabled` or `sensor_runner_unknown`). The runner's

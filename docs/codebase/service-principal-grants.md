@@ -102,6 +102,12 @@ op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
 operation registered as a change of rights, such as the Keycloak writes that
 change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
+A platform admin can turn approval off for such an operation, for the whole
+install or for one tenant's own copy, with a written reason and a fresh
+sign-in. The edit is written to the audit log. After it, a person in the web
+console runs a `caution` operation at once, and a `dangerous` operation still
+waits because of its risk level. A standing grant still does not cover the
+operation.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
 holds: a credential call, per-call approval, a caller-address field,

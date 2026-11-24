@@ -19,7 +19,11 @@ The rules:
   override with ``requires_approval=False``, set by a platform admin with a
   reason and a fresh sign-in. Every edit that ends approval (also removing
   an override) passes these checks. A destructive operation always waits
-  for approval.
+  for approval. This edit also ends the per-call wait of an operation that a
+  connector marked with ``declare_per_call_approval``: a ``caution``
+  operation then runs at once for a person in the web console, a
+  ``dangerous`` operation still waits because of its risk level, and a
+  change of rights is refused.
 * **Scope.** A tenant admin's override (``tenant_id`` = the tenant) applies
   to that tenant only. A platform admin's override on a built-in operation
   (``tenant_id IS NULL``) applies to the whole install. Each scope's

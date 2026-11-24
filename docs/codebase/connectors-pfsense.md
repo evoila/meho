@@ -1160,7 +1160,12 @@ approval, like any other call of these ops.
 
 `user.create` and `user.delete` give or take a login, so a person approves
 each call: a standing grant never covers them (`declare_per_call_approval` in
-`op_classes.py`). None of the five ops makes a copy of `config.xml`: pfSense
+`op_classes.py`). A platform admin can turn approval off for such an operation,
+for the whole install or for one tenant's own copy, with a written reason and a
+fresh sign-in; the edit is written to the audit log. After it, a person in the
+web console runs a `caution` operation at once, a `dangerous` operation still
+waits because of its risk level, and a standing grant or a run approval still
+does not cover the operation. None of the five ops makes a copy of `config.xml`: pfSense
 keeps its own history of the file (Diagnostics > Backup & Restore > Config
 History).
 

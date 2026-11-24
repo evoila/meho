@@ -163,6 +163,8 @@ a standing grant covers such an operation:
 - At call time the gate never lets a run approval or a standing grant clear
   a marked operation.
 
+A platform admin can turn approval off for such an operation, for the whole install or for one tenant's own copy, with a written reason and a fresh sign-in. The edit is written to the audit log. After it, a person in the web console runs a `caution` operation at once. A `dangerous` operation still waits because of its risk level. A standing grant or a run approval still does not cover the operation.
+
 Marked today:
 
 - `msad.group.add-member` and `msad.group.remove-member`. A group

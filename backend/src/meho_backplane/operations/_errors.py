@@ -1752,7 +1752,9 @@ def result_connector_redirect_on_change(
     ``Location`` there, and a one-time ticket in its query would reach the
     caller and the audit row. The redirect body is not used either. With
     *withhold_address* (the operation sends a secret) the redirect address is
-    left out too, because the vendor chose it.
+    left out, and the sent address keeps only its scheme, host and port: a
+    path parameter of the call, or the path the vendor chose, can carry the
+    secret.
     """
     status_code = exc.response.status_code
     address = _ADDRESS_WITHHELD if withhold_address else _redirect_address(exc)
@@ -1770,7 +1772,15 @@ def result_connector_redirect_on_change(
             f"The target answered with a redirect to {address}. MEHO did not follow it "
             "and could not find out if the change ran. Check the target."
         )
-    sent = f"{exc.request.method} {_safe_address(exc.request.url)}"
+    # For an operation that sends a secret, the sent path is left out too: a
+    # path parameter can carry the secret.
+    sent_url = exc.request.url
+    sent_address = (
+        f"{sent_url.scheme}://{sent_url.netloc.decode('ascii')}"
+        if withhold_address
+        else _safe_address(sent_url)
+    )
+    sent = f"{exc.request.method} {sent_address}"
     return OperationResult(
         status="error",
         op_id=op_id,

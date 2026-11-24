@@ -81,11 +81,12 @@ unpinned target's key is unchanged in its pin slot from the #1781 shape.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import os
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, cast
 
 import anyio
@@ -782,6 +783,33 @@ def _origin_and_path(url: httpx.URL) -> str:
     return str(url.copy_with(query=None, fragment=None, username=None, password=None))
 
 
+def _origin(url: httpx.URL) -> str:
+    """Return ``scheme://host[:port]`` only: no path, query, fragment or userinfo."""
+    return f"{url.scheme}://{url.netloc.decode('ascii')}"
+
+
+def _redirect_log_fields(request: httpx.Request, response: httpx.Response) -> dict[str, str | None]:
+    """The two addresses of a redirect that MEHO did not follow, safe for a log line.
+
+    A read logs scheme, host and path (:func:`_origin_and_path`). A change logs
+    the origin only: its path, and the path the target names, can carry a
+    secret value of the call (a key or a token in a path parameter), and the
+    client cannot tell which call sends a secret.
+    """
+    location = response.headers.get("Location")
+    if request.method.upper() in _IDEMPOTENT_METHODS:
+        return {
+            "from_url": _origin_and_path(request.url),
+            "location": _scrub_location_header(location),
+        }
+    if location is None:
+        return {"from_url": _origin(request.url), "location": None}
+    try:
+        return {"from_url": _origin(request.url), "location": _origin(request.url.join(location))}
+    except httpx.InvalidURL:
+        return {"from_url": _origin(request.url), "location": "<unparseable-location>"}
+
+
 def _scrub_location_header(location: str | None) -> str | None:
     """Scrub a raw ``Location`` header the same way :func:`_origin_and_path` does.
 
@@ -827,16 +855,51 @@ def _folded_path(url: httpx.URL) -> str:
     return _encoded_path(url).removesuffix("/").lower()
 
 
-def _sent_address(url: httpx.URL) -> str:
-    """The address a request goes to: origin, encoded path and query.
+#: Set while MEHO sends an operation again after "the login ended": the
+#: change was already sent once, so it follows no redirect
+#: (:func:`change_sent_once_before`).
+_change_sent_before: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_change_sent_before", default=False
+)
 
-    The fragment is left out because HTTP never sends it.
+
+@contextlib.contextmanager
+def change_sent_once_before() -> Iterator[None]:
+    """Mark the calls inside as a repeat of a change that was already sent once.
+
+    A change is sent at most twice. The dispatcher sends an operation again
+    after "the login ended" only when its first send was one request. Inside
+    this block a change follows no redirect, so the repeat is the second and
+    last send. Reads keep following redirects.
     """
-    return str(url.copy_with(fragment=None))
+    token = _change_sent_before.set(True)
+    try:
+        yield
+    finally:
+        _change_sent_before.reset(token)
+
+
+def _sent_address(url: httpx.URL) -> tuple[str, str, int | None, str, str]:
+    """The address a request goes to: scheme, host, port, encoded path and query.
+
+    The fragment and the login part (user name and password) are left out:
+    HTTP sends neither as part of the address, so two URLs that differ only
+    there reach the same resource.
+    """
+    return (
+        url.scheme,
+        url.host,
+        _effective_port(url),
+        _encoded_path(url),
+        url.query.decode("ascii"),
+    )
 
 
 def _change_may_be_sent_again(
-    status_code: int, sent: httpx.URL, location: httpx.URL, already_sent: set[str]
+    status_code: int,
+    sent: httpx.URL,
+    location: httpx.URL,
+    already_sent: set[tuple[str, str, int | None, str, str]],
 ) -> bool:
     """Whether a change may be sent once more to *location* after a redirect.
 
@@ -912,7 +975,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
         is_change = request.method.upper() not in _IDEMPOTENT_METHODS
-        max_hops = _MAX_CHANGE_REDIRECTS if is_change else _MAX_SAME_ORIGIN_REDIRECTS
+        if is_change:
+            max_hops = 0 if _change_sent_before.get() else _MAX_CHANGE_REDIRECTS
+        else:
+            max_hops = _MAX_SAME_ORIGIN_REDIRECTS
         sent_urls = {_sent_address(request.url)}
         # Each answer that MEHO followed. The last answer carries them in
         # ``history`` (as httpx does), so a caller can tell that the request
@@ -941,8 +1007,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     # full URL must never land in a log line. The refused
                     # (attacker-chosen) Location destination is scrubbed the
                     # same way -- its own query could carry a secret too.
-                    from_url=_origin_and_path(request.url),
-                    location=_scrub_location_header(response.headers.get("Location")),
+                    **_redirect_log_fields(request, response),
                 )
                 return response
             if is_change and (
@@ -958,8 +1023,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     "connector_redirect_not_followed_on_change",
                     method=request.method,
                     status_code=response.status_code,
-                    from_url=_origin_and_path(request.url),
-                    location=_scrub_location_header(response.headers.get("Location")),
+                    **_redirect_log_fields(request, response),
                 )
                 return response
             if len(history) >= max_hops:
@@ -1520,6 +1584,44 @@ class HttpConnector(Connector):
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
+
+    async def _send_traced(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Send one operation request through *client* and put it into the trace.
+
+        For a typed connector that sends its own request instead of using
+        :meth:`_post_json`. The trace gets one entry for each request that
+        was sent, with its own method: each followed redirect and the last
+        answer. Call it only for the operation's own request, never for a
+        login, so login traffic stays out of the trace. The answer is
+        returned as it is; the caller checks its status.
+        """
+        _fr_start = flight_recorder_capture.span_start()
+        trace_hops = _trace_redirect_hops.set(True)
+        try:
+            resp = await client.request(method, path, json=json, headers=headers)
+        except httpx.TransportError as exc:
+            flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
+            raise
+        finally:
+            _trace_redirect_hops.reset(trace_hops)
+        flight_recorder_capture.record_vendor_call(
+            _fr_start,
+            method=resp.request.method,
+            request_headers=headers,
+            response=resp,
+            request_body=json if resp.request.method == method else None,
+            request_content_type="application/json" if json is not None else None,
+            response_body=self._trace_response_body(_fr_start, resp),
+        )
+        return resp
 
     async def aclose(self) -> None:
         """Close all pooled clients. Called by lifespan or per-target cleanup."""

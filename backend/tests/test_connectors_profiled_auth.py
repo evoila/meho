@@ -704,8 +704,10 @@ async def test_session_login_redirect_names_the_login_and_sends_no_operation(sta
             )
 
     message = str(exc_info.value)
-    assert f"POST /api/v2/sessions returned HTTP {status}" in message
-    assert "did not send the operation" in message
+    assert message == (
+        f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+        "follow it and did not send the operation."
+    )
     assert "one-time-ticket-123" not in message
     assert not isinstance(exc_info.value, httpx.HTTPStatusError)
     assert login.call_count == 1

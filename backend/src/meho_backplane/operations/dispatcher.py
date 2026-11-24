@@ -330,6 +330,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.adapters.http import change_sent_once_before
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
 from meho_backplane.db.models import (
@@ -2702,14 +2703,16 @@ async def _retry_after_expired_session_answer(
     await invalidate_session(target, rejected=rejected_exc.request)
     mark_session_relogin(rejected_exc.response.status_code, resent=True)
     try:
-        raw = await _run_source_kind_branch(
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            audit_id=audit_id,
-        )
+        # The change was sent once already, so the repeat follows no redirect.
+        with change_sent_once_before():
+            raw = await _run_source_kind_branch(
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                audit_id=audit_id,
+            )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)
         if session_expired_by_hook(connector_instance, retry_exc.response):
@@ -2808,14 +2811,16 @@ async def _retry_after_session_invalidation(
     """
     await invalidate_session(target, rejected=rejected)
     try:
-        raw = await _run_source_kind_branch(
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            audit_id=audit_id,
-        )
+        # The change was sent once already, so the repeat follows no redirect.
+        with change_sent_once_before():
+            raw = await _run_source_kind_branch(
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                audit_id=audit_id,
+            )
     except httpx.HTTPStatusError as retry_exc:
         duration_ms = _elapsed_ms(started)
         # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch

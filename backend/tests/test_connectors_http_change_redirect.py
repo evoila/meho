@@ -20,9 +20,20 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.adapters.http import HttpConnector, _SameOriginRedirectClient
+from meho_backplane.connectors.adapters.http import (
+    HttpConnector,
+    _SameOriginRedirectClient,
+    change_sent_once_before,
+)
+from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.session import (
+    KeycloakAdminCredentials,
+    KeycloakClientCredentials,
+    KeycloakTargetLike,
+)
 from meho_backplane.operations._errors import is_redirect_on_change
 from meho_backplane.operations.dispatcher import _classify_http_status_error
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
@@ -205,6 +216,64 @@ async def test_followed_redirect_is_kept_in_history() -> None:
     assert plain.history == []
 
 
+@pytest.mark.asyncio
+async def test_change_307_that_adds_only_a_login_part_is_not_sent_again() -> None:
+    # A user name in the address is not part of what HTTP sends as the
+    # address: origin, path and query are the same, so it is the same address.
+    server = _Server(_redirect(307, "https://someone@svc.example.com/items/7"))
+    resp = await _send(server, "PUT", "/items/7")
+    assert resp.status_code == 307
+    assert server.seen == [("PUT", "/items/7")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location",
+    ["/keys/redirect-secret-value", "https://other.example.com/keys/redirect-secret-value"],
+)
+async def test_log_line_of_a_change_redirect_keeps_only_the_origin(location: str) -> None:
+    # The sent path and the path the target names can both carry a secret
+    # value of the call. The log line of a change names the origins only.
+    server = _Server(_redirect(307, location))
+    with capture_logs() as captured:
+        async with _SameOriginRedirectClient(
+            base_url=_BASE, transport=httpx.MockTransport(server)
+        ) as client:
+            await client.request("PUT", "/keys/sent-secret-value", json={"name": "widget"})
+
+    warnings = [e for e in captured if e["event"].startswith("connector_redirect_not_followed")]
+    assert len(warnings) == 1
+    dumped = json.dumps(captured, default=str)
+    assert "sent-secret-value" not in dumped
+    assert "redirect-secret-value" not in dumped
+    assert warnings[0]["from_url"] == _BASE
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_after_login_sends_a_change_once_more_at_most() -> None:
+    # The change was sent once before the login ended. Its repeat is the
+    # second and last send: a 307 to the same path is not followed.
+    server = _Server(_redirect(307, "/items/7/"))
+    with change_sent_once_before():
+        resp = await _send(server, "PUT", "/items/7")
+    assert resp.status_code == 307
+    assert server.seen == [("PUT", "/items/7")]
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_after_login_still_follows_a_read_redirect() -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/list":
+            return httpx.Response(307, headers={"Location": "/list/"})
+        return httpx.Response(200, json={"items": []})
+
+    server = _Server(answer)
+    with change_sent_once_before():
+        resp = await _send(server, "GET", "/list")
+    assert resp.status_code == 200
+    assert server.seen == [("GET", "/list"), ("GET", "/list/")]
+
+
 def _operator() -> Operator:
     return Operator(
         sub="test-operator",
@@ -312,6 +381,65 @@ async def test_direct_client_call_puts_no_redirect_into_the_trace() -> None:
     assert recorded == []
 
 
+_KC_BASE = "https://kc.example.test"
+
+
+async def _kc_loader(_target: KeycloakTargetLike, _operator: Operator) -> KeycloakAdminCredentials:
+    return KeycloakClientCredentials(client_id="meho-admin", client_secret="stub-secret")
+
+
+def _kc_target() -> Any:
+    return types.SimpleNamespace(
+        name="kc",
+        host="kc.example.test",
+        port=443,
+        secret_ref="stub/secret",
+        auth_model="shared_service_account",
+        extras={"managed_realm": "demo"},
+        id="22222222-2222-2222-2222-222222222222",
+        tenant_id="00000000-0000-0000-0000-000000000000",
+        verify_tls=True,
+        tls_ca_pin=None,
+        tls_server_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_trace_of_a_keycloak_write_has_each_request_and_no_login() -> None:
+    # The typed Keycloak write sends its own request. The trace gets the 307
+    # and the answer after it. The token request before it (also redirected
+    # here) stays out of the trace.
+    recorded, (start_patch, record_patch) = _recording()
+    conn = KeycloakConnector(credentials_loader=_kc_loader)
+    with start_patch, record_patch:
+        async with respx.mock(base_url=_KC_BASE) as mock:
+            mock.post(url__regex=r".*/openid-connect/token$").respond(
+                307, headers={"Location": "/realms/master/protocol/openid-connect/token/"}
+            )
+            mock.post(url__regex=r".*/openid-connect/token/$").respond(
+                200, json={"access_token": "made-up-token", "expires_in": 60}
+            )
+            mock.put("/admin/realms/demo/groups/7").respond(
+                307, headers={"Location": "/admin/realms/demo/groups/7/"}
+            )
+            write = mock.put("/admin/realms/demo/groups/7/").respond(204)
+            result = await conn._write_admin(
+                _kc_target(),
+                "PUT",
+                "/admin/realms/demo/groups/7",
+                operator=_operator(),
+                json={"name": "widgets"},
+            )
+    await conn.aclose()
+
+    assert result.status_code == 204
+    assert write.call_count == 1
+    assert recorded == [
+        ("PUT", 307, "/admin/realms/demo/groups/7"),
+        ("PUT", 204, "/admin/realms/demo/groups/7/"),
+    ]
+
+
 def _status_error(method: str, status: int, location: str | None) -> httpx.HTTPStatusError:
     request = httpx.Request(method, f"{_BASE}/items/7")
     headers = {"Location": location} if location else {}
@@ -369,6 +497,21 @@ def test_result_leaves_out_the_address_for_an_operation_that_sends_a_secret(stat
     dumped = json.dumps(result.model_dump(mode="json"))
     assert "the-secret-value" not in dumped
     assert "does not show, because this call sends a secret" in result.error
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_result_leaves_out_the_sent_path_for_an_operation_that_sends_a_secret(
+    status: int,
+) -> None:
+    request = httpx.Request("PUT", f"{_BASE}/keys/sent-secret-value")
+    response = httpx.Response(status, headers={"Location": "/elsewhere"}, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+
+    result = _classify(caught.value, op_sends_secret=True)
+
+    assert "sent-secret-value" not in json.dumps(result.model_dump(mode="json"))
+    assert result.extras["exception_message"] == f"HTTP {status} redirect after PUT {_BASE}"
 
 
 @pytest.mark.parametrize("status", [307, 308])

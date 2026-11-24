@@ -768,7 +768,7 @@ class KeycloakConnector(HttpConnector):
             )
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
-        resp = await client.request(verb, path, json=json, headers=headers)
+        resp = await self._send_traced(client, verb, path, json=json, headers=headers)
         if idempotent_conflict and resp.status_code == 409:
             return KeycloakWriteResult(status_code=409, location=None, conflict=True)
         resp.raise_for_status()

@@ -127,7 +127,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
-from meho_backplane.connectors.base import ShimKind
+from meho_backplane.connectors.base import ConnectorOwnMessage, ShimKind
 from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile, split_version
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -136,7 +136,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector"]
+__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector", "SessionLoginRedirectError"]
 
 _log = structlog.get_logger(__name__)
 
@@ -170,6 +170,23 @@ def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
     """Return the header a session-stateful scheme sends *token* in."""
     value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
     return {spec.token_header: value}
+
+
+class SessionLoginRedirectError(SessionLoginError, ConnectorOwnMessage):
+    """The login before an operation got a redirect, so the operation was not sent.
+
+    The message is a fixed sentence of MEHO with only the HTTP status. It
+    names no address: a login address can come from the credential (an
+    external token URL). It holds no text from the vendor and no value of
+    the call, so the dispatcher keeps it also for an operation that sends a
+    secret.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(
+            f"The login of this connector got HTTP {status_code}, a redirect. "
+            "MEHO did not follow it and did not send the operation."
+        )
 
 
 class _CachedSessionToken:
@@ -542,10 +559,7 @@ class ProfiledRestConnector(HttpConnector):
                 # The login, not the operation, got the redirect. The error
                 # names the login request, and says the operation was not sent,
                 # so the dispatcher does not take it for the operation's answer.
-                raise SessionLoginError(
-                    f"{message} (a redirect). MEHO did not follow it and did not "
-                    "send the operation."
-                ) from exc
+                raise SessionLoginRedirectError(exc.response.status_code) from exc
             raise
         return resp.json(), established_path
 

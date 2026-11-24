@@ -21758,6 +21758,7 @@
 <li><code>--params</code> — optional op-params JSON object (inline JSON, @<path>, or @-)</li>
 <li><code>--retry-backoff-seconds</code> — accelerated re-check spacing in seconds while a state change is pending, 5..300 (omitted when unset; the server then applies its default of 15)</li>
 <li><code>--retry-times</code> — consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)</li>
+<li><code>--runner</code> — name of a runner that runs the check at its site (needs RUNNER_CHECKS_ENABLED)</li>
 <li><code>--severity</code> — worst rollup state a failing assertion drives: degraded | critical (default critical)</li>
 <li><code>--target</code> — optional dispatch-target JSON object (inline JSON, @<path>, or @-)</li>
 <li><code>--tenant</code> — target tenant UUID (platform_admin cross-tenant create)</li>

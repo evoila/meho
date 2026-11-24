@@ -197,7 +197,7 @@ def _help_texts(body: str) -> dict[str, str]:
     texts: dict[str, str] = {}
     for value in ("none", "read-everything", "read-targets"):
         match = re.search(
-            rf'value="{value}".*?<span class="text-xs opacity-60">([^<]+)</span>', body, re.S
+            rf'value="{value}".*?<span class="text-xs text-subtle">([^<]+)</span>', body, re.S
         )
         assert match is not None, value
         texts[value] = html.unescape(" ".join(match.group(1).split()))

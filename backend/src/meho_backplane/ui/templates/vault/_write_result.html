@@ -45,6 +45,7 @@
     chain         -- dict | None: {work_ref, step, total} when the parked
                      request is step k of N in its change ticket (#3596)
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
 
@@ -86,7 +87,7 @@
         run yet.
       </p>
       {% if approval_id %}
-        <p class="mt-1 text-xs opacity-70">
+        <p class="mt-1 text-xs text-muted">
           Request id <code data-approval-request-id>{{ approval_id }}</code>
         </p>
         {% if chain %}
@@ -161,23 +162,23 @@
         these three keys; the value never reaches this template. -#}
     <div class="space-y-2" data-vault-write-status="ok" data-vault-move-result>
       <div class="flex items-center gap-2">
-        <span class="badge badge-success badge-sm">moved</span>
+        {{ badge("moved", variant="success") }}
       </div>
       <dl class="space-y-1 text-xs">
         <div class="flex gap-2">
-          <dt class="opacity-60">Status</dt>
+          <dt class="text-subtle">Status</dt>
           <dd class="font-mono" data-move-status>{{ result.get("status") }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="opacity-60">Value fingerprint</dt>
+          <dt class="text-subtle">Value fingerprint</dt>
           <dd class="font-mono [overflow-wrap:anywhere]" data-move-value-fingerprint>{{ result.get("value_fingerprint") }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="opacity-60">Length</dt>
+          <dt class="text-subtle">Length</dt>
           <dd class="font-mono" data-move-length>{{ result.get("length") }}</dd>
         </div>
       </dl>
-      <p class="text-xs opacity-60">
+      <p class="text-xs text-subtle">
         The value was moved server-side and never returned &mdash; only its
         SHA-256 + byte length are shown as provenance.
       </p>
@@ -187,12 +188,12 @@
         success; the put response carries no secret value. -#}
     <div class="space-y-2" data-vault-write-status="ok">
       <div class="flex items-center gap-2">
-        <span class="badge badge-success badge-sm">executed</span>
+        {{ badge("executed", variant="success") }}
         {% if envelope.get("duration_ms") is not none %}
-          <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
+          <span class="text-xs text-subtle">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
         {% endif %}
       </div>
-      <p class="text-xs opacity-70">
+      <p class="text-xs text-muted">
         The {{ verb }} completed. {% if verb == "put" %}A new version was written.{% else %}The named versions were soft-deleted.{% endif %}
       </p>
     </div>

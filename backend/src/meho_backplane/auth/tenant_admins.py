@@ -57,6 +57,7 @@ from meho_backplane.auth.operator import RoleGroup, TenantRole
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "NEEDS_SECOND_ADMIN",
     "ONLY_ONE_ADMIN",
     "RIGHTS_CHANGE_GUIDE_URL",
     "admin_count",
@@ -64,10 +65,11 @@ __all__ = [
     "tenant_admin_ids",
 ]
 
+#: The first sentence of :data:`ONLY_ONE_ADMIN`. It is false for an approved request.
+NEEDS_SECOND_ADMIN: Final[str] = "This change needs a second admin to approve it."
+
 #: The sentence a person reads when no other admin could approve their change.
-ONLY_ONE_ADMIN: Final[str] = (
-    "This change needs a second admin to approve it. This tenant has only one admin."
-)
+ONLY_ONE_ADMIN: Final[str] = f"{NEEDS_SECOND_ADMIN} This tenant has only one admin."
 
 #: The guide part that explains who approves a change of rights.
 RIGHTS_CHANGE_GUIDE_URL: Final[str] = (

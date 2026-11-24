@@ -45,7 +45,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Audit{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Query this tenant's full audit history &mdash; who touched what, which
         writes a change ticket authorised, and what an agent session did.
       </p>
@@ -71,7 +71,7 @@
     aria-label="Filter audit history"
   >
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Target</span>
+      <span class="label-text mb-1 text-xs text-muted">Target</span>
       <input
         type="search" name="target" value="{{ target_filter }}"
         placeholder="e.g. prod-k8s"
@@ -81,7 +81,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Principal</span>
+      <span class="label-text mb-1 text-xs text-muted">Principal</span>
       <input
         type="search" name="principal" value="{{ principal_filter }}"
         placeholder="user id or name (partial match)"
@@ -91,7 +91,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Operation (op_id)</span>
+      <span class="label-text mb-1 text-xs text-muted">Operation (op_id)</span>
       <input
         type="search" name="op_id" value="{{ op_id_filter }}"
         placeholder="e.g. k8s.pod.* (glob)"
@@ -101,7 +101,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Op class</span>
+      <span class="label-text mb-1 text-xs text-muted">Op class</span>
       <select
         name="op_class" class="select select-bordered select-sm w-full"
         aria-label="Filter by op class"
@@ -116,7 +116,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Result</span>
+      <span class="label-text mb-1 text-xs text-muted">Result</span>
       <select
         name="result_status" class="select select-bordered select-sm w-full"
         aria-label="Filter by result status"
@@ -131,7 +131,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Record type</span>
+      <span class="label-text mb-1 text-xs text-muted">Record type</span>
       <select
         name="event_class" class="select select-bordered select-sm w-full"
         aria-label="Filter by record type"
@@ -146,7 +146,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Since</span>
+      <span class="label-text mb-1 text-xs text-muted">Since</span>
       <input
         type="text" name="since" value="{{ since_filter }}"
         placeholder="e.g. 24h, 7d, 2026-01-01"
@@ -156,7 +156,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Until</span>
+      <span class="label-text mb-1 text-xs text-muted">Until</span>
       <input
         type="text" name="until" value="{{ until_filter }}"
         placeholder="e.g. 1h, 2026-02-01"
@@ -166,7 +166,7 @@
     </label>
 
     <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Change ticket (work_ref)</span>
+      <span class="label-text mb-1 text-xs text-muted">Change ticket (work_ref)</span>
       <input
         type="search" name="work_ref" value="{{ work_ref_filter }}"
         placeholder="e.g. gh:evoila/meho#1"
@@ -207,6 +207,7 @@
               event_class_label=drawer.event_class_label,
               tenant_label=drawer.tenant_label,
               via_label=drawer.via_label,
+              secret_read_as=drawer.secret_read_as,
               stored_session=drawer.stored_session %}
         {% include "audit/_drawer.html" %}
       {% endwith %}

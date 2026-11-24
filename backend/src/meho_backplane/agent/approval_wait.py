@@ -507,6 +507,7 @@ async def _resume_approved_or_already_resumed(
         claim_resume,
         get_request,
         persist_resume_result,
+        refuse_resume_if_asker_blocked,
         refuse_resume_if_preview_changed,
         refuse_resume_if_release_changed,
         refuse_resume_if_target_changed,
@@ -545,6 +546,17 @@ async def _resume_approved_or_already_resumed(
                 approval_request_id=approval_request_id,
             )
         return release_refusal.model_dump(mode="json")
+
+    # The login that asked must not be blocked when the approved call runs.
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        if blocked_refusal.status == "already_resumed":
+            return await _lost_claim_envelope(
+                operator=operator,
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return blocked_refusal.model_dump(mode="json")
 
     # The re-dispatch runs against the target the row saved by id, the same
     # check the operator surface runs, not the name the agent used when it
@@ -645,19 +657,24 @@ async def _redispatch_approved(
     either runs on that catalog or is refused when the target's detected
     version no longer fits it.
     """
+    from meho_backplane.auth.principal_block import checking_logins_for_steps
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        with composite_resume_binding(
-            subop_op_id=request.op_id,
-            subop_params_hash=request.params_hash,
-            resume_parent=resume_parent,
-            requester=requester_of(request),
-            proposed_effect=request.proposed_effect,
-        ) as parent_call:
+        with (
+            # Each step of the run also checks the person who asked.
+            checking_logins_for_steps(request.principal_sub, request.tenant_id),
+            composite_resume_binding(
+                subop_op_id=request.op_id,
+                subop_params_hash=request.params_hash,
+                resume_parent=resume_parent,
+                requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
+            ) as parent_call,
+        ):
             if parent_call is None:
                 # ``target`` is cleared so the name is never looked up again;
                 # the target the row saved by id (or ``None`` for a

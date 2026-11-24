@@ -14,6 +14,8 @@
   so the rolled-up states stay live without a manual refresh. Read-only in
   v1 -- no create / delete affordances (REST is the single write path).
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Checks &middot; MEHO Operator Console{% endblock %}
@@ -23,13 +25,13 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Checks{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Dashboards roll many Sensors up into one five-state answer to "is
         everything OK?". Click a row to inspect each member's state, the
         <code>for:</code> hold, and the last evidence.
       </p>
     </div>
-    <a href="/ui/sensors" class="btn btn-sm btn-ghost">Sensor registry</a>
+    {{ button("Sensor registry", variant="quiet", href="/ui/sensors") }}
   </header>
 
   {# ---------- Table ---------- #}

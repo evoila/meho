@@ -45,7 +45,7 @@ from meho_backplane.runner.login import (
     uses_proxy_settings,
 )
 from meho_backplane.runner.package_set import PACKAGE_SET_HEADER, local_package_set
-from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
+from meho_backplane.runner.wire import RefusedResult, RunnerAssignment, RunnerResultBatch
 
 __all__ = [
     "ASSIGNMENT_UNCHANGED",
@@ -144,6 +144,7 @@ class RunnerClient:
         headers = {
             wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
             PACKAGE_SET_HEADER: local_package_set().digest,
+            wire.FEATURES_HEADER: wire.FEATURE_SCHEDULED_CHECKS,
         }
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
@@ -186,8 +187,12 @@ class RunnerClient:
         except ValueError as exc:
             raise RunnerClientError(f"assignment payload invalid: {exc}") from exc
 
-    async def post_results(self, batch: RunnerResultBatch) -> None:
-        """POST a result batch; raise :class:`RunnerClientError` on failure."""
+    async def post_results(self, batch: RunnerResultBatch) -> list[RefusedResult]:
+        """POST a result batch and return the results MEHO refused.
+
+        Raises :class:`RunnerClientError` on failure. An answer without a
+        readable ``refused`` list counts as no refused result.
+        """
         try:
             resp = await self._client.post(_RESULTS_PATH, json=batch.model_dump(mode="json"))
         except (httpx.HTTPError, RunnerLoginError) as exc:
@@ -195,3 +200,14 @@ class RunnerClient:
         _raise_for_wire_version_mismatch(resp)
         if not resp.is_success:
             raise RunnerClientError(f"results post returned status {resp.status_code}")
+        return _refused_of(resp)
+
+
+def _refused_of(resp: httpx.Response) -> list[RefusedResult]:
+    """The ``refused`` list of a result-batch answer, or an empty list."""
+    try:
+        body = resp.json()
+        refused = body.get("refused") if isinstance(body, dict) else None
+        return [RefusedResult.model_validate(entry) for entry in refused or []]
+    except ValueError:
+        return []

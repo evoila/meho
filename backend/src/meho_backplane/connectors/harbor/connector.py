@@ -67,7 +67,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
@@ -241,7 +244,7 @@ class HarborConnector(HttpConnector):
         credentials_loader: HarborCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._creds_cache: dict[tuple[str, str, str], dict[str, str]] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
@@ -324,7 +327,7 @@ class HarborConnector(HttpConnector):
         the loader. A caller who has read keeps cold load → cache →
         reuse.
         """
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
             if cached is not None and self._readers.has_read(target, operator):
@@ -1017,7 +1020,8 @@ class HarborConnector(HttpConnector):
         serialised against an in-flight load.
         """
         async with self._creds_lock:
-            self._creds_cache.pop(target_cache_key(target), None)
+            for key in target_entry_keys(self._creds_cache, target):
+                del self._creds_cache[key]
             self._readers.forget(target)
 
     async def aclose(self) -> None:

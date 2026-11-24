@@ -25,6 +25,8 @@
   RBAC: the whole surface is tenant_admin (a non-admin 403s the route);
   ``can_write`` is always true here, kept for template-shape symmetry.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Agent grants &middot; MEHO Operator Console{% endblock %}
@@ -43,14 +45,14 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Agent grants</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Least-privilege governance: which principal may run which op
         pattern, with which verdict. Reading and changing grants is
         tenant-admin only.
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-sm opacity-70" aria-live="polite">
+      <span class="text-sm text-muted" aria-live="polite">
         {{ grant_count }} grant{{ "" if grant_count == 1 else "s" }}
       </span>
       {% if can_write %}
@@ -89,15 +91,15 @@
     hx-swap="outerHTML"
     hx-trigger="submit, change from:#grants-include-expired, keyup changed delay:300ms from:#grants-principal-filter"
   >
-    <label class="form-control">
-      <span class="label-text text-xs">Filter by principal</span>
+    <label>
+      <span class="text-xs">Filter by principal</span>
       <input
         type="text"
         id="grants-principal-filter"
         name="principal_sub"
         value="{{ filter_principal_sub }}"
         maxlength="512"
-        class="input input-bordered input-sm font-mono"
+        class="input input-sm font-mono"
         placeholder="exact principal sub"
         aria-label="Filter by principal sub"
       />
@@ -112,10 +114,10 @@
         class="checkbox checkbox-sm"
         aria-label="Include expired elevations"
       />
-      <span class="label-text text-sm">Include expired</span>
+      <span class="text-sm">Include expired</span>
     </label>
     <noscript>
-      <button type="submit" class="btn btn-sm">Apply</button>
+      {{ button("Apply", variant="default", type="submit") }}
     </noscript>
   </form>
 

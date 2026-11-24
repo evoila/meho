@@ -743,6 +743,15 @@ class Settings(BaseModel):
         was working on. The records exist only when
         ``REQUEST_USAGE_RETENTION_DAYS`` is set, and the same daily job
         deletes them. Env var ``OPERATION_SEARCH_STORE_QUERY_TEXT``.
+    audit_secret_read_as:
+        Show the field ``secret_read_as`` in every audit read (REST, CLI, MCP
+        and the web console): the login under which the secret the call used
+        was read from the store, in this call or in an earlier call of the
+        same caller (a login MEHO kept in memory names who read it, or
+        ``kept-login:reader-unknown``); empty when the call used no secret.
+        MEHO writes the column on every install. Default
+        ``False``: no audit read shows the field. Env var
+        ``AUDIT_SECRET_READ_AS``.
     audit_client_identity:
         Write a ``client`` block into every audit row: the login client
         (``azp``), the channel (``web`` or ``token``), the principal kind
@@ -1670,6 +1679,18 @@ class Settings(BaseModel):
         a direct call never gets the request of such a step.
         When off, every such call makes a new request. Env
         ``APPROVAL_SAME_CALL_REUSE``.
+    runner_checks_enabled:
+        Off by default. When on, a check bound to a runner counts like a
+        central check: the result a runner posts for its own check sets the
+        state of the check, shows on the dashboard, sends mails on change and
+        recovery and can start the investigator. A dead runner shows its
+        checks as ``unknown``. When off, MEHO only stores runner results.
+        Env ``RUNNER_CHECKS_ENABLED``.
+    runner_check_results_retention_days:
+        Days the clean-up job keeps raw runner result rows while
+        ``RUNNER_CHECKS_ENABLED`` is on (default 7; ``0`` keeps them). With
+        the switch off, the job deletes none. Env
+        ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2065,6 +2086,11 @@ class Settings(BaseModel):
     operation_search_store_query_text: bool = False
     # Off by default; with it off the audit rows stay as before.
     audit_client_identity: bool = False
+    # Off by default; with it off no audit read shows ``secret_read_as``.
+    # Measured in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch
+    # (audit answers name whose login read the secret) before it is on by
+    # default".
+    audit_secret_read_as: bool = False
     # Off by default; with it off auth-config lists no per-tool login client.
     mcp_client_per_tool_kind: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
@@ -2534,6 +2560,15 @@ class Settings(BaseModel):
     # triggers can match them. Off by default: nothing is written and nothing
     # else changes. Set via ``CHECKS_AGENT_EVENTS``.
     checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # With this switch on, the results of a runner count like the results of a
+    # central check: they set the state of the check, show on the dashboard,
+    # send mails and can start the investigator. Off by default: results are
+    # only stored. Set via ``RUNNER_CHECKS_ENABLED``.
+    runner_checks_enabled: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Days the clean-up job keeps raw ``runner_check_results`` rows while
+    # ``RUNNER_CHECKS_ENABLED`` is on. ``0``, or the switch off, keeps them for
+    # ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+    runner_check_results_retention_days: int = Field(default=7, ge=0, le=3650)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -3511,6 +3546,9 @@ def get_settings() -> Settings:
         audit_client_identity=parse_bool_env(
             os.environ.get("AUDIT_CLIENT_IDENTITY", "false"),
         ),
+        audit_secret_read_as=parse_bool_env(
+            os.environ.get("AUDIT_SECRET_READ_AS", "false"),
+        ),
         mcp_client_per_tool_kind=parse_bool_env(
             os.environ.get("MCP_CLIENT_PER_TOOL_KIND", "false"),
         ),
@@ -3837,6 +3875,10 @@ def get_settings() -> Settings:
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
         checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
+        runner_checks_enabled=parse_bool_env(os.environ.get("RUNNER_CHECKS_ENABLED", "false")),
+        runner_check_results_retention_days=int(
+            os.environ.get("RUNNER_CHECK_RESULTS_RETENTION_DAYS", "7"),
+        ),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(

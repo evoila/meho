@@ -24,6 +24,7 @@
                         *_group_count / operation_count etc.
     * ``csrf_token`` -- str: minted double-submit token for the POST.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="registry-action-modal" class="modal" aria-label="Enable connector">
   <div class="modal-box max-w-lg">
@@ -51,9 +52,7 @@
           <span class="badge badge-warning badge-sm">
             {{ row.staged_group_count }} staged &rarr; enabled
           </span>
-          <span class="badge badge-ghost badge-sm">
-            {{ row.enabled_operation_count }} / {{ row.operation_count }} ops enabled
-          </span>
+          {{ badge(row.enabled_operation_count ~ " / " ~ row.operation_count ~ " ops enabled", variant="quiet") }}
         </div>
       </div>
     </div>

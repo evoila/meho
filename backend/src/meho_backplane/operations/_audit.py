@@ -42,6 +42,7 @@ from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -907,6 +908,7 @@ async def write_audit_row(
         "occurred_at": datetime.now(UTC),
         "operator_sub": operator.sub,
         "actor_sub": resolve_actor_sub(),
+        "secret_read_as": current_secret_read_as(),
         "tenant_id": operator.tenant_id,
         "target_id": target_id,
         "parent_audit_id": parent_audit_id,

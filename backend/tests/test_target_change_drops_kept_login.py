@@ -41,7 +41,7 @@ from meho_backplane.api.v1.targets import (
     _drop_kept_logins_on_connection_change,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_cache_key, target_secret_cache_key
 from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError, _pool_key
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
@@ -136,28 +136,28 @@ def client() -> Iterator[TestClient]:
 async def test_github_invalidate_credentials_drops_only_that_target() -> None:
     changed, other = _Target(), _Target(name="other")
     conn = GitHubRestConnector()
-    conn._pat_tokens[target_cache_key(changed)] = "pat-old"
-    conn._installation_tokens[target_cache_key(changed)] = MagicMock()
-    conn._pat_tokens[target_cache_key(other)] = "pat-other"
+    conn._pat_tokens[target_secret_cache_key(changed)] = "pat-old"
+    conn._installation_tokens[target_secret_cache_key(changed)] = MagicMock()
+    conn._pat_tokens[target_secret_cache_key(other)] = "pat-other"
 
     await conn.invalidate_credentials(changed)
 
-    assert target_cache_key(changed) not in conn._pat_tokens
-    assert target_cache_key(changed) not in conn._installation_tokens
-    assert conn._pat_tokens[target_cache_key(other)] == "pat-other"
+    assert target_secret_cache_key(changed) not in conn._pat_tokens
+    assert target_secret_cache_key(changed) not in conn._installation_tokens
+    assert conn._pat_tokens[target_secret_cache_key(other)] == "pat-other"
 
 
 @pytest.mark.asyncio
 async def test_keycloak_invalidate_credentials_drops_only_that_target() -> None:
     changed, other = _Target(), _Target(name="other")
     conn = KeycloakConnector()
-    conn._admin_tokens[target_cache_key(changed)] = _CachedToken("tok-old", 1e12)
-    conn._admin_tokens[target_cache_key(other)] = _CachedToken("tok-other", 1e12)
+    conn._admin_tokens[target_secret_cache_key(changed)] = _CachedToken("tok-old", 1e12)
+    conn._admin_tokens[target_secret_cache_key(other)] = _CachedToken("tok-other", 1e12)
 
     await conn.invalidate_credentials(changed)
 
-    assert target_cache_key(changed) not in conn._admin_tokens
-    assert target_cache_key(other) in conn._admin_tokens
+    assert target_secret_cache_key(changed) not in conn._admin_tokens
+    assert target_secret_cache_key(other) in conn._admin_tokens
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@
   <span class="min-w-0">
     {% if show_person %}<span class="font-mono text-xs" data-field="push-person">{{ s.operator_sub }}</span> &middot; {% endif %}
     <span data-field="push-service">{{ s.service }}</span>
-    <span class="text-xs opacity-60" title="{{ s.created_at.isoformat() }}">since {{ s.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+    <span class="text-xs text-subtle" title="{{ s.created_at.isoformat() }}">since {{ s.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
   </span>
   <button
     type="button"
@@ -32,7 +32,7 @@
       {% for s in own_subscriptions %}{{ sub_row(s, false) }}{% endfor %}
     </ul>
     {% else %}
-    <p class="text-xs opacity-60" data-field="push-own-empty">No browser gets notifications yet.</p>
+    <p class="text-xs text-subtle" data-field="push-own-empty">No browser gets notifications yet.</p>
     {% endif %}
   </div>
   {% if is_tenant_admin %}
@@ -43,7 +43,7 @@
       {% for s in tenant_subscriptions %}{{ sub_row(s, true) }}{% endfor %}
     </ul>
     {% else %}
-    <p class="text-xs opacity-60">No browser in this tenant gets notifications.</p>
+    <p class="text-xs text-subtle">No browser in this tenant gets notifications.</p>
     {% endif %}
   </div>
   {% endif %}

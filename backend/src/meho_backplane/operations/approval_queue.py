@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -104,6 +104,8 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.principal_block import checking_logins_for_steps
+from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -143,6 +145,7 @@ from meho_backplane.operations._errors import (
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
+from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._target_connector_limit import (
     restored_connector_limit,
@@ -267,6 +270,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_asker_blocked",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -1137,17 +1141,42 @@ _IDEMPOTENT_LIVE_STATUSES: Final[tuple[str, ...]] = (
 )
 
 
-async def _find_idempotent_request(
+@dataclass(frozen=True)
+class _Asker:
+    """What the approve checks read about who asked, as one call sends it.
+
+    *kind* is the kind of login, *people* the casefolded subs of the people
+    behind it (:func:`behind_subs`, the compare of the self-approval rule),
+    *reveal_secret* the choice to reveal secret values. A waiting request
+    is given back to a call only when all three are the same.
+    """
+
+    kind: str | None
+    people: frozenset[str]
+    reveal_secret: bool
+
+    def asked(self, request: ApprovalRequest) -> bool:
+        """True when *request* was asked by the same kind of login, people and choice."""
+        return (
+            request.principal_kind == self.kind
+            and bool(request.reveal_secret) == self.reveal_secret
+            and behind_subs(request.people_behind) == self.people
+        )
+
+
+async def _key_holders(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     principal_sub: str,
     idempotency_key: str,
-) -> ApprovalRequest | None:
-    """Return the live request that holds *idempotency_key* for this principal.
+) -> list[ApprovalRequest]:
+    """Return every live request of this login that *idempotency_key* gets back.
 
     Scoped to the tenant **and** the principal, so a key never matches
-    another tenant's or another requester's request.
+    another tenant's or another requester's request. The request that holds
+    the key in its own column comes first, then the requests the key is
+    linked to (:class:`ApprovalRequestKey`), newest first.
 
     ``populate_existing`` refreshes a row the session already holds. The
     retry loop in :func:`_resolve_idempotent_request` calls this again after
@@ -1155,23 +1184,19 @@ async def _find_idempotent_request(
     another connection. Without the refresh the session would keep the
     cached ``pending`` state, treat the row as overdue again, and loop.
 
-    A key that a same-call reuse linked to a request
-    (:class:`ApprovalRequestKey`) gets that request back too, so each key
-    a caller got the request with keeps working after the approval.
+    A key is linked to a request by a same-call reuse, or by a call that
+    got its own request for a key another request holds.
     """
     live_for_caller = (
         ApprovalRequest.tenant_id == tenant_id,
         ApprovalRequest.principal_sub == principal_sub,
         ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
     )
-    stmt = (
+    held = (
         select(ApprovalRequest)
         .where(ApprovalRequest.idempotency_key == idempotency_key, *live_for_caller)
         .execution_options(populate_existing=True)
     )
-    found = (await session.execute(stmt)).scalars().first()
-    if found is not None:
-        return found
     linked = (
         select(ApprovalRequest)
         .join(ApprovalRequestKey, ApprovalRequestKey.approval_request_id == ApprovalRequest.id)
@@ -1179,13 +1204,103 @@ async def _find_idempotent_request(
         .order_by(ApprovalRequest.created_at.desc())
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(linked)).scalars().first()
+    found: list[ApprovalRequest] = []
+    for stmt in (held, linked):
+        found.extend((await session.execute(stmt)).scalars())
+    return found
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    asker: _Asker,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this caller.
+
+    A request of :func:`_key_holders` counts only when *asker* asked it: the
+    same kind of login, the same people behind the login and the same
+    choice to reveal secret values. A request asked otherwise is not
+    returned, so the call gets its own request.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    return next((found for found in holders if asker.asked(found)), None)
+
+
+async def _refuse_key_held_for_another_call(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    is_this_call: Callable[[ApprovalRequest], bool],
+) -> None:
+    """Refuse the call when *idempotency_key* gets back a request of another call.
+
+    Runs before the call gets a request back for the key or stores its own.
+    Every live request the key gets back is checked: the one that holds the
+    key in its own column and every linked one, asked the same way or
+    another way (:class:`_Asker`). One that holds the key for another call
+    (*is_this_call* is false) refuses the call.
+
+    A ``pending`` request past its deadline does not count, but only after
+    a locked re-read (:func:`_holds_key_after_lock`): an approve that
+    started before the deadline holds the row lock until it commits, and
+    the approved request keeps the key.
+
+    Raises:
+        IdempotencyKeyConflictError: a live request of another call holds
+            the key.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    for holder in holders:
+        if is_this_call(holder):
+            continue
+        if _is_overdue_pending(holder) and not await _holds_key_after_lock(session, holder):
+            continue
+        raise IdempotencyKeyConflictError(holder.id)
+
+
+async def _holds_key_after_lock(session: AsyncSession, request: ApprovalRequest) -> bool:
+    """Lock *request*, read it again, and say whether it still holds its key.
+
+    ``SELECT ... FOR UPDATE`` waits for a decision that holds the row lock
+    (:func:`_load_for_tenant` with ``for_update``) to commit. The request holds
+    its key when it is ``approved``, or ``pending`` within its deadline.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.id == request.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    return (
+        locked is not None
+        and locked.status in _IDEMPOTENT_LIVE_STATUSES
+        and not _is_overdue_pending(locked)
+    )
 
 
 async def _link_reuse_key(
     session: AsyncSession, request: ApprovalRequest, idempotency_key: str | None
 ) -> None:
-    """Link *idempotency_key* to the reused *request*, so a later retry finds it.
+    """Link *idempotency_key* to *request*, so a later retry finds it.
+
+    *request* is a reused request, or a request that got its own row while
+    a request of another asker holds the key in its own column.
 
     Nothing to do without a key, or when the row already holds this key.
     The insert runs in a savepoint: when a call that arrives at the same
@@ -1283,14 +1398,12 @@ async def _find_same_call_pending_request(
     *,
     tenant_id: uuid.UUID,
     principal_sub: str,
-    principal_kind: str,
     op_id: str,
     connector_id: str,
     target_id: uuid.UUID | None,
     params: dict[str, Any],
     preview_hash: str | None,
-    reveal_secret: bool,
-    people_behind: list[dict[str, Any]] | None,
+    asker: _Asker,
 ) -> ApprovalRequest | None:
     """Return the waiting request of this login for the same call, or ``None``.
 
@@ -1304,18 +1417,16 @@ async def _find_same_call_pending_request(
     request made before migration 0183 has ``composite_step`` NULL, so it
     never counts either. The match
     is the same as for a retry key: same operation, connector, target, params,
-    ``preview_hash`` and ``work_ref``, plus the same ``reveal_secret``
-    choice, the same kind of login (*principal_kind*) and the same people
-    behind the login (*people_behind*, compared by casefolded ``sub``): the
-    approval checks read only the kind and the list stored on the request.
+    ``preview_hash`` and ``work_ref``, plus the same *asker*: the kind of
+    login, the people behind it and the ``reveal_secret`` choice
+    (:class:`_Asker`). The approval checks read only the kind and the list
+    stored on the request.
     """
-    own_people = behind_subs(people_behind)
     stmt = (
         select(ApprovalRequest)
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.principal_sub == principal_sub,
-            ApprovalRequest.principal_kind == principal_kind,
             ApprovalRequest.op_id == op_id,
             ApprovalRequest.connector_id == connector_id,
             ApprovalRequest.target_id == target_id
@@ -1337,8 +1448,7 @@ async def _find_same_call_pending_request(
             and params_hash_matches(params, existing.params_hash)
             and existing.preview_hash == preview_hash
             and existing.work_ref == work_ref_var.get()
-            and bool(existing.reveal_secret) == reveal_secret
-            and behind_subs(existing.people_behind) == own_people
+            and asker.asked(existing)
             and not _is_overdue_pending(existing)
         ):
             return existing
@@ -1361,15 +1471,14 @@ def _reuse_idempotent_request(
     compared too, so two runs under different change tickets never share
     one request.
     """
-    same_call = (
-        existing.op_id == op_id
-        and existing.connector_id == connector_id
-        and existing.target_id == target_id
-        and params_hash_matches(params, existing.params_hash)
-        and existing.preview_hash == preview_hash
-        and existing.work_ref == work_ref_var.get()
-    )
-    if not same_call:
+    if not _is_same_keyed_call(
+        existing,
+        op_id=op_id,
+        connector_id=connector_id,
+        target_id=target_id,
+        params=params,
+        preview_hash=preview_hash,
+    ):
         raise IdempotencyKeyConflictError(existing.id)
     _log().info(
         "approval_request_reused",
@@ -1383,8 +1492,32 @@ def _reuse_idempotent_request(
     return existing
 
 
+def _is_same_keyed_call(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+) -> bool:
+    """True when *existing* was asked for this call: what a retry key compares.
+
+    The same operation, connector, target, params (:func:`params_hash_matches`),
+    ``preview_hash`` and ``work_ref``.
+    """
+    return (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and params_hash_matches(params, existing.params_hash)
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
+
+
 async def _insert_idempotent_request(
-    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str
+    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str, asker: _Asker
 ) -> ApprovalRequest | None:
     """Insert *request* in a savepoint; return the winner if a racer got there first.
 
@@ -1392,6 +1525,13 @@ async def _insert_idempotent_request(
     racing inserts fail. That insert's savepoint rolls back, the outer
     transaction stays usable, and the row the other request committed is
     returned. Returns ``None`` when *request* itself was inserted.
+
+    The index also refuses the insert when a request of another *asker*
+    holds the key (:func:`_find_idempotent_request` does not return it).
+    Then *request* keeps the key in :class:`ApprovalRequestKey` instead of
+    its own column. The caller holds the key lock
+    (:func:`_take_idempotency_key_lock`), so a second call with this key
+    looks it up only after this one commits, and finds this request.
     """
     try:
         async with session.begin_nested():
@@ -1403,11 +1543,31 @@ async def _insert_idempotent_request(
             tenant_id=request.tenant_id,
             principal_sub=request.principal_sub,
             idempotency_key=idempotency_key,
+            asker=asker,
         )
-        if existing is None:
-            raise
-        return existing
+        if existing is not None:
+            return existing
+        request.idempotency_key = None
+        session.add(request)
+        await session.flush()
+        await _link_reuse_key(session, request, idempotency_key)
     return None
+
+
+async def _take_idempotency_key_lock(
+    session: AsyncSession, *, tenant_id: uuid.UUID, principal_sub: str, idempotency_key: str
+) -> None:
+    """Take the lock of one retry key of one login, until the transaction ends.
+
+    Every call with a retry key takes it before it looks the key up. So two
+    calls with the same key never look it up and store a request at the same
+    moment: the second one looks the key up only after the first one
+    committed, and finds the request the first one stored or linked. That
+    holds also when the request that held the key is decided in between.
+    """
+    await take_approval_lock(
+        session, "idempotency-key", f"{tenant_id}\0{principal_sub}\0{idempotency_key}"
+    )
 
 
 #: The acting identity for every expiry: the sweeper and the late-retry path
@@ -1489,6 +1649,7 @@ async def _resolve_idempotent_request(
     tenant_id: uuid.UUID,
     principal_sub: str,
     idempotency_key: str,
+    asker: _Asker,
 ) -> tuple[ApprovalRequest | None, ApprovalRequest | None]:
     """Find what *idempotency_key* holds right now: ``(live, expired)`` (#3486).
 
@@ -1511,6 +1672,7 @@ async def _resolve_idempotent_request(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             idempotency_key=idempotency_key,
+            asker=asker,
         )
         if existing is None:
             return None, None
@@ -1585,6 +1747,16 @@ _CALLER_PATHS = frozenset({"approval.request", _REUSE_PATH})
 
 #: Audit paths that carry the runbook run and step of the call.
 _RUNBOOK_STEP_PATHS = frozenset({*_CALLER_PATHS, "approval.result"})
+
+
+def _request_row_columns() -> dict[str, Any]:
+    """The columns the rows of ``_CALLER_PATHS`` take from the waiting call's task.
+
+    The matched policy rule, and the login a secret store accepted
+    for the parking call so far (``secret_read_as``), for example the read of
+    the sink secret for the approval card of ``secret.move``.
+    """
+    return {**policy_rule_columns(), "secret_read_as": current_secret_read_as()}
 
 
 async def _write_audit_row(
@@ -1722,7 +1894,7 @@ async def _write_audit_row(
     # that expires an old overdue request writes that request's decision
     # row while the retry's own rule is bound.
     if path in _CALLER_PATHS:
-        policy_kwargs.update(policy_rule_columns())
+        policy_kwargs.update(_request_row_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1961,33 +2133,58 @@ async def create_pending_request(
         reused._expired_request = expired_request  # type: ignore[attr-defined]
         return reused
 
+    # What the approve checks will read about who asked. A waiting request
+    # is given back to this call only when it was asked the same way.
+    if requester is not None:
+        principal_kind = requester.kind
+        people_behind = requester.people_behind
+    else:
+        principal_kind = operator.principal_kind.value
+        people_behind = await _own_people_behind(session, operator)
+    asker = _Asker(principal_kind, behind_subs(people_behind), reveal_secret)
+
     if idempotency_key is not None:
-        live, expired_request = await _resolve_idempotent_request(
+        await _take_idempotency_key_lock(
             session,
             tenant_id=operator.tenant_id,
             principal_sub=operator.sub,
             idempotency_key=idempotency_key,
         )
+        live, expired_request = await _resolve_idempotent_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+            asker=asker,
+        )
+        await _refuse_key_held_for_another_call(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+            is_this_call=lambda held: _is_same_keyed_call(
+                held,
+                op_id=op_id,
+                connector_id=connector_id,
+                target_id=target_id,
+                params=params,
+                preview_hash=preview_hash,
+            ),
+        )
         if live is not None:
             return _reuse(live)
 
-    own_people_behind: list[dict[str, Any]] | None = None
-    own_people_known = False
     if _same_call_reuse_applies(run_id, resume_parent, requester):
-        own_people_behind = await _own_people_behind(session, operator)
-        own_people_known = True
         same_call = await _find_same_call_pending_request(
             session,
             tenant_id=operator.tenant_id,
             principal_sub=operator.sub,
-            principal_kind=operator.principal_kind.value,
             op_id=op_id,
             connector_id=connector_id,
             target_id=target_id,
             params=params,
             preview_hash=preview_hash,
-            reveal_secret=reveal_secret,
-            people_behind=own_people_behind,
+            asker=asker,
         )
         if same_call is not None:
             reused = _reuse(same_call)
@@ -2025,15 +2222,9 @@ async def create_pending_request(
         principal_sub = requester.sub
         principal_act = requester.act
         principal_name = requester.name
-        principal_kind = requester.kind
-        people_behind = requester.people_behind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
-        principal_kind = operator.principal_kind.value
-        people_behind = (
-            own_people_behind if own_people_known else await _own_people_behind(session, operator)
-        )
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -2069,7 +2260,9 @@ async def create_pending_request(
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
-            stored_resume_parent = {"op_id": resume_parent["op_id"]}
+            stored_resume_parent = {
+                key: resume_parent[key] for key in ("op_id", "request_sent") if key in resume_parent
+            }
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -2131,7 +2324,9 @@ async def create_pending_request(
         session.add(request)
         await session.flush()
     else:
-        winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
+        winner = await _insert_idempotent_request(
+            session, request, idempotency_key=idempotency_key, asker=asker
+        )
         if winner is not None:
             return _reuse(winner)
     request._expired_request = expired_request  # type: ignore[attr-defined]
@@ -3052,6 +3247,10 @@ async def resume_dispatch_after_approval(
     if release_refusal is not None:
         return release_refusal
 
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        return blocked_refusal
+
     resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
     if target_refusal is not None:
         return target_refusal
@@ -3210,6 +3409,41 @@ async def refuse_resume_if_release_changed(
         request,
         refusal,
         audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_asker_blocked(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> OperationResult | None:
+    """Refuse an approved run when the login that asked is blocked.
+
+    Returns ``None`` when the asker (``request.principal_sub``) is not
+    blocked, so the caller runs the request. Otherwise the operation never
+    runs and the vendor gets no call. The refusal is recorded like the
+    release refusal (:func:`refuse_resume_if_release_changed`): the claim
+    is taken, so the request never runs later, the stored run input is
+    deleted, one audit row records it, and the refusal is the stored run
+    result. A block-list read that fails refuses the run the same way.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    refusal = await refuse_if_principal_blocked(
+        request.op_id,
+        request.principal_sub,
+        request.tenant_id,
+        # The multi-step operation sent a step before it waited.
+        earlier_sent=(request.resume_parent or {}).get("request_sent") is True,
+    )
+    if refusal is None:
+        return None
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"asker_sub": request.principal_sub},
     )
 
 
@@ -3630,7 +3864,11 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+        with composite_resume_steps(
+            parent_op_id,
+            resume_parent.get("steps"),
+            earlier_sent=resume_parent.get("request_sent") is True,
+        ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)
@@ -3747,6 +3985,8 @@ async def _dispatch_resume_with_bound_context(
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
+            # Each step of the run also checks the person who asked.
+            checking_logins_for_steps(request.principal_sub, request.tenant_id),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

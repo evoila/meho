@@ -601,6 +601,11 @@ async def _refusal_rows(outcome: str) -> list[AuditLog]:
     return [row for row in await _status_rows() if row.payload.get("outcome") == outcome]
 
 
+async def _audit_row_ids() -> set[uuid.UUID]:
+    async with get_sessionmaker()() as session:
+        return set(await session.scalars(select(AuditLog.id)))
+
+
 async def _status_row_ids() -> set[uuid.UUID]:
     return {row.id for row in await _status_rows()}
 
@@ -640,17 +645,25 @@ async def test_a_request_of_someone_else_gets_no_row_in_its_own_history(
 ) -> None:
     _switch(monkeypatch, status=True)
     request_id = await _park()
+    request_row_id = uuid.uuid4()
+    await _set(request_id, request_audit_id=request_row_id)
     _Caller.operator = _REQUESTER.model_copy(update={"sub": "someone-else"})
     status_before = await _status_row_ids()
+    all_before = await _audit_row_ids()
 
     _answer(_call(client, request_id))
 
     row = await _the_one_new_status_row(status_before, _NOT_FOUND)
     assert row.operator_sub == "someone-else"
-    assert str(request_id) not in {
-        str(value) for value in row.payload.values() if value != str(request_id)
-    }
-    assert row.payload["asked_request_id"] == str(request_id)
+    assert row.parent_audit_id is None
+    async with get_sessionmaker()() as session:
+        written = (await session.scalars(select(AuditLog))).all()
+    assert [
+        r.id for r in written if r.id not in all_before and r.parent_audit_id == request_row_id
+    ] == []
+    assert [key for key, value in row.payload.items() if value == str(request_id)] == [
+        "asked_request_id"
+    ]
     assert "approval_request_id" not in row.payload
     assert await _result_rows() == 0
 

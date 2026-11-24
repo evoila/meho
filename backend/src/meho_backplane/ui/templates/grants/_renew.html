@@ -9,17 +9,17 @@
   <div class="grid gap-4 sm:grid-cols-2">
     <label class="block space-y-1">
       <span class="text-sm font-medium">Service principal sub</span>
-      <input type="text" name="principal_sub" value="{{ values.get('principal_sub', principal | default('')) }}" required maxlength="512" class="input input-bordered w-full font-mono" placeholder="Exact JWT sub" />
+      <input type="text" name="principal_sub" value="{{ values.get('principal_sub', principal | default('')) }}" required maxlength="512" class="input w-full font-mono" placeholder="Exact JWT sub" />
     </label>
     <label class="block space-y-1">
       <span class="text-sm font-medium">New expiry</span>
-      <input type="text" name="expires_at" value="{{ values.get('expires_at', '') }}" required class="input input-bordered w-full font-mono" placeholder="2026-10-01T12:00:00Z" />
+      <input type="text" name="expires_at" value="{{ values.get('expires_at', '') }}" required class="input w-full font-mono" placeholder="2026-10-01T12:00:00Z" />
       <span class="block text-xs text-subtle">A future ISO-8601 timestamp with its UTC offset, within {{ delete_grant_max_days | default(30) }} days.</span>
     </label>
   </div>
   <label class="block space-y-1">
     <span class="text-sm font-medium">Reason (optional)</span>
-    <textarea name="reason" class="textarea textarea-bordered w-full" maxlength="2048" rows="2" placeholder="Leave blank to keep each grant's recorded reason">{{ values.get('reason', '') }}</textarea>
+    <textarea name="reason" class="textarea w-full" maxlength="2048" rows="2" placeholder="Leave blank to keep each grant's recorded reason">{{ values.get('reason', '') }}</textarea>
   </label>
   <div>{{ button("Renew delete grants", variant="warning", type="submit") }}</div>
 </form>

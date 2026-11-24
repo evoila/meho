@@ -98,8 +98,8 @@
     >
       <input type="hidden" name="target" value="{{ target }}" />
 
-      <div class="form-control">
-        <span class="label-text mb-1 text-xs text-muted">Realm role names to grant</span>
+      <div>
+        <span class="mb-1 text-xs text-muted">Realm role names to grant</span>
         <template x-for="(role, idx) in roles" :key="idx">
           <div class="mb-1 flex gap-1">
             <input
@@ -107,7 +107,7 @@
               name="roles"
               maxlength="512"
               x-model="roles[idx]"
-              class="input input-bordered input-sm w-full font-mono"
+              class="input input-sm w-full font-mono"
               placeholder="realm-role-name"
               aria-label="Realm role name to grant"
               autocomplete="off"

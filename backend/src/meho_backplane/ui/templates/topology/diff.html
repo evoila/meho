@@ -43,38 +43,38 @@
      ``datetime-local`` inputs echo the active window so a re-submit refines
      it. The optional ``kind`` filter collapses behind an Alpine toggle. -#}
   <form method="get" action="/ui/topology/diff" class="flex flex-wrap items-end gap-2">
-    <label class="form-control">
-      <span class="label-text text-xs text-muted">From (ts1, exclusive)</span>
+    <label>
+      <span class="text-xs text-muted">From (ts1, exclusive)</span>
       <input
         type="datetime-local"
         name="ts1"
         value="{{ ts1 }}"
         required
-        class="input input-bordered input-sm font-mono"
+        class="input input-sm font-mono"
         aria-label="Diff window lower bound"
         data-test="diff-ts1"
       />
     </label>
-    <label class="form-control">
-      <span class="label-text text-xs text-muted">To (ts2, inclusive)</span>
+    <label>
+      <span class="text-xs text-muted">To (ts2, inclusive)</span>
       <input
         type="datetime-local"
         name="ts2"
         value="{{ ts2 }}"
         required
-        class="input input-bordered input-sm font-mono"
+        class="input input-sm font-mono"
         aria-label="Diff window upper bound"
         data-test="diff-ts2"
       />
     </label>
-    <label class="form-control" x-show="showKind" x-cloak>
-      <span class="label-text text-xs text-muted">Kind filter (optional)</span>
+    <label x-show="showKind" x-cloak>
+      <span class="text-xs text-muted">Kind filter (optional)</span>
       <input
         type="text"
         name="kind"
         value="{{ kind_filter }}"
         placeholder="e.g. vm&hellip;"
-        class="input input-bordered input-sm font-mono"
+        class="input input-sm font-mono"
         aria-label="Restrict the diff to one node kind"
         autocomplete="off"
       />

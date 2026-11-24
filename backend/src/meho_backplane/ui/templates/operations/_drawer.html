@@ -158,25 +158,25 @@
           >
             <input type="hidden" name="connector_id" value="{{ connector_id }}" />
             <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
-            <label class="form-control">
-              <span class="label-text mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
+            <label>
+              <span class="mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
               <input
                 type="text"
                 name="target"
                 maxlength="256"
-                class="input input-bordered input-sm w-full font-mono"
+                class="input input-sm w-full font-mono"
                 placeholder="e.g. prod-k8s"
                 aria-label="Target name"
                 autocomplete="off"
               />
             </label>
-            <label class="form-control">
-              <span class="label-text mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
+            <label>
+              <span class="mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
               <textarea
                 name="params"
                 rows="4"
                 maxlength="65536"
-                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                class="textarea textarea-sm w-full font-mono text-xs"
                 placeholder='{"path": "secret/data/app"}'
                 aria-label="Operation params as JSON"
               ></textarea>

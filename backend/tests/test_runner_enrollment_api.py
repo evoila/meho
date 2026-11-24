@@ -35,7 +35,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import KeycloakAdminError
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerPrincipal, Tenant
+from meho_backplane.db.models import AuditLog, RunnerPrincipal, Tenant
 from meho_backplane.main import app
 from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.runner.login import (
@@ -542,3 +542,102 @@ async def test_the_code_of_a_runner_revoked_before_enrolling_is_refused(
         )
     assert resp.status_code == 403
     kc2.set_client_signed_jwt_key.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# A refused enrollment with a right code writes one audit row
+# ---------------------------------------------------------------------------
+
+_REFUSED_PATH = "runner.principal.key_enrollment_refused"
+
+
+async def _refused_rows() -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == _REFUSED_PATH))
+        return list(result.scalars().all())
+
+
+def _assert_no_secret_in(row: AuditLog, code: str, jwk: dict[str, Any]) -> None:
+    secret = code.partition(".")[2]
+    for column in AuditLog.__table__.columns:
+        text = json.dumps(getattr(row, column.key), default=str)
+        assert secret not in text, column.key
+        for member in ("x", "y", "d"):
+            if member in jwk:
+                assert jwk[member] not in text, column.key
+
+
+async def _refusal_case(
+    client: TestClient, tmp_path: Any, case: str
+) -> tuple[int, str, str, dict[str, Any], str | None]:
+    """Make one refusal; return ``(status, runner, code, offered_key, key_id)``."""
+    name = f"site-audit-{case}"
+    code = (await _register(client, name))["enrollment_code"]
+    good = _jwk(tmp_path / "good")
+    factory, _kc = _kc_mock()
+    with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory):
+        if case == "used_by_another_key":
+            first = client.post(
+                _ENROLL, json={"enrollment_code": code, "public_key": good, "runner_name": name}
+            )
+            assert first.status_code == 200, first.text
+            offered: dict[str, Any] = _jwk(tmp_path / "other")
+            body = {"enrollment_code": code, "public_key": offered, "runner_name": name}
+        elif case == "expired":
+            await _expire_code(name)
+            offered = good
+            body = {"enrollment_code": code, "public_key": offered, "runner_name": name}
+        elif case == "other_runner":
+            offered = good
+            body = {"enrollment_code": code, "public_key": offered, "runner_name": "site-else"}
+        else:
+            offered = {"kty": "EC", "crv": "P-384", "x": "AAAA", "y": "BBBB"}
+            body = {"enrollment_code": code, "public_key": offered, "runner_name": name}
+        resp = client.post(_ENROLL, json=body)
+    key_id = None if case == "bad_key" else ec_key_id(offered)
+    return resp.status_code, name, code, offered, key_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "status", "reason"),
+    [
+        ("other_runner", 409, "runner_name_mismatch"),
+        ("bad_key", 422, "public_key_invalid"),
+        ("expired", 403, "code_expired"),
+        ("used_by_another_key", 403, "code_used_by_another_key"),
+    ],
+)
+async def test_a_refused_enrollment_with_a_right_code_writes_one_audit_row(
+    client: TestClient, tmp_path: Any, case: str, status: int, reason: str
+) -> None:
+    before = len(await _refused_rows())
+    got, name, code, offered, key_id = await _refusal_case(client, tmp_path, case)
+    assert got == status
+    rows = await _refused_rows()
+    assert len(rows) == before + 1
+    row = next(r for r in rows if r.payload["runner"] == name)
+    assert row.tenant_id == _TENANT
+    assert row.status_code == status
+    assert row.payload == {"runner": name, "reason": reason, "key_id": key_id}
+    _assert_no_secret_in(row, code, offered)
+
+
+@pytest.mark.asyncio
+async def test_a_code_that_matches_no_runner_writes_no_audit_row(
+    client: TestClient, tmp_path: Any
+) -> None:
+    code = (await _register(client, "site-audit-none"))["enrollment_code"]
+    before = len(await _refused_rows())
+    wrong = code[:-4] + ("AAAA" if not code.endswith("AAAA") else "BBBB")
+    for bad in (wrong, f"{uuid.uuid4().hex}.nothing", "not-a-code"):
+        resp = client.post(
+            _ENROLL,
+            json={
+                "enrollment_code": bad,
+                "public_key": _jwk(tmp_path),
+                "runner_name": "site-audit-none",
+            },
+        )
+        assert resp.status_code == 403
+    assert len(await _refused_rows()) == before

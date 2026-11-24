@@ -67,19 +67,33 @@ SIGNING_ALG: Final[str] = "ES256"
 _CODE_MAX_LENGTH: Final[int] = 256
 
 _ENROLL_AUDIT_PATH: Final[str] = "runner.principal.key_enrolled"
+_REFUSED_AUDIT_PATH: Final[str] = "runner.principal.key_enrollment_refused"
 _PRIVATE_JWK_MEMBERS: Final[frozenset[str]] = frozenset({"d", "p", "q", "dp", "dq", "qi", "k"})
 
 
 class EnrollmentCodeInvalidError(Exception):
-    """The code is wrong, already used, expired, or its runner is revoked."""
+    """The code is wrong, already used, expired, or its runner is revoked.
+
+    ``reason`` is set when the code matched a runner and was still refused
+    (``code_expired`` or ``code_used_by_another_key``). It is ``None`` when the
+    code matches no runner.
+    """
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason
+        super().__init__(reason or "enrollment code invalid")
 
 
 class EnrollmentRunnerMismatchError(Exception):
     """The code is good, but it belongs to a runner with another name."""
 
+    reason: Final[str] = "runner_name_mismatch"
+
 
 class EnrollmentKeyInvalidError(ValueError):
     """The public key is not a usable P-256 public key."""
+
+    reason: Final[str] = "public_key_invalid"
 
 
 @dataclass(frozen=True)
@@ -184,7 +198,7 @@ async def _row_of_code(session: AsyncSession, code: str) -> RunnerPrincipal:
 def _check_not_expired(row: RunnerPrincipal) -> None:
     expires = row.enrollment_code_expires_at
     if expires is None or _as_utc(expires) <= datetime.now(UTC):
-        raise EnrollmentCodeInvalidError
+        raise EnrollmentCodeInvalidError("code_expired")
 
 
 def _claimed_key(row: RunnerPrincipal, public_jwk: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -192,9 +206,9 @@ def _claimed_key(row: RunnerPrincipal, public_jwk: dict[str, Any]) -> tuple[dict
     try:
         jwks, key_id = _public_jwks(public_jwk)
     except EnrollmentKeyInvalidError:
-        raise EnrollmentCodeInvalidError from None
+        raise EnrollmentCodeInvalidError("code_used_by_another_key") from None
     if key_id != row.enrolled_key_id:
-        raise EnrollmentCodeInvalidError
+        raise EnrollmentCodeInvalidError("code_used_by_another_key")
     return jwks, key_id
 
 
@@ -235,6 +249,75 @@ async def _store_key(session: AsyncSession, row: RunnerPrincipal, jwks: dict[str
     await session.commit()
 
 
+def _offered_key_id(public_jwk: dict[str, Any]) -> str | None:
+    """The id of the offered key, or ``None`` when the key cannot be read."""
+    try:
+        return _public_jwks(public_jwk)[1]
+    except EnrollmentKeyInvalidError:
+        return None
+
+
+async def _audit_refusal(
+    row: RunnerPrincipal, status_code: int, reason: str, public_jwk: dict[str, Any]
+) -> None:
+    """One audit row for a refused enrollment whose code matched *row*.
+
+    The row holds the runner's name, the answer's status, the reason and the
+    id of the offered key. It never holds the code or the key.
+    """
+    await write_internal_audit_row(
+        event_class=AuditEventClass.SECURITY_EVENT,
+        operator_sub=row.keycloak_client_id,
+        actor_sub=row.keycloak_client_id,
+        tenant_id=row.tenant_id,
+        method=INTERNAL_METHOD,
+        path=_REFUSED_AUDIT_PATH,
+        status_code=status_code,
+        duration_ms=0.0,
+        payload={"runner": row.name, "reason": reason, "key_id": _offered_key_id(public_jwk)},
+    )
+
+
+_Refusal = EnrollmentCodeInvalidError | EnrollmentRunnerMismatchError | EnrollmentKeyInvalidError
+
+_REFUSAL_STATUS: Final[dict[type[Exception], int]] = {
+    EnrollmentCodeInvalidError: 403,
+    EnrollmentRunnerMismatchError: 409,
+    EnrollmentKeyInvalidError: 422,
+}
+
+
+async def _enroll_matched(
+    session: AsyncSession,
+    row: RunnerPrincipal,
+    code: str,
+    public_jwk: dict[str, Any],
+    runner_name: str,
+) -> tuple[RunnerPrincipal, str, bool]:
+    """Enroll *public_jwk* for *row*, whose code matched. The lock is held.
+
+    Returns ``(row, key_id, repeated)``.
+    """
+    if row.enrolled_key_id is None:
+        # A new key: the code must not have ended. Only then do the name
+        # and the key count, so an ended code always gets the same refusal.
+        _check_not_expired(row)
+        _check_runner_name(row, runner_name)
+        jwks, key_id = _public_jwks(public_jwk)
+        row = await _claim_key(session, row, code, key_id)
+    else:
+        # A used code answers only its own key; any other key gets the
+        # same refusal as a wrong code, before the name is looked at.
+        jwks, key_id = _claimed_key(row, public_jwk)
+        _check_runner_name(row, runner_name)
+    if row.enrolled_key_id != key_id:
+        raise EnrollmentCodeInvalidError("code_used_by_another_key")
+    repeated = row.key_enrolled_at is not None
+    if not repeated:
+        await _store_key(session, row, jwks)
+    return row, key_id, repeated
+
+
 async def enroll_runner_key(
     code: str, public_jwk: dict[str, Any], runner_name: str
 ) -> RunnerEnrollment:
@@ -248,6 +331,10 @@ async def enroll_runner_key(
     An ended code that has no key yet, and a used code with another key, get
     the code refusal before the name or the key is checked.
 
+    When the code matches a runner and the enrollment is still refused, one
+    audit row is written in that runner's tenant. A code that matches no
+    runner writes no audit row.
+
     Raises :class:`EnrollmentCodeInvalidError` for a bad code or for a used
     code with another key, :class:`EnrollmentRunnerMismatchError` when the code
     is for another runner, :class:`EnrollmentKeyInvalidError` for a bad key
@@ -256,30 +343,30 @@ async def enroll_runner_key(
     Keycloak cannot store the key (the runner can retry with the same key).
     """
     log = structlog.get_logger()
+    refusal: _Refusal | None = None
     async with get_sessionmaker()() as session:
         # Check the code first, so only a caller with a good code takes the
         # lock. Then read the row again under the lock: a revoke or another
         # enrollment may have changed it.
-        row = await _row_of_code(session, code)
-        await take_runner_lock(session, row.id)
-        row = await _row_of_code(session, code)
-        if row.enrolled_key_id is None:
-            # A new key: the code must not have ended. Only then do the name
-            # and the key count, so an ended code always gets the same refusal.
-            _check_not_expired(row)
-            _check_runner_name(row, runner_name)
-            jwks, key_id = _public_jwks(public_jwk)
-            row = await _claim_key(session, row, code, key_id)
-        else:
-            # A used code answers only its own key; any other key gets the
-            # same refusal as a wrong code, before the name is looked at.
-            jwks, key_id = _claimed_key(row, public_jwk)
-            _check_runner_name(row, runner_name)
-        if row.enrolled_key_id != key_id:
-            raise EnrollmentCodeInvalidError
-        repeated = row.key_enrolled_at is not None
-        if not repeated:
-            await _store_key(session, row, jwks)
+        matched = await _row_of_code(session, code)
+        await take_runner_lock(session, matched.id)
+        matched = await _row_of_code(session, code)
+        try:
+            row, key_id, repeated = await _enroll_matched(
+                session, matched, code, public_jwk, runner_name
+            )
+        except (
+            EnrollmentCodeInvalidError,
+            EnrollmentRunnerMismatchError,
+            EnrollmentKeyInvalidError,
+        ) as exc:
+            refusal = exc
+    if refusal is not None:
+        if refusal.reason is not None:
+            await _audit_refusal(
+                matched, _REFUSAL_STATUS[type(refusal)], refusal.reason, public_jwk
+            )
+        raise refusal
     await write_internal_audit_row(
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator_sub=row.keycloak_client_id,

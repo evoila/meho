@@ -50,7 +50,7 @@ A caller (``preview_operation``, ``meho_approvals_get``,
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak.ops_write_grant import (
     GRANT_OPS,
@@ -81,7 +81,6 @@ from meho_backplane.operations.grant_approval import (
 from meho_backplane.operations.grant_cover_check import register_grant_cover_check
 
 if TYPE_CHECKING:
-    from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
@@ -161,7 +160,7 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
             new = op_id == "keycloak.realm.create"
             if new and not given:
                 # The handler makes the managed realm when the call names none.
-                given = [resolve_realm_config(cast("KeycloakTargetLike", ctx.target)).managed_realm]
+                given = [resolve_realm_config(ctx.target).managed_realm]
             if given:
                 for name in given:
                     if await named_realm_is_protected(ctx, name, new=new):

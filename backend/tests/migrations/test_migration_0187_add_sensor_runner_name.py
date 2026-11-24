@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0185_add_sensor_runner_name``.
+"""Tests for Alembic migration ``0187_add_sensor_runner_name``.
 
 The migration adds the ``sensor.runner_name`` column and an index on
 ``runner_check_results.received_at``. The tests check that ``upgrade`` adds
@@ -25,8 +25,8 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import Sensor
 from meho_backplane.settings import get_settings
 
-_REVISION = "0185"
-_DOWN_REVISION = "0184"
+_REVISION = "0187"
+_DOWN_REVISION = "0186"
 _TABLE = "sensor"
 _RESULTS_TABLE = "runner_check_results"
 _INDEX = "runner_check_results_received_at_idx"
@@ -38,7 +38,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0185.db"
+    db_path = tmp_path / "migration_0187.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

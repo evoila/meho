@@ -142,6 +142,20 @@ def _runs_of(client: TestClient, request_id: uuid.UUID) -> list[OperationRun]:
     return _in_loop(client, _read)
 
 
+def _runs_until_ended(client: TestClient, request_id: uuid.UUID) -> list[OperationRun]:
+    """Read the runs of *request_id* until one exists and none is still going (10 seconds)."""
+    deadline = time.monotonic() + 10
+    while True:
+        runs = _runs_of(client, request_id)
+        ended = bool(runs) and all(
+            run.status not in (OperationRunStatus.PENDING.value, OperationRunStatus.RUNNING.value)
+            for run in runs
+        )
+        if ended or time.monotonic() > deadline:
+            return runs
+        time.sleep(0.05)
+
+
 def _approve(client: TestClient, csrf: str, request_id: uuid.UUID) -> tuple[str, float]:
     started = time.monotonic()
     response = client.post(
@@ -256,11 +270,10 @@ def test_closing_the_dialog_does_not_stop_the_run() -> None:
     ):
         _approve(client, csrf, rid)
         operation.release.set()
-        deadline = time.monotonic() + 10
-        while _stored(client, rid).resume_result is None and time.monotonic() < deadline:
-            time.sleep(0.05)
+        # The result is stored by the operation itself, a moment before the
+        # run row is marked as ended. Wait for the row that the test reads.
+        runs = _runs_until_ended(client, rid)
         stored = _stored(client, rid)
-        runs = _runs_of(client, rid)
 
     assert stored.resume_result is not None
     assert stored.resume_result["status"] == "ok"

@@ -814,9 +814,9 @@ def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
     """The ``/ui/kb/<slug>`` detail page themes code blocks for DaisyUI 5 (#2452).
 
     Regression guard for the dead-variable bug: the code-block ``<style>``
-    block must (a) carry both a default/dark-scoped ``.kb-code`` pygments
-    rule set AND a ``[data-theme="meho-light"]``-scoped override so token
-    colours follow the active theme, (b) pin the surface background to the
+    block must (a) carry a light ``.kb-code`` pygments rule set AND a dark
+    set scoped to ``evoila-dark`` / dark ``evoila-system`` so token colours
+    follow the active theme, (b) pin the surface background to the
     live ``var(--color-base-200)`` token, and (c) contain none of the dead
     DaisyUI 4 ``--b2`` / ``--wa`` variables that forced a light background
     (and dropped the query-term highlight) in both themes.
@@ -847,13 +847,14 @@ def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
     assert match is not None, "kb/detail.html rendered no inline <style> block"
     style_block = match.group(0)
 
-    # (a) one pygments token rule set, scoped to .kb-code. The console has
-    #     a single light theme, so a second theme-scoped set would ship on
-    #     every KB page and never be selected.
+    # (a) a light token set on .kb-code, and a dark one scoped like the
+    #     brand's dark values (evoila-dark, and evoila-system inside the
+    #     dark media query). With only the light set, function names were
+    #     deep blue on the dark block. Colours: tests/test_ui_code_theme.py.
     assert re.search(r"(?m)^\.kb-code \.\w", style_block), ".kb-code pygments rule set missing"
-    assert "data-theme" not in style_block, (
-        "a theme-scoped pygments override is back; there is only one theme"
-    )
+    assert '[data-theme="evoila-dark"] .kb-code .nf' in style_block
+    assert '[data-theme="evoila-system"] .kb-code .nf' in style_block
+    assert "@media (prefers-color-scheme: dark)" in style_block
 
     # (b) surface background follows the active theme via a live token.
     assert "background: var(--color-base-200)" in style_block

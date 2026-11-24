@@ -73,7 +73,7 @@
         <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-run-approval-note>{{ extras.get("approval_note") }}</p>
       {%- endif %}
       {% if approval_id %}
-        <p class="mt-1 text-xs opacity-70">
+        <p class="mt-1 text-xs text-muted">
           Request id <code data-approval-request-id>{{ approval_id }}</code>
         </p>
         {% if chain %}
@@ -146,7 +146,7 @@
     <div class="flex items-center gap-2">
       {{ badge("executed", variant="success") }}
       {% if envelope.get("duration_ms") is not none %}
-        <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
+        <span class="text-xs text-subtle">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
       {% endif %}
     </div>
 
@@ -163,18 +163,18 @@
           </p>
           <dl class="mt-2 space-y-1 text-xs">
             <div class="flex gap-2">
-              <dt class="opacity-60">Handle id</dt>
+              <dt class="text-subtle">Handle id</dt>
               <dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd>
             </div>
             {% if handle.total_rows is not none %}
               <div class="flex gap-2">
-                <dt class="opacity-60">Rows</dt>
+                <dt class="text-subtle">Rows</dt>
                 <dd data-handle-total-rows>{{ handle.total_rows }}</dd>
               </div>
             {% endif %}
             {% if handle.ttl_seconds is not none %}
               <div class="flex gap-2">
-                <dt class="opacity-60">TTL</dt>
+                <dt class="text-subtle">TTL</dt>
                 <dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd>
               </div>
             {% endif %}
@@ -190,7 +190,7 @@
       <div>
         <div class="meho-overline mb-1">Result</div>
         {% if envelope.get("result") is none %}
-          <p class="text-xs opacity-60">No result payload (the operation returned no body).</p>
+          <p class="text-xs text-subtle">No result payload (the operation returned no body).</p>
         {% else %}
           <pre class="max-h-72 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-run-result="inline"><code>{{ envelope.result | tojson(indent=2) }}</code></pre>
         {% endif %}

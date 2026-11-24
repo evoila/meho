@@ -36,7 +36,7 @@
   {% endif %}
   {% if near_misses %}
     <div class="text-xs" data-test="refresh-near-misses">
-      <span class="opacity-70">Did you mean:</span>
+      <span class="text-muted">Did you mean:</span>
       <ul class="mt-1 flex flex-wrap gap-1">
         {% for miss in near_misses %}
           <li>{{ badge(miss.name, variant="outline", class="font-mono") }}</li>

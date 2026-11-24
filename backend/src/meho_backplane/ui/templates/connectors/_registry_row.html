@@ -43,7 +43,7 @@
     <td>
       <div class="flex flex-col">
         <span>{{ row.product }}</span>
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           {{ row.impl_id }} &middot; {{ row.version }}
         </span>
       </div>
@@ -82,7 +82,7 @@
       <div class="flex flex-col gap-0.5">
         <span title="Groups by review status (staged / enabled / disabled)">
           groups: {{ row.group_count }}
-          <span class="opacity-60">
+          <span class="text-subtle">
             ({{ row.staged_group_count }}s / {{ row.enabled_group_count }}e /
             {{ row.disabled_group_count }}d)
           </span>

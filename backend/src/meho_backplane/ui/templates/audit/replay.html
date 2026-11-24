@@ -43,7 +43,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Session replay</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Chronological parent/child lineage of agent session
         <code class="font-mono break-all">{{ session_id }}</code> &mdash; a
         <span class="font-mono">tenant_admin</span> forensic view of one
@@ -68,7 +68,7 @@
           <span class="badge badge-sm {{ 'badge-warning' if loose_row_count else 'badge-ghost' }}">
             {{ loose_row_count }} loose row{{ '' if loose_row_count == 1 else 's' }}
           </span>
-          <span class="opacity-70">
+          <span class="text-muted">
             {% if loose_row_count %}
               Rows in this session point to a parent row that does not exist.
               A multi-step operation saves its own row last. Either it is
@@ -86,8 +86,8 @@
       {% else %}
         <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
           <div class="card-body items-center py-10 text-center">
-            <p class="text-base opacity-60">No rows recorded for this session</p>
-            <p class="text-sm opacity-40">
+            <p class="text-base text-subtle">No rows recorded for this session</p>
+            <p class="text-sm text-subtle">
               The session id matches no audit rows in this tenant &mdash; it may
               have aged out of retention, or never existed (the boundary is
               opaque).

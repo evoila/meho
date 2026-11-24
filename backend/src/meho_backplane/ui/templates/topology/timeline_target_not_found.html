@@ -24,7 +24,7 @@
         No target matched <span class="font-mono">{{ target_filter }}</span> in this tenant.
       </p>
       {% if near_misses %}
-        <p class="mt-1 opacity-80">Did you mean:</p>
+        <p class="mt-1 text-muted">Did you mean:</p>
         <div class="mt-1 flex flex-wrap gap-2" data-test="timeline-near-misses">
           {% for name in near_misses %}
             <a

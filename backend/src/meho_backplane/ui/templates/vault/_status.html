@@ -33,7 +33,7 @@
 
   {#- ---- Seal status card (vault.sys.seal_status) ---------------------- -#}
   <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="seal">
-    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
       {{ icon("shield-check", class="size-4 opacity-70") }}
       Seal status
     </h3>
@@ -56,16 +56,16 @@
       </div>
       <dl class="mt-3 space-y-1 text-xs">
         {% if s.get("type") %}
-          <div class="flex gap-2"><dt class="opacity-60">Seal type</dt><dd class="font-mono" data-vault-seal-type>{{ s.get("type") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Seal type</dt><dd class="font-mono" data-vault-seal-type>{{ s.get("type") }}</dd></div>
         {% endif %}
         {% if s.get("t") is not none and s.get("n") is not none %}
-          <div class="flex gap-2"><dt class="opacity-60">Threshold</dt><dd class="font-mono" data-vault-seal-threshold>{{ s.get("t") }} of {{ s.get("n") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Threshold</dt><dd class="font-mono" data-vault-seal-threshold>{{ s.get("t") }} of {{ s.get("n") }}</dd></div>
         {% endif %}
         {% if s.get("progress") is not none %}
-          <div class="flex gap-2"><dt class="opacity-60">Unseal progress</dt><dd class="font-mono" data-vault-seal-progress>{{ s.get("progress") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Unseal progress</dt><dd class="font-mono" data-vault-seal-progress>{{ s.get("progress") }}</dd></div>
         {% endif %}
         {% if s.get("version") %}
-          <div class="flex gap-2"><dt class="opacity-60">Version</dt><dd class="font-mono" data-vault-seal-version>{{ s.get("version") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Version</dt><dd class="font-mono" data-vault-seal-version>{{ s.get("version") }}</dd></div>
         {% endif %}
       </dl>
     {% endif %}
@@ -73,7 +73,7 @@
 
   {#- ---- Health card (vault.sys.health) -------------------------------- -#}
   <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="health">
-    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
       {{ icon("activity", class="size-4 opacity-70") }}
       Health
     </h3>
@@ -90,16 +90,16 @@
       </div>
       <dl class="mt-3 space-y-1 text-xs">
         {% if h.get("detail") %}
-          <div class="flex gap-2"><dt class="opacity-60">Detail</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-detail>{{ h.get("detail") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Detail</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-detail>{{ h.get("detail") }}</dd></div>
         {% endif %}
         {% if h.get("sealed") is not none %}
-          <div class="flex gap-2"><dt class="opacity-60">Sealed</dt><dd class="font-mono" data-vault-health-sealed>{{ "yes" if h.get("sealed") else "no" }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Sealed</dt><dd class="font-mono" data-vault-health-sealed>{{ "yes" if h.get("sealed") else "no" }}</dd></div>
         {% endif %}
         {% if h.get("version") %}
-          <div class="flex gap-2"><dt class="opacity-60">Version</dt><dd class="font-mono" data-vault-health-version>{{ h.get("version") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Version</dt><dd class="font-mono" data-vault-health-version>{{ h.get("version") }}</dd></div>
         {% endif %}
         {% if h.get("cluster_name") %}
-          <div class="flex gap-2"><dt class="opacity-60">Cluster</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-cluster>{{ h.get("cluster_name") }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Cluster</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-cluster>{{ h.get("cluster_name") }}</dd></div>
         {% endif %}
       </dl>
     {% endif %}
@@ -107,7 +107,7 @@
 
   {#- ---- Mounts card (vault.sys.mounts.list) --------------------------- -#}
   <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="mounts">
-    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold text-muted">
       {{ icon("package", class="size-4 opacity-70") }}
       Secret mounts
     </h3>
@@ -125,12 +125,12 @@
             <h4 class="text-sm font-semibold">Large mount set stored out-of-band</h4>
             <p class="text-xs">The mount list spilled to the read-back store; the summary is below.</p>
             <dl class="mt-2 space-y-1 text-xs">
-              <div class="flex gap-2"><dt class="opacity-60">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ m_handle.handle_id }}</dd></div>
+              <div class="flex gap-2"><dt class="text-subtle">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ m_handle.handle_id }}</dd></div>
               {% if m_handle.total_rows is not none %}
-                <div class="flex gap-2"><dt class="opacity-60">Mounts</dt><dd data-handle-total-rows>{{ m_handle.total_rows }}</dd></div>
+                <div class="flex gap-2"><dt class="text-subtle">Mounts</dt><dd data-handle-total-rows>{{ m_handle.total_rows }}</dd></div>
               {% endif %}
               {% if m_handle.ttl_seconds is not none %}
-                <div class="flex gap-2"><dt class="opacity-60">TTL</dt><dd data-handle-ttl>{{ m_handle.ttl_seconds }}s</dd></div>
+                <div class="flex gap-2"><dt class="text-subtle">TTL</dt><dd data-handle-ttl>{{ m_handle.ttl_seconds }}s</dd></div>
               {% endif %}
             </dl>
           </div>
@@ -151,7 +151,7 @@
             {% endfor %}
           </ul>
         {% else %}
-          <div class="rounded-box border border-base-300 px-3 py-6 text-center text-sm opacity-60" data-vault-mounts="empty">
+          <div class="rounded-box border border-base-300 px-3 py-6 text-center text-sm text-subtle" data-vault-mounts="empty">
             No secret mounts reported.
           </div>
         {% endif %}

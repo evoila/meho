@@ -54,7 +54,7 @@
       {{ icon("ban", class="size-5 shrink-0") }}
       <div>
         <h4 class="text-sm font-semibold">Ingest job lost</h4>
-        <p class="text-xs opacity-80">
+        <p class="text-xs text-muted">
           This job is no longer tracked &mdash; the backend pod may have
           restarted (ingest jobs are held in memory and do not survive a
           restart). Re-check the
@@ -83,7 +83,7 @@
       {{ icon("check", class="size-5 shrink-0") }}
       <div>
         <h4 class="text-sm font-semibold">Ingest succeeded</h4>
-        <p class="text-xs opacity-80">
+        <p class="text-xs text-muted">
           <span class="font-mono">{{ job.product }}/{{ job.version }}/{{ job.impl_id }}</span>
           ingested. Review its grouped operations and enable it for dispatch
           from the

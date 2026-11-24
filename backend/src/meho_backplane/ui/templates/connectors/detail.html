@@ -33,7 +33,7 @@
      so an operator clicking into a row sees they're inspecting a
      **target** (deployed instance), not a **connector** (typed class).
      G0.15-T10 #1218 / Option B in the issue body. #}
-  <nav aria-label="Breadcrumb" class="text-xs opacity-70">
+  <nav aria-label="Breadcrumb" class="text-xs text-muted">
     <a href="/ui/connectors" class="link link-hover">Targets</a>
     <span aria-hidden="true">/</span>
     <span class="font-mono">{{ target.name }}</span>
@@ -42,7 +42,7 @@
   <header class="flex flex-wrap items-baseline justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold font-mono">{{ target.name }}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         {{ badge(target.product, variant="outline") }}
         <span class="font-mono">{{ target.host }}</span>
         {% if target.vpn_required %}<span aria-label="VPN required" title="VPN required">&#x1F512;</span>{% endif %}
@@ -99,50 +99,50 @@
               ``%Y-%m-%d %H:%M UTC`` with the ISO value kept in the
               ``<time datetime>`` attribute. Timestamps are tz-aware UTC. -#}
           <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-            <dt class="opacity-60">Name</dt>
+            <dt class="text-subtle">Name</dt>
             <dd class="font-mono">{{ target.name }}</dd>
-            <dt class="opacity-60">Aliases</dt>
+            <dt class="text-subtle">Aliases</dt>
             <dd>
               {% if target.aliases %}
                 {{ target.aliases | join(", ") }}
               {% else %}
-                <span class="opacity-50">—</span>
+                <span class="text-subtle">—</span>
               {% endif %}
             </dd>
-            <dt class="opacity-60">Product</dt>
+            <dt class="text-subtle">Product</dt>
             <dd>{{ target.product }}</dd>
-            <dt class="opacity-60">Host</dt>
+            <dt class="text-subtle">Host</dt>
             <dd class="font-mono">{{ target.host }}</dd>
-            <dt class="opacity-60">Port</dt>
+            <dt class="text-subtle">Port</dt>
             <dd>{{ target.port if target.port is not none else "—" }}</dd>
-            <dt class="opacity-60">FQDN</dt>
+            <dt class="text-subtle">FQDN</dt>
             <dd>{{ target.fqdn or "—" }}</dd>
-            <dt class="opacity-60">Auth model</dt>
+            <dt class="text-subtle">Auth model</dt>
             <dd>{{ badge(target.auth_model, variant="quiet", size="xs") }}</dd>
-            <dt class="opacity-60">VPN required</dt>
+            <dt class="text-subtle">VPN required</dt>
             <dd>{{ "yes" if target.vpn_required else "no" }}</dd>
-            <dt class="opacity-60">Secret ref</dt>
+            <dt class="text-subtle">Secret ref</dt>
             <dd class="font-mono text-xs">{{ target.secret_ref or "—" }}</dd>
-            <dt class="opacity-60">Preferred impl</dt>
+            <dt class="text-subtle">Preferred impl</dt>
             <dd class="font-mono text-xs">{{ target.preferred_impl_id or "—" }}</dd>
-            <dt class="opacity-60">Created</dt>
+            <dt class="text-subtle">Created</dt>
             <dd class="text-xs">
               <time datetime="{{ target.created_at.isoformat() }}">{{ target.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
             </dd>
-            <dt class="opacity-60">Updated</dt>
+            <dt class="text-subtle">Updated</dt>
             <dd class="text-xs">
               <time datetime="{{ target.updated_at.isoformat() }}">{{ target.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
             </dd>
           </dl>
           {% if target.extras %}
             <details class="mt-2">
-              <summary class="cursor-pointer text-xs opacity-70">Raw extras JSON</summary>
+              <summary class="cursor-pointer text-xs text-muted">Raw extras JSON</summary>
               <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ target.extras | tojson(indent=2) }}</pre>
             </details>
           {% endif %}
           {% if target.notes %}
             <div class="mt-2">
-              <h3 class="text-xs font-semibold uppercase opacity-60">Notes</h3>
+              <h3 class="text-xs font-semibold uppercase text-subtle">Notes</h3>
               <p class="text-sm whitespace-pre-line">{{ target.notes }}</p>
             </div>
           {% endif %}

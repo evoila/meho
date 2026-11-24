@@ -129,13 +129,13 @@
             placeholder="Required for user-target and target scopes"
             aria-describedby="memory-create-target-name-hint"
           />
-          <span id="memory-create-target-name-hint" class="text-xs opacity-60">
+          <span id="memory-create-target-name-hint" class="text-xs text-subtle">
             The connector / target this memory binds to.
           </span>
         </label>
 
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Slug <span class="opacity-60 font-normal">(optional)</span></span>
+          <span class="text-sm font-medium">Slug <span class="text-subtle font-normal">(optional)</span></span>
           <input
             type="text"
             name="slug"
@@ -145,7 +145,7 @@
             pattern="[A-Za-z0-9_\-\.]*"
             aria-describedby="memory-create-slug-hint"
           />
-          <span id="memory-create-slug-hint" class="text-xs opacity-60">
+          <span id="memory-create-slug-hint" class="text-xs text-subtle">
             Letters, digits, hyphen, underscore, dot. Leave blank for a generated slug.
           </span>
         </label>
@@ -168,7 +168,7 @@
 
 Markdown body. Bare URLs (https://example.com) are linkified."
             ></textarea>
-            <span class="text-xs opacity-60">
+            <span class="text-xs text-subtle">
               Up to {{ body_max_length }} characters. Server-side preview updates as you type.
             </span>
           </label>
@@ -177,7 +177,7 @@ Markdown body. Bare URLs (https://example.com) are linkified."
             <span class="text-sm font-medium">Preview</span>
             <article
               id="memory-create-preview"
-              class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4 opacity-50"
+              class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4 text-subtle"
               aria-label="Memory body preview"
             >
               Preview will render here as you type.
@@ -187,20 +187,20 @@ Markdown body. Bare URLs (https://example.com) are linkified."
 
         <div class="grid gap-3 md:grid-cols-2">
           <label class="flex flex-col gap-1">
-            <span class="text-sm font-medium">Expires at <span class="opacity-60 font-normal">(optional)</span></span>
+            <span class="text-sm font-medium">Expires at <span class="text-subtle font-normal">(optional)</span></span>
             <input
               type="datetime-local"
               name="expires_at"
               class="input input-sm w-full"
               aria-describedby="memory-create-expires-hint"
             />
-            <span id="memory-create-expires-hint" class="text-xs opacity-60">
+            <span id="memory-create-expires-hint" class="text-xs text-subtle">
               Leave blank to use the scope's default TTL.
             </span>
           </label>
 
           <label class="flex flex-col gap-1">
-            <span class="text-sm font-medium">Tags <span class="opacity-60 font-normal">(comma-separated)</span></span>
+            <span class="text-sm font-medium">Tags <span class="text-subtle font-normal">(comma-separated)</span></span>
             <input
               type="text"
               name="tags"
@@ -209,7 +209,7 @@ Markdown body. Bare URLs (https://example.com) are linkified."
               placeholder="wine, preference, runbook"
               aria-describedby="memory-create-tags-hint"
             />
-            <span id="memory-create-tags-hint" class="text-xs opacity-60">
+            <span id="memory-create-tags-hint" class="text-xs text-subtle">
               Stored as a JSON list on the row; useful for the tag filter.
             </span>
           </label>

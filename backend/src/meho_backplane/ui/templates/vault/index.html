@@ -35,7 +35,7 @@
         Vault
         {% include "_maturity_badge.html" %}
       </h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Browse the KV secret tree within your tenant scope: list keys,
         read a secret's latest value, and view its version history.
         Read-only.
@@ -80,7 +80,7 @@
       <input type="hidden" name="connector_id" value="{{ connector_id }}" data-vault-connector-id />
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Target</span>
+        <span class="label-text mb-1 text-xs text-muted">Target</span>
         <input
           type="text"
           name="target"
@@ -93,7 +93,7 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+        <span class="label-text mb-1 text-xs text-muted">Mount</span>
         <input
           type="text"
           name="mount"
@@ -105,7 +105,7 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Path</span>
+        <span class="label-text mb-1 text-xs text-muted">Path</span>
         <input
           type="text"
           name="path"
@@ -166,7 +166,7 @@
         it carries no path inputs. The GET confirm routes are CSRF-free reads;
         only the confirm POST inside each modal is CSRF-gated. -#}
     <section aria-label="Write actions" class="space-y-2" data-vault-writes>
-      <h2 class="text-sm font-semibold opacity-80">Write</h2>
+      <h2 class="text-sm font-semibold text-muted">Write</h2>
       <div class="flex flex-wrap gap-2">
         <button
           type="button"
@@ -204,7 +204,7 @@
           Move secret
         </button>
       </div>
-      <p class="text-xs opacity-60">
+      <p class="text-xs text-subtle">
         Every write requires approval: confirming parks a request for a
         reviewer in <a href="/ui/approvals" class="link">Approvals</a> rather
         than executing immediately.
@@ -216,18 +216,18 @@
         separate so reading a secret does not wipe the key list. -#}
     <div class="grid gap-5 lg:grid-cols-2">
       <section aria-label="Keys" class="space-y-2">
-        <h2 class="text-sm font-semibold opacity-80">Keys</h2>
+        <h2 class="text-sm font-semibold text-muted">Keys</h2>
         <div id="vault-keys-region">
-          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
             List a path to see its child keys.
           </div>
         </div>
       </section>
 
       <section aria-label="Secret" class="space-y-2">
-        <h2 class="text-sm font-semibold opacity-80">Secret</h2>
+        <h2 class="text-sm font-semibold text-muted">Secret</h2>
         <div id="vault-secret-region">
-          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
             Read a secret to reveal its values.
           </div>
         </div>
@@ -235,9 +235,9 @@
     </div>
 
     <section aria-label="Version history" class="space-y-2">
-      <h2 class="text-sm font-semibold opacity-80">Version history</h2>
+      <h2 class="text-sm font-semibold text-muted">Version history</h2>
       <div id="vault-versions-region">
-        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
           Inspect a secret's version history.
         </div>
       </div>

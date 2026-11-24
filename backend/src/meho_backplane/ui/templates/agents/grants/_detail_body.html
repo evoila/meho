@@ -63,41 +63,41 @@
 
       <dl class="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Principal</dt>
+          <dt class="font-medium text-muted">Principal</dt>
           <dd class="flex flex-wrap items-baseline gap-1 break-all">{{ subject(grant.subject) }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Target scope</dt>
+          <dt class="font-medium text-muted">Target scope</dt>
           <dd class="break-all">
             {% if grant.target_scope in (None, "*") %}
-              <span class="opacity-60">{{ grant.target_scope_display }}</span>
+              <span class="text-subtle">{{ grant.target_scope_display }}</span>
             {% else %}
               <span class="font-mono">{{ grant.target_scope }}</span>
             {% endif %}
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Expiry</dt>
+          <dt class="font-medium text-muted">Expiry</dt>
           <dd>
             {% if grant.is_elevation %}
               <span data-expires-at="{{ grant.expires_at.isoformat() }}">
                 auto-expires {{ grant.expires_at.isoformat() }}
               </span>
             {% else %}
-              <span class="opacity-60">permanent (no expiry)</span>
+              <span class="text-subtle">permanent (no expiry)</span>
             {% endif %}
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Created by</dt>
+          <dt class="font-medium text-muted">Created by</dt>
           <dd class="break-all">{{ grant.created_by_sub }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Created</dt>
+          <dt class="font-medium text-muted">Created</dt>
           <dd data-created-at="{{ grant.created_at.isoformat() }}">{{ grant.created_at.isoformat() }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Updated</dt>
+          <dt class="font-medium text-muted">Updated</dt>
           <dd data-updated-at="{{ grant.updated_at.isoformat() }}">{{ grant.updated_at.isoformat() }}</dd>
         </div>
       </dl>

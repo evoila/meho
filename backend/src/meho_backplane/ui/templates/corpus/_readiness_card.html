@@ -74,7 +74,7 @@
     </header>
 
     <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-      <dt class="opacity-60">status</dt>
+      <dt class="text-subtle">status</dt>
       <dd>
         {% if collection.status == "ready" %}
           {{ badge("ready", variant="success") }}
@@ -89,51 +89,51 @@
         {% endif %}
       </dd>
 
-      <dt class="opacity-60">index built</dt>
+      <dt class="text-subtle">index built</dt>
       <dd>
         {% if collection.readiness and collection.readiness.get("index_built") %}
           {{ badge("yes", variant="success", size="xs") }}
         {% elif collection.readiness is not none %}
           {{ badge("no", variant="warning", size="xs") }}
-          <span class="text-xs opacity-70">(reachable, not yet answerable)</span>
+          <span class="text-xs text-muted">(reachable, not yet answerable)</span>
         {% else %}
-          <span class="opacity-50">never probed</span>
+          <span class="text-subtle">never probed</span>
         {% endif %}
       </dd>
 
-      <dt class="opacity-60">doc count</dt>
+      <dt class="text-subtle">doc count</dt>
       <dd class="tabular-nums">
         {% if collection.doc_count is not none %}
           {{ collection.doc_count }}
         {% else %}
-          <span class="opacity-50">&mdash;</span>
+          <span class="text-subtle">&mdash;</span>
         {% endif %}
       </dd>
 
-      <dt class="opacity-60">last ingested</dt>
+      <dt class="text-subtle">last ingested</dt>
       <dd class="text-xs">
         {% if collection.last_ingested_at is not none %}
           {{ collection.last_ingested_at.isoformat() }}
         {% else %}
-          <span class="opacity-50">never</span>
+          <span class="text-subtle">never</span>
         {% endif %}
       </dd>
     </dl>
 
     {% if collection.status == "provisioning" %}
-      <p class="text-xs opacity-70">
+      <p class="text-xs text-muted">
         Registered but not yet searchable. Re-probe to confirm the backend
         index is built and promote the collection to <code>ready</code>.
       </p>
     {% elif collection.status == "disabled" %}
-      <p class="text-xs opacity-70">
+      <p class="text-xs text-muted">
         Hidden from search. Enable the collection to return it to service.
       </p>
     {% endif %}
 
     {% if collection.readiness %}
       <details class="mt-1">
-        <summary class="cursor-pointer text-xs opacity-70">Raw readiness JSON</summary>
+        <summary class="cursor-pointer text-xs text-muted">Raw readiness JSON</summary>
         <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ collection.readiness | tojson(indent=2) }}</pre>
       </details>
     {% endif %}

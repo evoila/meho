@@ -76,7 +76,7 @@
       {% if active_tag %}
         <input type="hidden" name="tag" value="{{ active_tag }}" />
       {% endif %}
-      <span class="text-xs opacity-70" data-bulk-summary>
+      <span class="text-xs text-muted" data-bulk-summary>
         Select rows below, then choose an action.
       </span>
       <div class="ml-auto flex flex-wrap items-center gap-2">
@@ -117,7 +117,7 @@
   {# ----------- Active cards ----------- #}
   {% if not entries %}
     <div class="card bg-base-100 border-base-300 border">
-      <div class="card-body text-sm opacity-70">
+      <div class="card-body text-sm text-muted">
         No memories match the current scope / tag filter.
       </div>
     </div>
@@ -153,7 +153,7 @@
             </div>
             {% if entry.countdown %}
               <div
-                class="text-xs opacity-70"
+                class="text-xs text-muted"
                 data-expires-at="{{ entry.expires_at.isoformat() }}"
                 data-countdown="{{ entry.countdown }}"
               >
@@ -161,7 +161,7 @@
               </div>
             {% elif entry.expires_at %}
               <div
-                class="text-xs opacity-70"
+                class="text-xs text-muted"
                 data-expires-at="{{ entry.expires_at.isoformat() }}"
               >
                 Expires {{ entry.expires_at.isoformat() }}
@@ -176,7 +176,7 @@
                 {% endfor %}
               </ul>
             {% endif %}
-            <p class="text-sm opacity-80 whitespace-pre-wrap break-words">
+            <p class="text-sm text-muted whitespace-pre-wrap break-words">
               {{ entry.preview }}
             </p>
             <div class="card-actions justify-end">
@@ -202,15 +202,15 @@
       aria-label="Recently expired memories (cleanup pending)"
     >
       <header class="flex items-baseline justify-between gap-2">
-        <h2 class="text-sm font-semibold opacity-70">
+        <h2 class="text-sm font-semibold text-muted">
           Recently expired (cleanup pending)
         </h2>
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           {{ expired_count }} expired, awaiting the next sweeper tick
         </span>
       </header>
       <ul
-        class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 opacity-60"
+        class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 text-subtle"
         aria-label="Recently expired memories"
       >
         {% for entry in expired_entries %}

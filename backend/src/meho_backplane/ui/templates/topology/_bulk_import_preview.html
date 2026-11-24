@@ -61,7 +61,7 @@
               <span class="font-mono">{{ row.to_name }}</span>
               {{ badge(row.to_kind, variant="quiet", size="xs") }}
             </td>
-            <td class="text-xs opacity-70">
+            <td class="text-xs text-muted">
               {% if row.superseded %}
                 <div data-test="bulk-preview-superseded">
                   supersedes {{ row.superseded | length }} auto edge(s)

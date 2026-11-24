@@ -29,7 +29,7 @@
     {# Full breadcrumb back through the runs list to the agents console, so
        the operator has a one-click return to ``/ui/agents`` (not only to
        the runs list) matching the other agents sub-views (#2347). #}
-    <nav class="text-sm opacity-70" aria-label="Breadcrumb">
+    <nav class="text-sm text-muted" aria-label="Breadcrumb">
       <a href="/ui/agents" class="link link-hover">Agents</a>
       <span aria-hidden="true">/</span>
       <a href="/ui/agents/runs" class="link link-hover">Runs</a>
@@ -38,7 +38,7 @@
     </nav>
     <h1 class="text-xl font-semibold flex items-center gap-3">
       <span>Run</span>
-      <span class="font-mono text-sm opacity-70">{{ run.run_id }}</span>
+      <span class="font-mono text-sm text-muted">{{ run.run_id }}</span>
       {% if run.agent_name %}
         {# The producing agent's back-link (#2472); absent for an ad-hoc run
            or a definition deleted after the run. #}
@@ -71,30 +71,30 @@
         </span>
       </div>
       {% if run_events.state == "unfinished" %}
-        <p class="text-sm opacity-80" data-role="events-unfinished">
+        <p class="text-sm text-muted" data-role="events-unfinished">
           The run stopped without a final event.
           {% if run_events.last_seq %}The last saved event is #{{ run_events.last_seq }}.{% else %}It saved no events.{% endif %}
         </p>
       {% endif %}
       {% if run_events.state is none %}
-        <p class="text-sm opacity-60" data-state="no-events">This run has no saved events.</p>
+        <p class="text-sm text-subtle" data-state="no-events">This run has no saved events.</p>
       {% elif not run_events.events %}
-        <p class="text-sm opacity-60" data-state="no-events">No events saved yet.</p>
+        <p class="text-sm text-subtle" data-state="no-events">No events saved yet.</p>
       {% else %}
         <ol class="space-y-2" role="list" aria-label="Saved run events">
           {% for event in run_events.events %}
           <li class="rounded-box border border-base-300 bg-base-200 p-2 text-xs" data-role="run-event">
             <div class="flex items-center gap-2">
-              <span class="font-mono opacity-60">#{{ event.seq }}</span>
+              <span class="font-mono text-subtle">#{{ event.seq }}</span>
               <span class="badge badge-xs badge-outline" data-role="event-kind">{{ event.kind }}</span>
-              <span class="opacity-60">{{ event.at }}</span>
+              <span class="text-subtle">{{ event.at }}</span>
             </div>
             {% if event.withheld %}
-              <p class="mt-1 opacity-70">Only the person who started this run can read this event.</p>
+              <p class="mt-1 text-muted">Only the person who started this run can read this event.</p>
             {% elif event.quarantined %}
-              <p class="mt-1 opacity-70">The secret check was not sure about this event. Only a tenant admin can read it.</p>
+              <p class="mt-1 text-muted">The secret check was not sure about this event. Only a tenant admin can read it.</p>
             {% elif event.data_json %}
-              <pre class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90">{{ event.data_json }}</pre>
+              <pre class="mt-1 whitespace-pre-wrap break-words font-mono text-muted">{{ event.data_json }}</pre>
             {% endif %}
           </li>
           {% endfor %}

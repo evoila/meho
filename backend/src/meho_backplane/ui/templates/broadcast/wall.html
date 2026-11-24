@@ -46,9 +46,10 @@
     tenant-label macro is imported here rather than inherited (#810). -#}
 {% from "_tenant_label.html" import tenant_label %}
 <!doctype html>
-<html lang="en" data-theme="evoila" class="h-full">
+<html lang="en" data-theme="evoila-system" class="h-full">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Broadcast wall &middot; MEHO Operator Console</title>
     {# Surface JS -- the shared ``broadcastFeed`` Alpine controller.

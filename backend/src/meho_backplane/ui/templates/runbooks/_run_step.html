@@ -111,12 +111,12 @@
         {% if step.type == "operation_call" %}
           <div class="bg-base-200 rounded-box space-y-1 p-3 text-sm">
             <div>
-              <span class="opacity-60">Operation:</span>
+              <span class="text-subtle">Operation:</span>
               <code class="font-mono">{{ step.op_id }}</code>
             </div>
             {% if step.params %}
               <div>
-                <span class="opacity-60">Params:</span>
+                <span class="text-subtle">Params:</span>
                 <pre class="overflow-x-auto text-xs"><code>{{ step.params | tojson(indent=2) }}</code></pre>
               </div>
             {% endif %}
@@ -126,7 +126,7 @@
         {#- Verify gate — confirm prompt OR operation_call match shape. -#}
         {%- set verify = step.verify -%}
         <div class="border-base-300 border-t pt-2">
-          <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+          <p class="text-xs font-semibold uppercase tracking-wide text-subtle">Verify</p>
           {% if verify.type == "confirm" %}
             <p class="text-sm">
               {{ badge("confirm", variant="outline", class="mr-1") }}
@@ -140,13 +140,13 @@
               </p>
               {% if verify.params %}
                 <div>
-                  <span class="opacity-60">Params:</span>
+                  <span class="text-subtle">Params:</span>
                   <pre class="overflow-x-auto text-xs"><code>{{ verify.params | tojson(indent=2) }}</code></pre>
                 </div>
               {% endif %}
               {% if verify.expect %}
                 <div>
-                  <span class="opacity-60">Expect:</span>
+                  <span class="text-subtle">Expect:</span>
                   <pre class="overflow-x-auto text-xs"><code>{{ verify.expect | tojson(indent=2) }}</code></pre>
                 </div>
               {% endif %}
@@ -284,7 +284,7 @@
     <dialog id="runbook-run-abort-modal" class="modal">
       <div class="modal-box">
         <h3 class="text-lg font-semibold">Abort run</h3>
-        <p class="py-2 text-sm opacity-70">
+        <p class="py-2 text-sm text-muted">
           Aborting ends the run. The reason is <strong>required</strong> and is
           recorded in the audit log.
         </p>
@@ -329,7 +329,7 @@
       <dialog id="runbook-run-reassign-modal" class="modal">
         <div class="modal-box">
           <h3 class="text-lg font-semibold">Reassign run</h3>
-          <p class="py-2 text-sm opacity-70">
+          <p class="py-2 text-sm text-muted">
             Transfer ownership to another operator. They become the sole
             assignee able to advance the run.
           </p>

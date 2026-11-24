@@ -56,7 +56,7 @@
           {{ descriptor.op_id }}
         </h3>
         {% if descriptor.summary %}
-          <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
+          <p class="mt-0.5 text-sm text-muted">{{ descriptor.summary }}</p>
         {% endif %}
       </div>
       <div class="flex shrink-0 items-center gap-1">
@@ -108,7 +108,7 @@
       {% if descriptor.description %}
         <div>
           <div class="meho-overline mb-1">Description</div>
-          <p class="opacity-80">{{ descriptor.description }}</p>
+          <p class="text-muted">{{ descriptor.description }}</p>
         </div>
       {% endif %}
 
@@ -129,7 +129,7 @@
         {% if descriptor.parameter_schema %}
           <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ descriptor.parameter_schema | tojson(indent=2) }}</code></pre>
         {% else %}
-          <p class="text-xs opacity-60">No parameters.</p>
+          <p class="text-xs text-subtle">No parameters.</p>
         {% endif %}
       </div>
 
@@ -142,7 +142,7 @@
       {% if previewable %}
         <div class="border-t border-base-300 pt-4">
           <div class="meho-overline mb-2">Preview request</div>
-          <p class="mb-3 text-xs opacity-60">
+          <p class="mb-3 text-xs text-subtle">
             Render the literal HTTP request meho would send for this
             operation &mdash; method, path, query, and the redacted body
             &mdash; <span class="font-semibold">without dispatching it</span>.
@@ -158,25 +158,25 @@
           >
             <input type="hidden" name="connector_id" value="{{ connector_id }}" />
             <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
-            <label>
-              <span class="mb-1 text-xs opacity-70">Target <span class="opacity-50">(name; leave blank for a target-less op)</span></span>
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs text-muted">Target <span class="text-subtle">(name; leave blank for a target-less op)</span></span>
               <input
                 type="text"
                 name="target"
                 maxlength="256"
-                class="input input-sm w-full font-mono"
+                class="input input-bordered input-sm w-full font-mono"
                 placeholder="e.g. prod-k8s"
                 aria-label="Target name"
                 autocomplete="off"
               />
             </label>
-            <label>
-              <span class="mb-1 text-xs opacity-70">Params <span class="opacity-50">(JSON object)</span></span>
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs text-muted">Params <span class="text-subtle">(JSON object)</span></span>
               <textarea
                 name="params"
                 rows="4"
                 maxlength="65536"
-                class="textarea textarea-sm w-full font-mono text-xs"
+                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
                 placeholder='{"path": "secret/data/app"}'
                 aria-label="Operation params as JSON"
               ></textarea>

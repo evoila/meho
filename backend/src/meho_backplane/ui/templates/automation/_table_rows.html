@@ -43,7 +43,7 @@
           {% if row.last_seen %}
             <span class="text-xs" title="{{ row.last_seen.isoformat() }}">{{ _rel(row.last_seen) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
@@ -57,14 +57,14 @@
               {% endfor %}
             </div>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
       </tr>
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="6" class="text-center text-sm opacity-60 py-6">
+      <td colspan="6" class="text-center text-sm text-subtle py-6">
         No automation add-on is paired and contract-healthy — the automation
         surface is inactive.
       </td>

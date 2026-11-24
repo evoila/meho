@@ -115,7 +115,7 @@
               placeholder="vault.kv.* or k8s.configmap.info"
               aria-describedby="broadcast-override-pattern-hint"
             />
-            <span id="broadcast-override-pattern-hint" class="text-xs opacity-60">
+            <span id="broadcast-override-pattern-hint" class="text-xs text-subtle">
               Glob only &mdash; <code>*</code> and literals; no regex
               (<code>[ ] ( ) { } \ + ? | ^ $</code> are rejected).
             </span>
@@ -163,7 +163,7 @@
                 <option value="{{ option }}">{{ option }}</option>
               {% endfor %}
             </select>
-            <span class="text-xs opacity-60">
+            <span class="text-xs text-subtle">
               <code>aggregate</code> suppresses the op's detail on the feed;
               <code>full</code> pins it to full detail (re-exposing a
               normally-sensitive op).
@@ -209,7 +209,7 @@
                   {% if rule.scope_field %}
                     <span class="font-mono">{{ rule.scope_field }}={{ rule.scope_value }}</span>
                   {% else %}
-                    <span class="opacity-60">op-wide</span>
+                    <span class="text-subtle">op-wide</span>
                   {% endif %}
                 </td>
                 <td>
@@ -220,7 +220,7 @@
                   {% endif %}
                 </td>
                 <td class="font-mono text-xs break-all">{{ rule.created_by_sub }}</td>
-                <td class="text-xs opacity-70">
+                <td class="text-xs text-muted">
                   <time datetime="{{ rule.created_at.isoformat() }}">
                     {{ rule.created_at.isoformat() }}
                   </time>
@@ -246,7 +246,7 @@
         <dialog id="broadcast-override-delete-{{ rule.id }}" class="modal">
           <div class="modal-box">
             <h3 class="font-semibold text-lg">Delete this suppression rule?</h3>
-            <p class="text-sm py-2 opacity-80">
+            <p class="text-sm py-2 text-muted">
               Deleting this rule re-exposes the suppressed detail for
               matching ops on the live feed and the Slack mirror. The rule
               <span class="font-mono">{{ rule.op_id_pattern }}</span>
@@ -278,7 +278,7 @@
         </dialog>
       {% endfor %}
     {% else %}
-      <div class="px-3 py-10 text-center text-sm opacity-70" id="broadcast-overrides-empty">
+      <div class="px-3 py-10 text-center text-sm text-muted" id="broadcast-overrides-empty">
         No suppression rules for this tenant yet. Create one to pin a
         normally-full op to aggregate-only detail (or vice versa).
       </div>

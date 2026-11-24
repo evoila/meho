@@ -24,14 +24,14 @@
     <p class="flex items-center gap-2 text-sm">
       <span class="font-mono">{{ edge.from_endpoint.name }}</span>
       {{ badge(edge.from_endpoint.kind, variant="quiet", size="xs") }}
-      <span class="opacity-60">&rarr;</span>
+      <span class="text-subtle">&rarr;</span>
       {{ badge(edge.kind, variant="outline", size="xs") }}
-      <span class="opacity-60">&rarr;</span>
+      <span class="text-subtle">&rarr;</span>
       <span class="font-mono">{{ edge.to_endpoint.name }}</span>
       {{ badge(edge.to_endpoint.kind, variant="quiet", size="xs") }}
-      <span class="text-xs opacity-50">({{ edge.source }})</span>
+      <span class="text-xs text-subtle">({{ edge.source }})</span>
     </p>
-    <p class="text-xs opacity-60">
+    <p class="text-xs text-subtle">
       Edge id <span class="font-mono">{{ edge.id }}</span>.
     </p>
   </div>

@@ -25,25 +25,25 @@
     <div class="flex flex-wrap items-baseline justify-between gap-2">
       <h4 class="text-sm font-semibold">Script to run</h4>
       {% if fields.get("script_bytes") is not none %}
-        <span class="text-xs text-base-content/55">{{ fields.get("script_bytes") }} bytes</span>
+        <span class="text-xs text-subtle">{{ fields.get("script_bytes") }} bytes</span>
       {% endif %}
     </div>
     <dl class="mt-1 space-y-0.5 text-xs">
       {% if fields.get("script_sha256") %}
         <div class="flex flex-wrap gap-2">
-          <dt class="text-base-content/55">SHA-256</dt>
+          <dt class="text-subtle">SHA-256</dt>
           <dd class="font-mono [overflow-wrap:anywhere]" data-testid="approval-script-sha256">{{ fields.get("script_sha256") }}</dd>
         </div>
       {% endif %}
       {% if fields.get("script_ref") %}
         <div class="flex flex-wrap gap-2">
-          <dt class="text-base-content/55">Reviewed copy</dt>
+          <dt class="text-subtle">Reviewed copy</dt>
           <dd class="font-mono [overflow-wrap:anywhere]">{{ fields.get("script_ref") }}</dd>
         </div>
       {% endif %}
       {% if fields.get("script_check") %}
         <div class="flex flex-wrap gap-2">
-          <dt class="text-base-content/55">Expected SHA-256</dt>
+          <dt class="text-subtle">Expected SHA-256</dt>
           <dd>
             <span class="badge badge-sm {{ 'badge-success' if fields.get('script_check') == 'matches' else 'badge-error' }}" data-testid="approval-script-check">{{ fields.get("script_check") }}</span>
           </dd>

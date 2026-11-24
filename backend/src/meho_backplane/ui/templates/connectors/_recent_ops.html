@@ -39,7 +39,7 @@
 >
   <div class="card-body space-y-2">
     <h2 class="card-title text-base">Recent operations</h2>
-    <p class="text-sm opacity-70" role="status" data-recent-ops-forbidden>
+    <p class="text-sm text-muted" role="status" data-recent-ops-forbidden>
       Recent operations need the <span class="font-mono">operator</span> role.
       Your session does not hold it.
     </p>
@@ -56,7 +56,7 @@
   <div class="card-body space-y-2">
     <header class="flex items-center justify-between gap-2">
       <h2 class="card-title text-base">Recent operations</h2>
-      <p class="text-xs opacity-70" role="status" data-refresh-status>
+      <p class="text-xs text-muted" role="status" data-refresh-status>
         Updated
         <time datetime="{{ recent_ops_updated_at }}">{{ recent_ops_updated_at[11:19] }} UTC</time>
         · {{ recent_ops | length }} of last 10
@@ -67,15 +67,15 @@
       <ul class="divide-y divide-base-300 text-sm" role="list">
         {% for op in recent_ops %}
           <li class="flex items-center gap-2 py-1.5">
-            <time class="text-xs opacity-70 w-44 shrink-0" datetime="{{ op.occurred_at }}">{{ op.occurred_at[:19] | replace("T", " ") }}</time>
+            <time class="text-xs text-muted w-44 shrink-0" datetime="{{ op.occurred_at }}">{{ op.occurred_at[:19] | replace("T", " ") }}</time>
             {{ badge(op.method, variant="outline", size="xs") }}
             <span class="font-mono text-xs truncate">{{ op.op_id or op.path }}</span>
-            <span class="text-xs opacity-50 ml-auto">{{ op.status_code }}</span>
+            <span class="text-xs text-subtle ml-auto">{{ op.status_code }}</span>
           </li>
         {% endfor %}
       </ul>
     {% else %}
-      <div class="text-sm opacity-60 py-4 text-center">
+      <div class="text-sm text-subtle py-4 text-center">
         No operations recorded for this target yet.
       </div>
     {% endif %}

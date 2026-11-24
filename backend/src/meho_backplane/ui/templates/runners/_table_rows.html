@@ -37,13 +37,13 @@
         </td>
         <td>
           {% if row.stale and row.stale_at %}
-            <span class="text-xs opacity-70" title="dead-man flip at {{ row.stale_at.isoformat() }}">
+            <span class="text-xs text-muted" title="dead-man flip at {{ row.stale_at.isoformat() }}">
               stale since {{ _rel(row.stale_at) }}
             </span>
           {% elif row.last_seen_at %}
             <span class="text-xs" title="{{ row.last_seen_at.isoformat() }}">{{ _rel(row.last_seen_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">
@@ -52,7 +52,7 @@
           {% elif row.wire_version %}
             <span>{{ row.wire_version }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs font-mono">
@@ -61,28 +61,28 @@
           {% elif row.package_set_digest %}
             <span title="{{ row.package_set_digest }}">{{ row.package_set_digest[:19] }}…</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">
           {% if row.revoked %}
             {{ badge("revoked", variant="neutral") }}
           {% else %}
-            <span class="opacity-60">no</span>
+            <span class="text-subtle">no</span>
           {% endif %}
         </td>
         <td>
           {% if row.created_at %}
             <span class="text-xs" title="{{ row.created_at.isoformat() }}">{{ _rel(row.created_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
       </tr>
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+      <td colspan="7" class="text-center text-sm text-subtle py-6">
         No runners registered yet. Register one via
         <code>meho runner-principal register &lt;name&gt;</code>.
       </td>

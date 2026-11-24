@@ -145,6 +145,20 @@ def test_an_entry_with_a_blank_quoted_reason_is_refused(tmp_path: Path) -> None:
         _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], _entry("lowered_level", reason='"   "'))
 
 
+@pytest.mark.parametrize("reason", ["#", "# a comment", "  #"])
+def test_an_entry_whose_reason_is_only_a_comment_is_refused(tmp_path: Path, reason: str) -> None:
+    approved = _entry("removed", reason=reason, op_id="vault.kv.get")
+    with pytest.raises(SystemExit, match="has no reason"):
+        _judge(tmp_path, [_row(), _row("vault.kv.get")], [_row()], approved)
+
+
+def test_a_comment_after_a_value_is_not_part_of_the_value(tmp_path: Path) -> None:
+    approved = _entry("lowered_level", reason='"the reason" # why').replace(
+        "change: lowered_level", "change: lowered_level  # the level goes down"
+    )
+    assert _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], approved) == 0
+
+
 def test_an_unknown_risk_level_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="unknown risk level"):
         _judge(tmp_path, [_row()], [_row(risk_level="mild")])

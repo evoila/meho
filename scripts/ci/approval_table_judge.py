@@ -69,6 +69,18 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
     return found
 
 
+def _value(text: str) -> str:
+    """A YAML scalar: the text in quotes, or the plain text without a ``#`` comment."""
+    text = text.strip()
+    if text and text[0] in "\"'":
+        end = text.find(text[0], 1)
+        if end > 0:
+            return text[1:end]
+    if text.startswith("#"):
+        return ""
+    return text.split(" #", 1)[0].strip()
+
+
 def read_approved(path: Path) -> list[dict]:
     """The approved file: ``approved:`` then a list of entries, in the simple form of the header."""
     entries: list[dict] = []
@@ -82,7 +94,7 @@ def read_approved(path: Path) -> list[dict]:
         key, colon, value = line.partition(":")
         if not entries or not colon:
             sys.exit(f"approved file: cannot read the line {raw!r}")
-        entries[-1][key.strip()] = value.strip().strip("\"'")
+        entries[-1][key.strip()] = _value(value)
     return entries
 
 

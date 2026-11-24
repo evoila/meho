@@ -93,6 +93,7 @@ from meho_backplane.operations.service_grants import (
     caller_address_grant_reason,
     credential_refusal,
     delete_grant_reason,
+    descriptor_needs_per_call_approval,
 )
 from meho_backplane.policy.routing import approver_set_for, routing_enabled, routing_refusal
 
@@ -245,6 +246,11 @@ async def _entry_refusal(tenant_id: uuid.UUID, entry: RunApprovalEntry) -> str |
     credential = credential_refusal(entry.op_id, getattr(descriptor, "op_class", None))
     if credential is not None:
         return credential
+    if descriptor is not None and descriptor_needs_per_call_approval(descriptor):
+        return (
+            f"op {entry.op_id!r}: a person approves each call. A run approval never "
+            "covers it: leave it out of the list"
+        )
     reason = (
         caller_address_grant_reason(descriptor)
         or always_wait_grant_reason(descriptor)

@@ -162,6 +162,9 @@ a standing grant covers such an operation:
 - `RunApprovalService.request` refuses a list with a marked operation (422).
 - At call time the gate never lets a run approval or a standing grant clear
   a marked operation.
+- The check also reads the op id that the connector's ingest correction gives
+  the stored row (`descriptor_needs_per_call_approval`), so a row stored
+  with another op id for the same call waits too.
 
 Marked today:
 

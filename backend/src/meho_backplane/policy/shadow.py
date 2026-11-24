@@ -114,7 +114,7 @@ def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:
 
 
 def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> frozenset[str]:
-    from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
+    from meho_backplane.op_classes import is_root_shell
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
     from meho_backplane.operations.service_grants import (
@@ -122,13 +122,14 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
         delete_grant_reason,
         descriptor_credential_reason,
         descriptor_credential_waits,
+        descriptor_needs_per_call_approval,
     )
 
     op_id = descriptor.op_id
     patterns = get_settings().service_grant_delete_shaped_patterns
     marks = {
         "root_shell": is_root_shell(op_id),
-        "per_call_approval": needs_per_call_approval(op_id),
+        "per_call_approval": descriptor_needs_per_call_approval(descriptor),
         "credential": descriptor_credential_reason(descriptor) is not None,
         "credential_waits": (
             descriptor_credential_waits(descriptor) or params_write_credential(op_id, params)

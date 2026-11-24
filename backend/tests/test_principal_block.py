@@ -39,6 +39,7 @@ from meho_backplane.auth.principal_block import (
     BLOCK_CACHE_SECONDS,
     BLOCK_SCOPE_ALL,
     PRINCIPAL_BLOCKED_MESSAGE,
+    PrincipalBlockUnavailableError,
     block_principal,
     reset_block_cache,
 )
@@ -630,3 +631,189 @@ async def test_approved_call_does_not_run_while_the_asker_is_blocked(
     assert stored.resumed_at is not None
     assert stored.resume_result is not None
     assert stored.resume_result["extras"]["error_code"] == "principal_blocked"
+
+
+# ---------------------------------------------------------------------------
+# A platform admin's own way back
+# ---------------------------------------------------------------------------
+
+_PA = "platform-person"
+_PA_ROLE = "meho-platform-admin"
+
+
+def _pa_token(
+    key: Any,
+    *,
+    tenant: uuid.UUID = _TENANT_A,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: Any = True,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
+    """A token of the person ``_PA``; the platform admin flag is the claim value."""
+    claims: dict[str, Any] = {"platform_admin": platform_admin}
+    claims.update(extra_claims or {})
+    return mint_token(
+        key,
+        sub=_PA,
+        tenant_id=str(tenant),
+        tenant_role=role.value,
+        extra_claims=claims,
+    )
+
+
+async def _unblock(
+    ac: httpx.AsyncClient, token: str, sub: str, *, tenant: uuid.UUID | None = None
+) -> httpx.Response:
+    headers = _auth(token)
+    if tenant is not None:
+        headers["Meho-Tenant"] = str(tenant)
+    return await ac.delete(f"{_ROUTE}/{sub}", headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_blocked_platform_admin_removes_own_block_and_works_again(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(key, role=TenantRole.READ_ONLY)
+
+    # Every other route of the tenant still refuses the person.
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+    assert (await ac.get(_ROUTE, headers=_auth(token))).status_code == 403
+
+    removed = await _unblock(ac, token, _PA, tenant=_TENANT_A)
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"sub": _PA, "removed": 1}
+    assert await _rows(_PA) == []
+    after = await ac.get(_WORK_ROUTE, headers=_auth(token))
+    assert "principal_blocked" not in after.text
+    # The audit row names the person who removed the block.
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    (row,) = [r for r in rows if r.payload.get("unblocked_sub") == _PA]
+    assert row.operator_sub == _PA
+
+
+@pytest.mark.asyncio
+async def test_way_back_works_on_an_install_with_one_tenant(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT_A, slug="block-a", name="Block A"))
+        await session.commit()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(key)
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+
+    assert (await _unblock(ac, token, _PA)).status_code == 200
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code != 403
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_under_a_block_in_every_tenant_cannot_unblock(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    other_platform_admin = _token(
+        key, "other-platform-person", role=TenantRole.TENANT_ADMIN, platform_admin=True
+    )
+    assert (await _block(ac, other_platform_admin, sub=_PA)).status_code == 201
+    (row,) = await _rows(_PA)
+    assert row.scope == BLOCK_SCOPE_ALL
+
+    refused = await _unblock(ac, _pa_token(key), _PA)
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}"
+    assert len(await _rows(_PA)) == 1
+    # A platform admin who is not blocked removes it.
+    assert (await _unblock(ac, other_platform_admin, _PA)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_blocked_tenant_admin_cannot_unblock_anyone(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub="admin-person-2")).status_code == 201
+    blocked_admin = _token(key, "admin-person-2", role=TenantRole.TENANT_ADMIN)
+
+    own = await _unblock(ac, blocked_admin, "admin-person-2")
+    assert own.status_code == 403
+    assert own.json()["detail"].startswith("principal_blocked")
+    assert (await _block(ac, _admin(key))).status_code == 201
+    other = await _unblock(ac, blocked_admin, _BLOCKED)
+    assert other.status_code == 403
+    assert len(await _rows("admin-person-2")) == 1
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_platform_admin_cannot_remove_another_persons_block(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key))).status_code == 201
+
+    refused = await _unblock(ac, _pa_token(key), _BLOCKED)
+    assert refused.status_code == 403
+    assert len(await _rows(_BLOCKED)) == 1
+    assert len(await _rows(_PA)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_token_without_a_valid_platform_admin_flag_has_no_way_back(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+
+    for flag in (False, "yes", "nope", [], None):
+        token = _pa_token(key, platform_admin=flag)
+        response = await _unblock(ac, token, _PA)
+        assert response.status_code == 403, flag
+    assert len(await _rows(_PA)) == 1
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_from_a_realm_role_has_the_same_way_back(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    monkeypatch.setenv("JWT_PLATFORM_ADMIN_ROLE_NAME", _PA_ROLE)
+    get_settings.cache_clear()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(
+        key,
+        platform_admin=None,
+        extra_claims={"realm_access": {"roles": [_PA_ROLE]}},
+    )
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+    assert (await _unblock(ac, token, _PA)).status_code == 200
+    assert await _rows(_PA) == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_block_list_gives_a_platform_admin_no_way_through(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    reset_block_cache()
+
+    async def _broken() -> Any:
+        raise PrincipalBlockUnavailableError
+
+    monkeypatch.setattr(f"{_BLOCK_MODULE}._load_entries", _broken)
+    response = await _unblock(ac, _pa_token(key), _PA)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "principal_block_check_unavailable"

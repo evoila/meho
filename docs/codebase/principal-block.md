@@ -17,6 +17,26 @@ Who may block:
 - Nobody blocks their own login (422 `cannot_block_self`).
 - Only a person with `tenant_admin` can block, unblock or list. An agent,
   service or runner login gets 403. There is no MCP tool.
+- A platform admin also unblocks with any role in the tenant.
+
+Who may remove a block, and the way back for a platform admin:
+
+- A platform admin whom a tenant admin blocked in a tenant removes that
+  block on their own login, from that tenant. This is their way back. It
+  holds on an install with one tenant too. Every other route of that
+  tenant still refuses the person until the block is gone.
+- A blocked platform admin removes only their own block, never the block
+  of another person.
+- A block that a platform admin made (scope `*`) stays until a platform
+  admin who is not blocked removes it. The person under it gets 403 on
+  unblock.
+- A tenant admin who is blocked in their tenant gets 403 on unblock. A
+  tenant admin or a platform admin who is not blocked removes the block.
+- The platform admin flag comes from the person's own token (the claim or
+  the realm role). A token without it, or with a malformed one, has no way
+  back through this rule.
+- When the block list cannot be read, the unblock answers 503, like every
+  other route.
 
 A blocked person reads: "This person is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
@@ -128,7 +148,12 @@ REST routes (`/api/v1/principals/blocked`):
   scope updates the reason.
 - `DELETE /{sub}`: unblock. A platform admin removes every block of the
   login. A tenant admin removes the block of their tenant. 404 when there
-  is none.
+  is none. This route uses its own sign-in check
+  (`verify_jwt_platform_admin_way_back` in `auth/jwt.py`,
+  `verify_jwt_and_bind_platform_admin_way_back` in `middleware.py`): a
+  platform admin passes a block of the current tenant and reaches the
+  route, which lets a caller who is blocked there remove only their own
+  block. A block in every tenant always refuses.
 
 CLI: `meho principal block <sub> --reason <text>`,
 `meho principal unblock <sub>`, `meho principal blocked`.

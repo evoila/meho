@@ -15,9 +15,14 @@ Routes (REST and CLI only; there is no MCP tool):
   A platform admin blocks in every tenant. A tenant admin blocks in their
   own tenant only. Nobody blocks their own login (422).
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
-  is no block the admin may remove.
+  is no block the admin may remove. A platform admin whom a tenant admin
+  blocked in this tenant removes that block on their own login: this is
+  their way back, also on an install with one tenant. A block that a
+  platform admin made (every tenant) stays until a platform admin
+  removes it. A tenant admin who is blocked cannot remove a block.
 
-Every route needs ``tenant_admin`` and a person's login: an agent,
+Every route needs ``tenant_admin`` (the unblock route also takes a
+platform admin of any tenant role) and a person's login: an agent,
 service or runner login is refused with 403. Block and unblock write one
 audit row each, with the admin, the login and the reason.
 """
@@ -34,15 +39,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.principal_block import (
+    PRINCIPAL_BLOCKED_MESSAGE,
     REASON_MAX_LENGTH,
     BlockedPerson,
     CannotBlockSelfError,
+    PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
+    is_principal_blocked,
     list_blocked,
     unblock_principal,
 )
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
+from meho_backplane.middleware import verify_jwt_and_bind_platform_admin_way_back
 
 __all__ = ["router"]
 
@@ -59,6 +68,16 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 def _require_person_admin(operator: Operator = _require_admin) -> Operator:
     """``tenant_admin`` who signed in as a person."""
+    ensure_human_principal(operator, remediation=_PEOPLE_ONLY)
+    return operator
+
+
+def _require_unblock_caller(
+    operator: Operator = Depends(verify_jwt_and_bind_platform_admin_way_back),
+) -> Operator:
+    """A tenant admin or a platform admin, who signed in as a person."""
+    if operator.tenant_role is not TenantRole.TENANT_ADMIN and not operator.platform_admin:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="insufficient_role")
     ensure_human_principal(operator, remediation=_PEOPLE_ONLY)
     return operator
 
@@ -141,10 +160,28 @@ async def block_principal_route(
 @router.delete("/{sub}", response_model=UnblockResponse)
 async def unblock_principal_route(
     sub: Annotated[str, Path(min_length=1, max_length=_SUB_MAX_LENGTH)],
-    operator: Operator = Depends(_require_person_admin),
+    operator: Operator = Depends(_require_unblock_caller),
 ) -> UnblockResponse:
-    """Unblock a login. A platform admin removes every block of it."""
+    """Unblock a login. A platform admin removes every block of it.
+
+    A caller who is blocked in this tenant may remove only their own
+    block, and only as a platform admin: a blocked tenant admin never
+    reaches this point.
+    """
     structlog.contextvars.bind_contextvars(audit_op_id="principal.unblock", audit_op_class="write")
+    if sub != operator.sub:
+        try:
+            caller_blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
+        except PrincipalBlockUnavailableError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="principal_block_check_unavailable",
+            ) from exc
+        if caller_blocked:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail=f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}",
+            )
     try:
         removed = await unblock_principal(operator, sub)
     except PrincipalNotBlockedError as exc:

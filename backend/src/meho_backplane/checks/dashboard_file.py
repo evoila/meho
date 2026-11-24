@@ -296,6 +296,23 @@ async def _runner_problem(
     return None
 
 
+async def _bound_runner_problem(
+    tenant_id: uuid.UUID, index: int, row: Sensor | None, body: SensorCreate
+) -> ImportProblem | None:
+    """:func:`_runner_problem` for a stored Sensor bound to a runner that the file changes."""
+    if row is None or row.runner_name is None:
+        return None
+    if not _changed(_current_sensor(row), _wanted_sensor(body)):
+        return None
+    return await _runner_problem(tenant_id, index, body)
+
+
+async def _stored_sensors(tenant_id: uuid.UUID, names: list[str]) -> dict[str, Sensor]:
+    async with get_sessionmaker()() as session:
+        query = select(Sensor).where(Sensor.tenant_id == tenant_id, Sensor.name.in_(names))
+        return {row.name: row for row in (await session.scalars(query)).all()}
+
+
 async def _check_file(tenant_id: uuid.UUID, request: DashboardImportRequest) -> list[SensorCreate]:
     """Check the whole file; return the create body of each Sensor.
 
@@ -305,12 +322,15 @@ async def _check_file(tenant_id: uuid.UUID, request: DashboardImportRequest) -> 
     problems = _mapping_problems(request)
     targets, target_problems = await _find_mapped_targets(tenant_id, request)
     problems.extend(target_problems)
+    stored = await _stored_sensors(tenant_id, [s.name for s in request.file.sensors])
     bodies: list[SensorCreate] = []
     for index, sensor in enumerate(request.file.sensors):
         mapped = None if sensor.target is None else request.target_map.get(sensor.target)
         body = sensor.to_create(target_name=mapped)
         bodies.append(body)
         problem = await _operation_problem(tenant_id, index, sensor, body)
+        if problem is None:
+            problem = await _bound_runner_problem(tenant_id, index, stored.get(sensor.name), body)
         if problem is not None:
             problems.append(problem)
             continue
@@ -427,11 +447,10 @@ async def _sync_sensors(
             continue
         ids[body.name] = row.id
         changed = _changed(_current_sensor(row), _wanted_sensor(body))
-        if row.runner_name is not None and changed:
-            problem = await _runner_problem(tenant_id, index, body)
-            if problem is not None:
-                runner_problems.append(problem)
-                continue
+        problem = await _bound_runner_problem(tenant_id, index, row, body)
+        if problem is not None:  # checked again here, under the lock
+            runner_problems.append(problem)
+            continue
         action: ImportAction = "update" if changed else "unchanged"
         identity_sub = identity_after_change(row.identity_sub, created_by_sub, changed)
         reset = identity_sub != row.identity_sub

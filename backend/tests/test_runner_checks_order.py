@@ -536,6 +536,39 @@ async def test_an_import_names_every_runner_check_whose_new_op_the_runner_cannot
     assert (await _sensor_by_name("second")).op_id == _OP_SAFE
 
 
+@pytest.mark.asyncio
+async def test_an_import_names_an_unknown_op_and_a_runner_op_together_and_writes_nothing(
+    switch_on: None,
+) -> None:
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    await _seed_descriptor(op_id=_OP_GENERIC, handler_ref=None)
+    _register_connector()
+    await _seed_sensor(name="bound")
+    unknown = _file_sensor("new-one").model_copy(update={"op_id": "check.not-here"})
+    request = DashboardImportRequest(
+        file=DashboardFile(
+            dashboard=DashboardFileSettings(name="site"),
+            sensors=[unknown, _file_sensor("bound")],
+        ),
+        target_map={"site": _TARGET_NAME},
+    )
+
+    with pytest.raises(DashboardImportRefusedError) as refused:
+        await import_dashboard(_TENANT, "op-admin", request)
+
+    problems = refused.value.problems
+    assert [(p.kind, p.loc[3]) for p in problems] == [
+        ("dashboard_import_unknown_operation", "0"),
+        ("dashboard_import_runner_cannot_run", "1"),
+    ]
+    assert (await _sensor_by_name("bound")).op_id == _OP_SAFE
+    async with get_sessionmaker()() as session:
+        assert await session.scalar(select(Sensor).where(Sensor.name == "new-one")) is None
+        assert (await session.scalars(select(CheckDashboard))).all() == []
+
+
 async def _sensor_by_name(name: str) -> Sensor:
     async with get_sessionmaker()() as session:
         row = await session.scalar(select(Sensor).where(Sensor.name == name))

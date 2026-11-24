@@ -64,21 +64,21 @@
         <td class="font-mono text-xs">
           {{ row.schedule_summary }}
           {% if row.kind == "cron" %}
-            <span class="opacity-50">· {{ row.timezone }}</span>
+            <span class="text-subtle">· {{ row.timezone }}</span>
           {% endif %}
         </td>
         <td>
           {% if row.next_fire_at %}
             <span class="text-xs" title="{{ row.next_fire_at.isoformat() }}">{{ _rel(row.next_fire_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.last_fired_at %}
             <span class="text-xs" title="{{ row.last_fired_at.isoformat() }}">{{ _rel(row.last_fired_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">{{ row.agent_name }}</td>
@@ -86,7 +86,7 @@
           {% if row.work_ref %}
             <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="flex items-center gap-1">
@@ -125,7 +125,7 @@
       </tr>
     {% else %}
       <tr>
-        <td colspan="8" class="text-center text-sm opacity-60 py-6">
+        <td colspan="8" class="text-center text-sm text-subtle py-6">
           No scheduled triggers match the current filter.
         </td>
       </tr>

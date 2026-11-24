@@ -60,7 +60,7 @@
         <h3 class="text-lg font-semibold" id="connectors-review-drawer-title">
           Review operations
         </h3>
-        <p class="mt-1 text-xs opacity-70">
+        <p class="mt-1 text-xs text-muted">
           <code class="font-mono">{{ connector_id }}</code>
           &middot; {{ product }}/{{ version }}
           &middot; {{ total_op_count }} operation{{ "" if total_op_count == 1 else "s" }}
@@ -136,7 +136,7 @@
               {% else %}
                 <span class="badge badge-warning badge-xs" data-review-status>{{ status }}</span>
               {% endif %}
-              <span class="ml-auto text-xs opacity-60" data-op-count>
+              <span class="ml-auto text-xs text-subtle" data-op-count>
                 {{ group.op_count }} op{{ "" if group.op_count == 1 else "s" }}
               </span>
             </summary>
@@ -151,7 +151,7 @@
               {#- Lazy placeholder: replaced by the group's per-op rows on
                   first <details> open. The big-payload guard lives here --
                   no op markup ships in the initial drawer HTML. -#}
-              <p class="text-xs opacity-50" data-group-loading>
+              <p class="text-xs text-subtle" data-group-loading>
                 Loading operations&hellip;
               </p>
             </div>
@@ -159,7 +159,7 @@
         {% endfor %}
       </div>
     {% else %}
-      <p class="mt-4 text-sm opacity-60" data-no-groups>
+      <p class="mt-4 text-sm text-subtle" data-no-groups>
         This connector has no grouped operations to review.
       </p>
     {% endif %}

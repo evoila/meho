@@ -32,7 +32,7 @@
     {# ----- Step header: index + remove/reorder ----- #}
     <div class="flex flex-wrap items-center gap-2">
       <span class="badge badge-neutral" x-text="idx + 1"></span>
-      <span class="text-sm font-medium opacity-60">Step</span>
+      <span class="text-sm font-medium text-subtle">Step</span>
       <div class="ml-auto flex gap-1">
         <button type="button" class="btn btn-ghost btn-xs"
                 x-bind:disabled="idx === 0"
@@ -59,7 +59,7 @@
                placeholder="drain-node"
                autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' id'" />
-        <span class="text-xs opacity-60">lowercase, hyphens, unique</span>
+        <span class="text-xs text-subtle">lowercase, hyphens, unique</span>
         <span class="text-xs text-error" x-show="stepIdError(idx)" x-text="stepIdError(idx)"></span>
       </label>
       <label class="flex flex-col gap-1 min-w-48">
@@ -88,21 +88,21 @@
                x-model="step.op_id" placeholder="gh.composite.repo_create"
                autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' operation id'" />
-        <span class="text-xs opacity-60">registry op_id (free text)</span>
+        <span class="text-xs text-subtle">registry op_id (free text)</span>
       </label>
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">Params (JSON)</span>
         <textarea class="textarea textarea-bordered textarea-sm font-mono w-full" rows="3"
                   x-model="step.params" placeholder="{}"
                   x-bind:aria-label="'Step ' + (idx + 1) + ' params'"></textarea>
-        <span class="text-xs opacity-60">${run.target} / ${run.params.X} only</span>
+        <span class="text-xs text-subtle">${run.target} / ${run.params.X} only</span>
       </label>
     </div>
 
     {# ----- Body editor + live preview (CodeMirror + HTMX) ----- #}
     <div class="flex flex-wrap gap-4">
       <div class="flex-1 min-w-64 space-y-1">
-        <div class="text-xs font-medium uppercase tracking-wide opacity-60">Body (Markdown)</div>
+        <div class="text-xs font-medium uppercase tracking-wide text-subtle">Body (Markdown)</div>
         {# CodeMirror mounts onto this textarea; the textarea stays the
            form-model source (x-model) and the HTMX preview trigger. #}
         <textarea class="textarea textarea-bordered textarea-sm font-mono w-full runbook-step-body"
@@ -118,10 +118,10 @@
                   x-bind:aria-label="'Step ' + (idx + 1) + ' body'"></textarea>
       </div>
       <div class="flex-1 min-w-64 space-y-1">
-        <div class="text-xs font-medium uppercase tracking-wide opacity-60">Preview</div>
+        <div class="text-xs font-medium uppercase tracking-wide text-subtle">Preview</div>
         <div class="runbook-step-preview prose prose-sm max-w-none border-base-300 rounded-box border p-3 min-h-24"
              aria-live="polite" x-bind:aria-label="'Step ' + (idx + 1) + ' preview'">
-          <p class="opacity-40 text-sm">Start typing to see a preview&hellip;</p>
+          <p class="text-subtle text-sm">Start typing to see a preview&hellip;</p>
         </div>
       </div>
     </div>
@@ -129,7 +129,7 @@
     {# ----- Verify gate ----- #}
     <div class="border-base-300 border-t pt-3 space-y-3">
       <div class="flex flex-wrap items-end gap-4">
-        <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+        <p class="text-xs font-semibold uppercase tracking-wide text-subtle">Verify</p>
         <label class="flex flex-col gap-1 min-w-48">
           <select class="select select-bordered select-sm w-full" x-model="step.verify.type"
                   x-bind:aria-label="'Step ' + (idx + 1) + ' verify type'">
@@ -167,7 +167,7 @@
           <textarea class="textarea textarea-bordered textarea-sm font-mono w-full" rows="2"
                     x-model="step.verify.expect" placeholder="{}"
                     x-bind:aria-label="'Step ' + (idx + 1) + ' verify expect'"></textarea>
-          <span class="text-xs opacity-60">structural-equality match</span>
+          <span class="text-xs text-subtle">structural-equality match</span>
         </label>
       </div>
     </div>

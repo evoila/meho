@@ -55,7 +55,7 @@
   x-on:click="detailsOpen = !detailsOpen"
 >
   {# ---------- timestamp ---------- #}
-  <span class="col-span-2 font-mono text-xs opacity-70">
+  <span class="col-span-2 font-mono text-xs text-muted">
     <time :datetime="ev.ts" x-text="formatTs(ev.ts)"></time>
   </span>
 
@@ -73,7 +73,7 @@
   {# ---------- activity (agent-authored, UNTRUSTED → quoted + escaped) ---------- #}
   <span class="col-span-6 truncate sm:col-span-3">
     <span
-      class="border-l-2 border-base-300 pl-2 italic opacity-90"
+      class="border-l-2 border-base-300 pl-2 italic text-muted"
       :title="ev.activity"
       x-text="ev.activity"
     ></span>
@@ -100,14 +100,14 @@
   </button>
 
   {# ---------- target(s) ---------- #}
-  <span class="col-span-5 truncate text-xs opacity-80 sm:col-span-2">
+  <span class="col-span-5 truncate text-xs text-muted sm:col-span-2">
     <span :title="announcementTargets(ev)" x-text="announcementTargets(ev) || '—'"></span>
   </span>
 
   {# ---------- claim details: planned_op_class · TTL · work_ref ---------- #}
   <span class="hidden truncate text-xs sm:col-span-2 sm:block">
     <span
-      class="opacity-60"
+      class="text-subtle"
       :title="announcementMeta(ev)"
       x-text="announcementMeta(ev) || '—'"
     ></span>
@@ -130,7 +130,7 @@
       class="whitespace-pre-wrap border-l-2 border-base-300 pl-2 italic [overflow-wrap:anywhere]"
       x-text="ev.activity"
     ></p>
-    <p class="[overflow-wrap:anywhere] opacity-80" x-text="announcementTargets(ev) || '—'"></p>
-    <p class="[overflow-wrap:anywhere] opacity-60" x-text="announcementMeta(ev) || '—'"></p>
+    <p class="[overflow-wrap:anywhere] text-muted" x-text="announcementTargets(ev) || '—'"></p>
+    <p class="[overflow-wrap:anywhere] text-subtle" x-text="announcementMeta(ev) || '—'"></p>
   </div>
 </li>

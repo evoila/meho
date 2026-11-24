@@ -47,7 +47,7 @@
 
     {% if ambiguous_kinds %}
       <div class="text-sm" data-test="ambiguous-kinds">
-        <p class="opacity-70">
+        <p class="text-muted">
           Candidate kinds for <span class="font-mono">{{ ambiguous_name }}</span>:
         </p>
         <ul class="mt-1 flex flex-wrap gap-1">
@@ -67,7 +67,7 @@
     >
       <fieldset class="grid grid-cols-2 gap-3">
         <label class="flex flex-col gap-1">
-          <span class="text-xs font-medium opacity-70">From (name)</span>
+          <span class="text-xs font-medium text-muted">From (name)</span>
           <input
             type="text" name="from_name" required
             value="{{ submitted.from_name | default('') }}"
@@ -76,7 +76,7 @@
           />
         </label>
         <label class="flex flex-col gap-1">
-          <span class="text-xs font-medium opacity-70">From kind (optional)</span>
+          <span class="text-xs font-medium text-muted">From kind (optional)</span>
           <input
             type="text" name="from_kind"
             value="{{ submitted.from_kind | default('') }}"
@@ -87,7 +87,7 @@
       </fieldset>
 
       <label class="flex flex-col gap-1">
-        <span class="text-xs font-medium opacity-70">Edge kind</span>
+        <span class="text-xs font-medium text-muted">Edge kind</span>
         {# Free-text input + datalist (not a closed <select>): the kind
            vocabulary is open (T1 #2534) — the well-known kinds are
            offered as suggestions, and any lowercase slug (2–63 chars;
@@ -109,7 +109,7 @@
 
       <fieldset class="grid grid-cols-2 gap-3">
         <label class="flex flex-col gap-1">
-          <span class="text-xs font-medium opacity-70">To (name)</span>
+          <span class="text-xs font-medium text-muted">To (name)</span>
           <input
             type="text" name="to_name" required
             value="{{ submitted.to_name | default('') }}"
@@ -118,7 +118,7 @@
           />
         </label>
         <label class="flex flex-col gap-1">
-          <span class="text-xs font-medium opacity-70">To kind (optional)</span>
+          <span class="text-xs font-medium text-muted">To kind (optional)</span>
           <input
             type="text" name="to_kind"
             value="{{ submitted.to_kind | default('') }}"
@@ -129,7 +129,7 @@
       </fieldset>
 
       <label class="flex flex-col gap-1">
-        <span class="text-xs font-medium opacity-70">Note (optional)</span>
+        <span class="text-xs font-medium text-muted">Note (optional)</span>
         <textarea
           name="note" rows="2" maxlength="{{ max_note_length }}"
           class="textarea textarea-bordered textarea-sm w-full"
@@ -138,7 +138,7 @@
       </label>
 
       <label class="flex flex-col gap-1">
-        <span class="text-xs font-medium opacity-70">Evidence URL (optional)</span>
+        <span class="text-xs font-medium text-muted">Evidence URL (optional)</span>
         <input
           type="url" name="evidence_url" maxlength="{{ max_evidence_url_length }}"
           value="{{ submitted.evidence_url | default('') }}"

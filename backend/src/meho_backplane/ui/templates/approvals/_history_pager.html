@@ -36,7 +36,7 @@
   class="flex items-center justify-between gap-2"
   {% if oob | default(false) %}hx-swap-oob="outerHTML"{% endif %}
 >
-  <span class="text-sm opacity-60">
+  <span class="text-sm text-subtle">
     Showing {{ offset + 1 }}&ndash;{{ offset + requests | length }}
   </span>
   {% if has_more %}
@@ -52,6 +52,6 @@
       Load more
     </button>
   {% else %}
-    <span class="text-xs opacity-40">No more requests</span>
+    <span class="text-xs text-subtle">No more requests</span>
   {% endif %}
 </div>

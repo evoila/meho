@@ -92,7 +92,7 @@
         <tbody>
           {% for row in preview.operations %}
             <tr data-classify-row data-op-id="{{ row.op_id }}" data-changes="{{ 'true' if row.changes else 'false' }}"
-                class="{{ '' if row.changes else 'opacity-60' }}">
+                class="{{ '' if row.changes else 'text-subtle' }}">
               <td class="font-mono text-xs">{{ row.connector_id }}</td>
               <td class="font-mono text-xs">{{ row.group_key or "" }}</td>
               <td class="font-mono text-xs">{{ row.op_id }}</td>

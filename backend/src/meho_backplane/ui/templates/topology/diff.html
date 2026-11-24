@@ -26,7 +26,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Topology diff</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Net graph changes between two points in time
         (<span class="font-mono">ts1</span> exclusive &rarr; <span class="font-mono">ts2</span> inclusive).
       </p>
@@ -42,7 +42,7 @@
      it. The optional ``kind`` filter collapses behind an Alpine toggle. -#}
   <form method="get" action="/ui/topology/diff" class="flex flex-wrap items-end gap-2">
     <label class="form-control">
-      <span class="label-text text-xs opacity-70">From (ts1, exclusive)</span>
+      <span class="label-text text-xs text-muted">From (ts1, exclusive)</span>
       <input
         type="datetime-local"
         name="ts1"
@@ -54,7 +54,7 @@
       />
     </label>
     <label class="form-control">
-      <span class="label-text text-xs opacity-70">To (ts2, inclusive)</span>
+      <span class="label-text text-xs text-muted">To (ts2, inclusive)</span>
       <input
         type="datetime-local"
         name="ts2"
@@ -66,7 +66,7 @@
       />
     </label>
     <label class="form-control" x-show="showKind" x-cloak>
-      <span class="label-text text-xs opacity-70">Kind filter (optional)</span>
+      <span class="label-text text-xs text-muted">Kind filter (optional)</span>
       <input
         type="text"
         name="kind"
@@ -101,7 +101,7 @@
 
   {# ---------- Diff entries ---------- #}
   <section aria-label="Diff entries">
-    <h2 class="text-sm font-semibold uppercase opacity-60">
+    <h2 class="text-sm font-semibold uppercase text-subtle">
       Changes ({{ entries | length }})
     </h2>
     {% if entries %}
@@ -120,12 +120,12 @@
             {% if entry.name %}
               <span class="font-mono">{{ entry.name }}</span>
             {% endif %}
-            <span class="opacity-90">{{ entry.summary }}</span>
+            <span class="text-muted">{{ entry.summary }}</span>
           </li>
         {% endfor %}
       </ul>
     {% else %}
-      <p class="text-sm opacity-60" data-test="diff-empty">
+      <p class="text-sm text-subtle" data-test="diff-empty">
         No net changes between these two points in time.
       </p>
     {% endif %}

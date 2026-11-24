@@ -21,14 +21,16 @@
   (no wrapping ``<ul>``); on "load more" HTMX swaps the load-more ``<li>``
   for these, so the new rows land inside the existing ``#topology-timeline-list``.
 -#}
+
+{% from "_components.html" import badge %}
 {% if rows %}
   {% for row in rows %}
     <li class="flex flex-wrap items-center gap-2 border-base-300 border-b pb-1" data-test="timeline-row">
       <time class="text-xs text-muted font-mono" datetime="{{ row.valid_from.isoformat() }}">
         {{ row.valid_from.isoformat() }}
       </time>
-      <span class="badge badge-outline badge-xs">{{ row.source }}</span>
-      <span class="badge badge-ghost badge-xs">{{ row.change_kind }}</span>
+      {{ badge(row.source, variant="outline", size="xs") }}
+      {{ badge(row.change_kind, variant="quiet", size="xs") }}
       <span class="text-muted">{{ row.summary }}</span>
       {% if row.resource_id %}
         <span class="text-xs text-subtle font-mono">{{ row.resource_id }}</span>

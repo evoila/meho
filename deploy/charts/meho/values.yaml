@@ -733,6 +733,21 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `kbSearchWordHint` is rendered into `KB_SEARCH_WORD_HINT`. When
+  # `"true"`, `search_knowledge` tells the agent to search with a few key
+  # words, and its answer has `word_match` (`some` or `none`). Off until a
+  # measurement shows it helps. See `docs/codebase/kb.md`.
+  kbSearchWordHint: "false"
+  # -- `kbWikiFilteredSearch` is rendered into `KB_WIKI_FILTERED_SEARCH`.
+  # When `"true"`, a product or version filter on `search_knowledge` can
+  # still search the wiki. Off until a measurement shows it helps. See
+  # `docs/codebase/kb.md`.
+  kbWikiFilteredSearch: "false"
+  # -- `kbWikiInterleave` is rendered into `KB_WIKI_INTERLEAVE`. When
+  # `"true"`, `search_knowledge` mixes wiki hits into the knowledge hits
+  # in turns. Off until a measurement shows it helps. See
+  # `docs/codebase/kb.md`.
+  kbWikiInterleave: "false"
   # -- `fileRefParams` is rendered into `FILE_REF_PARAMS`. When `"true"`,
   # the operation parameters that wait behind this switch show to agents
   # and people and are accepted. See `docs/codebase/mcp.md`.

@@ -25,6 +25,8 @@
   RBAC: the whole surface is tenant_admin (a non-admin 403s the route);
   ``can_write`` is always true here, kept for template-shape symmetry.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Agent grants &middot; MEHO Operator Console{% endblock %}
@@ -89,15 +91,15 @@
     hx-swap="outerHTML"
     hx-trigger="submit, change from:#grants-include-expired, keyup changed delay:300ms from:#grants-principal-filter"
   >
-    <label class="form-control">
-      <span class="label-text text-xs">Filter by principal</span>
+    <label>
+      <span class="text-xs">Filter by principal</span>
       <input
         type="text"
         id="grants-principal-filter"
         name="principal_sub"
         value="{{ filter_principal_sub }}"
         maxlength="512"
-        class="input input-bordered input-sm font-mono"
+        class="input input-sm font-mono"
         placeholder="exact principal sub"
         aria-label="Filter by principal sub"
       />
@@ -112,10 +114,10 @@
         class="checkbox checkbox-sm"
         aria-label="Include expired elevations"
       />
-      <span class="label-text text-sm">Include expired</span>
+      <span class="text-sm">Include expired</span>
     </label>
     <noscript>
-      <button type="submit" class="btn btn-sm">Apply</button>
+      {{ button("Apply", variant="default", type="submit") }}
     </noscript>
   </form>
 

@@ -33,6 +33,8 @@
     * ``content`` — overrides the base.html main pane.
     * ``scripts`` — no extra JS (Alpine is loaded by base.html vendor).
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Upload · Knowledge &middot; MEHO Operator Console{% endblock %}
@@ -57,9 +59,7 @@
       </p>
     </div>
     <div>
-      <a href="/ui/kb" class="btn btn-ghost btn-sm">
-        View all entries
-      </a>
+      {{ button("View all entries", variant="quiet", href="/ui/kb") }}
     </div>
   </header>
 
@@ -157,23 +157,23 @@
 
           {# The hidden file input value is wired via Alpine's @change above;
              HTMX picks it up from #kb-file-input on submit via hx-include. #}
-          <div class="form-control">
+          <div>
             <label class="label" for="single-slug">
-              <span class="label-text">Slug</span>
-              <span class="label-text-alt text-subtle">override filename-derived value</span>
+              <span>Slug</span>
+              <span class="text-subtle">override filename-derived value</span>
             </label>
             <input
               id="single-slug"
               type="text"
               name="slug"
-              class="input input-bordered w-full font-mono"
+              class="input w-full font-mono"
               x-model="slugOverride"
               placeholder="kebab-case-slug"
               pattern="[a-z][a-z0-9.\-]*[a-z0-9]?"
               aria-label="Slug for the uploaded entry"
             />
             <div class="label">
-              <span class="label-text-alt text-subtle">
+              <span class="text-subtle">
                 Must start with [a-z], may contain hyphens + dots.
               </span>
             </div>
@@ -182,7 +182,7 @@
           {% if similar_check %}
           <label class="label cursor-pointer justify-start gap-2">
             <input type="checkbox" name="create_anyway" value="true" class="checkbox checkbox-sm" />
-            <span class="label-text">Create anyway, even when similar entries exist</span>
+            <span>Create anyway, even when similar entries exist</span>
           </label>
           {% endif %}
 
@@ -247,7 +247,7 @@
           {% if similar_check %}
           <label class="label cursor-pointer justify-start gap-2">
             <input type="checkbox" name="create_anyway" value="true" class="checkbox checkbox-sm" />
-            <span class="label-text">Create anyway, even when similar entries exist</span>
+            <span>Create anyway, even when similar entries exist</span>
           </label>
           {% endif %}
 

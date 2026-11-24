@@ -465,7 +465,7 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Build SELECT audit_log, targets.name, tenant.name
+  ├─ Build SELECT audit_log (every column but raw_payload), targets.name, tenant.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
   │     OUTER JOIN tenant  ON audit_log.tenant_id = tenant.id    ← tenant_name (#5238)
@@ -512,6 +512,15 @@ query_audit(filters, tenant_id, session)
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
                    if has_more else None
 ```
+
+The list does not load `raw_payload` (#6818). That column holds the whole
+raw answer of a call and can be many megabytes; no `AuditEntry` field uses
+it. The query sets `defer(AuditLog.raw_payload, raiseload=True)`, so code
+that reads it on a listed row fails in tests instead of running one more
+query per row. The two console cards of recent operations on a target
+(topology drawer, target page) skip it the same way. The policy replay
+(`policy_replay.py`) reads it with its own `SELECT` of one row, and that
+`SELECT` loads it also when the same session listed the row first.
 
 ## One rule for a ticket id (work ref)
 

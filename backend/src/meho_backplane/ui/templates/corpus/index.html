@@ -38,6 +38,7 @@
   a route literal would shadow the live value.
 -#}
 {% extends "base.html" %}
+{% from "_components.html" import badge, button %}
 {% from "_icons.html" import icon %}
 
 {% block page_title %}Docs Corpus &middot; MEHO Operator Console{% endblock %}
@@ -74,13 +75,13 @@
           role="search"
           aria-label="Search the docs corpus"
         >
-          <label class="form-control w-full sm:w-64">
+          <label class="w-full sm:w-64">
             <div class="label">
-              <span class="label-text">Collection</span>
+              <span>Collection</span>
             </div>
             <select
               name="collection"
-              class="select select-bordered w-full"
+              class="select w-full"
               aria-label="Doc collection to search"
               required
             >
@@ -102,16 +103,16 @@
               {% endfor %}
             </select>
           </label>
-          <label class="form-control w-full flex-1">
+          <label class="w-full flex-1">
             <div class="label">
-              <span class="label-text">Query</span>
+              <span>Query</span>
             </div>
             <input
               type="search"
               name="q"
               value="{{ query }}"
               placeholder="Ask the corpus&hellip;"
-              class="input input-bordered w-full"
+              class="input w-full"
               autofocus
               aria-label="Docs corpus query"
               autocomplete="off"
@@ -127,9 +128,9 @@
              submitted with the query; the backend defaults to "search" for any
              unrecognised value. ``aria-label`` on the fieldset names the choice
              for assistive tech. #}
-          <fieldset class="form-control" aria-label="Result mode">
+          <fieldset aria-label="Result mode">
             <div class="label">
-              <span class="label-text">Mode</span>
+              <span>Mode</span>
             </div>
             <div class="join" role="radiogroup" aria-label="Result mode">
               <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">
@@ -161,9 +162,7 @@
               target's detected product and version. -#}
           {% if target %}
             <input type="hidden" name="target" value="{{ target }}" />
-            <span class="badge badge-ghost self-center" title="Version hint from this target">
-              Target: {{ target }}
-            </span>
+            {{ badge("Target: " ~ target, variant="quiet", size="md", class="self-center", title="Version hint from this target") }}
           {% endif %}
           <button type="submit" class="btn btn-primary gap-1" aria-label="Search the corpus">
             {{ icon("search") }}
@@ -222,9 +221,7 @@
               This tenant has no doc collections registered yet. Register one
               from the Collections tab to provision the docs corpus.
             </p>
-            <a href="/ui/corpus/collections" class="btn btn-primary btn-sm">
-              Register a collection
-            </a>
+            {{ button("Register a collection", variant="primary", href="/ui/corpus/collections") }}
           {% else %}
             <p class="text-sm text-subtle">
               This tenant has no doc collections registered yet. A tenant

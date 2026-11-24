@@ -22,6 +22,8 @@
   ``data-open-dialog`` / ``data-close-dialog`` (``app/modal-dialogs.js``),
   with no script in this template.
 -#}
+
+{% from "_components.html" import button %}
 <div
   id="account-tools"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -84,7 +86,7 @@
               </p>
               <div class="modal-action">
                 <form method="dialog">
-                  <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+                  {{ button("Cancel", variant="quiet", type="submit") }}
                 </form>
                 <button
                   type="button"

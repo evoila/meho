@@ -10,7 +10,7 @@ in-process fake, so the read really happens before the write.
 * A patch of a secret that exists names the caller.
 * A patch of a secret that does not exist names no login.
 * A read that passes, then a write the store refuses, still names the caller.
-* The made-up secret value is not in the row, the logs or the answer.
+* Neither made-up secret value is in any column of the row, the logs or the answer.
 """
 
 from __future__ import annotations
@@ -182,14 +182,18 @@ async def test_secret_values_stay_out_of_the_row_the_logs_and_the_answer(
     assert result.status == "ok", result.error
     row = await _row()
     assert row.secret_read_as == "person-sub"
-    texts = [
-        repr(result.model_dump()),
-        repr(logs),
-        caplog.text,
-        row.secret_read_as or "",
-    ]
-    for text in texts:
-        assert _STORED_VALUE not in text
-    assert _NEW_VALUE not in repr(result.model_dump())
+    whole_row = json.dumps(
+        {column.name: getattr(row, column.name) for column in AuditLog.__table__.columns},
+        default=str,
+    )
+    texts = {
+        "answer": repr(result.model_dump()),
+        "structlog": repr(logs),
+        "stdlib log": caplog.text,
+        "audit row": whole_row,
+    }
+    for where, text in texts.items():
+        for value in (_STORED_VALUE, _NEW_VALUE):
+            assert value not in text, f"{value} found in the {where}"
     for marker in (_MOUNT, "markerenv0zzz", "tokentail0zzz"):
         assert marker not in (row.secret_read_as or "")

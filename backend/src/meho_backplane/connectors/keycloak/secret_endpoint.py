@@ -364,11 +364,15 @@ class KeycloakCredentialSecretEndpoint:
         return managed_realm_problem(await self._resolve_target(operator), self._realm)
 
     async def check_target(self, operator: Operator) -> None:
-        """Find the named target and check it against the approval card. No Keycloak call.
+        """Find the named target and check it and the ref's realm. No Keycloak call.
 
+        The target must be the one on the approval card, and the ref's realm
+        must be its managed realm now (:func:`managed_realm_problem`).
         ``secret.move`` calls this before it reads the source.
         """
-        await self._resolve_target(operator)
+        problem = await self.realm_problem(operator)
+        if problem is not None:
+            raise KeycloakSecretRefError(problem)
 
     def _in_sign_in_realm(self, target: KeycloakTargetLike) -> bool:
         return self._realm == resolve_realm_config(target).admin_realm

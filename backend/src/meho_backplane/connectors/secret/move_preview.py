@@ -194,6 +194,12 @@ __all__ = [
     "has_keycloak_side",
 ]
 
+#: The reason when the target name of a ``keycloak:`` ref fits more than one target.
+_AMBIGUOUS_TARGET = (
+    "keycloak secret ref: the target name fits more than one target. "
+    "Use a name that fits one target only."
+)
+
 _LINUX_KIND = "linux"
 _KEYCLOAK_KIND = "keycloak"
 
@@ -383,9 +389,10 @@ def check_secret_move_sink(params: dict[str, Any]) -> dict[str, Any] | None:
 async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
     """Check before the wait for approval: each ``keycloak:`` ref names its target's managed realm.
 
-    A malformed ref or a target that does not exist is left to the run,
-    which reports it. The reason names the target's managed realm, never a
-    param value.
+    The check of ``secret.handoff.export`` too, which has only a source. A
+    malformed ref or a target that does not exist is left to the run, which
+    reports it. A target name that fits more than one target is refused. The
+    reason names the target's managed realm, never a param value.
     """
     # Imported here: the keycloak module imports this package, so a top
     # import is circular when the keycloak module is imported first.
@@ -408,6 +415,8 @@ async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
             problem = await keycloak_ref_realm_problem(ctx.operator, spec.ref)
         except (KeycloakSecretRefError, TargetNotFoundError):
             continue
+        except AmbiguousTargetError:
+            return _AMBIGUOUS_TARGET
         if problem is not None:
             return problem
     return None

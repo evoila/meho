@@ -18,6 +18,7 @@
 
   Context contract: ``row`` + ``csrf_token`` (see the enable modal).
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="registry-action-modal" class="modal" aria-label="Enable reads for connector">
   <div class="modal-box max-w-lg">
@@ -42,9 +43,7 @@
           PATCH / DELETE) stay default-deny.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
-          <span class="badge badge-ghost badge-sm">
-            {{ row.enabled_operation_count }} / {{ row.operation_count }} ops currently enabled
-          </span>
+          {{ badge(row.enabled_operation_count ~ " / " ~ row.operation_count ~ " ops currently enabled", variant="quiet") }}
         </div>
       </div>
     </div>

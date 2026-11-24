@@ -66,7 +66,7 @@
     {% if mode == "edit" %}aria-describedby="target-name-immutable-hint"{% endif %}
   />
   {% if mode == "edit" %}
-    <span id="target-name-immutable-hint" class="text-xs opacity-60">
+    <span id="target-name-immutable-hint" class="text-xs text-subtle">
       Name is immutable. To rename, delete and re-create the target.
     </span>
   {% endif %}
@@ -131,7 +131,7 @@
   </label>
 
   <label class="flex flex-col gap-1">
-    <span class="text-sm font-medium">Port <span class="opacity-60">(optional)</span></span>
+    <span class="text-sm font-medium">Port <span class="text-subtle">(optional)</span></span>
     <input
       type="number"
       name="port"
@@ -148,7 +148,7 @@
 
 <div class="grid gap-3 md:grid-cols-2">
   <label class="flex flex-col gap-1">
-    <span class="text-sm font-medium">Secret ref <span class="opacity-60">(optional)</span></span>
+    <span class="text-sm font-medium">Secret ref <span class="text-subtle">(optional)</span></span>
     <input
       type="text"
       name="secret_ref"
@@ -159,14 +159,14 @@
       placeholder="secret/data/targets/&lt;name&gt;"
       aria-describedby="target-secret-ref-hint"
     />
-    <span id="target-secret-ref-hint" class="text-xs opacity-60">
+    <span id="target-secret-ref-hint" class="text-xs text-subtle">
       Vault path the connector reads credentials from.
     </span>
     {{ error_for('secret_ref') }}
   </label>
 
   <label class="flex flex-col gap-1">
-    <span class="text-sm font-medium">Aliases <span class="opacity-60">(comma-separated, optional)</span></span>
+    <span class="text-sm font-medium">Aliases <span class="text-subtle">(comma-separated, optional)</span></span>
     <input
       type="text"
       name="aliases"
@@ -181,7 +181,7 @@
 </div>
 
 <label class="flex flex-col gap-1">
-  <span class="text-sm font-medium">Managed realm <span class="opacity-60">(Keycloak only)</span></span>
+  <span class="text-sm font-medium">Managed realm <span class="text-subtle">(Keycloak only)</span></span>
   <input
     type="text"
     name="managed_realm"
@@ -191,7 +191,7 @@
     aria-label="Managed realm"
     aria-describedby="target-managed-realm-hint"
   />
-  <span id="target-managed-realm-hint" class="text-xs opacity-60">
+  <span id="target-managed-realm-hint" class="text-xs text-subtle">
     The Keycloak realm MEHO manages on this target. Required for a Keycloak target.
     Give the name as it is: no spaces around it, no / ? # % or \.
   </span>
@@ -199,7 +199,7 @@
 </label>
 
 <label class="flex flex-col gap-1">
-  <span class="text-sm font-medium">Notes <span class="opacity-60">(optional)</span></span>
+  <span class="text-sm font-medium">Notes <span class="text-subtle">(optional)</span></span>
   <textarea
     name="notes"
     maxlength="8192"

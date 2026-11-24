@@ -30,7 +30,7 @@
             <span class="badge badge-outline badge-sm" data-model-tier="{{ agent.model_tier }}">
               {{ agent.model_tier }}
             </span>
-            <span class="opacity-70">{{ agent.turn_budget }} turn budget</span>
+            <span class="text-muted">{{ agent.turn_budget }} turn budget</span>
           </div>
         </div>
         <div class="flex items-center gap-2">
@@ -98,25 +98,25 @@
 
       <dl class="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Identity ref</dt>
+          <dt class="font-medium text-muted">Identity ref</dt>
           <dd class="font-mono break-all">{{ agent.identity_ref }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Tools</dt>
+          <dt class="font-medium text-muted">Tools</dt>
           <dd>{{ agent.tool_count }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Created by</dt>
+          <dt class="font-medium text-muted">Created by</dt>
           <dd class="break-all">{{ agent.created_by_sub }}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Created</dt>
+          <dt class="font-medium text-muted">Created</dt>
           <dd data-created-at="{{ agent.created_at.isoformat() }}">
             <time datetime="{{ agent.created_at.isoformat() }}">{{ agent.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="font-medium opacity-70">Updated</dt>
+          <dt class="font-medium text-muted">Updated</dt>
           <dd data-updated-at="{{ agent.updated_at.isoformat() }}">
             <time datetime="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
           </dd>
@@ -129,7 +129,7 @@
      (edit goes through the modal). #}
   <section class="card bg-base-100 border-base-300 border shadow-sm">
     <div class="card-body p-4 space-y-2">
-      <h2 class="text-sm font-semibold opacity-80">System prompt</h2>
+      <h2 class="text-sm font-semibold text-muted">System prompt</h2>
       <pre class="whitespace-pre-wrap break-words rounded-box bg-base-200 p-3 font-mono text-xs"
            aria-label="System prompt (read-only)">{{ agent.system_prompt }}</pre>
     </div>
@@ -154,7 +154,7 @@
           {% if agent.output_schema_json %}
             <pre class="whitespace-pre-wrap break-words font-mono text-xs">{{ agent.output_schema_json }}</pre>
           {% else %}
-            <p class="text-xs opacity-60">No structured-output schema defined.</p>
+            <p class="text-xs text-subtle">No structured-output schema defined.</p>
           {% endif %}
         </div>
       </details>

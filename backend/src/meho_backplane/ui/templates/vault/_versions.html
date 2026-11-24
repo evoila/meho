@@ -21,6 +21,7 @@
   Context: ``error`` (str|None), ``envelope`` (dict|None), ``mount``,
   ``path``, ``target``.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
 
@@ -61,11 +62,11 @@
                 <td class="font-mono">
                   {{ vnum }}
                   {% if current is not none and vnum | string == current | string %}
-                    <span class="badge badge-primary badge-xs ml-1">current</span>
+                    {{ badge("current", variant="primary", size="xs", class="ml-1") }}
                   {% endif %}
                 </td>
-                <td class="font-mono text-xs opacity-70">{{ meta.get("created_time") or "—" }}</td>
-                <td class="font-mono text-xs opacity-70">{{ deletion_time if is_deleted else "—" }}</td>
+                <td class="font-mono text-xs text-muted">{{ meta.get("created_time") or "—" }}</td>
+                <td class="font-mono text-xs text-muted">{{ deletion_time if is_deleted else "—" }}</td>
                 <td>
                   {% if destroyed %}
                     <span class="badge badge-error badge-xs" data-vault-version-state="destroyed">destroyed</span>
@@ -82,7 +83,7 @@
       </div>
     {% else %}
       <div
-        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60"
+        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm text-subtle"
         data-vault-versions="empty"
       >
         No version history for <code>{{ mount }}/{{ path }}</code>.

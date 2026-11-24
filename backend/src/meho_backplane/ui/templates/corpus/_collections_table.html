@@ -24,6 +24,8 @@
       ``vendor`` / ``products`` (list[str]) / ``status`` / ``doc_count``
       (int | None) / ``last_ingested_at`` (datetime | None).
 -#}
+
+{% from "_components.html" import badge %}
 <tbody id="corpus-collections-table-body">
   {% if collection_rows %}
     {% for row in collection_rows %}
@@ -41,27 +43,27 @@
           {% if row.products %}
             {{ row.products | join(", ") }}
           {% else %}
-            <span class="opacity-50">&mdash;</span>
+            <span class="text-subtle">&mdash;</span>
           {% endif %}
         </td>
         <td>
           {% if row.status == "ready" %}
-            <span class="badge badge-success badge-sm">ready</span>
+            {{ badge("ready", variant="success") }}
           {% elif row.status == "provisioning" %}
-            <span class="badge badge-info badge-sm">provisioning</span>
+            {{ badge("provisioning", variant="info") }}
           {% elif row.status == "rebuilding" %}
-            <span class="badge badge-warning badge-sm">rebuilding</span>
+            {{ badge("rebuilding", variant="warning") }}
           {% elif row.status == "disabled" %}
-            <span class="badge badge-ghost badge-sm">disabled</span>
+            {{ badge("disabled", variant="quiet") }}
           {% else %}
-            <span class="badge badge-ghost badge-sm">{{ row.status }}</span>
+            {{ badge(row.status, variant="quiet") }}
           {% endif %}
         </td>
         <td class="text-right tabular-nums">
           {% if row.doc_count is not none %}
             {{ row.doc_count }}
           {% else %}
-            <span class="opacity-50">&mdash;</span>
+            <span class="text-subtle">&mdash;</span>
           {% endif %}
         </td>
         <td class="text-xs">
@@ -70,7 +72,7 @@
               {{ row.last_ingested_at.strftime("%Y-%m-%d") }}
             </span>
           {% else %}
-            <span class="opacity-50">never</span>
+            <span class="text-subtle">never</span>
           {% endif %}
         </td>
         <td>
@@ -86,7 +88,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+      <td colspan="7" class="text-center text-sm text-subtle py-6">
         No collections registered for this tenant yet.
       </td>
     </tr>

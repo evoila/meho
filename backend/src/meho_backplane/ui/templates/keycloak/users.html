@@ -26,6 +26,7 @@
 -#}
 {% extends "base.html" %}
 
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 
 {% block page_title %}Keycloak users &middot; MEHO Operator Console{% endblock %}
@@ -35,7 +36,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Keycloak users</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         List, create, reset passwords, and assign realm roles for the managed
         realm's users. Credential material is redacted.
       </p>
@@ -56,11 +57,11 @@
     hx-target="body"
     hx-push-url="true"
   >
-    <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Keycloak target</span>
+    <label>
+      <span class="mb-1 text-xs text-muted">Keycloak target</span>
       <select
         name="target"
-        class="select select-bordered select-sm w-full font-mono"
+        class="select select-sm w-full font-mono"
         aria-label="Keycloak target"
         hx-get="/ui/keycloak/users"
         hx-target="body"
@@ -76,14 +77,14 @@
         {% endfor %}
       </select>
     </label>
-    <label class="form-control">
-      <span class="label-text mb-1 text-xs opacity-70">Username filter</span>
+    <label>
+      <span class="mb-1 text-xs text-muted">Username filter</span>
       <input
         type="text"
         name="username"
         maxlength="512"
         value="{{ username_filter }}"
-        class="input input-bordered input-sm w-full font-mono"
+        class="input input-sm w-full font-mono"
         placeholder="operator-a"
         aria-label="Username filter"
         autocomplete="off"
@@ -98,11 +99,11 @@
   </form>
 
   {% if not targets %}
-    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
       No Keycloak targets registered for this tenant.
     </div>
   {% elif not active_target %}
-    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm text-subtle">
       Select a Keycloak target to list its users.
     </div>
   {% else %}
@@ -135,8 +136,8 @@
     {% endif %}
 
     <section aria-label="Users" data-keycloak-users>
-      <h2 class="mb-2 text-sm font-semibold opacity-80">
-        Users <span class="text-xs opacity-60">({{ users | length }})</span>
+      <h2 class="mb-2 text-sm font-semibold text-muted">
+        Users <span class="text-xs text-subtle">({{ users | length }})</span>
       </h2>
       {% if users %}
         <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
@@ -154,19 +155,19 @@
               {% for user in users %}
                 <tr data-user-row data-user-uuid="{{ user.get('id') | default('', true) }}">
                   <td class="font-mono">{{ user.get("username") | default("—", true) }}</td>
-                  <td class="text-xs opacity-70">{{ user.get("email") | default("—", true) }}</td>
+                  <td class="text-xs text-muted">{{ user.get("email") | default("—", true) }}</td>
                   <td>
                     {% if user.get("enabled") %}
-                      <span class="badge badge-success badge-xs">yes</span>
+                      {{ badge("yes", variant="success", size="xs") }}
                     {% else %}
-                      <span class="badge badge-ghost badge-xs">no</span>
+                      {{ badge("no", variant="quiet", size="xs") }}
                     {% endif %}
                   </td>
                   <td>
                     {% if user.get("emailVerified") %}
-                      <span class="badge badge-ghost badge-xs">yes</span>
+                      {{ badge("yes", variant="quiet", size="xs") }}
                     {% else %}
-                      <span class="badge badge-ghost badge-xs">no</span>
+                      {{ badge("no", variant="quiet", size="xs") }}
                     {% endif %}
                   </td>
                   {% if is_tenant_admin %}
@@ -206,7 +207,7 @@
           </table>
         </div>
       {% else %}
-        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm text-subtle">
           No users in this realm{% if username_filter %} matching <code>{{ username_filter }}</code>{% endif %}.
         </div>
       {% endif %}

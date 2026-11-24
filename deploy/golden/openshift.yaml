@@ -338,7 +338,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: da9e61b2c76a2665ea33a15c1c3d150d514a7442cb78186da64b52826a40c271
+        checksum/config: 8d8d2e34fb070c3a04b08f3eed1940e4ef14649c00d7327f0bfc06a5e5ffb805
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -757,6 +757,9 @@ data:
   # texts for the biggest tools on the MCP tool list.
   TEAM_KNOWLEDGE_RECALL: "false"
   KB_SIMILAR_CHECK: "false"
+  KB_SEARCH_WORD_HINT: "false"
+  KB_WIKI_FILTERED_SEARCH: "false"
+  KB_WIKI_INTERLEAVE: "false"
   FILE_REF_PARAMS: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
   # Tool profiles with a connector list. Off by default.

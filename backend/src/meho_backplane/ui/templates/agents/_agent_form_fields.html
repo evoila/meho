@@ -80,7 +80,7 @@
     {% if mode == "edit" %}aria-describedby="agent-name-immutable-hint"{% endif %}
   />
   {% if mode == "edit" %}
-    <span id="agent-name-immutable-hint" class="text-xs opacity-60">
+    <span id="agent-name-immutable-hint" class="text-xs text-subtle">
       Name is immutable. To rename, delete and re-create the agent.
     </span>
   {% endif %}
@@ -145,7 +145,7 @@
     hx-target="#agent-live-grants"
     hx-swap="innerHTML"
   />
-  <span id="agent-identity-ref-hint" class="text-xs opacity-60">
+  <span id="agent-identity-ref-hint" class="text-xs text-subtle">
     Keycloak client id of a registered, non-revoked agent principal in
     this tenant.
   </span>

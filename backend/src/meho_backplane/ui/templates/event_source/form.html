@@ -1,3 +1,4 @@
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {#- Per-field validation errors (#384). `errors` maps a form field name to
@@ -37,13 +38,13 @@
       <span class="text-sm font-medium">Name</span>
       {% if mode == "create" %}
         <input type="text" name="name" required maxlength="200"
-               value="{{ values.get('name', '') }}" class="input input-bordered input-sm w-full{{ error_class('name', 'input-error') }}"
+               value="{{ values.get('name', '') }}" class="input input-sm w-full{{ error_class('name', 'input-error') }}"
                placeholder="Prod Alertmanager" />
       {% else %}
         <input type="text" value="{{ values.get('name', '') }}"
-               class="input input-bordered input-sm w-full" disabled
+               class="input input-sm w-full" disabled
                aria-describedby="event-source-name-immutable" />
-        <span id="event-source-name-immutable" class="text-xs opacity-60">
+        <span id="event-source-name-immutable" class="text-xs text-subtle">
           You cannot change the name. To use a new name, delete this event
           source and create it again.
         </span>
@@ -52,18 +53,18 @@
     </label>
 
     <label class="flex flex-col gap-1">
-      <span class="text-sm font-medium">Slug <span class="opacity-60 font-normal">(URL routing token)</span></span>
+      <span class="text-sm font-medium">Slug <span class="text-subtle font-normal">(URL routing token)</span></span>
       {% if mode == "create" %}
         <input type="text" name="slug" required maxlength="100"
                pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
                value="{{ values.get('slug', '') }}"
-               class="input input-bordered input-sm font-mono w-full{{ error_class('slug', 'input-error') }}" placeholder="prod-alertmanager" />
-        <span class="text-xs opacity-60">Lowercase, digits, hyphen. Globally unique; immutable after creation.</span>
+               class="input input-sm font-mono w-full{{ error_class('slug', 'input-error') }}" placeholder="prod-alertmanager" />
+        <span class="text-xs text-subtle">Lowercase, digits, hyphen. Globally unique; immutable after creation.</span>
       {% else %}
         <input type="text" value="{{ values.get('slug', '') }}"
-               class="input input-bordered input-sm font-mono w-full" disabled
+               class="input input-sm font-mono w-full" disabled
                aria-describedby="event-source-slug-immutable" />
-        <span id="event-source-slug-immutable" class="text-xs opacity-60">
+        <span id="event-source-slug-immutable" class="text-xs text-subtle">
           You cannot change the slug. Other systems use it in the address
           they send events to.
         </span>
@@ -74,7 +75,7 @@
     <div class="grid gap-3 md:grid-cols-3">
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">Kind</span>
-        <select name="kind" class="select select-bordered select-sm w-full{{ error_class('kind', 'select-error') }}" required>
+        <select name="kind" class="select select-sm w-full{{ error_class('kind', 'select-error') }}" required>
           {% for k in kind_options %}
             <option value="{{ k }}" {{ "selected" if values.get('kind') == k else "" }}>{{ k }}</option>
           {% endfor %}
@@ -83,7 +84,7 @@
       </label>
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">Auth strategy</span>
-        <select name="auth_strategy" class="select select-bordered select-sm w-full{{ error_class('auth_strategy', 'select-error') }}" required>
+        <select name="auth_strategy" class="select select-sm w-full{{ error_class('auth_strategy', 'select-error') }}" required>
           {% for a in auth_options %}
             <option value="{{ a }}" {{ "selected" if values.get('auth_strategy') == a else "" }}>{{ a }}</option>
           {% endfor %}
@@ -92,7 +93,7 @@
       </label>
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">Status</span>
-        <select name="status" class="select select-bordered select-sm w-full{{ error_class('status', 'select-error') }}" required>
+        <select name="status" class="select select-sm w-full{{ error_class('status', 'select-error') }}" required>
           {% for s in status_options %}
             <option value="{{ s }}" {{ "selected" if values.get('status') == s else "" }}>{{ s }}</option>
           {% endfor %}
@@ -102,21 +103,21 @@
     </div>
 
     <label class="flex flex-col gap-1">
-      <span class="text-sm font-medium">Extras <span class="opacity-60 font-normal">(JSON object, optional)</span></span>
-      <textarea name="extras" class="textarea textarea-bordered font-mono text-sm min-h-[6rem] w-full{{ error_class('extras', 'textarea-error') }}"
+      <span class="text-sm font-medium">Extras <span class="text-subtle font-normal">(JSON object, optional)</span></span>
+      <textarea name="extras" class="textarea font-mono text-sm min-h-[6rem] w-full{{ error_class('extras', 'textarea-error') }}"
                 placeholder='{"rate_limit": 60, "body_cap": 1048576}'>{{ values.get('extras', '') }}</textarea>
-      <span class="text-xs opacity-60">Body cap, rate limit, replay window, dedupe config the ingest path reads.</span>
+      <span class="text-xs text-subtle">Body cap, rate limit, replay window, dedupe config the ingest path reads.</span>
       {{ error_for('extras') }}
     </label>
 
     <label class="flex flex-col gap-1">
       <span class="text-sm font-medium">
         Auth secret
-        <span class="opacity-60 font-normal">{% if mode == "edit" %}(leave blank to keep the current secret){% else %}(optional){% endif %}</span>
+        <span class="text-subtle font-normal">{% if mode == "edit" %}(leave blank to keep the current secret){% else %}(optional){% endif %}</span>
       </span>
-      <input type="password" name="secret" autocomplete="off" class="input input-bordered input-sm w-full{{ error_class('secret', 'input-error') }}"
+      <input type="password" name="secret" autocomplete="off" class="input input-sm w-full{{ error_class('secret', 'input-error') }}"
              placeholder="written to Vault; never displayed" />
-      <span class="text-xs opacity-60">Custodied in Vault — never stored in the database or shown again. A secret of only spaces is refused.</span>
+      <span class="text-xs text-subtle">Custodied in Vault — never stored in the database or shown again. A secret of only spaces is refused.</span>
       {{ error_for('secret') }}
     </label>
 
@@ -124,7 +125,7 @@
       <button type="submit" class="btn btn-sm btn-primary" data-action="submit">
         {{ "Create" if mode == "create" else "Save" }}
       </button>
-      <a href="/ui/event-sources" class="btn btn-sm btn-ghost">Cancel</a>
+      {{ button("Cancel", variant="quiet", href="/ui/event-sources") }}
     </div>
   </form>
 </section>

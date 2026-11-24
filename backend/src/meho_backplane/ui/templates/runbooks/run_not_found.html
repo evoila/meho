@@ -12,6 +12,8 @@
   Context variables:
     run_id -- str: the id the operator navigated to (echoed for support)
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Run not found &middot; MEHO Operator Console{% endblock %}
@@ -41,6 +43,6 @@
     </div>
   </div>
 
-  <a href="/ui/runbooks/runs" class="btn btn-primary btn-sm">Back to runs</a>
+  {{ button("Back to runs", variant="primary", href="/ui/runbooks/runs") }}
 </section>
 {% endblock %}

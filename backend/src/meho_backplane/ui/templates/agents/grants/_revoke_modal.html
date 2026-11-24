@@ -32,14 +32,14 @@
       Revoke grant?
     </h3>
 
-    <p class="py-2 text-sm opacity-80">
+    <p class="py-2 text-sm text-muted">
       Revoke
       <span class="font-mono break-all">{{ grant.op_pattern }}</span>
       (<span class="font-mono">{{ grant.verdict }}</span>)
       for principal
       {{ subject(grant.subject) }}?
     </p>
-    <p class="text-xs opacity-60">
+    <p class="text-xs text-subtle">
       This removes the explicit grant; the principal reverts to its
       safety-level default (a dangerous op is never auto-executed). This
       cannot be undone -- re-create the grant to restore it.

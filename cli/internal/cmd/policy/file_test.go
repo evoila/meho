@@ -105,12 +105,12 @@ func TestValidateSendsTheFileAsYAML(t *testing.T) {
 func TestValidateListsMistakesAndFails(t *testing.T) {
 	var got seen
 	srv := server(t, 200,
-		`{"ok":false,"scope":"tenant","mistakes":["`+"`routing`"+` is not a known key."],"warnings":[]}`, &got)
+		`{"ok":false,"scope":"tenant","mistakes":["`+"`owners`"+` is not a known key."],"warnings":[]}`, &got)
 	stdout, _, err := run(t, "validate", writeFile(t), "--backplane", srv.URL)
 	if err == nil {
 		t.Fatal("expected an error for a file with mistakes")
 	}
-	if !strings.Contains(stdout, "mistake: `routing` is not a known key.") {
+	if !strings.Contains(stdout, "mistake: `owners` is not a known key.") {
 		t.Errorf("stdout: %s", stdout)
 	}
 }
@@ -122,7 +122,11 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 		`"description":{"added":[],"changed":[],"removed":[]},`+
 		`"taxonomy":{"added":["team-net"],"changed":[],"removed":[]},`+
 		`"classifications":{"added":[{"entry":{"match":{"op":"k8s.*"}},"matches":3,"changes":2}],`+
-		`"changed":[],"removed":[]},"operations_changed":2}}`, &got)
+		`"changed":[],"removed":[]},`+
+		`"routing":{"added":[{"entry":{"match":{"category":"network"},"approvers":["Admins"]}}],`+
+		`"changed":[],"removed":[]},`+
+		`"bindings":{"added":[],"changed":[],"removed":[{"entry":{"kind":"Operators"}}]},`+
+		`"operations_changed":2}}`, &got)
 	stdout, stderr, err := run(t, "diff", writeFile(t), "--scope", "install", "--backplane", srv.URL)
 	if err != nil {
 		t.Fatalf("diff: %v; stderr=%s", err, stderr)
@@ -134,6 +138,8 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 	for _, want := range []string{
 		"+ taxonomy: team-net",
 		"+ classifications: changes=2 entry={\"match\":{\"op\":\"k8s.*\"}} matches=3",
+		"+ routing: entry={\"approvers\":[\"Admins\"],\"match\":{\"category\":\"network\"}}",
+		"- bindings: entry={\"kind\":\"Operators\"}",
 		"Operations whose values change: 2",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -146,7 +152,7 @@ func TestImportPrintsTheWaitingRequest(t *testing.T) {
 	var got seen
 	srv := server(t, 202, `{"preview":false,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
 		`"no_change":false,"file_sha256":"a","based_on":"b","diff":null,`+
-		`"message":"The import waits until a second admin approves it. Nothing changed yet.",`+
+		`"message":"The import waits until an admin approves it in the web console. Nothing changed yet.",`+
 		`"approval_request_id":"11111111-1111-1111-1111-111111111111"}`, &got)
 	stdout, stderr, err := run(t, "import", writeFile(t), "--backplane", srv.URL)
 	if err != nil {
@@ -155,7 +161,7 @@ func TestImportPrintsTheWaitingRequest(t *testing.T) {
 	if strings.Contains(got.query, "preview=true") {
 		t.Errorf("import must not be a preview: %q", got.query)
 	}
-	if !strings.Contains(stdout, "waits until a second admin approves it") ||
+	if !strings.Contains(stdout, "waits until an admin approves it in the web console") ||
 		!strings.Contains(stdout, "Approval request: 11111111-1111-1111-1111-111111111111") {
 		t.Errorf("stdout: %s", stdout)
 	}

@@ -127,6 +127,7 @@ from meho_backplane.api.v1.agent_runs import AgentRunRequest, _bound_work_ref
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
+    RunNotOwnedCancellationError,
     UnauthorizedCancellationError,
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
@@ -145,10 +146,10 @@ from meho_backplane.ui.routes.agents.views import (
     _fetch_agent_or_404,
     is_htmx_request,
 )
+from meho_backplane.ui.routes.work_ref_form import form_work_ref
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
-    "WORK_REF_MAX",
     "cancel_run",
     "render_run_console",
     "stream_run_events",
@@ -156,12 +157,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: Max length of the optional ``work_ref`` form field. Mirrors the
-#: change-ticket reference the run row stamps (work_ref I3-T2 #1662); a
-#: generous cap that bounds the form-body parse before it reaches the
-#: token mint.
-WORK_REF_MAX: Final[int] = 256
 
 #: Max length of the prompt textarea. Generous (a run prompt can be a
 #: multi-paragraph instruction) but bounded so a pathological submit
@@ -303,7 +298,7 @@ async def submit_run(
     The actual run executes inside the GET bridge the fragment subscribes
     to (one ``EventSource`` connection = one run's lifetime).
     """
-    cleaned_work_ref = work_ref.strip() if work_ref else None
+    cleaned_work_ref = form_work_ref(work_ref)
     # Reject a blank / whitespace-only prompt up front. The REST
     # ``AgentRunRequest`` model only enforces ``min_length=1`` (so a
     # single space would pass and burn a turn on an empty instruction);
@@ -509,7 +504,9 @@ async def cancel_run(
       error.
     * 403 (``agent_run_cancel_forbidden``) if the operator's role ranks
       below the cancel floor (defence-in-depth; the route gate already
-      rejects ``read_only``).
+      rejects ``read_only``), or if the run was started by another
+      person and the operator is not a tenant admin. That detail says who
+      may stop the run.
     """
     del request  # tenant + identity come from the lifted operator.
     structlog.contextvars.bind_contextvars(
@@ -524,6 +521,11 @@ async def cancel_run(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="agent_run_not_found",
+        ) from exc
+    except RunNotOwnedCancellationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"agent_run_cancel_forbidden: {exc}",
         ) from exc
     except UnauthorizedCancellationError as exc:
         raise HTTPException(

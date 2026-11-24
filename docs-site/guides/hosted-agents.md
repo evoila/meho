@@ -155,11 +155,36 @@ More rules:
 - Any other key in the object is ignored.
 - `meta_tools` and `connectors` must be lists of strings. Anything else
   (for example a single string) makes the run fail.
-- The `connectors` list limits `call_operation` and
-  `preview_operation`, and `meho_connector_list` shows only the
-  connectors in the list. When the agent asks for a connector that is not in
-  the list, MEHO refuses the call and tells the agent which connectors it
-  may use.
+- The `connectors` list limits these tools:
+  - `call_operation`, `preview_operation`, `list_operation_groups` and
+    `search_operations` answer only for connectors in the list. When the
+    agent asks for a connector that is not in the list, MEHO refuses the
+    call and tells the agent which connectors it may use.
+  - `meho_connector_list` shows only the connectors in the list.
+  - `list_targets` shows only the targets of connectors in the list.
+    Its page cursor also names only such a target.
+  - When the agent names a target that MEHO does not find, or a name
+    that fits more than one target, the answer lists close target names.
+    It lists only targets of connectors in the list.
+  - When every target that the exact-name step of the lookup finds is
+    outside the list, or every target that the alias step finds is
+    outside the list, MEHO answers "no target" (`no_target`) with no close
+    names.
+  - An answer never names a target outside the list, and never names its
+    product.
+  - The close target names of a "no target" answer leave out the targets
+    outside the list, so there can be fewer than five, or none.
+  - `result_query` reads only results that were stored under the list.
+  - With the setting `AGENT_TOPOLOGY_OFF_WITH_CONNECTOR_LIST` on, an agent
+    with a `connectors` list does not get `query_topology`. The setting is
+    off by default.
+- The `connectors` list does **not** limit Memory, the knowledge base or
+  the activity feed. `search_memory`, `search_knowledge`,
+  `read_context_resource`, `broadcast_recent` and `broadcast_watch` show
+  the same entries as for an agent without a list. These entries can be
+  about any connector. They are shared on purpose, so that agents learn
+  from each other and see what other agents do. If an agent must not see
+  them, leave these tools out of `meta_tools`.
 
 ### The tool names
 
@@ -291,6 +316,26 @@ meho agent edit pod-reader --disabled   # switch it off
 meho agent edit pod-reader --enabled    # switch it on again
 ```
 
+To let the definition run as another agent, pass `--identity-ref`. When
+that agent has no grant yet, MEHO asks for its first grants, as at
+create. Pass `--grants` with it:
+
+```bash
+meho agent edit pod-reader --identity-ref agent:<other-agent> --grants none
+```
+
+When the agent already has grants, MEHO needs no `--grants`. Then
+`meho agent create` and `meho agent edit` print the agent's grants that
+are live, so you see what it may do:
+
+```text
+This agent already has these grants; no starting grant is needed.
+live grants of agent:<other-agent>:
+  op=* target=every target verdict=auto-execute ends=never
+```
+
+The console forms show the same list next to the starting grant choices.
+
 ## Step 5 — Set permissions (grants)
 
 Every operation has a **safety level**: `safe`, `caution`, `dangerous`,
@@ -396,7 +441,8 @@ else. This example assumes the switch is `on`.
 
 3. Create the definition as in [Step 4](#step-4-create-the-definition),
    with `--identity-ref agent:report-reader`. It needs no `--grants`:
-   the agent already has grants.
+   the agent already has grants. The output lists them under "This agent
+   already has these grants; no starting grant is needed."
 
 4. What happens when the agent calls operations:
 
@@ -478,6 +524,14 @@ these always wait for a person's approval. An agent never approves.
 Grants only check operations that run through `call_operation`. The
 discovery tools (`meho_connector_list`, `list_operation_groups`,
 `search_operations`, `list_targets`) are not affected by grants.
+A docs lookup that names a target (`search_docs` or `ask_docs` with
+`target`) is checked like a `safe` call on that target. With `off` or
+`observe`, it runs when no grant covers it or when a grant with
+`auto-execute` covers it. With `on`, it runs only when a grant with
+`auto-execute` covers it. A `needs-approval` or `deny` grant refuses it
+in every state, because a docs lookup cannot wait for approval. The
+grants are matched on the operation `meho.docs.search` (for `search_docs`)
+and `meho.docs.ask` (for `ask_docs`).
 
 ### Recipe: a read-only agent for one operation on one target
 
@@ -600,6 +654,10 @@ meho agent run-list --status running          # runs that are still going
 meho agent run-cancel <run-id>                # stop a run
 meho agent run-events pod-reader --input "..." # start a run and watch each step live
 ```
+
+You can stop a run that you started. A tenant admin can stop any run of
+the tenant, and so can a platform admin. An agent or service login can stop
+only its own runs.
 
 ### A run as the agent, with its grants
 

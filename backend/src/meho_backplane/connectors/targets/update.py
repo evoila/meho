@@ -30,8 +30,9 @@ Approval and role:
   waits until a person with ``tenant_admin`` approves it. ``host`` and
   ``fqdn`` are addresses MEHO connects to (``x-meho-caller-address``), and
   the call can also change ``secret_ref``, so a changed target is checked
-  by a person before MEHO uses it. People who change a target at once use
-  REST ``PATCH``, ``meho targets update`` or the web console.
+  by a person before MEHO uses it. REST ``PATCH`` with a token (``meho
+  targets update``) becomes a call of this op; only the web console
+  changes a target at once.
 * The role floor is ``tenant_admin``, the same as REST ``PATCH``. It is
   registered below, so the policy gate refuses a person with a lower role
   on every path (``call_operation``, the REST dispatch route, the CLI,
@@ -41,13 +42,14 @@ Approval and role:
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from meho_backplane.api.v1.targets import apply_target_update
+from meho_backplane.api.v1.targets import apply_target_update, screen_destination_change
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.targets.ops import (
@@ -57,10 +59,14 @@ from meho_backplane.connectors.targets.ops import (
     _parse_target_id,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.settings import get_settings
+from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
+from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -74,6 +80,7 @@ __all__ = [
     "build_targets_update_preview",
     "register_targets_update_operation",
     "targets_update",
+    "targets_update_card_warnings",
 ]
 
 TARGETS_UPDATE_OP_ID: Final[str] = "targets.update"
@@ -212,6 +219,15 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Names of the fields the call changed.",
         },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when a setting is allowed but risky, for example a "
+                "Keycloak target that manages the realm MEHO itself signs in with. "
+                "Tell the person about each line."
+            ),
+        },
     },
     "required": ["target_id", "name", "product", "version", "host", "updated_fields"],
 }
@@ -263,6 +279,19 @@ def _update_fields(params: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def _screen_sent_destination(body: TargetUpdate, row: Any) -> None:
+    """Refuse a change that leaves a destination that is not public.
+
+    Runs :func:`~meho_backplane.api.v1.targets.screen_destination_change`
+    on the sent fields and the stored row, so a port-only change is checked
+    too. The error keeps the usual "invalid target parameters" shape.
+    """
+    try:
+        screen_destination_change(body.model_dump(exclude_unset=True), row)
+    except TargetDestinationBlockedError as exc:
+        raise ValueError(f"invalid target parameters: {exc}") from exc
+
+
 async def targets_update(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Change the sent fields of one target of the operator's tenant.
 
@@ -290,10 +319,12 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
                     f"no live target with id {target_id} in your tenant; nothing was changed"
                 )
             structlog.contextvars.bind_contextvars(target_id=str(row.id), target_name=row.name)
+            _screen_sent_destination(body, row)
             updated = await apply_target_update(row, body, operator, session)
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 
+    warnings = keycloak_realm_warnings(updated.product, updated.extras)
     return {
         "target_id": str(updated.id),
         "name": updated.name,
@@ -301,14 +332,40 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
         "version": updated.version,
         "host": updated.host,
         "updated_fields": sorted(body.model_fields_set),
+        **({"warnings": warnings} if warnings else {}),
     }
 
 
-async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Show which target ``targets.update`` would change, and which fields.
+def _preview_changes(row: Any, params: dict[str, Any], ctx: PreviewContext) -> dict[str, Any]:
+    """Map each sent field to ``{"from": <stored value>, "to": <new value>}``.
 
-    Names the target (id, name, host) and its connector link, and lists
-    the names of the fields the call sends. When no live target with the
+    Secret-shaped values are hidden the same way the generic parameter echo
+    hides them. ``secret_ref`` is a Vault path, not a secret, so it shows.
+    """
+    changes = {
+        field: {"from": _stored_value(getattr(row, field, None)), "to": value}
+        for field, value in params.items()
+        if field != "target_id"
+    }
+    return _redact_echoed_params(
+        changes,
+        connector_id=ctx.connector_id,
+        tenant=str(ctx.operator.tenant_id),
+        op_id=TARGETS_UPDATE_OP_ID,
+    )
+
+
+def _stored_value(value: Any) -> Any:
+    return value.value if isinstance(value, Enum) else value
+
+
+async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Show which target ``targets.update`` would change, and each change.
+
+    Names the target (id, name, host) and its connector link. ``changes``
+    holds each sent field with its stored value and its new value, so the
+    approver sees for example the new host. The agent's own preview holds
+    ``changes`` only with ``PREVIEW_TYPED_WRITES`` on. When no live target with the
     id exists in the caller's tenant, it says so; the call would fail.
     Reads only.
     """
@@ -325,7 +382,7 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
             "result_if_run": "fails",
             "note": "no live target with this id in your tenant",
         }
-    return {
+    preview: dict[str, Any] = {
         "action": TARGETS_UPDATE_OP_ID,
         "target": {"id": str(row.id), "name": row.name, "host": row.host},
         "connector": {
@@ -336,6 +393,29 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
         "fields": fields,
         "result_if_run": "updated" if fields else "fails",
     }
+    # The approver always sees each change; the agent's own preview only
+    # with PREVIEW_TYPED_WRITES on.
+    if not ctx.agent_preview or get_settings().preview_typed_writes:
+        preview["changes"] = _preview_changes(row, ctx.params, ctx)
+    return preview
+
+
+async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
+    """The realm warnings for the target as it will be after ``targets.update``.
+
+    A sent ``product`` or ``extras`` replaces the stored one; a field that is
+    not sent keeps its stored value. No live target gives no warning: the
+    call would fail.
+    """
+    target_id = _parse_target_id(ctx.params)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await resolve_target_by_id(session, ctx.operator.tenant_id, target_id)
+    if row is None:
+        return []
+    return keycloak_realm_warnings(
+        ctx.params.get("product", row.product), ctx.params.get("extras", row.extras)
+    )
 
 
 async def register_targets_update_operation(

@@ -68,7 +68,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
 from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
 from meho_backplane.connectors.schemas import (
@@ -168,6 +168,9 @@ class Rke2SshConnector(SshConnector):
     product = "rke2"
     version = "1.x"
     impl_id = "rke2-ssh"
+    # RKE2 follows the Kubernetes minor lines. The token-rotate version check
+    # in ops_write.py is separate and stays as it is.
+    supported_version_range = ">=1.32,<1.38"
 
     async def fingerprint(
         self,
@@ -216,7 +219,7 @@ class Rke2SshConnector(SshConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="ssh: rke2 --version",
-                extras={"error": str(exc)},
+                extras=fingerprint_error_extras(exc),
             )
 
         os_raw = (os_proc.stdout or "") if hasattr(os_proc, "stdout") else ""

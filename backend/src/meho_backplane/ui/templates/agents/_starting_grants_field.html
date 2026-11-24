@@ -5,29 +5,36 @@
   The starting grant pick (#6192). Included by the register-principal
   modal and by the create-agent form. Three choices; none is selected at
   first. While AGENT_GRANT_REQUIRED is not "off" (``grants_required``)
-  the choice is required. For "read-targets" the person ticks targets
-  from the tenant's list.
+  the register form requires the choice. The agent definition forms
+  never mark it required: the service asks for it only when the agent
+  has no grant yet, and its error shows next to the field (#6389). For
+  "read-targets" the person ticks targets from the tenant's list.
 
   Context (from
   :func:`~meho_backplane.ui.routes.agents.starting_grants.pick_context`):
     * ``grant_set_choices``  -- the three choices (value, label, help).
     * ``grant_target_names`` -- the tenant's target names.
     * ``grants_required``    -- whether the choice is required.
-    * ``pick_for_definition`` -- set by the create-agent form; adds a
-      hint that the pick is needed only for an agent with no grants.
+    * ``pick_for_definition`` -- set by the agent definition forms
+      (create and edit); the choice is not marked required, and a hint
+      says the pick is needed only for an agent with no grants.
+    * ``mode``               -- "create" | "edit" on the definition forms.
     * ``errors`` / ``values`` -- as in the surrounding form; the keys are
       ``starting_grants`` and ``starting_grant_targets``.
 -#}
-{%- set picked = values.starting_grants if values and values.starting_grants else "" -%}
-{%- set picked_targets = values.starting_grant_targets if values and values.starting_grant_targets else [] -%}
+{%- set picked = values.get("starting_grants") or "" if values else "" -%}
+{%- set picked_targets = values.get("starting_grant_targets") or [] if values else [] -%}
+{%- set for_definition = pick_for_definition is defined and pick_for_definition -%}
+{%- set mark_required = grants_required and not for_definition -%}
 <fieldset class="flex flex-col gap-1" data-field="starting_grants" aria-describedby="starting-grants-hint">
   <legend class="text-sm font-medium">
     Starting grants
-    {% if not grants_required %}<span class="opacity-60 font-normal">(optional)</span>{% endif %}
+    {% if not mark_required %}<span class="text-subtle font-normal">(optional)</span>{% endif %}
   </legend>
-  <span id="starting-grants-hint" class="text-xs opacity-60">
+  <span id="starting-grants-hint" class="text-xs text-subtle">
     What this agent may run. You can change its grants later.
-    {% if pick_for_definition is defined and pick_for_definition %}MEHO needs this pick when the agent has no grants yet.{% endif %}
+    {% if for_definition and mode == "edit" %}MEHO needs this pick when you change the identity reference to an agent that has no grants yet.
+    {% elif for_definition %}MEHO needs this pick when the agent has no grants yet.{% endif %}
   </span>
   {% for choice in grant_set_choices %}
     <label class="flex items-start gap-2 cursor-pointer">
@@ -36,13 +43,13 @@
         name="starting_grants"
         value="{{ choice.value }}"
         class="radio radio-sm mt-1"
-        {% if grants_required %}required{% endif %}
+        {% if mark_required %}required{% endif %}
         {% if picked == choice.value %}checked{% endif %}
         data-grant-set="{{ choice.value }}"
       />
       <span class="flex flex-col">
         <span class="text-sm">{{ choice.label }}</span>
-        <span class="text-xs opacity-60">{{ choice.help }}</span>
+        <span class="text-xs text-subtle">{{ choice.help }}</span>
       </span>
     </label>
   {% endfor %}
@@ -64,7 +71,7 @@
         {% endfor %}
       </div>
     {% else %}
-      <span class="text-xs opacity-60" data-no-targets>This tenant has no targets yet.</span>
+      <span class="text-xs text-subtle" data-no-targets>This tenant has no targets yet.</span>
     {% endif %}
   </div>
   {% if errors and 'starting_grants' in errors %}

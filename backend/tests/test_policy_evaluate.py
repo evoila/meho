@@ -216,7 +216,7 @@ def test_standing_grant_then_run_approval_clear_a_service_wait() -> None:
     "asked",
     [
         _asked("dangerous", caller_address=True),
-        _asked("dangerous", op_class=frozenset({"credential_read"})),
+        _asked("dangerous", op_class=frozenset({"credential"})),
         _asked("dangerous", op_class=frozenset({"classified_always_wait"})),
         _asked("dangerous", op_class=frozenset({"per_call_approval"})),
     ],
@@ -266,11 +266,8 @@ def test_hosted_run_of_an_agent_caller_uses_both_grants() -> None:
 
 def test_approvers_only_for_a_wait() -> None:
     assert evaluate(_asker(), _asked("safe"), Lookups()).approvers == ()
-    assert evaluate(_asker(), _asked("dangerous"), Lookups()).approvers == (
-        "MEHO-SA-Operators",
-        "MEHO-Admins",
-    )
-    assert approver_groups("caution", "x.op")[0] == "MEHO-Operators"
+    assert evaluate(_asker(), _asked("dangerous"), Lookups()).approvers == ("MEHO-Admins",)
+    assert approver_groups("caution", "x.op") == ("MEHO-Operators", "MEHO-Admins")
     assert approver_groups("caution", _FLOOR_OP) == ("MEHO-Admins",)
 
 
@@ -310,8 +307,9 @@ def _ask(**kw: Any) -> ApprovalAsk:
             "sa_operator_or_admin",
         ),
         (_asker(), _ask(rights_change=True), False, "rights_change"),
-        (_asker(role="tenant_admin"), _ask(rights_change=True), True, "reviewer"),
-        (_asker(flags={"platform_admin"}), _ask(rights_change=True), True, "reviewer"),
+        (_asker(role="tenant_admin"), _ask(rights_change=True), False, "rights_change"),
+        (_asker(role="tenant_admin", via="web"), _ask(rights_change=True), True, "reviewer"),
+        (_asker(flags={"platform_admin"}, via="web"), _ask(rights_change=True), True, "reviewer"),
         (_asker(), _ask(grant_refusal="for your own login"), False, "grant_change"),
         (_asker(role="tenant_admin"), _ask(op_id=_FLOOR_OP), True, "reviewer"),
         (_asker(), _ask(op_id=_FLOOR_OP), False, "role_floor"),
@@ -344,6 +342,12 @@ def test_may_approve_others(asker: Asker, ask: ApprovalAsk, allowed: bool, rule_
         (_asker(sub="me"), _ask(break_glass=True), True, "break_glass_self_approval"),
         (_asker(sub="me"), _ask(break_glass=True, risk="dangerous"), False, "own_change"),
         (_asker(sub="me", role="tenant_admin"), _ask(rights_change=True), False, "rights_change"),
+        (
+            _asker(sub="me", role="tenant_admin", via="web"),
+            _ask(rights_change=True),
+            True,
+            "sa_operator_self_approval",
+        ),
     ],
 )
 def test_may_approve_own_change(

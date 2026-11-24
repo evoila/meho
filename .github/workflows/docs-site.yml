@@ -65,6 +65,9 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
+      - 'docs/deploying.md'
+      - 'scripts/ci/upgrade_rows.py'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'docs/compatibility/**'
@@ -89,6 +92,7 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
   workflow_dispatch:
 
 # Read-only by default; the deploy job elevates to the minimum it
@@ -114,6 +118,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The new-row check below needs the base branch and its history.
+          fetch-depth: 0
 
       - name: Install uv
         # Pinned uv, the same version as ci.yml (its python-lint job says
@@ -126,6 +133,14 @@ jobs:
       - name: Install docs toolchain (locked)
         run: uv sync --locked --only-group docs
         working-directory: backend
+
+      - name: Check new upgrade rows
+        # A new row file must go into the folder of the next release, not
+        # into a folder of a version that is already released.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: python3 scripts/ci/upgrade_rows.py --check-new-rows "$BASE_REF"
 
       - name: Check "tested live" claims
         # A page or the release notes may say a version was tested live

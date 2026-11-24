@@ -23,7 +23,7 @@ import (
 // classification.
 const classifyNote = "A category decides who may approve, so a change of category,\n" +
 	"labels or \"always wait\" is a change of rights: it waits until\n" +
-	"another tenant admin approves it (`meho approvals list`). It needs\n" +
+	"a tenant admin approves it in the web console. It needs\n" +
 	"the POLICY_CLASSIFICATION setting on the backplane.\n"
 
 // newClassifyCmd returns the `meho connector classify` command.
@@ -83,7 +83,7 @@ func newClassifyCmd() *cobra.Command {
 	addClassificationFlags(cmd, &category, &labels)
 	cmd.Flags().BoolVar(&alwaysWait, "always-wait", false, "every call of a matched operation waits for approval")
 	cmd.Flags().BoolVar(&noAlwaysWait, "no-always-wait", false,
-		"back to the operation's own approval value (never below it)")
+		"back to the operation's own approval value (never below it); refused when the install's policy makes a matched operation always wait")
 	cmd.Flags().BoolVar(&apply, "apply", false, "ask for the change (without it: dry run only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
@@ -240,23 +240,36 @@ func printClassificationPreview(w io.Writer, preview *api.ClassificationPreviewR
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CONNECTOR\tGROUP\tOPERATION\tCATEGORY\tLABELS\tALWAYS WAIT")
+	fmt.Fprintln(tw, "CONNECTOR\tGROUP\tOPERATION\tCATEGORY\tLABELS\tALWAYS WAIT\tIN FORCE")
 	for _, row := range preview.Operations {
 		group := ""
 		if row.GroupKey != nil {
 			group = *row.GroupKey
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s -> %s\t%s -> %s\t%t -> %t\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s -> %s\t%s -> %s\t%t -> %t\t%s -> %s\n",
 			row.ConnectorId, group, row.OpId,
 			valueOr(row.Before.Category, "-"), valueOr(row.After.Category, "-"),
 			labelText(row.Before.Labels), labelText(row.After.Labels),
 			row.Before.AlwaysWait, row.After.AlwaysWait,
+			inForceText(row.Before.InForce), inForceText(row.After.InForce),
 		)
 	}
 	_ = tw.Flush()
 	if preview.Conflict == nil && preview.MatchedOperations > 0 {
 		fmt.Fprintln(w, "Run the same command with --apply to ask for the change.")
 	}
+}
+
+// inForceText is what applies with the values: the code's value, the
+// overrides and the minimum-level rules included. "-" when the operation is gone.
+func inForceText(inForce *api.ClassificationInForce) string {
+	if inForce == nil {
+		return "-"
+	}
+	if inForce.Waits {
+		return inForce.Risk + ", waits"
+	}
+	return inForce.Risk + ", runs at once"
 }
 
 func valueOr(value *string, fallback string) string {
@@ -284,7 +297,7 @@ func labelText(labels map[string]string) string {
 
 // classificationFlagsSet reports whether --category or --label was given,
 // and refuses them next to any of the other edit flags: a classification
-// change waits for another admin, the other edits are stored at once.
+// change waits for an admin's approval, the other edits are stored at once.
 func classificationFlagsSet(cmd *cobra.Command, otherFlags ...string) (bool, error) {
 	if !cmd.Flags().Changed("category") && !cmd.Flags().Changed("label") {
 		return false, nil
@@ -292,7 +305,8 @@ func classificationFlagsSet(cmd *cobra.Command, otherFlags ...string) (bool, err
 	for _, name := range otherFlags {
 		if cmd.Flags().Changed(name) {
 			return true, fmt.Errorf(
-				"--category and --label wait for another tenant admin; use them without --%s", name)
+				"--category and --label wait until a tenant admin approves them in the web console; use them without --%s",
+				name)
 		}
 	}
 	return true, nil

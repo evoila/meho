@@ -76,6 +76,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from tests._rest_write_helpers import run_writes_at_once
 
 from .conftest import DOCKER_AVAILABLE, SKIP_REASON, build_integration_app
 
@@ -166,7 +167,9 @@ def annotate_app(pg_engine: None) -> AsyncIterator[FastAPI]:
 
     app = build_integration_app()
     app.include_router(topology_router)
-    yield app
+    # These tests check what a graph write does, so they run it as the
+    # console does; a person's token call waits for approval.
+    yield run_writes_at_once(app)
 
     clear_registry()
     _CONNECTOR_INSTANCE_CACHE.clear()

@@ -14,13 +14,13 @@ You can add your own connectors the same way as the enterprise pack: see [Write 
 
 These connectors are in the public image, generated from the in-process connector registry. Each row is one registered implementation. The **Docs** column links to the connector's page in the source repository.
 
-MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers.
+MEHO has two kinds of connector, both first-class and indistinguishable to an agent. **Generic** connectors are built by ingesting a vendor's OpenAPI file (version 3.0 or 3.1; the command line converts a Swagger 2.0 file first); **typed** connectors are hand-coded against a vendor SDK or transport where no usable spec exists. The **Kind** column is populated only where MEHO's published connector-spec catalog states it, and is blank otherwise — it is a property of how a connector's operations are sourced, not something this table infers. MEHO refuses a Kubernetes API file whose paths do not start with `/api/v1` or `/apis/<group>/<version>`: use the standard API file that the cluster serves.
 
 | Connector | Product | What it does | Built for | Tested live on | Kind | Docs |
 | --- | --- | --- | --- | --- | --- | --- |
-| `argocd-api-3.x` | `argocd` | — | >=2.0,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md) |
+| `argocd-api-3.x` | `argocd` | — | >=3.0,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-argocd.md) |
 | `azure-arm-2026.10` | `azure` | Reads Azure subscriptions (VMs, Kubernetes clusters, networks, storage, costs, security and policy), changes tags and starts patch checks. | Azure has no product version. Each call names the API version of its resource type. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-azure.md) |
-| `bind9-ssh-9.x` | `bind9` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md) |
+| `bind9-ssh-9.x` | `bind9` | — | >=9.18,<9.21 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-bind9.md) |
 | `entra-graph-1.0` | `entra` | Reads Microsoft Entra ID users, groups, app registrations, service principals and role assignments. | Entra ID has no product version. The connector calls Microsoft Graph v1.0. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-entra.md) |
 | `freeipa-jsonrpc-4.x` | `freeipa` | Reads FreeIPA users, groups, hosts and access rules; creates users, groups, host groups and rules, adds members, deletes hosts, users and roles, and sets the password policy. | >=4.9,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-freeipa.md) |
 | `gcloud-rest-1.0` | `gcloud` | — | Google Cloud has no product version. Each call uses the versioned path of its API. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-gcloud.md) |
@@ -28,54 +28,57 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `harbor-rest-2.x` | `harbor` | — | >=2.0,<3.0 | not yet recorded | generic | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-harbor.md) |
 | `hetzner-rest-2026.04` | `hetzner` | — | Hetzner Robot has no product version. The connector version 2026.04 is a date. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hetzner-robot.md) |
 | `hyperv-ssh-2022.x` | `hyperv` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-hyperv.md) |
-| `k8s-1.x` | `k8s` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
+| `k8s-1.x` | `k8s` | — | >=1.32,<1.38 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-kubernetes.md) |
 | `keycloak-admin-26.x` | `keycloak` | — | >=26.0,<27.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-keycloak.md) |
 | `linux-ssh-1.x` | `linux` | — | Any Linux host that runs systemd fits. A rule for the distribution applies, not a range. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-linux.md) |
 | `loki-api-3.x` | `loki` | — | >=2.9,<4.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-loki.md) |
-| `mongodb-wire-7` | `mongodb` | — | >=5,<9 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
+| `mongodb-wire-7` | `mongodb` | — | >=7,<9 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mongodb.md) |
 | `msad-ssh-2022.x` | `msad` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-msad.md) |
 | `mssql-tds-2022.x` | `mssql` | — | >=13,<17 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-mssql.md) |
-| `pfsense-ssh-2.7` | `pfsense` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
+| `pfsense-ssh-2.7` | `pfsense` | — | >=2.7,<2.10 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-pfsense.md) |
 | `phpipam-rest-1.x` | `phpipam` | Lists phpIPAM subnets and free addresses, and reserves or releases an IP address. | The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference. | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-phpipam.md) |
-| `postgres-wire-16` | `postgres` | — | >=13,<18 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
+| `postgres-wire-16` | `postgres` | — | >=15,<19 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-postgres.md) |
 | `prometheus-api-2.x` | `prometheus` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-prometheus.md) |
 | `proxmox-api-8.x` | `proxmox` | — | >=7.0,<9.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-proxmox.md) |
 | `rabbitmq-management-3.x` | `rabbitmq` | — | >=3.8,<5.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rabbitmq.md) |
-| `rke2-ssh-1.x` | `rke2` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
+| `rke2-ssh-1.x` | `rke2` | — | >=1.32,<1.38 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-rke2.md) |
 | `tempo-api-2.x` | `tempo` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-tempo.md) |
-| `vault-1.x` | `vault` | — | no range stated | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
+| `vault-1.x` | `vault` | — | >=1.18,<2.0 | not yet recorded | typed | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
+| `vault-openbao-2.x` | `vault` | — | >=2.0,<3.0 | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault.md) |
 | `windns-ssh-2016.x` | `windns` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-windows-dns.md) |
 | `winsrv-ssh-2022.x` | `winsrv` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-winsrv.md) |
 | `wsfc-ssh-2022.x` | `wsfc` | — | no range stated | not yet recorded | — | [docs](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-wsfc.md) |
 
 ## evoila's enterprise pack
 
-evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF connectors, and connectors for Fortinet and CrowdStrike products, as a signed package on top of the public image. Their setup guides and operation lists come with the pack. To get the pack, contact evoila.
+evoila's enterprise pack is a commercial add-on. It adds the VMware and VCF connectors, and connectors for Fortinet, CrowdStrike and Dell NetWorker products, as a signed package on top of the public image. Their setup guides and operation lists come with the pack. To get the pack, contact evoila.
 
 | Product | Connectors | Built for | Tested live on | What it does |
 | --- | --- | --- | --- | --- |
-| VMware vCenter and vSphere | `vmware-rest-9.0`, `vmware-rest-8.0` | 8.0 Update 1 or newer, 9.x | `vmware-rest-9.0`: not yet recorded. `vmware-rest-8.0`: not yet recorded. | Reads and manages virtual machines, hosts, clusters, storage and networks. |
-| VMware NSX | `nsx-rest-9.0`, `nsx-rest-4.2` | 4.x, 9.x | `nsx-rest-9.0`: not yet recorded. `nsx-rest-4.2`: not yet recorded. | Reads and changes segments, gateways, firewall rules, load balancers and VPNs. |
-| VCF SDDC Manager | `sddc-rest-9.0`, `sddc-vcf5-5.0` | 5.x, 9.x | `sddc-rest-9.0`: not yet recorded. `sddc-vcf5-5.0`: not yet recorded. | Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks. |
-| VCF Installer and Cloud Builder | `installer-rest-9.1`, `installer-cb-5.0` | 5.x, 9.x | `installer-rest-9.1`: not yet recorded. `installer-cb-5.0`: not yet recorded. | Checks a deployment plan and deploys a new VCF instance. |
-| VCF fleet management and Aria Suite Lifecycle | `fleet-lcm-9.0`, `fleet-rest-9.0` | 8.x, 9.x | `fleet-lcm-9.0`: not yet recorded. `fleet-rest-9.0`: not yet recorded. | Installs, updates and scales the VCF management components. |
-| VCF Automation and Aria Automation | `vcfa-rest-9.0`, `vcfa-vra8-8.0` | 8.x, 9.x | `vcfa-rest-9.0`: not yet recorded. `vcfa-vra8-8.0`: not yet recorded. | Reads and manages projects, catalog items, templates and deployments. |
-| VCF Operations and Aria Operations | `vrops-rest-9.0`, `vrops-vrops8-8.0` | 8.x, 9.x | `vrops-rest-9.0`: not yet recorded. `vrops-vrops8-8.0`: not yet recorded. | Reads resources, alerts, metrics and health. |
-| VCF Operations for logs and Aria Operations for Logs | `vrli-rest-9.0`, `vrli-vrli8-8.0` | 8.x, 9.x | `vrli-rest-9.0`: not yet recorded. `vrli-vrli8-8.0`: not yet recorded. | Searches logs and reads log alerts. |
-| VCF Operations orchestrator | `vro-rest-9.0` | 8.x, 9.x | not yet recorded | Reads workflows and their runs, and starts or cancels a workflow run. |
-| VCF Identity Broker and Workspace ONE Access | `idb-rest-9.0`, `idb-wsa-3.3` | 3.3, 9.x | `idb-rest-9.0`: not yet recorded. `idb-wsa-3.3`: not yet recorded. | Reads users, groups and identity settings. |
-| VMware Cloud Director | `vcd-rest-10.6` | 10.x | not yet recorded | Reads and manages tenants, vApps, virtual machines, networks and edge gateways. |
-| VMware HCX | `hcx-rest-9.0` | 4.7 to 9.x | not yet recorded | Reads site pairings, service meshes and migrations, and changes service meshes. |
-| VMware Site Recovery Manager | `srm-rest-9.1` | 8.8 to 9.x | not yet recorded | Reads protection groups and recovery plans, and runs recovery tasks. |
-| VMware vSphere Replication | `vr-rest-9.1` | 8.8 to 9.x | not yet recorded | Reads and manages the replication of virtual machines. |
-| VMware Aria Automation Config (Salt) | `salt-raas-8.18` | 8.x, 9.x | not yet recorded | Reads minions and jobs, accepts minion keys and starts jobs. |
-| VMware Holodeck | `holodeck-ssh-9.0` | 9.0 | not yet recorded | Builds and manages nested VCF lab environments. |
+| VMware vCenter and vSphere | `vmware-rest-9.0`, `vmware-rest-8.0` | 8.0 Update 1 or newer, 9.x | `vmware-rest-9.0`: 9.1.0.0: changes (Oct 2026, last tested with MEHO v0.37.0). `vmware-rest-8.0`: 8.0.3: changes (Oct 2026, last tested with MEHO v0.37.0). | Reads and manages virtual machines, hosts, clusters, storage and networks. |
+| VMware NSX | `nsx-rest-9.0`, `nsx-rest-4.2` | 4.x, 9.x | `nsx-rest-9.0`: 9.1.0.0: reads (Nov 2026). `nsx-rest-4.2`: not yet tested live. | Reads and changes segments, gateways, firewall rules, load balancers and VPNs. |
+| VCF SDDC Manager | `sddc-rest-9.1`, `sddc-rest-9.0`, `sddc-vcf5-5.0` | 5.x, 9.x | `sddc-rest-9.1`: not yet recorded. `sddc-rest-9.0`: 9.1.0.0: reads (Nov 2026). `sddc-vcf5-5.0`: not yet tested live. | Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks. |
+| VCF Operations for Networks | `vrni-rest-9.0`, `vrni-rest-6.14` | 6.14, 9.x | `vrni-rest-9.0`: not yet recorded. `vrni-rest-6.14`: not yet recorded. | Reads network flows, applications and problems, and the infrastructure it sees. |
+| VCF Installer and Cloud Builder | `installer-rest-9.1`, `installer-cb-5.0` | 5.x, 9.x | `installer-rest-9.1`: 9.1.1.0: changes (Oct 2026, last tested with MEHO v0.37.0). `installer-cb-5.0`: not yet tested live. | Checks a deployment plan and deploys a new VCF instance. |
+| VCF fleet management and Aria Suite Lifecycle | `fleet-lcm-9.0`, `fleet-rest-9.0` | 8.18 to 9.x | `fleet-lcm-9.0`: not yet tested live. `fleet-rest-9.0`: not yet tested live. | Installs, updates and scales the VCF management components. |
+| VCF Automation and Aria Automation | `vcfa-rest-9.0`, `vcfa-vra8-8.0` | 8.18 to 9.x | `vcfa-rest-9.0`: 9.1.0: changes (Oct 2026, last tested with MEHO v0.37.0); 9.1.1: reads (Nov 2026). `vcfa-vra8-8.0`: not yet tested live. | Reads and manages projects, catalog items, templates and deployments. |
+| VCF Operations and Aria Operations | `vrops-rest-9.0`, `vrops-vrops8-8.0` | 8.18 to 9.x | `vrops-rest-9.0`: not yet tested live. `vrops-vrops8-8.0`: not yet tested live. | Reads resources, alerts, metrics and health. |
+| VCF Operations for logs and Aria Operations for Logs | `vrli-rest-9.0`, `vrli-vrli8-8.0` | 8.18 to 9.x | `vrli-rest-9.0`: not yet tested live. `vrli-vrli8-8.0`: not yet tested live. | Searches logs and reads log alerts. |
+| VCF Operations orchestrator | `vro-rest-9.0` | 8.18 to 9.x | not yet tested live | Reads workflows and their runs, and starts or cancels a workflow run. |
+| VCF Identity Broker and Workspace ONE Access | `idb-rest-9.0`, `idb-wsa-3.3` | 3.3, 9.x | `idb-rest-9.0`: not yet tested live. `idb-wsa-3.3`: not yet tested live. | Reads users, groups and identity settings. |
+| VMware Cloud Director | `vcd-rest-10.6` | 10.x | not yet tested live | Reads and manages tenants, vApps, virtual machines, networks and edge gateways. |
+| VMware HCX | `hcx-rest-9.0` | 4.11 to 9.x | not yet tested live | Reads site pairings, service meshes and migrations, and changes service meshes. |
+| VMware Site Recovery Manager | `srm-rest-9.1` | 8.8 to 9.x | not yet tested live | Reads protection groups and recovery plans, and runs recovery tasks. |
+| VMware vSphere Replication | `vr-rest-9.1` | 8.8 to 9.x | not yet tested live | Reads and manages the replication of virtual machines. |
+| VMware Aria Automation Config (Salt) | `salt-raas-8.18` | 8.18 to 9.x | not yet tested live | Reads minions and jobs, accepts minion keys and starts jobs. |
+| VMware Holodeck | `holodeck-ssh-9.0` | 9.0 | not yet tested live | Builds and manages nested VCF lab environments. |
 | Fortinet FortiGate | `fortigate-rest-7.x` | 7.2 to 7.x | not yet recorded | Reads firewalls and changes interfaces, routes, addresses, policies and IPsec VPNs. |
 | Fortinet FortiManager | `fortimanager-jsonrpc-7.x` | 7.2 to 7.x | not yet recorded | Changes addresses, groups and policies, then installs the policy package to devices. |
 | Fortinet FortiAnalyzer | `fortianalyzer-jsonrpc-7.x` | 7.2 to 7.x | not yet recorded | Searches the logs and events that FortiAnalyzer keeps for many devices. |
 | Fortinet FortiMail | `fortimail-rest-7.x` | 7.2 to 7.x | not yet recorded | Reads status, quarantine and mail queues, and changes block lists, safe lists and policies. |
 | Fortinet FortiSIEM | `fortisiem-rest-7.5`, `fortisiem-rest-7.4` | 7.4 to 7.x | `fortisiem-rest-7.5`: not yet recorded. `fortisiem-rest-7.4`: not yet recorded. | Reads the health of the FortiSIEM nodes and the organizations. |
 | CrowdStrike Falcon | `falcon-rest-2026.11` | cloud service | not yet recorded | Reads hosts and detections, and cuts a host off the network or gives it back. |
+| Dell NetWorker | `networker-rest-19.x` | 19.x | not yet recorded | Reads backup jobs, clients and workflows, and starts or stops backups, with approval. |
 
 ## Versions and how a connector is chosen
 

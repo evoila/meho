@@ -42,6 +42,8 @@
                          in_flight_run_count} surfaced after a fork-on-edit
     csrf_token        -- str
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ page_title }} &middot; MEHO Operator Console{% endblock %}
@@ -150,11 +152,11 @@
         {% if mode == "new" %}
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Slug</span>
-          <input type="text" name="slug" class="input input-bordered input-sm font-mono w-full"
+          <input type="text" name="slug" class="input input-sm font-mono w-full"
                  x-model="slug" pattern="[a-z]([a-z0-9.\-]*[a-z0-9])?"
                  placeholder="rotate-cluster-cert" autocomplete="off" required
                  aria-label="Template slug" />
-          <span class="text-xs opacity-60">lowercase, dots/hyphens, required</span>
+          <span class="text-xs text-subtle">lowercase, dots/hyphens, required</span>
           <span class="text-xs text-error" x-show="slugError()" x-text="slugError()"></span>
         </label>
         {% else %}
@@ -164,21 +166,21 @@
 
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Title</span>
-          <input type="text" name="title" class="input input-bordered input-sm w-full"
+          <input type="text" name="title" class="input input-sm w-full"
                  x-model="title" placeholder="Rotate the cluster certificate"
                  autocomplete="off" required aria-label="Template title" />
         </label>
 
         <label class="flex flex-col gap-1">
           <span class="text-sm font-medium">Description</span>
-          <textarea name="description" class="textarea textarea-bordered textarea-sm w-full" rows="2"
+          <textarea name="description" class="textarea textarea-sm w-full" rows="2"
                     x-model="description" placeholder="What this runbook does and when to run it."
                     required aria-label="Template description"></textarea>
         </label>
 
         <label class="flex flex-col gap-1 max-w-md">
-          <span class="text-sm font-medium">Target kind <span class="opacity-60 font-normal">(optional)</span></span>
-          <input type="text" name="target_kind" class="input input-bordered input-sm font-mono w-full"
+          <span class="text-sm font-medium">Target kind <span class="text-subtle font-normal">(optional)</span></span>
+          <input type="text" name="target_kind" class="input input-sm font-mono w-full"
                  x-model="targetKind" placeholder="k8s-node" autocomplete="off"
                  aria-label="Template target kind" />
         </label>
@@ -192,7 +194,7 @@
     <div class="space-y-4 mt-4">
       <div class="flex items-center justify-between">
         <h2 class="text-xl font-semibold">
-          Steps <span class="text-sm font-normal opacity-60" x-text="'(' + steps.length + ')'"></span>
+          Steps <span class="text-sm font-normal text-subtle" x-text="'(' + steps.length + ')'"></span>
         </h2>
         <button type="button" class="btn btn-outline btn-sm" x-on:click="addStep()">
           + Add step
@@ -206,8 +208,8 @@
 
     {# Actions #}
     <div class="flex items-center justify-end gap-3 mt-4">
-      <a href="/ui/runbooks" class="btn btn-ghost btn-sm">Cancel</a>
-      <button type="submit" class="btn btn-primary btn-sm">{{ submit_label }}</button>
+      {{ button("Cancel", variant="quiet", href="/ui/runbooks") }}
+      {{ button(submit_label, variant="primary", type="submit") }}
     </div>
   </form>
 </section>

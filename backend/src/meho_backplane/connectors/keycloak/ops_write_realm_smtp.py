@@ -28,19 +28,28 @@ the Keycloak list of secret fields and then by the same two passes as the
 generic params echo: secret-named keys (``clientSecret``,
 ``authTokenClientSecret``, ``someApiKey`` at any depth) and secret-shaped
 text in any value (for example a token) show as hidden.
+
+The text of the realm's password rules (``passwordPolicy`` at the top of
+the realm) holds no password, so both realm cards show it
+(:func:`show_password_policy`). It still goes through the value-shape
+pass first. The same name deeper in the realm stays hidden.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
+from meho_backplane.connectors.keycloak.redaction import (
+    PASSWORD_POLICY_FIELD,
+    redact_preview_fields,
+)
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     _redact_echoed_params,
     register_preview_builder,
 )
+from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
@@ -52,6 +61,7 @@ __all__ = [
     "SMTP_PASSWORD_SECRET_PROPS",
     "has_inline_smtp_password",
     "inline_smtp_password_reason",
+    "show_password_policy",
     "with_smtp_password",
 ]
 
@@ -119,17 +129,26 @@ def with_smtp_password(smtp: Any, password: str) -> dict[str, Any]:
 
 
 async def _refuse_inline_smtp_password(ctx: PreviewContext) -> str | None:
-    """Park check: refuse an inline SMTP password before the wait for approval."""
+    """Park check: refuse an inline SMTP password before the wait for approval.
+
+    Then the check of MEHO's own login realm runs
+    (:func:`~.ops_meho_own_login_guard.login_realm_park_reason`).
+    """
     if has_inline_smtp_password(ctx.params):
         return inline_smtp_password_reason()
-    return None
+    # Imported late: the guard imports the user guard, which imports the write modules.
+    from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+        login_realm_park_reason,
+    )
+
+    return await login_realm_park_reason(ctx)
 
 
 def _realm_label(ctx: PreviewContext) -> str | None:
     """The realm the update targets: the ``realm`` param, else the managed realm."""
     explicit = ctx.params.get("realm")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+    if isinstance(explicit, str) and explicit:
+        return explicit
     if ctx.target is None:
         return None
     try:
@@ -137,6 +156,26 @@ def _realm_label(ctx: PreviewContext) -> str | None:
     except Exception:
         # The label is a convenience; a target without a realm config omits it.
         return None
+
+
+def show_password_policy(
+    hidden: dict[str, Any], representation: Any, ctx: PreviewContext
+) -> dict[str, Any]:
+    """Put the realm's password rules text back on a realm approval card.
+
+    *hidden* is the card's scrubbed realm, *representation* the realm as
+    sent. Only a text ``passwordPolicy`` at the top level comes back, and
+    only after the value-shape pass of the generic echo has checked it.
+    The same name deeper in the realm stays hidden.
+    """
+    policy = representation.get(PASSWORD_POLICY_FIELD) if isinstance(representation, dict) else None
+    if not isinstance(policy, str) or PASSWORD_POLICY_FIELD not in hidden:
+        return hidden
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+    checked = apply_connector_boundary_redaction(
+        policy, connector_id=ctx.connector_id, tenant=tenant, op=ctx.descriptor.op_id
+    ).redacted
+    return {**hidden, PASSWORD_POLICY_FIELD: checked}
 
 
 async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -149,7 +188,7 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
     redacted = _redact_echoed_params(
         {
-            "representation": redact_secret_fields(
+            "representation": redact_preview_fields(
                 representation if isinstance(representation, dict) else {}
             )
         },
@@ -157,7 +196,7 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         tenant=tenant,
         op_id=ctx.descriptor.op_id,
     )
-    hidden = redacted.get("representation", {})
+    hidden = show_password_policy(redacted.get("representation", {}), representation, ctx)
     preview: dict[str, Any] = {
         "resource": "realm",
         "realm": _realm_label(ctx),

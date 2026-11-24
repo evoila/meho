@@ -3,11 +3,11 @@
 
 """A preview of a typed write shows what it will change (#5074).
 
-With the ``PREVIEW_TYPED_WRITES`` switch off (the default), a typed write
-that does not carry ``requires_approval`` (``targets.register``) and a
-credential write with its own safe preview (``keycloak.user.reset_password``)
-both answer ``status="unavailable"``, as before. With the switch on, both
-preview. A credential write shows only its own plan: the params are never
+With the ``PREVIEW_TYPED_WRITES`` switch off (the default), a typed
+``caution`` write that does not carry ``requires_approval`` (the stand-in
+``demo.lab.create``) and a credential write with its own safe preview
+(``keycloak.user.reset_password``) both answer ``status="unavailable"``.
+With the switch on, both preview. A credential write shows only its own plan: the params are never
 copied, and a secret value never shows.
 
 Most tests here run with the switch on. The tests named ``*_switch_off_*``
@@ -122,11 +122,11 @@ async def _preview(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 async def test_caution_write_without_requires_approval_previews(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """``targets.register`` runs at once only from the web interface, and it still previews."""
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    """A caution write that needs no approval still previews."""
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
     params = {"name": "lab-a", "product": "demo"}
 
-    envelope = await _preview("targets.register", params)
+    envelope = await _preview("demo.lab.create", params)
 
     assert envelope["status"] == "ok"
     assert envelope["method"] == "COMPOSITE"
@@ -141,11 +141,11 @@ async def test_caution_write_without_requires_approval_previews(
 async def test_different_params_give_different_hashes(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
 
-    first = await _preview("targets.register", {"name": "lab-a"})
-    second = await _preview("targets.register", {"name": "lab-b"})
-    again = await _preview("targets.register", {"name": "lab-a"})
+    first = await _preview("demo.lab.create", {"name": "lab-a"})
+    second = await _preview("demo.lab.create", {"name": "lab-b"})
+    again = await _preview("demo.lab.create", {"name": "lab-a"})
 
     assert first["preview_hash"] != second["preview_hash"]
     assert first["preview_hash"] == again["preview_hash"]
@@ -186,7 +186,8 @@ async def test_credential_write_with_builder_shows_the_plan_never_the_params(
     assert envelope["redacted_body"] is None
     assert envelope["plan_shown"] is True
     preview = envelope["proposed_effect"]["preview"]
-    assert preview["username"] == "alice"
+    # No live connector here, so the card shows the name as requested.
+    assert preview["requested_username"] == "alice"
     assert preview["realm"] == "lab"
     assert preview["password_secret_ref"] == "secret/keycloak/alice"
     assert _SECRET not in str(envelope)
@@ -230,6 +231,80 @@ async def test_credential_write_without_builder_stays_unavailable(
     assert _SECRET not in str(envelope)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+async def test_destructive_credential_write_without_builder_shows_masked_params(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    """The risk level decides: the caller gets the hash a destructive call needs."""
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", switch_on)
+    await _register(
+        stub_embedding_service,
+        "k8s.secret.create",
+        safety_level="destructive",
+        requires_approval=True,
+        schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "password": {"type": "string"}},
+        },
+    )
+    _PREVIEW_BUILDERS.pop("k8s.secret.create", None)
+
+    envelope = await _preview("k8s.secret.create", {"name": "lab-a", "password": _SECRET})
+
+    assert envelope["status"] == "ok"
+    assert envelope["redacted_body"] == {"name": "lab-a", "password": "***REDACTED***"}
+    assert isinstance(envelope["preview_hash"], str)
+    assert _SECRET not in str(envelope)
+
+
+@pytest.mark.asyncio
+async def test_destructive_credential_write_with_builder_shows_the_plan_never_the_params(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register(
+        stub_embedding_service,
+        "keycloak.user.reset_password",
+        safety_level="destructive",
+        requires_approval=True,
+    )
+    params = {"username": "alice", "realm": "lab", "password_secret_ref": "secret/a"}
+
+    envelope = await _preview("keycloak.user.reset_password", {**params, "password": _SECRET})
+
+    assert envelope["status"] == "ok"
+    assert envelope["redacted_body"] is None
+    assert envelope["plan_shown"] is True
+    assert isinstance(envelope["preview_hash"], str)
+    assert _SECRET not in str(envelope)
+
+
+@pytest.mark.asyncio
+async def test_credential_write_whose_builder_declines_gives_the_hash_without_a_plan(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    async def _declining_builder(ctx: Any) -> None:
+        return None
+
+    await _register(
+        stub_embedding_service,
+        "keycloak.user.reset_password",
+        safety_level="dangerous",
+        requires_approval=True,
+    )
+    _PREVIEW_BUILDERS["keycloak.user.reset_password"] = _declining_builder
+    params = {"username": "alice", "realm": "lab", "password_secret_ref": "secret/a"}
+
+    envelope = await _preview("keycloak.user.reset_password", {**params, "password": _SECRET})
+
+    assert envelope["status"] == "ok"
+    assert isinstance(envelope["preview_hash"], str)
+    assert envelope["redacted_body"] is None
+    assert envelope["plan_shown"] is False
+    assert "proposed_effect" not in envelope
+    assert _SECRET not in str(envelope)
+
+
 def _switch(monkeypatch: pytest.MonkeyPatch, name: str, on: bool) -> None:
     monkeypatch.setenv(name, "true" if on else "false")
     get_settings.cache_clear()
@@ -246,9 +321,9 @@ async def test_switch_off_caution_write_without_requires_approval_stays_unavaila
     stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
-    await _register(stub_embedding_service, "targets.register", safety_level="caution")
+    await _register(stub_embedding_service, "demo.lab.create", safety_level="caution")
 
-    envelope = await _preview("targets.register", {"name": "lab-a"})
+    envelope = await _preview("demo.lab.create", {"name": "lab-a"})
 
     assert envelope["status"] == "unavailable"
     assert envelope["extras"]["reason"] == "not_ingested"
@@ -352,3 +427,57 @@ def test_switch_on_tool_text_says_the_new_rule(
     # Only the text changes: the input schema is the same in both states.
     _switch(monkeypatch, "PREVIEW_TYPED_WRITES", False)
     assert shown["inputSchema"] == _shown_preview_tool()["inputSchema"]
+
+
+_INGESTED_CREDENTIAL_WRITE_TEXT = (
+    "An ingested credential write previews with text under a secret name (like `password`) "
+    "in the query or body shown as `***REDACTED***`; the path shows as built. "
+)
+
+
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+def test_short_text_says_how_each_kind_of_credential_write_previews(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    _switch(monkeypatch, "MCP_SHORT_TOOL_TEXTS", True)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", switch_on)
+
+    description = _shown_preview_tool()["description"]
+
+    assert _INGESTED_CREDENTIAL_WRITE_TEXT in description
+    assert "cannot be previewed" not in description
+    assert "each secret input" not in description
+    typed_rule = (
+        "A typed one with its own safe preview shows a `preview_hash`, never the params, and "
+        "its plan when that preview builds one (if not, `plan_shown` is false). Without one, "
+        "a destructive one shows the redacted params and a "
+        '`preview_hash`; any other stays `status="unavailable"`.'
+        if switch_on
+        else 'A typed one stays `status="unavailable"`, unless it is destructive: then it shows '
+        "the redacted params and a `preview_hash`."
+    )
+    assert description.endswith(_INGESTED_CREDENTIAL_WRITE_TEXT + typed_rule)
+
+
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+def test_full_text_names_the_destructive_credential_write(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    _switch(monkeypatch, "MCP_SHORT_TOOL_TEXTS", False)
+    _switch(monkeypatch, "PREVIEW_TYPED_WRITES", switch_on)
+
+    description = _shown_preview_tool()["description"]
+
+    rule = (
+        "A typed/composite credential write with no safe preview of its own stays "
+        '`status="unavailable"`, unless it is destructive.'
+        if switch_on
+        else "An approval-gated typed/composite op that writes a credential and is not destructive "
+        "(for example `vault.kv.put`) is NOT previewable"
+    )
+    assert rule in description
+    plan_rule = (
+        "It shows `proposed_effect` only when that preview builds a plan; otherwise "
+        "`plan_shown` is false."
+    )
+    assert (plan_rule in description) is switch_on

@@ -55,6 +55,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import hvac
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -86,6 +87,7 @@ from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
 )
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -211,17 +213,23 @@ def _make_preview_ctx(params: dict[str, Any]) -> PreviewContext:
     )
 
 
-async def test_preview_builder_emits_ref_only_summary() -> None:
+async def test_preview_builder_emits_ref_only_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     """The builder names source + sink as ``{kind, ref}`` and echoes reason.
 
-    No store I/O, so the value cannot enter the summary — and the params
-    it reads carry references only.
+    The params it reads carry references only. The sink also says whether
+    its secret exists; here Vault refuses the read, so it says "not known".
     """
+    install_fake_client(monkeypatch, read_exc=hvac.exceptions.Forbidden("permission denied"))
     preview = await build_secret_move_preview(_make_preview_ctx(_MOVE_PARAMS))
     assert preview == {
         "action": "secret.move",
         "source": {"kind": "vault", "ref": "secret/db/prod#password"},
-        "sink": {"kind": "vault", "ref": "secret/db/replica#password"},
+        "sink": {
+            "kind": "vault",
+            "ref": "secret/db/replica#password",
+            "secret_exists": "not known",
+        },
+        "merge": False,
         "reason": "promote replica credential",
     }
 
@@ -267,7 +275,11 @@ async def test_move_with_no_grant_parks_pending(
     assert effect["op_class"] == "other"
     preview = effect["preview"]
     assert preview["source"] == {"kind": "vault", "ref": "secret/db/prod#password"}
-    assert preview["sink"] == {"kind": "vault", "ref": "secret/db/replica#password"}
+    assert preview["sink"] == {
+        "kind": "vault",
+        "ref": "secret/db/replica#password",
+        "secret_exists": "yes",
+    }
     # Both refs are present in the serialised proposed_effect.
     effect_json = json.dumps(effect)
     assert "secret/db/prod#password" in effect_json
@@ -287,14 +299,19 @@ async def test_move_refuses_execution_without_approval(
     monkeypatch: pytest.MonkeyPatch,
     _registered_secret_broker_op: None,
 ) -> None:
-    """Neither ``read_secret`` nor ``write_secret`` runs on the park path."""
+    """Neither ``read_secret`` nor ``write_secret`` runs on the park path.
+
+    The park looks up only whether the sink secret exists, for the card.
+    """
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
 
     result = await _dispatch_move(_make_operator())
 
     assert result.status == "awaiting_approval", result.error
     # The connector-resolution / read / write never happen for a park.
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 
@@ -378,7 +395,9 @@ async def test_expired_grant_not_honored(
 
     # Parked, not executed: the expired grant authorizes nothing.
     assert result.status == "awaiting_approval", result.error
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 
@@ -406,7 +425,9 @@ async def test_active_grant_parks_not_auto_executes(
 
     # Parked (the grant is capped at needs-approval), never executed.
     assert result.status == "awaiting_approval", result.error
-    assert fake.secrets.kv.v2.read_calls == []
+    # The source is never read. The only read is the sink lookup for the
+    # approval card (does the sink secret exist?).
+    assert [c["path"] for c in fake.secrets.kv.v2.read_calls] == ["secret/db/replica"]
     assert fake.secrets.kv.v2.put_calls == []
 
 
@@ -572,6 +593,7 @@ async def _park_run_bound_move(*, requester_sub: str) -> uuid.UUID:
     from meho_backplane.operations.approval_queue import create_pending_request
 
     requester = _make_operator(sub=requester_sub, principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(_TENANT_ID, requester_sub)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         request = await create_pending_request(
@@ -583,13 +605,17 @@ async def _park_run_bound_move(*, requester_sub: str) -> uuid.UUID:
             params=_MOVE_PARAMS,
             params_hash=compute_params_hash(_MOVE_PARAMS),
             run_id=uuid.uuid4(),
+            proposed_effect={"safety_level": "dangerous"},
         )
         await session.commit()
     return request.id
 
 
 def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, Any]:
-    """Approve *request_id* over HTTP ``/decide`` as a distinct operator."""
+    """Approve *request_id* over HTTP ``/decide`` as a distinct tenant admin.
+
+    ``secret.move`` is ``dangerous``: only an SA-Operator or an admin approves it.
+    """
     key = make_rsa_keypair("kid-decider-2293")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
@@ -597,7 +623,7 @@ def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, An
             key,
             fresh_sign_in=True,
             sub=decider_sub,
-            tenant_role=TenantRole.OPERATOR.value,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:

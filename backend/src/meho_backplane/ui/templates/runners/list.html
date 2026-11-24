@@ -15,6 +15,8 @@
   so a runner going dark surfaces without a manual refresh. Read-only --
   register / revoke stay on ``meho runner-principal`` (#2502).
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Runners &middot; MEHO Operator Console{% endblock %}
@@ -24,11 +26,11 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Runners{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Satellite runners execute governed read-only operations inside
         networks the central backplane cannot dial, reporting back over a
         push-only channel. A runner is flagged
-        <span class="badge badge-ghost badge-sm">unknown</span> when the
+        {{ badge("unknown", variant="quiet") }} when the
         central dead-man sweeper has not heard from it for more than
         {{ stale_threshold_seconds }}s.
       </p>

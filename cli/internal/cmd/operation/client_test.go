@@ -253,7 +253,7 @@ func TestGetGroupsPassesTypedConnectorIdParam(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: body},
 		},
 	}
-	got, err := getGroups(context.Background(), f, "vault-1.x")
+	got, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if err != nil {
 		t.Fatalf("getGroups: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestGetGroupsRefreshesOn401AndRetries(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(200), Body: body},
 		},
 	}
-	if _, err := getGroups(context.Background(), f, "vault-1.x"); err != nil {
+	if _, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{}); err != nil {
 		t.Fatalf("getGroups after refresh: %v", err)
 	}
 	if f.refreshCount != 1 {
@@ -294,7 +294,7 @@ func TestGetGroupsClassifies403AsApiResponseError(t *testing.T) {
 			{HTTPResponse: makeHTTPResp(403), Body: []byte(`{"detail":"forbidden"}`)},
 		},
 	}
-	_, err := getGroups(context.Background(), f, "vault-1.x")
+	_, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if err == nil {
 		t.Fatalf("expected non-2xx error; got nil")
 	}
@@ -315,7 +315,7 @@ func TestGetGroupsTransportErrorPropagates(t *testing.T) {
 	f := &fakeOperationsClient{
 		groupsErrors: []error{transportErr},
 	}
-	_, err := getGroups(context.Background(), f, "vault-1.x")
+	_, err := getGroups(context.Background(), f, "vault-1.x", groupsQuery{})
 	if !errors.Is(err, transportErr) {
 		t.Fatalf("expected transport error to propagate verbatim; got %v", err)
 	}
@@ -771,27 +771,87 @@ func TestRunCallForwardsValidWorkRef(t *testing.T) {
 	}
 }
 
-// TestRunCallRejectsMalformedWorkRefBeforeRequest ensures bad ticket syntax
-// fails locally rather than issuing a dispatch without trustworthy linkage.
-func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
-	f := &fakeOperationsClient{}
+// TestRunCallForwardsNonGitHubWorkRef checks that a ticket id from
+// another system (a ServiceNow change, a Jira key) goes into the body
+// unchanged, like the backplane accepts it.
+func TestRunCallForwardsNonGitHubWorkRef(t *testing.T) {
+	for _, ref := range []string{"CHG0012345", "OPS-123", "Änderung-7"} {
+		t.Run(ref, func(t *testing.T) {
+			cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+			f := &fakeOperationsClient{
+				callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+					{HTTPResponse: makeHTTPResp(200), Body: cr},
+				},
+			}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != ref {
+				t.Fatalf("work_ref not forwarded from flag; got %+v", f.lastCallBody)
+			}
+		})
+	}
+}
+
+// TestRunCallTrimsWorkRef checks that --work-ref " CHG1 " is sent as
+// "CHG1", the same id the global flag and MEHO_WORK_REF send.
+func TestRunCallTrimsWorkRef(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
 	withFakeClient(t, f)
 
 	cmd := newCallCmd()
 	cmd.SetOut(&bytes.Buffer{})
-	var errBuf bytes.Buffer
-	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{
-		"vault-1.x", "vault.kv.read", "--work-ref", "not-a-ticket", "--backplane", "https://x",
-	})
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("malformed work ref should return a command error")
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", " CHG1 ", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
 	}
-	if !strings.Contains(errBuf.String(), "--work-ref must match gh:<owner>/<repo>#<n>") {
-		t.Fatalf("expected work-ref validation message; got %q", errBuf.String())
+	if f.lastCallBody == nil || f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != "CHG1" {
+		t.Fatalf("work_ref not trimmed; got %+v", f.lastCallBody)
 	}
-	if f.lastCallBody != nil {
-		t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+}
+
+// TestRunCallRejectsMalformedWorkRefBeforeRequest checks that an empty
+// or blank value, or a value with a line break, fails locally before
+// any request. An explicit `--work-ref ""` is refused, not taken as
+// "no reference".
+func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
+	for name, ref := range map[string]string{
+		"empty":        "",
+		"blank":        "   ",
+		"line break":   "OPS-123\nX-Other: 1",
+		"carriage ret": "OPS-123\rX-Other: 1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeOperationsClient{}
+			withFakeClient(t, f)
+
+			cmd := newCallCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			var errBuf bytes.Buffer
+			cmd.SetErr(&errBuf)
+			cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--work-ref", ref, "--backplane", "https://x"})
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("malformed work ref should return a command error")
+			}
+			if !strings.Contains(errBuf.String(), "--work-ref "+api.WorkRefRule) {
+				t.Fatalf("expected work-ref error message; got %q", errBuf.String())
+			}
+			if f.lastCallBody != nil {
+				t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
+			}
+		})
 	}
 }
 

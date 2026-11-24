@@ -16,8 +16,8 @@ admin namespace holds. It routes through
 :func:`~meho_backplane.operations.dispatcher.dispatch` (op_id
 ``targets.register`` on the synthetic ``targets-registry-1.x`` connector
 registered by :mod:`meho_backplane.connectors.targets.ops`) so the policy
-gate runs per call: an AGENT principal's registration parks as a durable
-approval request while a human ``tenant_admin`` executes immediately. The
+gate runs per call: every registration waits as a durable approval
+request until a person with ``tenant_admin`` approves it. The
 typed-op handler forwards to
 :func:`~meho_backplane.api.v1.targets.create_target` — the same service
 REST calls — so validation is reused, not re-implemented.
@@ -77,13 +77,11 @@ _DESCRIPTION: Final[str] = (
     "path. After it, `list_targets` shows the new row in your tenant. The "
     "new target is not probed yet: `next_step` names the `targets.probe` "
     "call that detects its product and version.\n\n"
-    "AGENT PRINCIPALS: the registration does not execute immediately — it "
-    "parks as a durable approval request and the tool returns "
-    "`{status: awaiting_approval, approval_request_id, ...}`; a human "
-    "operator approves it from the approvals surfaces (`/ui/approvals`, "
-    "`meho approvals list`, `meho_approvals_*`), which re-executes the "
-    "registration with the exact original params. Human tenant_admin "
-    "calls execute immediately."
+    "APPROVAL: every registration waits for a person. The tool returns "
+    "`{status: awaiting_approval, approval_request_id, ...}`; a person "
+    "with `tenant_admin` approves it from the approvals surfaces "
+    "(`/ui/approvals`, `meho approvals list`), which runs the "
+    "registration with the exact original params."
 )
 
 
@@ -111,7 +109,7 @@ async def dispatch_targets_write(
     Result translation:
 
     * ``ok`` — return the typed-op handler's domain payload verbatim.
-    * ``awaiting_approval`` — the AGENT-principal park, returned as a
+    * ``awaiting_approval`` — the call waits for approval, returned as a
       structured envelope (not an error): the proposal succeeded and the
       approval id is what the agent references next.
     * ``denied`` — policy refusal → ``-32602``.

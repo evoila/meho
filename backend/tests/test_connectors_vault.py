@@ -69,6 +69,7 @@ from uuid import UUID
 import hvac.exceptions
 import pytest
 import requests.exceptions
+import structlog.testing
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -308,6 +309,43 @@ async def test_fingerprint_returns_hashicorp_vault_with_version(
     assert result.extras["cluster_id"] == "abc123"
     assert result.extras["cluster_name"] == "meho-vault"
     assert fake.sys.read_calls == [{"method": "GET"}]
+
+
+async def test_fingerprint_names_openbao_when_enterprise_key_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenBao 2.x health has no ``enterprise`` key; HashiCorp always has it."""
+    install_fake_client(
+        monkeypatch,
+        health_payload={"initialized": True, "sealed": False, "version": "2.1.0"},
+    )
+    result = await VaultConnector().fingerprint(_make_target())
+
+    assert result.vendor == "openbao"
+    assert result.product == "openbao"
+    assert result.version == "2.1.0"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": "2.2.0", "enterprise": False},
+        {"version": "1.18.0", "enterprise": False},
+        {"version": "1.15.0"},
+        {"version": "not-a-version"},
+        {"sealed": False},
+    ],
+)
+async def test_fingerprint_stays_hashicorp_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+) -> None:
+    """The ``enterprise`` key, a version below 2.0, or no usable version is not OpenBao."""
+    install_fake_client(monkeypatch, health_payload=payload)
+    result = await VaultConnector().fingerprint(_make_target())
+
+    assert result.vendor == "hashicorp"
+    assert result.product == "vault"
 
 
 async def test_fingerprint_version_none_for_non_200_response(
@@ -1305,8 +1343,13 @@ def test_write_target_path_renders_authorization_path(
 
 
 def test_write_capabilities_cover_every_write_op() -> None:
-    """Every ``requires_approval`` KV write op has a capability requirement."""
+    """Every ``requires_approval`` KV write op has a capability requirement.
+
+    ``vault.kv.generate`` is registered from its own module, not from
+    ``_KV_OP_SPECS``, and it needs approval too, so it is added by name.
+    """
     write_ops = {spec["op_id"] for spec in _KV_OP_SPECS if spec.get("requires_approval") is True}
+    write_ops.add("vault.kv.generate")
     assert write_ops == set(VAULT_KV_WRITE_CAPABILITIES)
 
 
@@ -1459,9 +1502,13 @@ async def test_preflight_fail_soft_when_probe_raises(
     fake = install_fake_vault(monkeypatch)
     fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
 
-    result = await vault_kv_write_capability_preflight(
-        _make_operator(), "vault.kv.put", {"path": "meho/x"}
-    )
+    # Capture the log lines instead of printing them. With no logging set up,
+    # structlog prints the failure with every local variable, and those hold
+    # made-up secret test data.
+    with structlog.testing.capture_logs():
+        result = await vault_kv_write_capability_preflight(
+            _make_operator(), "vault.kv.put", {"path": "meho/x"}
+        )
 
     assert result is None
 

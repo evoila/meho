@@ -177,14 +177,13 @@ def test_pick_has_three_options_and_none_is_selected(path: str) -> None:
     assert "(optional)" in body
 
 
-@pytest.mark.parametrize("path", [_REGISTER, _CREATE])
 def test_pick_is_required_while_the_switch_is_not_off(
-    monkeypatch: pytest.MonkeyPatch, path: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _switch(monkeypatch, "observe")
     client, mock, _csrf = _admin_client(with_csrf=False)
     try:
-        body = client.get(path).text
+        body = client.get(_REGISTER).text
     finally:
         mock.stop()
     radios = _radios(body)
@@ -198,7 +197,7 @@ def _help_texts(body: str) -> dict[str, str]:
     texts: dict[str, str] = {}
     for value in ("none", "read-everything", "read-targets"):
         match = re.search(
-            rf'value="{value}".*?<span class="text-xs opacity-60">([^<]+)</span>', body, re.S
+            rf'value="{value}".*?<span class="text-xs text-subtle">([^<]+)</span>', body, re.S
         )
         assert match is not None, value
         texts[value] = html.unescape(" ".join(match.group(1).split()))
@@ -266,17 +265,23 @@ def test_pick_says_when_the_tenant_has_no_targets() -> None:
     assert "data-no-targets" in body
 
 
-def test_edit_form_has_no_pick() -> None:
-    """The pick is only asked when a definition is created."""
+def test_edit_form_shows_the_pick_without_marking_it_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The edit form shows the pick; the service asks for it only when needed (#6389)."""
     client, mock, csrf = _admin_client()
     _seed_principal(tenant_id=_TENANT_A, keycloak_client_id="agent-triage")
     try:
         created = client.post(_CREATE, data=_create_form(), headers=_csrf_headers(csrf))
         assert created.status_code == 204, created.text
+        _switch(monkeypatch, "on")
         body = client.get("/ui/agents/triage/edit").text
     finally:
         mock.stop()
-    assert 'name="starting_grants"' not in body
+    radios = _radios(body)
+    assert len(radios) == 3
+    assert not any("required" in r for r in radios)
+    assert "change the identity reference to an agent that has no grants yet" in body
 
 
 # ---------------------------------------------------------------------------
@@ -501,8 +506,8 @@ def test_create_missing_pick_with_the_switch_on_shows_the_text_next_to_the_field
         response = client.post(_CREATE, data=_create_form(), headers=_csrf_headers(csrf))
     finally:
         mock.stop()
-    # 200 so HTMX swaps the form back in (the create form's error mold).
-    assert response.status_code == 200, response.text
+    # 422; the modal container's before-swap hook swaps the form back in.
+    assert response.status_code == 422, response.text
     assert "data-form-error-summary" in response.text
     error = re.search(r'data-error-for="starting_grants">\s*([^<]+)<', response.text)
     assert error is not None
@@ -522,7 +527,7 @@ def test_create_unknown_target_writes_nothing() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     assert 'data-error-for="starting_grants"' in response.text
     assert "no target named" in response.text
     assert _definition_names() == []
@@ -559,7 +564,7 @@ def test_create_wrong_pick_keeps_the_typed_values() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
     assert 'data-error-for="starting_grants"' in response.text
     assert 'value="triage"' in response.text
     assert re.search(r'value="read-targets"[^>]*checked', response.text)
@@ -578,15 +583,20 @@ requires_node = pytest.mark.skipif(
 # Runs the container's ``hx-on::before-swap`` code the way htmx 2.0.9 does
 # (``event`` in scope, fired on the swap target) for each case, then does
 # the swap htmx would do: the body goes into the container only when
-# ``shouldSwap`` is on. Prints what the container holds after each case.
+# ``shouldSwap`` is on. A case's ``contentType`` is the answer's
+# Content-Type header (default: HTML). Prints what the container holds after each case.
 _SWAP_DRIVER = r"""
 "use strict";
 const [code, casesJson] = process.argv.slice(1);
 const handler = new Function("event", code);
 const out = {};
 for (const c of JSON.parse(casesJson)) {
+  const contentType = c.contentType ?? "text/html; charset=utf-8";
   const detail = {
-    xhr: { status: c.status },
+    xhr: {
+      status: c.status,
+      getResponseHeader: (name) => (name.toLowerCase() === "content-type" ? contentType : null),
+    },
     requestConfig: { verb: c.verb },
     shouldSwap: c.status < 400,
     isError: c.status >= 400,

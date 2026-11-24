@@ -53,8 +53,18 @@ _VALUES_SCHEMA: Final[dict[str, Any]] = {
         "risk": {"type": ["string", "null"], "description": "null when no entry sets one."},
         "always_wait": {"type": "boolean"},
         "rule_ref": {"type": "string", "description": "The entry that decided the values."},
+        "in_force": {
+            "type": ["object", "null"],
+            "description": (
+                "What applies with these values: the risk level and whether a call waits, "
+                "after the code's value, the overrides and the minimum-level rules. null "
+                "when the operation is gone."
+            ),
+            "properties": {"risk": {"type": "string"}, "waits": {"type": "boolean"}},
+            "required": ["risk", "waits"],
+        },
     },
-    "required": ["category", "labels", "risk", "always_wait", "rule_ref"],
+    "required": ["category", "labels", "risk", "always_wait", "rule_ref", "in_force"],
 }
 
 RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -124,7 +134,8 @@ _LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "When conflict is null and the list is what you expect, call policy.classify "
-        "with the same parameters. It waits until another tenant admin approves it."
+        "with the same parameters. It waits until a tenant admin approves it in the web "
+        "console."
     ),
 }
 

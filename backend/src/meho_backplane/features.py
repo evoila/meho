@@ -5,7 +5,7 @@
 
 v0.6.0 ships four major features that each require additional deploy
 configuration not flagged anywhere operator-facing
-(``claude-rdc-hetzner-dc#697`` signals 16, 17). The pattern is the same
+(consumer feedback signals 16 and 17). The pattern is the same
 across all four: the feature's code ships, env vars get added in
 :mod:`meho_backplane.settings`, but no ``/ready`` check, no
 ``docs/RELEASING.md`` callout, no release-body "what won't work out of
@@ -90,7 +90,7 @@ for its discovery payload.
 References
 ----------
 
-* Consumer feedback (canonical): ``claude-rdc-hetzner-dc#697`` signals
+* Consumer feedback (canonical): signals
   16 + 17 — the original "expose feature-gate state" flag.
 * Convention anchor: :doc:`docs/codebase/error-message-shape.md`
   (G0.14-T11) — the missing-env messages here mirror the convention's
@@ -106,7 +106,7 @@ References
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Final, Literal, NotRequired, TypedDict
 
 from cryptography.fernet import Fernet
 
@@ -114,6 +114,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
 __all__ = [
+    "CATEGORY_WITHOUT_CLASSIFICATION",
     "FEATURE_MATURITY",
     "Maturity",
     "MaturityInfo",
@@ -363,7 +364,10 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
     """MCP-layer runtime visibility for ``/ready``.
 
     ``short_tool_texts`` is the ``MCP_SHORT_TOOL_TEXTS`` switch (#4172), so
-    a benchmark knows its state. ``client_per_tool_kind`` is the
+    a benchmark knows its state. ``profile_connector_lists`` is the
+    ``MCP_PROFILE_CONNECTOR_LISTS`` switch (#6099). ``/ready`` needs no
+    login, so it does not name the profiles of ``MCP_CONNECTOR_PROFILES``.
+    ``client_per_tool_kind`` is the
     ``MCP_CLIENT_PER_TOOL_KIND`` switch: when on, Claude Code and Claude
     Desktop sign in with their own login client, and ``/ready`` adds
     ``tool_clients`` (:func:`~meho_backplane.auth.tool_clients.tool_clients_report`:
@@ -404,6 +408,7 @@ def _mcp_block(settings: Settings) -> dict[str, Any]:
         "configured": True,
         "protocol_version": PROTOCOL_VERSION,
         "short_tool_texts": settings.mcp_short_tool_texts,
+        "profile_connector_lists": settings.mcp_profile_connector_lists,
         "client_per_tool_kind": settings.mcp_client_per_tool_kind,
         "missing_env": [],
     }
@@ -526,6 +531,16 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+#: The ``/ready`` policy note, and the import warning, when approver routing
+#: is on and the classification is off
+#: (:func:`meho_backplane.policy.routing.category_routing_warnings`).
+CATEGORY_WITHOUT_CLASSIFICATION: Final[str] = (
+    "POLICY_APPROVER_ROUTING is on and POLICY_CLASSIFICATION is off, so no change has "
+    "a category and a routing entry that matches on `category` fits nothing. Turn on "
+    "POLICY_CLASSIFICATION, or match on connector or risk."
+)
+
+
 def _policy_block(settings: Settings) -> dict[str, Any]:
     """The policy switches, so ``/ready`` shows which are on.
 
@@ -537,13 +552,32 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
 
     ``engine_shadow`` is the ``POLICY_ENGINE_SHADOW`` switch: the policy
     evaluator runs next to today's checks and logs every difference
-    (:mod:`meho_backplane.policy.shadow`). It decides nothing. Off by
-    default.
+    (:mod:`meho_backplane.policy.shadow`). It also writes the rule it
+    matched on audit rows and approval requests
+    (:mod:`meho_backplane.policy.stamp`), and a preview shows the rule
+    and who may approve. It decides nothing. Off by default.
+
+    ``approver_routing`` is the ``POLICY_APPROVER_ROUTING`` switch: a
+    waiting request stores who may approve it, from the policy file's
+    ``routing`` section (:mod:`meho_backplane.policy.routing`), and the
+    ``bindings`` of the policy file give login groups a group kind and
+    categories (:mod:`meho_backplane.policy.bindings`). Off by default.
+
+    ``notes`` holds one sentence when ``approver_routing`` is on and
+    ``classification`` is off: then no change has a category, so a routing
+    entry that matches on ``category`` fits nothing. Empty otherwise.
     """
+    notes = (
+        [CATEGORY_WITHOUT_CLASSIFICATION]
+        if settings.policy_approver_routing and not settings.policy_classification
+        else []
+    )
     return {
         "configured": True,
         "classification": settings.policy_classification,
         "engine_shadow": settings.policy_engine_shadow,
+        "approver_routing": settings.policy_approver_routing,
+        "notes": notes,
         "missing_env": [],
     }
 
@@ -599,9 +633,11 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
                                  "docs": "docs/codebase/connectors-vault-tenant-scope.md",
                                  "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...",
-                             "short_tool_texts": <bool>, "missing_env": []},
+                             "short_tool_texts": <bool>,
+                             "profile_connector_lists": <bool>, "missing_env": []},
           "policy":         {"configured": true, "classification": <bool>,
-                             "engine_shadow": <bool>, "missing_env": []}
+                             "engine_shadow": <bool>, "approver_routing": <bool>,
+                             "notes": [<text>], "missing_env": []}
         }
     """
     block: dict[str, dict[str, Any]] = {

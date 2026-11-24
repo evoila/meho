@@ -5,8 +5,8 @@
 
 The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
-owner decided (``docs/decisions/login-role-groups.md``): five role groups that
-carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
+owner decided (``docs/decisions/login-role-groups.md``): three role groups that
+carry ``tenant_id`` and ``tenant_role``,
 the platform group that carries only ``platform_admin`` (#4043), the
 ``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the
 clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
@@ -42,7 +42,7 @@ _REALM_FILE = (
 _TOOL_CLIENTS = ("meho-mcp-code", "meho-mcp-desktop")
 _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", *_TOOL_CLIENTS, "meho-web")
 #: Every client a person signs in with, including the approval sign-in (#5515).
-_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve")
+_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve", "meho-web-approve")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
     "MEHO_REALM_TENANT_ID",
@@ -172,21 +172,10 @@ def test_role_groups_with_tenant_attributes_and_the_platform_group(realm: dict[s
             "tenant_role": ["operator"],
             "meho_tenant": _meho_tenant("Operators"),
         },
-        "MEHO-SA-Operators": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["operator"],
-            "meho_tenant": _meho_tenant("SA-Operators"),
-        },
         "MEHO-Admins": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["tenant_admin"],
             "meho_tenant": _meho_tenant("Admins"),
-        },
-        "MEHO-Approvers": {
-            "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
-            "tenant_role": ["read_only"],
-            "approver": ["true"],
-            "meho_tenant": _meho_tenant("Approvers"),
         },
         # Not a role group: it carries no tenant and no role, only the right
         # to act across tenants. The bootstrap Job puts the first admin here.
@@ -203,6 +192,7 @@ def test_clients(realm: dict[str, Any]) -> None:
         "meho-mcp-code",
         "meho-mcp-desktop",
         "meho-web",
+        "meho-web-approve",
         "meho-admin",
         "meho-check-runner",
     }
@@ -375,6 +365,33 @@ def test_web_client(realm: dict[str, Any]) -> None:
     )
 
 
+def test_console_approval_client(realm: dict[str, Any]) -> None:
+    """``meho-web-approve`` is the console's approval sign-in (#6282).
+
+    A confidential client with the secret of ``meho-web``, a callback of
+    its own, no refresh token, a 15-minute token, and no grant that skips
+    its login flow. Its tokens carry the claims MEHO checks, without the
+    MCP audience.
+    """
+    client = _client(realm, "meho-web-approve")
+    assert client["publicClient"] is False
+    assert client["secret"] == "${MEHO_REALM_WEB_CLIENT_SECRET}"
+    assert client["standardFlowEnabled"] is True
+    assert client["directAccessGrantsEnabled"] is False
+    assert client["implicitFlowEnabled"] is False
+    assert client["serviceAccountsEnabled"] is False
+    attributes = client["attributes"]
+    assert attributes["pkce.code.challenge.method"] == "S256"
+    assert attributes["oauth2.device.authorization.grant.enabled"] == "false"
+    assert attributes["use.refresh.tokens"] == "false"
+    assert attributes["access.token.lifespan"] == "900"
+    assert "acr.loa.map" not in attributes
+    assert client["redirectUris"] == ["${MEHO_REALM_PUBLIC_URL}/ui/auth/approval-callback"]
+    mappers = {m["name"] for m in client["protocolMappers"]}
+    assert mappers == {m["name"] for m in _client(realm, "meho-cli-approve")["protocolMappers"]}
+    assert "meho-mcp-audience" not in mappers
+
+
 def test_service_clients(realm: dict[str, Any]) -> None:
     admin = _client(realm, "meho-admin")
     assert admin["serviceAccountsEnabled"] is True
@@ -471,12 +488,13 @@ def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
 def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None:
     """``meho-cli-approve`` signs in with a flow that always asks for the password.
 
-    The flow has the password form and the one-time code step (when the
-    person has set one up), and no other step: no step that signs a person
-    in without the form.
+    The flow has one conditional sub-flow at approval level 2: the level
+    step, the password form and the one-time code step (when the person has
+    set one up). No other step: no step that signs a person in without the
+    form, and no step that sends the person to another sign-in system.
     """
     flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
-    flow = flows["meho approval sign-in"]
+    flow = flows["meho approval sign-in level"]
     assert flow["topLevel"] is True
     assert flow["builtIn"] is False
     assert _client(realm, "meho-cli-approve")["authenticationFlowBindingOverrides"] == {
@@ -486,19 +504,60 @@ def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None
         (step.get("authenticator") or step["flowAlias"], step["requirement"])
         for step in flow["authenticationExecutions"]
     ]
-    assert steps == [
+    assert steps == [("meho approval sign-in level - level 2", "CONDITIONAL")]
+    level = flows["meho approval sign-in level - level 2"]
+    assert level["topLevel"] is False
+    assert [
+        (s.get("authenticator") or s["flowAlias"], s["requirement"])
+        for s in level["authenticationExecutions"]
+    ] == [
+        ("conditional-level-of-authentication", "REQUIRED"),
         ("auth-username-password-form", "REQUIRED"),
-        ("meho approval sign-in - one-time code", "CONDITIONAL"),
+        ("meho approval sign-in level - one-time code", "CONDITIONAL"),
     ]
-    code = flows["meho approval sign-in - one-time code"]
+    code = flows["meho approval sign-in level - one-time code"]
     assert code["topLevel"] is False
     assert [(s["authenticator"], s["requirement"]) for s in code["authenticationExecutions"]] == [
         ("conditional-user-configured", "REQUIRED"),
         ("auth-otp-form", "REQUIRED"),
     ]
-    # Only the approval client and the console have a flow of their own.
+    # Only the two approval clients and the console have a flow of their own.
     bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
-    assert bound == ["meho-cli-approve", "meho-web"]
+    assert bound == ["meho-cli-approve", "meho-web", "meho-web-approve"]
+    # The console's approval client signs in with the same flow (#6282).
+    assert _client(realm, "meho-web-approve")["authenticationFlowBindingOverrides"] == {
+        "browser": flow["id"]
+    }
+
+
+def test_approval_level_is_level_2_and_asked_for_at_every_sign_in(realm: dict[str, Any]) -> None:
+    """The realm names level 2 ``meho-approve``; only the approval flow reaches it (#6281).
+
+    Level 1 is any normal sign-in and has no name, so a normal console, CLI
+    or MCP login keeps ``acr`` ``"1"``. Maximum age 0 means the level is
+    never taken from an earlier sign-in.
+    """
+    assert json.loads(realm["attributes"]["acr.loa.map"])["meho-approve"] == 2
+    level_step = next(
+        step
+        for flow in realm["authenticationFlows"]
+        for step in flow["authenticationExecutions"]
+        if step.get("authenticator") == "conditional-level-of-authentication"
+        and flow["alias"] == "meho approval sign-in level - level 2"
+    )
+    configs = {item["alias"]: item["config"] for item in realm["authenticatorConfig"]}
+    assert configs[level_step["authenticatorConfig"]] == {
+        "loa-condition-level": "2",
+        "loa-max-age": "0",
+    }
+    # No other flow of the realm file gives level 2.
+    levels = [
+        configs[step["authenticatorConfig"]]["loa-condition-level"]
+        for flow in realm["authenticationFlows"]
+        for step in flow["authenticationExecutions"]
+        if step.get("authenticator") == "conditional-level-of-authentication"
+    ]
+    assert levels.count("2") == 1
 
 
 _TOUCH = "meho approval touch"
@@ -520,8 +579,11 @@ def _configs(realm: dict[str, Any]) -> dict[str, dict[str, str]]:
 
 
 def test_touch_level_is_mapped_in_the_realm(realm: dict[str, Any]) -> None:
-    """#6213: ``acr_values=meho-touch`` asks for level 3. Level 1 keeps its name "1"."""
-    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-touch": 3}
+    """#6213: ``acr_values=meho-touch`` asks for level 3. Level 1 keeps its name "1".
+
+    The map names both levels: ``meho-approve`` (2) and ``meho-touch`` (3).
+    """
+    assert json.loads(realm["attributes"]["acr.loa.map"]) == {"meho-approve": 2, "meho-touch": 3}
 
 
 def test_console_login_flow_has_level_1_and_the_touch_level(realm: dict[str, Any]) -> None:

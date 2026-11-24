@@ -22,8 +22,8 @@ Coverage matrix (G8.1-T1 acceptance criteria):
   of one row (an approval request's decision and run rows), tenant-scoped.
 * G8.2-T3 — ``agent_session_id`` filter narrows rows; ``parent_audit_id`` /
   ``agent_session_id`` populate on the returned ``AuditEntry``.
-* work_ref I1-T3 #1658 — ``work_ref`` exact-match filter narrows to rows whose
-  ``work_ref`` matches (excluding different / NULL); ``work_ref`` populates on
+* work_ref I1-T3 #1658 — ``work_ref`` filter narrows to rows whose
+  ``work_ref`` is the whole ticket id (excluding different / NULL); ``work_ref`` populates on
   every returned ``AuditEntry``.
 * #4668 — ``principal`` matches part of the user id **or** part of the stored
   name, case-insensitively, with LIKE metacharacters escaped on both;
@@ -47,6 +47,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1.audit_models import AuditQueryRequest
 from meho_backplane.audit_query import (
     AuditQueryFilters,
     InvalidCursorError,
@@ -97,6 +98,8 @@ async def _seed_audit_row(
     parent_audit_id: uuid.UUID | None = None,
     work_ref: str | None = None,
     event_class: AuditEventClass = AuditEventClass.LEGACY_REQUEST,
+    policy_rule: str | None = None,
+    policy_version: int | None = None,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -116,6 +119,8 @@ async def _seed_audit_row(
             parent_audit_id=parent_audit_id,
             work_ref=work_ref,
             event_class=event_class.value,
+            policy_rule=policy_rule,
+            policy_version=policy_version,
         ),
     )
     return row_id
@@ -635,10 +640,10 @@ async def test_agent_session_id_filter_narrows_rows(
 async def test_work_ref_filter_exact_match_excludes_others_and_null(
     session: AsyncSession,
 ) -> None:
-    """``work_ref`` is an exact-match filter (work_ref I1-T3 #1658).
+    """``work_ref`` filters by the whole ticket id (work_ref I1-T3 #1658).
 
     The column landed with work_ref I1-T1 (#1655, migration ``0039``); this
-    task adds the ``WHERE work_ref = :work_ref`` clause. The match is exact —
+    task adds the ``WHERE work_ref = :work_ref`` clause. It matches the whole id —
     a change-ticket reference is an opaque identifier, not a search term — so a
     row carrying a *different* work_ref, and a row whose ``work_ref`` is NULL
     (the system-internal / not-yet-bound case), are both excluded. The
@@ -678,6 +683,46 @@ async def test_work_ref_filter_exact_match_excludes_others_and_null(
 
 
 @pytest.mark.asyncio
+async def test_work_ref_filter_finds_a_row_stored_before_the_rule(
+    session: AsyncSession,
+) -> None:
+    """A row stored before the ticket id rule keeps its padded text.
+
+    The filter matches the cleaned id and the text as typed, so a search
+    with the exact old text finds the old row and the new one, and a search
+    with the cleaned id finds the new row.
+    """
+    tenant_id = uuid.uuid4()
+    old_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        work_ref="  CHG1  ",
+    )
+    new_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        work_ref="CHG1",
+    )
+    await session.commit()
+
+    padded = await query_audit(
+        AuditQueryRequest(work_ref="  CHG1  ").to_filters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    cleaned = await query_audit(
+        AuditQueryRequest(work_ref="CHG1").to_filters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert {entry.id for entry in padded.rows} == {old_id, new_id}
+    assert [entry.id for entry in cleaned.rows] == [new_id]
+
+
+@pytest.mark.asyncio
 async def test_work_ref_surfaced_on_every_returned_entry(
     session: AsyncSession,
 ) -> None:
@@ -713,6 +758,41 @@ async def test_work_ref_surfaced_on_every_returned_entry(
     by_id = {entry.id: entry.work_ref for entry in result.rows}
     assert by_id[bound_id] == "jira:OPS-42"
     assert by_id[unbound_id] is None
+
+
+@pytest.mark.asyncio
+async def test_policy_rule_and_version_surfaced_from_the_row(
+    session: AsyncSession,
+) -> None:
+    """#6044: each returned entry carries its row's policy rule and version.
+
+    A row with a rule and a version returns both; a row without them returns
+    ``None`` for both.
+    """
+    tenant_id = uuid.uuid4()
+    stamped_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        policy_rule="default:person.safe (shadow)",
+        policy_version=3,
+    )
+    empty_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    by_id = {entry.id: (entry.policy_rule, entry.policy_version) for entry in result.rows}
+    assert by_id[stamped_id] == ("default:person.safe (shadow)", 3)
+    assert by_id[empty_id] == (None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -957,10 +1037,10 @@ async def test_since_until_range(session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_target_filter_resolves_by_name(session: AsyncSession) -> None:
-    """``target="rdc-vcenter"`` resolves through the targets table by name."""
+    """``target="example-vcenter"`` resolves through the targets table by name."""
     tenant_id = uuid.uuid4()
-    target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vcenter")
-    other_target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vault")
+    target_id = await _seed_target(session, tenant_id=tenant_id, name="example-vcenter")
+    other_target_id = await _seed_target(session, tenant_id=tenant_id, name="vault-a")
     await session.commit()
 
     await _seed_audit_row(
@@ -978,21 +1058,21 @@ async def test_target_filter_resolves_by_name(session: AsyncSession) -> None:
     await session.commit()
 
     result = await query_audit(
-        AuditQueryFilters(target="rdc-vcenter"),
+        AuditQueryFilters(target="example-vcenter"),
         tenant_id=tenant_id,
         session=session,
     )
 
     assert len(result.rows) == 1
     assert result.rows[0].target_id == target_id
-    assert result.rows[0].target_name == "rdc-vcenter"
+    assert result.rows[0].target_name == "example-vcenter"
 
 
 @pytest.mark.asyncio
 async def test_target_name_denormalization_left_join(session: AsyncSession) -> None:
     """The LEFT JOIN populates ``target_name`` when present, None otherwise."""
     tenant_id = uuid.uuid4()
-    target_id = await _seed_target(session, tenant_id=tenant_id, name="rdc-vcenter")
+    target_id = await _seed_target(session, tenant_id=tenant_id, name="example-vcenter")
     await session.commit()
 
     await _seed_audit_row(
@@ -1012,7 +1092,7 @@ async def test_target_name_denormalization_left_join(session: AsyncSession) -> N
     result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
 
     by_target = {entry.target_id: entry.target_name for entry in result.rows}
-    assert by_target[target_id] == "rdc-vcenter"
+    assert by_target[target_id] == "example-vcenter"
     assert by_target[None] is None
 
 
@@ -1284,13 +1364,13 @@ async def test_principal_name_surfaced_from_payload(session: AsyncSession) -> No
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
-        payload={"op_id": "meho_status", "principal_name": "Damir Topic"},
+        payload={"op_id": "meho_status", "principal_name": "Operator A"},
     )
     await session.commit()
 
     result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
     entry = result.rows[0]
-    assert entry.principal_name == "Damir Topic"
+    assert entry.principal_name == "Operator A"
 
 
 @pytest.mark.asyncio

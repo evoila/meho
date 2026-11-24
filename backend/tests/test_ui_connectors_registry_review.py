@@ -133,6 +133,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "observe")
     get_settings_cache_clear()
     reset_fernet_cache_for_testing()
     reset_verifier_store_for_testing()
@@ -309,6 +310,7 @@ def _client_with_role(
         tenant_id=str(tenant_id),
         tenant_role=role.value,
         platform_admin=platform_admin,
+        fresh_sign_in=True,
     )
     session_id = _seed_session_sync(
         tenant_id=tenant_id,
@@ -1131,6 +1133,37 @@ def test_overrides_report_page_lists_reduced_approval() -> None:
     assert f'data-op-id="{_OP_ID}"' in report.text
     assert "read-only in practice" in report.text
     assert "turned off" in report.text
+    # The switch is off: no "Category" column; the page says what a whole-install row is.
+    assert "<th>Category</th>" not in report.text
+    assert "data-override-category" not in report.text
+    assert "data-overrides-install-note" in report.text
+
+
+def test_overrides_report_page_shows_the_category_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _classification_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    try:
+        client.patch(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
+            data={"safety_level": "dangerous"},
+            headers=_edit_headers(csrf),
+        )
+        report = client.get("/ui/connectors/overrides?show=all")
+    finally:
+        mock.stop()
+    assert report.status_code == 200, report.text
+    assert f'data-op-id="{_OP_ID}"' in report.text
+    assert "<th>Category</th>" in report.text
+    assert "data-override-category" in report.text
 
 
 # ---------------------------------------------------------------------------
@@ -1236,10 +1269,12 @@ def test_classify_page_needs_tenant_admin(monkeypatch: pytest.MonkeyPatch) -> No
         mock.stop()
     assert page.status_code == 403
     assert preview.status_code == 403
+    assert "Classifying operations needs the tenant_admin role." in page.text
+    assert "re-probe" not in page.text
 
 
 def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dry run lists the matched operation and writes nothing; the request waits."""
+    """The dry run writes nothing; a tenant admin's change in the console runs at once."""
     _classification_on(monkeypatch)
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_connector(tenant_id=_TENANT_A)
@@ -1269,9 +1304,10 @@ def test_classify_page_dry_run_then_request(monkeypatch: pytest.MonkeyPatch) -> 
     assert 'data-matched="1"' in preview.text
     assert f'data-op-id="{_OP_ID}"' in preview.text
     assert "data-classify-request" in preview.text
+    assert "data-classify-in-force" in preview.text
     assert count_after_preview == 0
     assert requested.status_code == 200, requested.text
-    assert "data-classify-requested" in requested.text
-    assert _approval_request_count() == 1
+    assert "data-classify-done" in requested.text
+    assert _approval_request_count() == 0
     assert "data-classify-error" in bad.text
     assert "key=value" in bad.text

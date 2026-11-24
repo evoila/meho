@@ -74,6 +74,7 @@ from kubernetes_asyncio.dynamic import DynamicClient
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     SecretRefReadError,
+    TargetSecretForbiddenError,
     TargetSecretNotFoundError,
     check_param_secret_ref,
     load_vault_secret_data,
@@ -600,7 +601,7 @@ async def _resolve_secret_refs(
                 operator,
                 mount=mount,
             )
-        except TargetSecretNotFoundError as exc:
+        except (TargetSecretNotFoundError, TargetSecretForbiddenError) as exc:
             # The ref came from a param, not from the cluster target: report
             # it as a param read error, with the store error as its cause
             # (the same answer load_param_secret_data gives).

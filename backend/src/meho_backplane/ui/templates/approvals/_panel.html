@@ -19,11 +19,13 @@
                 (id / op_id / connector_id / principal_sub /
                  proposed_effect / created_at / chain)
                 chain is {work_ref, step, total} or None (#3596)
+                who_can_approve is the approver-routing line or None
 
   Phone layout (#6000): below the ``sm`` width the dialog opens as a sheet
   from the bottom of the screen, each row stacks, its text wraps instead
   of being cut, and the Review button fills the row width.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 {% from "_references.html" import subject %}
 <dialog id="meho-approvals-modal" class="modal modal-bottom sm:modal-middle" aria-label="Pending approvals">
@@ -54,16 +56,26 @@
               <p class="font-mono text-sm [overflow-wrap:anywhere] sm:truncate">{{ req.op_id }}</p>
               {% if req.chain %}
                 <p class="truncate text-xs" data-approval-chain-step="{{ req.chain.step }}">
-                  <span class="badge badge-sm badge-info">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
-                  <span class="text-base-content/55">in change ticket</span>
+                  {{ badge("Step " ~ req.chain.step ~ " of " ~ req.chain.total, variant="info") }}
+                  <span class="text-subtle">in change ticket</span>
                   <span class="font-mono">{{ req.chain.work_ref }}</span>
                 </p>
               {% endif %}
-              <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
+              <p class="text-xs text-subtle [overflow-wrap:anywhere] sm:truncate">
                 <span>{{ req.connector_id }}</span>
                 <span aria-hidden="true">&middot;</span>
                 <span>requested by {{ subject(req.requester) }}</span>
               </p>
+              {% if req.people_behind_line %}
+                <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-people-behind-line>
+                  {{ req.people_behind_line }}
+                </p>
+              {% endif %}
+              {% if req.who_can_approve %}
+                <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-who-can-approve>
+                  Who can approve: {{ req.who_can_approve }}
+                </p>
+              {% endif %}
             </div>
             <button
               type="button"
@@ -80,8 +92,8 @@
       </ul>
     {% else %}
       <div class="py-10 text-center">
-        <p class="text-base text-base-content/55">No pending approvals</p>
-        <p class="mt-1 text-sm text-base-content/40">
+        <p class="text-base text-subtle">No pending approvals</p>
+        <p class="mt-1 text-sm text-subtle">
           New requests appear here the moment an agent action needs your sign-off.
         </p>
       </div>

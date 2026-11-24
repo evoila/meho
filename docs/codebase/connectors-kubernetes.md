@@ -24,15 +24,168 @@ secret-delete / job-create / cronjob-run) and a bounded `k8s.exec`. Every
 op that is not `safe` has `requires_approval=True`, so the call waits for
 approval (see `approvals.md`). There is no `k8s.drain` op.
 
+Six of these calls always wait for a person, and no standing grant, no
+agent grant and no run approval covers them
+([service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- every `k8s.exec` call: a command in a container can read or write any
+  credential the container holds. Grant create, agent grant create and
+  run approval create refuse `k8s.exec`.
+- every `k8s.apply` call, for every kind of object, in every document of
+  a manifest and every item of a list object, and also a manifest MEHO
+  cannot read. What an apply does to an object depends on the object as
+  it is on the cluster and on the fields other writers own, not only on
+  the manifest. So there is no list of kinds that keep the rules of
+  `k8s.apply`. Grant create, agent grant create and run approval create
+  refuse `k8s.apply`. A person's own call waits for approval, as every
+  `k8s.apply` call does.
+- every `k8s.delete` call: it deletes a Pod, a Job or a ReplicaSet.
+- every `k8s.label` call: on a Namespace it can set or remove the labels
+  that decide how the cluster checks the pods in it. This holds for
+  every kind of object.
+- every `k8s.annotate` call, for the same reason as `k8s.label`.
+- every `k8s.namespace.create` call: it makes a new namespace, and MEHO
+  sets no labels on it.
+
+Grant create, agent grant create and run approval create refuse all six.
+In sandbox mode a delete grant still covers `k8s.delete`, and only that
+one of the six (`declare_sandbox_delete_grant`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`k8s.scale`, `k8s.rollout.restart` and `k8s.cordon` (also with
+`uncordon: true`) keep their rules: a standing grant and a run approval
+still cover them.
+
+All six are declared in `op_classes.py` of the connector. The approval card
+says in one line why the call waits; only a person reads that line. The
+card of a `k8s.apply` also names, for a person only, what each container
+runs: the object, the container, the image, the `command` and `args`, and
+the `exec` commands of its lifecycle hooks and probes, with secret values
+hidden (`run_commands`, see `approvals.md`). A container here is also any
+other object with a `command` or `args` list, under any field of a
+custom kind, so every command line the manifest echo shows only by size
+is named. It does so also when the dry
+run fails. The list keeps at most 16 KB. It always keeps room for the
+name of every later container: an entry that is too large keeps
+the start of what it runs, and its `cut` field says so.
+The stored request of a `k8s.apply` of a Secret, or of a manifest with a
+secret-looking value, keeps its manifest only in the encrypted one-time
+handoff of the run, as a credential write does. Such a call needs
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
+(`manifest_holds_credential` in `op_classes.py`) when:
+
+- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
+  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
+  example a ConfigMap;
+- an `env` entry at any depth (the object itself, the containers and init
+  containers of a pod template) has a secret name and a value of its own; an entry that
+  reads its value from a Secret (`valueFrom`) does not count;
+- a text at any depth has a secret shape of its own: the rule of
+  `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
+  token with a known vendor prefix).
+
+The check reads each value of the manifest once, and the names of each
+`data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
+them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
+holds. The regular expressions of `hide_in_text` stay fast on a long line.
+The row of the request keeps no copy, also not when the request is
+approved and never runs, and a step of a multi-step run keeps no copy of
+the parent's params either. A row stored before this rule keeps its
+manifest until the run starts or the request ends, or until the start-up
+clean-up when it cannot run (see "Approval-TTL lifecycle" in
+`approvals.md`); then MEHO replaces it with the same marker it writes for
+a secret-named value. A new run of a failed apply needs the params sent
+again.
+
+`k8s.cronjob.run` keeps its rules: it starts the Job that the CronJob
+defines, unchanged, so the caller does not choose what runs. Writing the
+CronJob with `k8s.apply` waits for a person. The card shows the job
+template of the CronJob.
+
+An operator can also ingest a Kubernetes API file as a generic connector.
+The operations it makes that read or write a Secret, run a command in a
+pod, open a proxy or a port forward, or make a token get the same rule.
+So does every write (`POST`, `PUT`, `PATCH`, `DELETE`) on the path of an
+object or of a collection of objects, of every kind: `/api/v1/...` and
+`/apis/<group>/<version>/...`, namespaced or cluster-wide (for the core
+group: a namespace, a node, a persistent volume or a component status).
+There is no list of kinds that keep their rules. Every write to a
+sub-part of one object waits too: a path that goes on past the name of
+the object, for example a pod's `eviction` or `binding`, a Namespace's
+`finalize`, or the action of an add-on API. This includes the two
+sub-parts that waited first: a pod's `ephemeralcontainers` and the
+`approval` of a certificate signing request. Only `status` and `scale`,
+right after the name of the object, keep the rules of the operation, for
+every kind. A `status` write is where a controller reports what it sees;
+it does not change what the object asks the cluster to run. A `scale`
+write changes only the number of copies of a workload, the same change
+as `k8s.scale`. A longer path, such as `.../status/<more>`, waits.
+`status` and `scale` keep their rules only as a sub-part of one object:
+a path that also reads as a write to a collection, such as
+`/apis/<group>/<version>/namespaces/{namespace}/status`, waits, except
+the `status` of a core Namespace. A
+trailing `/` counts the same as none. A path can have any prefix in
+front, for example the base path of a proxy. A read keeps the rules of
+the operation
+(`ingested_paths.py`, [service-principal-grants.md](service-principal-grants.md#credential-calls)).
+The rule reads the path of every operation made from an ingested API
+file, whatever the product. So an API file of another product whose
+paths have the same form (`/api/v1/namespaces/...`,
+`/api/v1/<cluster-wide core kind>/...` or `/apis/<group>/<version>/...`)
+gets the same rule: its writes wait for a person on every call, and
+grant create refuses them. The method is read without case: `post:`
+counts the same as `POST:`.
+
+MEHO refuses a whole API file when one of its paths looks like a
+Kubernetes path without the usual start (`/api/v1` or
+`/apis/<group>/<version>`), for example `/namespaces/{namespace}/secrets`
+or `/apps/v1/namespaces/{namespace}/deployments`. Nothing from the file is
+stored. The dry run, the ingest and the start check of the shipped files
+all refuse it, because they use the same parser
+([spec-ingestion.md](spec-ingestion.md)). The shapes live in one place,
+`full_kubernetes_path` (`short_paths.py`). There is no setting that turns
+the check off. The ways past: use the standard API file that the cluster
+serves, which has full paths. Or, when the start is in the file's server
+address, write it there as a relative path (for example `/api/v1`, or
+`/k8s/clusters/<id>/api/v1` for a cluster behind a management product)
+and put the host in the target address. MEHO then adds the start to each
+path. A tool with its own API that only uses Kubernetes names can write
+its real start as a relative server address (for example `/api`). A path
+with `namespaces/{x}/secrets`, or a pod's `exec`, `attach`,
+`portforward` or `proxy`, is refused from any `/` of the path, also with
+a relative server address.
+
+An operation that an older ingest stored from such a file stays as it
+is. Each of its calls gets the answer of the same call on the full path:
+`ingested_op_is_credential_call` reads the call with the full path that
+`full_kubernetes_path` gives. So it waits for a person exactly where the
+full path waits (a write of an object, a Secret, a pod's `exec`,
+`attach`, `portforward` or `proxy`, a ServiceAccount token), and a plain
+read keeps its rules. At start MEHO writes one warning log line,
+`short_kubernetes_paths_stored`, for each connector with such operations
+(`short_path_warning.py`). It names the connector id, the tenant and the
+count.
+
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Key types
 
 - **`KubernetesConnector`** (`connector.py`) -- `Connector` subclass.
   Class attributes: `product="k8s"`, `version="1.x"`,
-  `impl_id="k8s"`. Caches one
+  `impl_id="k8s"`, `supported_version_range=">=1.32,<1.38"`. The range is
+  the Kubernetes lines upstream still maintains (1.35 to 1.37) plus 1.32,
+  the oldest line CI tests. CI boots k3s 1.32, 1.35 and 1.37 for
+  `tests/integration/test_connectors_k8s_k3d.py` (list in
+  `MEHO_TEST_K3S_TAGS`; the image name comes from `MEHO_TEST_K3S_IMAGE`;
+  the full module runs on the first image, the other two run a smoke set).
+  A target whose known version is outside the range does not run: the
+  operation and its preview answer `no_connector`, and the error names the
+  range (`operations/_target_version_range.py`). The fallback entry
+  without a version still lets a target with no known version be probed.
+  A Sensor on such a target gets the fit warning that names the range
+  (`checks/connector_fit.py`). Caches one
   `kubernetes_asyncio.client.ApiClient` per target, keyed on the
-  target's `(tenant_id, id)` from `target_cache_key` (see
+  target's `(tenant_id, id)` and secret reference from
+  `target_secret_cache_key` (see
   [`kubernetes-connector.md`](kubernetes-connector.md) for why). The
   credential loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
@@ -46,6 +199,12 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `k8s.node.list`. Helpers stay pure-function so the unit suite can pin
   the wire shape against synthetic `V1Namespace` / `V1Node` model
   instances without booting an event loop.
+- **Node size and reserved room** (`_node_resources.py`) -- `capacity` and
+  `allocatable` of a node (cpu, memory, pods, as the API writes them) and
+  the `requested` sum of the pods on it, added to each `k8s.node.list` row
+  when the switch `K8S_NODE_LIST_RESOURCES` is on (off by default).
+  It answers "how much more fits on this node?". Details in "Node capacity
+  and reserved requests".
 - **Workload helpers** (`ops_workload.py`) -- pure row mappers
   (`pod_row`, `pod_info`, `deployment_row`, `deployment_info`,
   `container_status_row`, `pod_ready_string`) plus the prefix
@@ -384,7 +543,7 @@ Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
 through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
 connector therefore keeps a **parallel** per-target cache
 (`KubernetesConnector._ws_api_clients`, keyed on the target's
-`(tenant_id, id)` exactly like `_api_clients`), built lazily from the
+`(tenant_id, id)` and secret reference exactly like `_api_clients`), built lazily from the
 same operator-identity kubeconfig via `_get_ws_api_client` and closed
 alongside the read clients in `aclose` (no open sockets left behind).
 
@@ -514,6 +673,8 @@ a secret stay visible. An option group without `c` (`sh -e`) does not
 start a shell string: the next item is a direct argument.
 The command-line hider lives in `redaction/command_line.py`; the
 `linux.script.run` preview uses it too, for the script text.
+The Job previews run the pass in a worker thread, so the backend keeps
+answering other requests.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`
@@ -1130,6 +1291,22 @@ need no raw kubectl:
   - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
     (2048 B), with its own `status_truncated` flag. It is `null` when
     the object has no `.status`.
+- **Reading a large object.** `spec_excerpt` and `status_excerpt` are
+  cut at 2048 B after the keys are sorted, so a long block hides the
+  keys after it (a CronJob's `schedule` after `jobTemplate`, a node's
+  `nodeInfo` after `images`). Two things make a cut safe:
+  - When an excerpt is cut, the row also has `spec_omitted_keys` or
+    `status_omitted_keys`: the top-level keys that are not whole in it.
+    The key where the cut falls is in the list too.
+  - Pass `fields` (up to 20 paths that start at `spec` or `status`, for
+    example `spec.schedule` or `status.conditions`; a number picks a
+    list item) to `k8s.cr.list` or `k8s.cr.info`. The row then has
+    `fields`, a map from each path to its value, never cut. A path that
+    is not in the object is in `fields_missing`, so a missing field does
+    not look like a null one. The values come from the redacted object:
+    a Secret's `data` is not readable this way, and HelmChart values
+    stay placeholders. The helpers are in
+    `ops_customresource_fields.py`.
 - **Built-in kinds** (#3840): the same two ops read any kind no
   dedicated op covers. A built-in group with a name (for example
   `apiregistration.k8s.io` / `v1` / `apiservices`, or
@@ -1301,8 +1478,11 @@ value of `spec.set` becomes one (keys kept). Chart values often hold
 passwords. A chart made with `kubectl apply` also carries its whole
 manifest, values included, in the last-applied annotation, so every
 annotation value of a `HelmChart` becomes a placeholder too (keys kept),
-as on a Secret. `k8s.meho.release.info` reads such objects, and the flight
-recorder (next paragraph) records the answer only in this masked form.
+as on a Secret. A `kind: HelmChartConfig` object (it overrides the values
+of a packaged chart) and the kind-less items of a `HelmChartConfigList`
+are masked the same way. `k8s.meho.release.info` reads such objects, and
+the flight recorder (next paragraph) records the answer only in this
+masked form.
 
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
@@ -1315,7 +1495,21 @@ and annotations carry placeholders, never the values text. For a list
 read, each item first gets its `kind` from the list envelope
 (`Secret` from a `SecretList`, `HelmChart` from a `HelmChartList`; see
 "Built-in kinds" above), because the API server leaves `kind` off list
-items. The dedicated way
+items. For every kind, `custom_resource_row` also hides the values under
+secret-shaped key names in `spec` and `status` (numbers included) and the
+secret-named fields inside their text values, before it builds
+`spec_excerpt`, `status_excerpt` and `fields`. It hides a secret-named
+field inside an annotation value before it cuts the value. On a
+`reveal_secret: true` call by a person, an excerpt or an annotation value
+that is not cut keeps the raw values: the dispatcher hides them in the
+default view and the audit copy and gives them back on the reveal. In
+`fields` a raw value stays only where the dispatcher hides it under its
+path (`_revealed_fields`). A value cut out of its object loses the names
+around it (the `name` of an env entry, the SNMP setting next to a
+`community`), so the dispatcher cannot hide it there; such a value comes
+from the hidden object. A cut excerpt stays hidden, also on a reveal. Both operations
+build their rows in a worker thread, so a large text value does not hold
+up other calls. The dedicated way
 to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
 section), which also run this redactor as a second net.
 
@@ -1493,6 +1687,17 @@ a "200 but nothing happened" apply can be explained from the trace.
   error.
 - When capture is off the wrapper costs one contextvar read.
 - Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
+
+What the span holds depends on who reads it. A person reads the stored
+span: the whole object of the answer, with Secret data masked as above. An
+agent reads a copy (`trace_agent_view.py`): an `env` value is hidden by
+the same secret rules as in the direct answer of an operation (a
+secret-named entry is hidden; plain values, the names and `valueFrom`
+references stay), the secret values on each `command` / `args` line and in
+`sh -c` scripts are hidden, and annotation values are cleaned (the
+last-applied object is cleaned like the object). `managedFields` stays. A
+service login reads the stored span of its own calls as it is. The rules and who reads which copy are in
+[redaction.md](redaction.md#what-an-agent-reads-in-the-trace-of-a-kubernetes-call).
 
 The shared recorder is
 `flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the
@@ -1680,3 +1885,48 @@ The `total` key in the response envelope is the full row count
   <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/>
 - Kubernetes Deployment API:
   <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/>
+
+
+## Node capacity and reserved requests
+
+These fields are behind the switch `K8S_NODE_LIST_RESOURCES`
+(`Settings.k8s_node_list_resources`). It is off by default, because it
+changes what the AI reads. With it off, `k8s.node.list` answers as before,
+and its description, `llm_instructions` and response schema are as before.
+With it on, `register_operations()` stores the op with the longer text and
+schema (`with_node_resources()`), and the handler adds the fields below.
+The topology rows of a node never get these fields. The switch goes on by
+default only in a later pull request, after a measured run shows it helps.
+
+With the switch on, `k8s.node.list` rows carry, besides status, roles and version:
+
+- `capacity` and `allocatable`: `{cpu, memory, pods}` as the API writes
+  them (for example `"4"`, `"16393216Ki"`, `"110"`). Other resources such as
+  ephemeral storage are not listed. `null` when the node has no status yet.
+- `requested`: `{cpu_millicores, memory_bytes, pods}`, the sum of the
+  requests of the pods on the node. Free room is `allocatable` minus
+  `requested`.
+- `requests_error`: `null`, or the reason `requested` is `null`.
+
+How `requested` is built (`_node_resources.py`):
+
+1. The handler reads the pods of all namespaces, 500 per page, at most 40
+   pages (the same bound as the migration reads), in addition to the node
+   list.
+2. Pods that ended (`Succeeded`, `Failed`) and pods with no node yet are not
+   counted. Pending pods that are already on a node are counted, like the
+   scheduler does.
+3. Each pod counts as the scheduler counts it: the sum of its containers
+   and sidecars (init containers with `restartPolicy: Always`), or the peak
+   of the init containers when that is higher, plus the pod overhead. A
+   pod-level request (`spec.resources.requests` of the pod, for cpu or
+   memory) takes the place of that container sum for its resource; the
+   overhead is still added.
+4. A container without a request counts as zero. CPU is rounded up to whole
+   millicores.
+
+A failure is never an answer. When the pod read fails (any error but a 401,
+which is raised so the login can be renewed), is cut at the page cap, or one
+pod has a quantity that cannot be read, `requested` is `null` and
+`requests_error` says why. A node with no pods has `requested` of zeros.
+The node list itself still comes back.

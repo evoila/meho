@@ -34,6 +34,8 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.broadcast import _handler_recent
@@ -110,7 +112,7 @@ def test_tools_list_exposes_recent_for_operator(
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
     assert "meho_broadcast_recent" in names
-    # MEHO-internal RBAC fields stripped from the wire shape.
+    # internal RBAC fields stripped from the wire shape.
     recent_def = next(t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_recent")
     assert "required_role" not in recent_def
     assert "op_class" not in recent_def
@@ -248,6 +250,64 @@ async def test_filter_target_matches_targets_list() -> None:
     await seed_announcement(tenant_id, targets=["vc-c"])
     result = await _handler_recent(_operator(tenant_id), {"filter": {"target": "vc-b"}})
     assert _ids(result) == [str(hit.event_id)]
+
+
+async def test_filter_work_ref_does_not_match_an_operations_work_ref() -> None:
+    """The feed holds announcements only, so an operation's ``work_ref`` never matches.
+
+    An operation that ran with a ticket id leaves an audit row with that
+    ``work_ref``. The filter still returns only the announcement that
+    declared the id, and nothing for an id that only an operation has.
+    """
+    tenant_id = uuid4()
+    async with get_sessionmaker()() as session:
+        for work_ref in ("gh:org/repo#1", "gh:org/repo#2"):
+            session.add(
+                AuditLog(
+                    event_class="operation_execution",
+                    tenant_id=tenant_id,
+                    operator_sub="reader-1",
+                    method="POST",
+                    path="/mcp",
+                    status_code=200,
+                    payload={},
+                    work_ref=work_ref,
+                )
+            )
+        await session.commit()
+    announced, _ = await seed_announcement(tenant_id, work_ref="gh:org/repo#1")
+
+    hit = await _handler_recent(_operator(tenant_id), {"filter": {"work_ref": "gh:org/repo#1"}})
+    assert _ids(hit) == [str(announced.event_id)]
+    miss = await _handler_recent(_operator(tenant_id), {"filter": {"work_ref": "gh:org/repo#2"}})
+    assert miss["events"] == []
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.parametrize("tool", ["meho_broadcast_recent", "meho_broadcast_watch"])
+def test_filter_texts_name_no_operation_events(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    tool: str,
+) -> None:
+    """The filter texts of both read tools describe announcements only.
+
+    Both tools read the announcement archive, which holds no operation
+    events. A filter text that names operations or audit rows sends the
+    agent looking for something this feed never has.
+    """
+    client, _op = client_with_operator
+    tools = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()
+    definition = next(t for t in tools["result"]["tools"] if t["name"] == tool)
+    filters = definition["inputSchema"]["properties"]["filter"]["properties"]
+    assert "announcement declared" in filters["work_ref"]["description"]
+    for name, sub_schema in filters.items():
+        text = sub_schema["description"].lower()
+        for word in ("operation", "audit", "broadcastevent", "lineage"):
+            assert word not in text, f"{tool} filter.{name} names {word!r}: {text}"
 
 
 @pytest.mark.parametrize(

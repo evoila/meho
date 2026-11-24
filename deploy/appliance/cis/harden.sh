@@ -97,6 +97,10 @@ readonly ADMIN_USER=admin
 # the appliance has not. sudo uses the last secure_path it reads, and it
 # reads sudoers.d after /etc/sudoers.
 readonly ENVIRONMENT=/etc/environment
+# A login shell of root (sudo -i, the VM screen) also runs this file of the
+# snapd package, which adds /snap/bin again. The scan starts no login shell,
+# so it does not see it. dpkg does not bring back a deleted config file.
+readonly SNAP_PROFILE=/etc/profile.d/apps-bin-path.sh
 readonly SUDOERS_DROPIN=/etc/sudoers.d/meho-appliance
 readonly ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 readonly CRON_ALLOW=/etc/cron.allow
@@ -346,6 +350,7 @@ drop_snap_from_root_path() {
     local new dropin="${HOST_ROOT}${SUDOERS_DROPIN}" temporary
     new=$(sed 's#:/snap/bin\([:"]\)#\1#g' "${HOST_ROOT}${ENVIRONMENT}")
     printf '%s\n' "$new" | write_root_file "$ENVIRONMENT" 0644
+    rm -f "${HOST_ROOT}${SNAP_PROFILE}"
     # sudo skips names with a dot in sudoers.d, so it never reads the
     # temporary file. A file visudo refuses would stop every later sudo.
     temporary=$(mktemp "${dropin}.XXXXXX")
@@ -362,7 +367,7 @@ drop_snap_from_root_path() {
     # it before the change.
     # shellcheck disable=SC2001 # a ${PATH//...} would also cut /snap/binx
     PATH=$(sed 's#:/snap/bin\(:\|$\)#\1#g' <<<"$PATH")
-    ok "root's PATH has no /snap/bin in $ENVIRONMENT, in sudo's secure_path and for the scan (CIS 5.4.2.5)"
+    ok "root's PATH has no /snap/bin in $ENVIRONMENT, in a login shell, in sudo's secure_path and for the scan (CIS 5.4.2.5)"
 }
 
 # After the fixes of step 3 the file is in the group root; CIS 2.4.1.8

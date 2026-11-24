@@ -1,15 +1,15 @@
 # Register targets and secrets
 
-A **target** is one system MEHO operates against — a Kubernetes API
+A **[target](../reference/words.md#target)** is one system MEHO operates against — a Kubernetes API
 server, a vCenter, a Vault, a firewall. Registration gives the
 backplane three things: the coordinates to reach the system (`host`,
-`port`, TLS trust), the `product` token that selects which connector
+`port`, TLS trust), the `product` token that selects which [connector](../reference/words.md#connector)
 serves it, and a `secret_ref` — a *reference* into your credential
 store. MEHO never stores the credential itself; it resolves the
 reference at dispatch time, under an identity your store can audit.
 
 Until at least one target is registered and its probe is green, an
-agent session can discover operations but cannot act on anything —
+agent session can discover [operations](../reference/words.md#operation) but cannot act on anything —
 which is why this is the first guide.
 
 !!! note "Prerequisites and roles"
@@ -34,18 +34,28 @@ which is why this is the first guide.
 
 Create, edit and delete on REST are for people only. A service login
 gets `403 human_principal_required`, also with the **tenant_admin**
-role. It registers a target with the `targets.register` operation and
-removes one with `targets.remove` (connector `targets-registry-1.x`).
-MEHO checks both against the approval rules.
+role. It registers a target with the `targets.register` operation,
+changes one with `targets.update` and removes one with `targets.remove`
+(connector `targets-registry-1.x`). Each new target and each change waits
+for a person's [approval](../reference/words.md#approval): no standing
+grant, run approval or agent grant covers it. The approval card shows the
+target's values, also its `extras`.
+
+**The CLI and REST wait for approval.** A change made with your login
+token (`meho targets add`, `update`, `delete`, `import`, or a script on
+REST) waits until a person approves it. The command prints the approval
+id and exits 0; approving the request makes the change. Find it with
+`meho approvals list`, or in the console under approvals. A change you
+make in the operator console runs at once.
 
 **Register targets on the operator surfaces above.** Registration is an
-operator-trust decision. For agents, the default MCP tools only read
+operator-trust decision. For agents, the default [MCP](../reference/words.md#mcp) tools only read
 targets (`list_targets`). A session that asked for the `mcp:admin`
 scope also has `meho_targets_register` and `meho_targets_update`
 (tenant_admin only). Through `call_operation`, the connector
 `targets-registry-1.x` offers `targets.register`, `targets.update`,
-`targets.remove` and `targets.probe`; an agent's register and every update
-wait for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
+`targets.remove` and `targets.probe`; every register and every update
+waits for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
 the CLI is worth installing before your first agent session.
 
 ## Write a `targets.yaml`
@@ -90,7 +100,7 @@ Mapping rules the importer applies:
   `extras` JSON column, and the importer prints a warning for each one.
   To carry your own annotations without the warning, put them under an
   `extras:` block.
-- **`fingerprint` is server-managed** and dropped with a warning; the
+- **[`fingerprint`](../reference/words.md#detected-product-and-version) is server-managed** and dropped with a warning; the
   probe verb is its only writer.
 - `verify_tls: false` and `tls_ca_pin` are mutually exclusive (422):
   pin the CA *or* disable verification, never both.
@@ -99,8 +109,116 @@ Mapping rules the importer applies:
   it, dispatch fails with `connector_tls_verify_failed`, carrying
   Python's own *"IP address mismatch"* text inside
   `extras.exception_message`.
+- If a target has a `tls_ca_pin` and TLS fails, the error says the pin
+  is stale. It does not tell you to set a pin. `extras.pin_stale` is
+  `true`, and `extras.presented_certificate` shows the issuer, the
+  subject and the SHA-256 fingerprint of the certificate the host
+  presents now. This happens when the host certificate was re-issued.
+  For an ESXi host or a vCenter whose certificates come from the VMCA
+  (the vCenter's own certificate authority), pin the **VMCA root CA**,
+  not the host certificate. Then a later re-issue does not break the
+  target. Update the pin with `--update`.
 
 You can leave `secret_ref` out entirely — see the next section.
+
+### Add a whole VMware Cloud Foundation stack
+
+VMware Cloud Foundation (VCF) is not one system. It is many systems
+that run side by side. Each part has its own address and its own login,
+so **each part is its own target**. Add one target for each part you
+want MEHO to operate.
+
+The `product` value of a target is the first part of the connector id
+(the name before the first dash that is followed by a digit). For
+example `vmware-rest-9.0` gives `vmware`, and `sddc-rest-9.0` gives
+`sddc`. This table lists the value for each VCF part. The connector ids
+are in the [connector reference](../reference/connectors.md#evoilas-enterprise-pack).
+
+| VCF part | `product` value | Connector ids |
+| --- | --- | --- |
+| vCenter | `vmware` | `vmware-rest-9.0`, `vmware-rest-8.0` |
+| NSX Manager | `nsx` | `nsx-rest-9.0`, `nsx-rest-4.2` |
+| SDDC Manager | `sddc` | `sddc-rest-9.0`, `sddc-vcf5-5.0` |
+| VCF Installer and Cloud Builder | `installer` | `installer-rest-9.1`, `installer-cb-5.0` |
+| VCF fleet management | `fleet` | `fleet-lcm-9.0`, `fleet-rest-9.0` |
+| VCF Operations | `vrops` | `vrops-rest-9.0`, `vrops-vrops8-8.0` |
+| VCF Operations for logs | `vrli` | `vrli-rest-9.0`, `vrli-vrli8-8.0` |
+| VCF Operations orchestrator | `vro` | `vro-rest-9.0` |
+| VCF Automation | `vcfa` | `vcfa-rest-9.0`, `vcfa-vra8-8.0` |
+| VCF Identity Broker | `idb` | `idb-rest-9.0`, `idb-wsa-3.3` |
+
+The connectors for VCF come with evoila's enterprise pack. Without the
+pack, MEHO refuses these `product` values with 422 `unknown_product`.
+That answer lists the `valid_products` of your backplane. The
+same list is in `meho connector list`. Use the value from that list if
+it ever differs from this table.
+
+A stack with the main parts looks like this. The names and the
+addresses (`192.0.2.0/24`) are examples. Where a target has no
+`secret_ref`, the server derives one secret path for each target (see
+[Stage the secret](#stage-the-secret)).
+
+```yaml
+targets:
+  - name: vcenter-lab
+    product: vmware
+    host: 192.0.2.21
+    tls_server_name: vcenter-lab.example.com
+
+  - name: nsx-lab
+    product: nsx
+    host: 192.0.2.22
+    tls_server_name: nsx-lab.example.com
+
+  - name: sddc-lab
+    product: sddc
+    host: 192.0.2.23
+    tls_server_name: sddc-lab.example.com
+
+  - name: vcfops-lab
+    product: vrops
+    host: 192.0.2.24
+    tls_server_name: vcfops-lab.example.com
+
+  - name: vcfa-lab
+    product: vcfa
+    host: 192.0.2.25
+    fqdn: vcfa-lab.example.com      # the appliance picks the organisation from this name
+    tls_server_name: vcfa-lab.example.com
+    extras:
+      domain: example-org           # the tenant organisation to log in to
+      provider_username: provider-svc
+      provider_secret_ref: tenants/<tenant-id>/vcfa-lab-provider
+```
+
+Add the other parts (`fleet`, `vrli`, `vro`, `idb`, `installer`) the same
+way: a `name`, the `product` value from the table, and a `host`. Add
+`tls_ca_pin` or `tls_server_name` as for any target. Then
+[import and probe](#import-and-verify) each one. A probe that is green
+for a part shows that MEHO reaches it and identified its product and version.
+
+#### What VCF Automation reads
+
+VCF Automation has two login planes on one appliance: the provider plane
+and the tenant plane. The connector reads these values.
+
+| Where | Name | What it does |
+| --- | --- | --- |
+| Target `fqdn` | `fqdn` | The appliance picks the organisation from the `Host` name. When you reach it by IP, set `fqdn` to its FQDN. |
+| Target `extras` | `domain` | The tenant organisation to log in to. It is a target setting, **not** a field in the secret. |
+| Target `extras` | `provider_username` | Optional. The user name for the provider plane, when the provider plane needs another login than the tenant plane. |
+| Target `extras` | `provider_secret_ref` | Optional. The `secret_ref` of a second secret that holds the login of the provider user. It follows the same rules as `secret_ref` for your credential backend. |
+| Secret | `username`, `password` | The tenant login. |
+| Secret | `refresh_token` | Optional. A VCF Automation API token. For a VCF Automation 9.1 target whose appliance does not serve the usual login, add it to the secret of the target. |
+
+Set these with `meho targets update`, for example
+`meho targets update vcfa-lab --extra domain=example-org`. `--extra` on
+`update` replaces the whole `extras` map, so pass every key you want to
+keep.
+
+The exact rules for each product, such as which login the provider plane
+uses when you set no `provider_username`, are in the setup guide that
+comes with the enterprise pack.
 
 ### The record schema
 
@@ -156,7 +274,7 @@ store it points at is decided by your deploy's credential backend
 
 The `secret_ref` is the **logical KV-v2 path relative to the `secret`
 mount** — never include the mount or the `/data/` segment. The
-canonical, enforced layout is per-tenant:
+canonical, enforced layout is per-[tenant](../reference/words.md#tenant):
 
 ```
 tenants/<tenant-id>/<target-name>
@@ -239,6 +357,39 @@ target in such a project fails every dispatch with
 `connector_error: GcpSecretManagerReadError` until the project is
 listed. The same list applies to `gsm:` refs in operation parameters.
 
+### Share one secret between targets, or not
+
+MEHO lets two targets name the same `secret_ref`. Use one secret for
+several targets only when one account is right for all of them. This is
+what it means:
+
+- **Rights.** Every call on every one of these targets runs with the
+  rights of that one account. A read-only target and a target that
+  changes things need two accounts, so give them two secrets.
+- **Approvals.** The approval rules depend on the operation, not on the
+  secret. A shared secret does not weaken them, and it does not make a
+  change wait less. It does mean that an approved change on one target
+  runs with an account that the other targets also use.
+- **Audit.** MEHO writes one [audit row](../reference/words.md#audit-record) for each call. The row names the
+  target and the person (or agent) who made the call, also when targets
+  share a secret. The vendor sees only the one account, so the vendor's
+  own log cannot tell the targets apart. Use one secret for each target
+  when you need that in the vendor's log.
+- **Logins.** Some vendors allow one session for each user. For many
+  connectors, two targets of one tenant that use the same secret and the
+  same login address share one login and one token, so they do not end
+  each other's session. Targets with different secrets log in on their
+  own.
+- **Rotation.** When you change the shared secret, change it once. Then
+  send `meho targets update <name> --secret-ref <same-ref>` for each
+  target, to make MEHO read it again (see
+  [Change a secret](#change-a-secret)).
+
+For a VCF stack, a simple rule works: one secret for each target, named
+after the target. Share a secret only for targets of the same product
+that need the same rights, for example several vCenter targets that
+use one read-only account.
+
 ### Targets that need no credential
 
 Some products need no login, for example a Prometheus that you reach
@@ -259,6 +410,42 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
 
+### Keycloak targets need a managed realm
+
+A Keycloak target must name the realm MEHO manages, in
+`extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
+refuses to create or update the target, and refuses every operation on
+it.
+
+```bash
+meho targets add lab-sso --product keycloak --host sso.example.com \
+  --extra managed_realm=example
+```
+
+In YAML, put it under `extras:` (`managed_realm: example`). The optional
+`extras.admin_realm` is the realm the target logs in to; it is `master`
+when you leave it out.
+
+- A realm is one plain name: no `/`, `\`, `?`, `#` or `%`, no spaces at
+  the start or the end, not only dots, and at most 255 characters. MEHO
+  does not trim a value; it refuses it.
+- MEHO allows a managed realm that is the admin realm, or the realm MEHO
+  itself signs in with, but it warns you. When the warning shows depends
+  on how you make the change:
+  - You make it in the console, or with `meho targets add` or `update`
+    after a person's login: the warning shows at once, after the save.
+  - A request made with a token waits for a person to approve it (an AI
+    agent's call, or a call with an API token). The warning is on the
+    approval card, so the approver sees it before approving. It is in the
+    result again after the approval.
+  - A settings file import writes at once. Its preview and its result
+    both list the warning, with the path of the target entry.
+  - Each later write on that target also shows the warning on its
+    approval card.
+- `meho doctor` lists the Keycloak targets MEHO refuses. A platform
+  admin sees the targets of every tenant. You can fix one with
+  `meho targets update`, or in the console edit form ("Managed realm").
+
 ## Change a secret
 
 MEHO keeps a login for each target for a while, so it does not have to
@@ -277,7 +464,7 @@ Any change to how MEHO reaches or logs in to a target (for example
 logs in with the new values.
 
 The MEHO server that gets the update drops its login at once. Any
-other backplane server, and any satellite runner, drops its login on
+other backplane server, and any [satellite runner](../reference/words.md#satellite-runner), drops its login on
 its next call to that target.
 
 ## Import and verify
@@ -288,17 +475,34 @@ meho targets import targets.yaml --dry-run
 
 # 2. Apply. Default mode aborts before any write if a name already exists:
 meho targets import targets.yaml
-#   Applied: 2 created, 0 updated.
+#   Applied: 0 created, 0 updated, 2 waiting for approval.
+#   Each target is created when a person approves its request.
 
 # 3. Iterate later with --update: PATCHes existing names, creates new ones.
 #    The PATCH is sparse — fields your YAML omits are left untouched.
 meho targets import targets.yaml --update
 ```
 
-Then probe. The probe invokes the connector matched to the target's
-`product`, live, and persists the resulting fingerprint:
+Each row of the file makes its own approval request, because the CLI
+calls with a token. A file with 50 rows makes 50 requests. For a large
+file, use one of these:
+
+- Import the file in the operator console. A person in the console
+  writes at once.
+- Give the import a change ticket. Then a person goes through all its
+  rows with one command. It shows each row and asks for a yes.
+
+  ```bash
+  meho --work-ref gh:acme/ops#42 targets import targets.yaml
+  meho approvals approve --filter-work-ref gh:acme/ops#42 --in-order
+  ```
+
+Then probe. A target exists only after a person approved its request, so
+approve the rows first. The probe invokes the connector matched to the
+target's `product`, live, and persists the resulting fingerprint:
 
 ```bash
+meho approvals approve <approval-id-of-the-row>
 meho targets probe lab-rke2
 ```
 
@@ -340,8 +544,15 @@ ports.
 | NSX | HTTPS 443 to NSX Manager | The built-in `Auditor` role. | `Network Admin`, or `Enterprise Admin` for the whole estate. |
 | SDDC Manager | HTTPS 443 | The `VIEWER` role. | `OPERATOR`, or `ADMIN` for lifecycle tasks. |
 | VCF Operations | HTTPS 443 | The `ReadOnly` role. | A role that may edit the object a change touches. |
-| VCF Automation | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
-| Operations for logs | HTTPS 443 | See the vendor guide of your version. | See the vendor guide of your version. |
+
+These products of the enterprise pack have no row here: VCF Automation,
+VCF Operations for logs, VCF Installer and Cloud Builder, VCF fleet
+management, VCF Operations orchestrator, VCF Identity Broker, VMware Cloud Director, HCX, Site Recovery Manager,
+vSphere Replication, Aria Automation Config (Salt) and Holodeck. The
+port and the role of each one are in the setup guide of its connector,
+which comes with the enterprise pack. The role names are the vendor's
+own, so they can change with the product version. To get the pack, contact evoila (see the
+[connector reference](../reference/connectors.md#evoilas-enterprise-pack)).
 
 Use a separate login for reads and for changes where you can. MEHO also
 asks a person to approve a risky change before it runs
@@ -356,7 +567,7 @@ Real failure modes, with the errors they actually produce:
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. |
+| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
 | 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |
@@ -364,7 +575,7 @@ Real failure modes, with the errors they actually produce:
 | Probe exits with 501 — *"no connector registered for product=…"* | The target row is fine; no connector serves that product on this backplane version. Any cached fingerprint is left untouched. | Check the [connector catalog](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-catalog.md) for your version; for spec-ingested (generic) connectors, ingest one first. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…has a KV-v2 API-path-shaped secret_ref…"* | Your ref embeds the mount or a `data/` segment (`secret/data/…`). | Store the logical path only: `tenants/<tenant-id>/<name>`. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |
-| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. |
+| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run `meho targets update <name> --secret-ref <path>`. If the error says it is not the target's own `secret_ref`, check the path the operation names. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422. |
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
 | Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |

@@ -41,7 +41,7 @@ Closed vocabulary of three values: `AUTO_EXECUTE`, `NEEDS_APPROVAL`, `DENY`. DB-
 Stateless, async, session-per-method. Public API:
 
 - `grant(tenant_id, created_by_sub, payload)` → `AgentGrantRead`
-- `revoke(tenant_id, grant_id)` → `bool`
+- `revoke(tenant_id, grant_id, *, auto_execute_only=False)` → `bool`; with `auto_execute_only` a `deny` or `needs-approval` row raises `GrantRevokeNeedsPersonError` and stays
 - `get(tenant_id, grant_id)` → `AgentGrantRead | None`
 - `list_(tenant_id, *, principal_sub, include_expired, limit, offset)` → `list[AgentGrantRead]`
 
@@ -128,6 +128,30 @@ For time-bounded elevations: same path, plus `expires_at` set on the row. The gr
 | Elevation active | As granted until expiry | Only if explicit grant (same cap) |
 | Elevation expired | Reverts to baseline | Denied |
 
+A call that reads, writes or makes a credential always waits for a
+person. No standing grant, no agent grant and no run approval covers it
+(the one rule: `service_grants.never_covered_reason`, see
+[service-principal-grants.md](service-principal-grants.md#credential-calls)).
+For an agent:
+
+- `_agent_verdict` (`operations/_validate.py`) makes such a call at least
+  `needs-approval`, also at level `safe`, whatever the grant rows say
+  (`service_grants.credential_call_waits`). The check sits there and not
+  in `resolve_verdict`, because only the row there carries the class a
+  connector's floor stored on an ingested operation. A credential read
+  marked in code as one that returns no secret value still runs at once.
+- `AgentGrantService.grant` (create and elevate) refuses an
+  `auto-execute` row whose `op_pattern` is exactly the op id of such a
+  call, with the reason "A standing grant, an agent grant or a run
+  approval never covers 'OP': it reads, writes or makes a credential, so a
+  person approves each call. Leave it out." A pattern with `*`, `?` or
+  `[` is not refused: the gate keeps the credential calls it matches
+  waiting. A `needs-approval` or `deny` row is not refused either, because
+  it never runs a call at once, and with `AGENT_GRANT_REQUIRED=on` an
+  agent needs a row to call the operation at all.
+
+A call with no target (for example a `net.*` operation) matches only a grant for every target (`target_scope` `*` or empty), never a grant for named targets, so with `AGENT_GRANT_REQUIRED=on` a `read-targets` agent cannot run it.
+
 ### The upgrade row (migration `0155`)
 
 Migration `0155_agent_read_everything_at_upgrade` gives every agent that
@@ -175,16 +199,26 @@ Rules:
   named twice gives one row.
 - While `AGENT_GRANT_REQUIRED` is `observe` or `on`, register refuses a
   request without the field: 422 `starting_grants_required`, with the
-  three choices in the text. With `off` the field may be left out.
+  three choices in the text. The text is true for the switch value: with
+  `observe` it says that MEHO refuses no call yet, so `none` and
+  `read-targets` limit the agent only once the switch is `on`. With `off`
+  the field may be left out.
 - For a definition the field is required only when the agent that
-  `identity_ref` names has no live (not expired) grant yet. The rows go
-  to that agent principal. A live row the agent already has is skipped,
+  `identity_ref` names has no live (not expired) grant yet. This holds at
+  create, and at edit (`PATCH /api/v1/agents/{name}`,
+  `meho_agents_edit`) when the new `identity_ref` names another agent
+  (#6389). An edit that sends the same `identity_ref` asks nothing. On an
+  edit the field is used only together with `identity_ref`; without it
+  the request gets 422. A pick that is sent with the same `identity_ref`
+  is still written: MEHO does not ask for it, but it takes it.
+  The rows go to that agent principal. A live row the agent already has is skipped,
   and so is a `deny` row. An expired row with the same pattern and
   target is renewed: it gets `auto-execute` and no end date.
 - Only a person may send a pick that adds rows (`read-everything` or
   `read-targets`), the same rule as the grant routes. Register is
-  person-only anyway. On `POST /api/v1/agents` and `meho_agents_create`
-  a service, agent or runner login gets `human_principal_required` and
+  person-only anyway. On `POST /api/v1/agents`, `PATCH
+  /api/v1/agents/{name}`, `meho_agents_create` and `meho_agents_edit` a
+  service, agent or runner login gets `human_principal_required` and
   nothing is written; `set: none` still works for it.
 - Register resolves the names before it creates the Keycloak client, so
   a bad pick creates nothing. The rows go in the same database
@@ -195,33 +229,57 @@ Rules:
   admin removes them like any other grant.
 - The audit row of the creation carries `starting_grants` (the set, or
   `not-chosen` when no set was picked) and, for `read-targets`,
-  `starting_grant_targets` (the names as sent).
+  `starting_grant_targets` (the names as sent). So does the audit row of
+  an edit that sends `identity_ref`. The audit row of an agent definition
+  create, and of such an edit, also carries `starting_grant_agent`, the
+  agent that gets the grants. The console
+  forms write the same audit values as the API (`ui/routes/agents/forms.py`,
+  `principals_forms.py`). They bind the operation name before they read
+  the pick and before the person check, so the audit row of a form that
+  is refused early also names it. A refused console create or edit
+  answers 422, so its audit row does not read like a done change; a
+  saved one answers 204. `test_ui_agent_starting_grants_audit.py`,
+  `test_agent_starting_grants_edit_audit.py`,
+  `test_agent_starting_grants_create_audit.py` and
+  `test_ui_agent_form_refusals.py` check the rows.
+- A target name that does not resolve gives
+  `starting_grants_target_unknown` (or `_ambiguous` when it matches more
+  than one target). The text ends with "Nothing was created." for a
+  register or create, and "Nothing was changed." for an edit.
 
-Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`, the
-admin MCP tools `meho_agent_principals_register` and
-`meho_agents_create`, the CLI and the console.
+Surfaces: `POST /api/v1/agent-principals`, `POST /api/v1/agents`,
+`PATCH /api/v1/agents/{name}`, the admin MCP tools
+`meho_agent_principals_register`, `meho_agents_create` and
+`meho_agents_edit`, the CLI and the console.
 
 CLI (`cli/internal/startinggrants/`, #6192): `meho agent-principal
-register` and `meho agent create` take `--grants
+register`, `meho agent create` and `meho agent edit` take `--grants
 none|read-everything|read-targets` and `--target <name>` (repeat it for
-more targets). The CLI refuses `--target` without `--grants
+more targets). `meho agent edit` takes `--grants` only together with
+`--identity-ref`. The CLI refuses `--target` without `--grants
 read-targets`, and `read-targets` without a `--target`. Without
 `--grants` it sends no pick; when MEHO then answers 422
-`starting_grants_required`, the CLI prints the three choices and stops.
-With `--grants`, it reads the agent's grants after the create (every
-page of `GET /api/v1/agents/grants?principal_sub=`) and shows them;
-`--json` adds them as `grants`. If that read fails, `grants` is `null`
-and `grants_error` says why. The CLI cannot see the server's
+`starting_grants_required`, the CLI prints the three choices and stops
+("Nothing was created." or, for an edit, "Nothing was changed.").
+With `--grants`, it reads the agent's grants after the create or edit
+(every page of `GET /api/v1/agents/grants?principal_sub=`) and shows
+them; `--json` adds them as `grants`. `meho agent-principal register
+--json` reads and adds them also without `--grants` (an empty list for a
+new agent with no grant), so scripts read one shape (#6389). If that
+read fails, `grants` is `null` and `grants_error` says why. The CLI cannot see the server's
 `AGENT_GRANT_REQUIRED`, so the `--grants` help and the printed choices
 say that `none` and `read-targets` limit the agent only with `on`.
 
 Console (`ui/routes/agents/starting_grants.py`, #6192): the register
-form and the create-agent form show the three choices as radio buttons,
-none selected at first, and the tenant's targets as checkboxes for
-`read-targets`. While the switch is not `off` the choice is required in
-the form. A missing or wrong pick, or a target name that does not
-resolve, shows the service's text next to the field. After a pick that
-writes grants, the console opens `/ui/agents/grants?principal_sub=<the
+form and the agent definition forms (create and edit) show the three
+choices as radio buttons, none selected at first, and the tenant's
+targets as checkboxes for `read-targets`. While the switch is not `off`
+the register form marks the choice required. The definition forms never
+do: the service asks for the pick only when the agent has no grant yet,
+the same rule as the API (#6389). A missing or wrong pick, or a target
+name that does not resolve, shows the service's text next to the field
+(`ui/routes/agents/form_saves.py` maps the service errors). After a pick
+that writes grants, the console opens `/ui/agents/grants?principal_sub=<the
 agent>`. The help text of each choice follows the current
 `AGENT_GRANT_REQUIRED`: with `off` or `observe`, "None" and "Read some
 targets" say that safe operations still run, and name the value. The
@@ -229,12 +287,58 @@ register modal's container on the principals page lets htmx swap the
 register and revoke error answers (404, 409, 422, 502, 503 to a POST), so
 the field error or banner shows in the open modal.
 
-The two MCP tools show the `starting_grants` input and the sentence about
-it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
+The three MCP tools show the `starting_grants` input and the sentence
+about it only while `AGENT_GRANT_REQUIRED` is `observe` or `on`
 (`mcp/tools/_starting_grants.py`, through the tool's `for_settings`). With
-the switch `off` (the default), an AI client sees both tools exactly as
+the switch `off` (the default), an AI client sees the tools exactly as
 before, and a call that sends `starting_grants` is refused by the input
-check. REST takes the field in every state.
+check. REST and the console take the field in every state. The MCP tools
+refuse it on purpose: the `tools/call` input check uses the same input
+schema that `tools/list` shows (`ToolDefinition.for_settings` in
+`mcp/registry.py`). To accept the field with `off`, the tools would
+have to show it with `off` too, and then a switch that is off would
+change what an AI client sees.
+
+### Live grants in the create and edit answers (`agents/live_grants.py`)
+
+When MEHO asks for no pick because the agent already has a live grant,
+the person still sees what the agent may do. Every way in shows the
+agent's live grants:
+
+- **REST.** `POST /api/v1/agents` and `PATCH /api/v1/agents/{name}`
+  answer `AgentDefinitionSaved`: the definition plus `live_grants` (each
+  with `id`, `op_pattern`, `target_scope`, `target_name`, `verdict`,
+  `expires_at`) and `live_grants_truncated`. The list is read after the
+  save, so it also holds the rows a pick just wrote. `GET` answers keep
+  the plain `AgentDefinitionRead`.
+- **MCP.** `meho_agents_create` and `meho_agents_edit` answer
+  `{name, agent, live_grants, live_grants_truncated}`. The tool text names
+  `live_grants` only in the sentence that the switch adds, so with
+  `AGENT_GRANT_REQUIRED=off` the tool list is unchanged.
+- **CLI.** `meho agent create` and `meho agent edit` without `--grants`
+  print "This agent already has these grants; no starting grant is
+  needed." and one line per grant (operations, target, verdict, end
+  date). They print nothing more when the agent has no live grant.
+  `--json` has the answer's `live_grants`.
+- **Console.** The identity reference field of the create and edit
+  forms loads `GET /ui/agents/principals/live-grants?identity_ref=<agent>`
+  (`ui/routes/agents/live_grants.py`, tenant admin only) when the form
+  opens and after each change. When the agent has live grants, the
+  fragment lists them next to the pick with the same sentence.
+
+A grant is live when it has no end date or its end date is in the
+future; a grant that has run out is not listed, and then MEHO asks for
+the pick. The list reads only the caller's tenant, and names a target
+only when it is in that tenant. It holds at most 100 grants; when there
+are more, `live_grants_truncated` is true and the CLI and console say so.
+`test_agent_live_grants.py`, `test_ui_agent_live_grants.py` and
+`cli/internal/cmd/agent/live_grants_test.go` check it.
+
+The agent form caps the system prompt (65,536 characters) and the turn budget (8
+characters) in the browser. A longer value fails the form route's own
+length check before MEHO's form code runs, and that answer is a JSON 422.
+The modal container swaps a 422 into the open form only when the answer
+is HTML, so such an answer never replaces the form and the person's text.
 
 ## Elevation sweeper (`agents/grant_expiry.py`)
 
@@ -255,7 +359,7 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 | `GET` | `/api/v1/agents/grants/{id}` | tenant_admin | Show one |
 | `POST` | `/api/v1/agents/grants` | tenant_admin **+ human** | Create (permanent or elevation). Machine `principal_kind` → 403 `human_principal_required`. |
 | `POST` | `/api/v1/agents/grants/elevate` | tenant_admin **+ human** | Create elevation (`expires_at` required). Machine `principal_kind` → 403 `human_principal_required`. |
-| `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin | Revoke |
+| `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin (**+ human** for a `deny` or `needs-approval` grant) | Revoke. A machine `principal_kind` removes only an `auto-execute` grant; for any other verdict it gets 403 `human_principal_required` and the row stays. |
 
 The two **write** verbs that mint or widen a grant — `POST /agents/grants` and
 `POST /agents/grants/elevate` — carry `require_human_principal` (`auth/rbac.py`)
@@ -263,14 +367,24 @@ in addition to the `tenant_admin` role gate, so a machine `principal_kind`
 (`agent` / `service` / `runner`) is refused 403 `human_principal_required`
 regardless of role. This is the REST peer of the MCP human-only block below: an
 agent minted `tenant_admin` cannot mint or widen its own (or a sibling's) grant
-over REST any more than it can over MCP. `list` / `show` /
-`revoke` keep the role-only gate.
+over REST any more than it can over MCP. `list` / `show` keep the role-only
+gate.
+
+`revoke` keeps the role-only gate for an `auto-execute` grant, because
+removing it only narrows the agent. A `deny` or `needs-approval` grant limits
+the agent, and removing it can let a broader `auto-execute` grant apply again
+(`resolve_verdict` in `auth/permissions.py`). So only a person removes it, on
+REST, MCP and the console. `AgentGrantService.revoke(..., auto_execute_only=True)`
+puts the verdict into the `DELETE` statement, so the check and the delete are
+one step. When the row has another verdict it raises
+`GrantRevokeNeedsPersonError`; each surface turns that into its
+`human_principal_required` answer.
 
 ## MCP surface
 
 Four tools under `meho_agents_grant_*`: `list`, `show`, `create`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
 
-`meho_agents_grant_create` is for people, the same as `POST /agents/grants`. Its handler calls `ensure_human_mcp_caller` (`mcp/human_only.py`) first. An agent, service or runner login gets JSON-RPC `-32602` with `human_principal_required: ...`, also with `tenant_admin` and `mcp:admin`, and also when MEHO infers the kind from the token (a client-credentials token with no `principal_kind` claim is a service login). The text names the console and `meho agent grant create`. `meho_agent_principals_register` follows the same rule. `list`, `show` and `revoke` keep the role check alone.
+`meho_agents_grant_create` is for people, the same as `POST /agents/grants`. Its handler calls `ensure_human_mcp_caller` (`mcp/human_only.py`) first. An agent, service or runner login gets JSON-RPC `-32602` with `human_principal_required: ...`, also with `tenant_admin` and `mcp:admin`, and also when MEHO infers the kind from the token (a client-credentials token with no `principal_kind` claim is a service login). The text names the console and `meho agent grant create`. `meho_agent_principals_register` follows the same rule. `list` and `show` keep the role check alone. `meho_agents_grant_revoke` keeps it for an `auto-execute` grant; for a `deny` or `needs-approval` grant a machine login gets `human_principal_required` and the text names the console and `meho agent grant revoke <grant-id>`.
 
 The dedicated elevation verb — `meho_agents_grant_elevate` — has **no MCP path under any claim set** (#3155, Initiative #3153): granting a time-bounded privilege elevation is a human-only operator action, not agent-invocable. It stays on the REST / CLI / console surfaces above (`POST /api/v1/agents/grants/elevate`, `meho agent grant elevate`), unchanged. Its wire name is pinned in `backend/src/meho_backplane/mcp/human_only.py`, so a `tools/call` on it is denied with a remediation naming the CLI/console path. (Note: `meho_agents_grant_create` accepts an `expires_at` and can create a time-bounded grant; it stays on the operator plane per the T1 surface classification — only the dedicated `elevate` verb is removed.)
 
@@ -285,7 +399,8 @@ meho agent grant revoke <grant-id> [--confirm]
 ```
 
 All verbs require `tenant_admin`; `create` and `elevate` additionally require a
-**human** principal (machine `principal_kind` → 403).
+**human** principal (machine `principal_kind` → 403). `revoke` of a `deny` or
+`needs-approval` grant requires a human principal too.
 
 ## Console surface
 
@@ -296,8 +411,17 @@ person (`ensure_ui_human` in `ui/routes/agents/operator.py`). A console session
 that holds an agent, service or runner token gets 403
 `human_principal_required`. The unified revoke route
 `POST /ui/grants/{kind}/{id}/revoke` uses `_human_admin` (`ui/routes/grants.py`)
-for both kinds. List, show and the revoke on `/ui/agents/grants/{id}/revoke`
-keep the role check alone.
+for both kinds. List and show keep the role check alone. The revoke on
+`/ui/agents/grants/{id}/revoke` keeps it for an `auto-execute` grant; a
+`deny` or `needs-approval` grant needs a person (`ensure_ui_human`).
+
+## A grant makes its giver a person behind the agent
+
+The person who gave a grant that is in force (`agent_permission.created_by_sub`,
+not expired) counts as a requester of every change the agent asks for. They
+may approve such a request only where they may approve their own change, and
+never a change of rights. The giver of an expired grant does not count. See
+[The people behind a request](approvals.md#the-people-behind-a-request).
 
 ## Dependencies
 

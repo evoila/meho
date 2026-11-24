@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -220,11 +221,51 @@ func (f *fakeKeycloak) handleRealm(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		f.realm = body
+		// Keycloak changes the fields of the body and keeps the others.
+		maps.Copy(f.realm, body)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// realmAttr returns one attribute of the fake realm.
+func (f *fakeKeycloak) realmAttr(key string) (string, bool) {
+	attributes, _ := f.realm["attributes"].(map[string]any)
+	value, ok := attributes[key].(string)
+	return value, ok
+}
+
+// setRealmAttr sets one attribute of the fake realm.
+func (f *fakeKeycloak) setRealmAttr(key, value string) {
+	attributes, _ := f.realm["attributes"].(map[string]any)
+	if attributes == nil {
+		attributes = map[string]any{}
+		f.realm["attributes"] = attributes
+	}
+	attributes[key] = value
+}
+
+// setStepSettings stores the settings of a step under id.
+func (f *fakeKeycloak) setStepSettings(id string, settings map[string]string) {
+	config := map[string]any{}
+	for k, v := range settings {
+		config[k] = v
+	}
+	f.stepConfigs[id] = map[string]any{"id": id, "config": config}
+}
+
+// stepSettings returns the settings stored under id; nil when there are none.
+func (f *fakeKeycloak) stepSettings(id string) map[string]string {
+	config, ok := f.stepConfigs[id]["config"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range config {
+		out[k] = fmt.Sprint(v)
+	}
+	return out
 }
 
 // handleFlows serves the login flow endpoints; false when sub is not one.
@@ -719,10 +760,10 @@ func runBootstrapOnce(t *testing.T, fake *fakeKeycloak, opts BootstrapOptions) (
 // defaults fill in the rest via withDefaults().
 func fullOpts() BootstrapOptions {
 	return BootstrapOptions{
-		Realm:             "evba",
+		Realm:             "example",
 		AdminUsername:     "admin",
 		AdminPassword:     "hunter2",
-		MCPResourceURI:    "https://meho.evba.lab/mcp",
+		MCPResourceURI:    "https://meho.example.test/mcp",
 		TenantID:          "438fdfa5-95ae-4303-90d6-8742123234cc",
 		AdminUserUsername: "deployer@example.com",
 		AdminUserPassword: "deploypw",
@@ -792,10 +833,10 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		}
 	}
 
-	// Five role groups plus the platform group, one user, and the user
+	// Three role groups plus the platform group, one user, and the user
 	// is in MEHO-Admins and MEHO-Platform-Admins.
-	if len(fake.groups) != 6 {
-		t.Errorf("expected 6 groups, got %d", len(fake.groups))
+	if len(fake.groups) != 4 {
+		t.Errorf("expected 4 groups, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 1 {
 		t.Errorf("expected 1 user, got %d", len(fake.users))
@@ -908,7 +949,7 @@ func TestBootstrap_RefusesConfidentialClientName(t *testing.T) {
 
 func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	opts := fullOpts()
-	opts.MCPResourceURI = "https://meho.evba.lab/mcp/"
+	opts.MCPResourceURI = "https://meho.example.test/mcp/"
 	_, _, err := runBootstrapOnce(t, newFakeKeycloak(), opts)
 	if err == nil {
 		t.Fatalf("expected refusal for trailing-slash MCP URI")
@@ -918,7 +959,7 @@ func TestBootstrap_RefusesTrailingSlashOnMCPURI(t *testing.T) {
 	}
 }
 
-// Skipping the user step still creates the five groups: they carry the
+// Skipping the user step still creates the three groups: they carry the
 // tenant and the role for people who come from a directory.
 func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	opts := fullOpts()
@@ -930,8 +971,8 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap with skip-user: %v", err)
 	}
-	if len(fake.groups) != 6 {
-		t.Errorf("expected the 5 role groups and the platform group "+
+	if len(fake.groups) != 4 {
+		t.Errorf("expected the 3 role groups and the platform group "+
 			"when the user step is skipped, got %d", len(fake.groups))
 	}
 	if len(fake.users) != 0 {
@@ -1037,7 +1078,7 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 
 	// meho-mcp-audience — custom-audience form.
 	mcp := byName["meho-mcp-audience"]
-	if mcp.Config["included.custom.audience"] != "https://meho.evba.lab/mcp" {
+	if mcp.Config["included.custom.audience"] != "https://meho.example.test/mcp" {
 		t.Errorf("mcp mapper audience = %q",
 			mcp.Config["included.custom.audience"])
 	}
@@ -1306,7 +1347,7 @@ func TestBootstrapClientsCmd_CLIOfflineAccessZeroParses(t *testing.T) {
 // Keycloak verbatim).
 func TestBootstrap_RejectsNegativeCLIOfflineIdle(t *testing.T) {
 	opts := fullOpts()
-	opts.KeycloakBaseURL = "https://keycloak.evba.lab"
+	opts.KeycloakBaseURL = "https://keycloak.example.test"
 	opts.CLIOfflineSessionIdleSeconds = -1
 	err := opts.withDefaults().validate()
 	if err == nil {
@@ -1706,10 +1747,10 @@ func (f *fakeKeycloak) clientMappers(t *testing.T, clientID string) map[string]p
 	return nil
 }
 
-// The five groups carry the decided attributes: the tenant from
-// --tenant-id, the role per group, and approver=true only on
-// MEHO-Approvers.
-func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
+// The three groups carry the decided attributes: the tenant from
+// --tenant-id and the role per group. No SA-Operators or Approvers group
+// is made.
+func TestBootstrap_CreatesThreeRoleGroupsWithAttributes(t *testing.T) {
 	fake := newFakeKeycloak()
 	opts := fullOpts()
 	if _, _, err := runBootstrapOnce(t, fake, opts); err != nil {
@@ -1724,17 +1765,15 @@ func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
 		"MEHO-Operators": {
 			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("Operators"),
 		},
-		"MEHO-SA-Operators": {
-			"tenant_id": tenant, "tenant_role": {"operator"}, "meho_tenant": mt("SA-Operators"),
-		},
 		"MEHO-Admins": {
 			"tenant_id": tenant, "tenant_role": {"tenant_admin"}, "meho_tenant": mt("Admins"),
 		},
-		"MEHO-Approvers": {
-			"tenant_id": tenant, "tenant_role": {"read_only"}, "approver": {"true"},
-			"meho_tenant": mt("Approvers"),
-		},
 		"MEHO-Platform-Admins": {"platform_admin": {"true"}},
+	}
+	for _, name := range []string{"MEHO-SA-Operators", "MEHO-Approvers"} {
+		if fake.groupByName(name) != nil {
+			t.Errorf("group %s must not be made", name)
+		}
 	}
 	for name, attrs := range want {
 		g := fake.groupByName(name)
@@ -1758,7 +1797,7 @@ func TestBootstrap_CreatesFiveRoleGroupsWithAttributes(t *testing.T) {
 // tenant-id / tenant-role mappers on both clients and a `meho-admins`
 // group with the admin user in it. A run replaces the two fixed mappers
 // with User Attribute mappers, adds the approver mapper, creates the
-// five groups and puts the admin user in MEHO-Admins. Old groups are
+// three groups and puts the admin user in MEHO-Admins. Old groups are
 // left alone. A second run then changes nothing.
 func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 	fake := newFakeKeycloak()
@@ -1853,7 +1892,7 @@ func TestBootstrap_UpgradeReplacesFixedValueMappers(t *testing.T) {
 
 // A role group whose attributes were changed by hand is set back. Only
 // the three keys the command owns change: other attributes stay, and
-// `approver` is removed from groups other than MEHO-Approvers.
+// `approver` is removed from the three role groups.
 func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	fake := newFakeKeycloak()
 	fake.groups["uuid-ops"] = &groupRep{
@@ -1891,8 +1930,8 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	if n := fake.calls["PUT /groups/{uuid}"]; n != 2 {
 		t.Errorf("PUT /groups/{uuid} called %d times, want 2", n)
 	}
-	if n := fake.calls["POST /groups"]; n != 4 {
-		t.Errorf("POST /groups called %d times, want 4 (the missing groups)", n)
+	if n := fake.calls["POST /groups"]; n != 2 {
+		t.Errorf("POST /groups called %d times, want 2 (the missing groups)", n)
 	}
 	for name, change := range map[string]string{
 		"MEHO-Operators": "tenant_role: [tenant_admin] -> [operator]",
@@ -1910,7 +1949,7 @@ func TestBootstrap_FixesChangedGroupAttributes(t *testing.T) {
 	}
 }
 
-// The dry run lists the five groups with their attributes.
+// The dry run lists the three groups with their attributes.
 func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
 	opts := fullOpts()
 	opts.DryRun = true
@@ -1918,10 +1957,35 @@ func TestBootstrap_DryRunListsRoleGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap dry-run: %v", err)
 	}
-	want := "MEHO-Approvers: tenant_id=" + opts.TenantID +
-		" tenant_role=read_only approver=true meho_tenant=" + opts.TenantID + ":main:Approvers"
+	want := "MEHO-Readers: tenant_id=" + opts.TenantID +
+		" tenant_role=read_only meho_tenant=" + opts.TenantID + ":main:Readers"
 	if !strings.Contains(stdout, want) {
 		t.Errorf("dry-run stdout missing %q; got:\n%s", want, stdout)
+	}
+	for _, name := range []string{"MEHO-SA-Operators", "MEHO-Approvers"} {
+		if strings.Contains(stdout, name) {
+			t.Errorf("dry-run stdout names %s; got:\n%s", name, stdout)
+		}
+	}
+}
+
+// A realm that has MEHO-SA-Operators and MEHO-Approvers groups keeps them
+// as they are: the command neither changes nor removes them.
+func TestBootstrap_LeavesOlderRoleGroupsAlone(t *testing.T) {
+	fake := newFakeKeycloak()
+	old := map[string][]string{"tenant_role": {"read_only"}, "approver": {"true"}}
+	fake.groups["uuid-appr"] = &groupRep{ID: "uuid-appr", Name: "MEHO-Approvers", Attributes: old}
+	fake.groups["uuid-sa"] = &groupRep{
+		ID: "uuid-sa", Name: "MEHO-SA-Operators", Attributes: map[string][]string{"tenant_role": {"operator"}},
+	}
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if g := fake.groups["uuid-appr"]; g == nil || !slices.Equal(g.Attributes["approver"], []string{"true"}) {
+		t.Errorf("MEHO-Approvers changed: %v", g)
+	}
+	if g := fake.groups["uuid-sa"]; g == nil || !slices.Equal(g.Attributes["tenant_role"], []string{"operator"}) {
+		t.Errorf("MEHO-SA-Operators changed: %v", g)
 	}
 }
 
@@ -2022,6 +2086,15 @@ func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
 	if got := approvalFlowStepLines(fake); !slices.Equal(got, wantApprovalFlowStepLines) {
 		t.Errorf("steps = %v, want %v", got, wantApprovalFlowStepLines)
 	}
+	if got := levelSettingsOf(fake); !maps.Equal(got, approvalLevelSettings()) {
+		t.Errorf("settings of the level step = %v, want %v", got, approvalLevelSettings())
+	}
+	if got, _ := fake.realmAttr(levelMapAttribute); got != `{"meho-approve":2,"meho-touch":3}` {
+		t.Errorf("acr.loa.map = %q, want meho-approve at level 2 and meho-touch at level 3", got)
+	}
+	if _, ok := fake.realmAttr("frontendUrl"); !ok {
+		t.Error("the other realm attributes were dropped")
+	}
 	// Only the approval client is bound to a flow of its own.
 	for _, c := range fake.clients {
 		if c.ClientID != "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) > 0 {
@@ -2039,10 +2112,16 @@ func seedApprovalFlow(fake *fakeKeycloak) *fakeFlow {
 		if s.Subflow != "" {
 			fake.flows[s.Subflow] = &fakeFlow{ID: fake.mintID()}
 		}
-		fake.flows[s.Parent].Steps = append(fake.flows[s.Parent].Steps, &fakeFlowStep{
+		step := &fakeFlowStep{
 			ID: fake.mintID(), Provider: s.Provider, Subflow: s.Subflow, Requirement: s.Requirement,
-		})
+		}
+		if s.Provider == approvalLevelStep {
+			step.Config = fake.mintID()
+			fake.setStepSettings(step.Config, approvalLevelSettings())
+		}
+		fake.flows[s.Parent].Steps = append(fake.flows[s.Parent].Steps, step)
 	}
+	fake.setRealmAttr(levelMapAttribute, `{"meho-approve":2}`)
 	return flow
 }
 
@@ -2061,10 +2140,23 @@ func approvalFlowStepLines(fake *fakeKeycloak) []string {
 }
 
 var wantApprovalFlowStepLines = []string{
-	"0 auth-username-password-form REQUIRED",
-	"0 " + approvalCodeFlowAlias + " CONDITIONAL",
-	"1 conditional-user-configured REQUIRED",
-	"1 auth-otp-form REQUIRED",
+	"0 " + approvalLevelFlowAlias + " CONDITIONAL",
+	"1 conditional-level-of-authentication REQUIRED",
+	"1 auth-username-password-form REQUIRED",
+	"1 " + approvalCodeFlowAlias + " CONDITIONAL",
+	"2 conditional-user-configured REQUIRED",
+	"2 auth-otp-form REQUIRED",
+}
+
+// levelSettingsOf returns the settings of the level step of the fake's
+// approval flow; nil when it has none.
+func levelSettingsOf(fake *fakeKeycloak) map[string]string {
+	for _, s := range fake.flows[approvalLevelFlowAlias].Steps {
+		if s.Provider == approvalLevelStep && s.Config != "" {
+			return fake.stepSettings(s.Config)
+		}
+	}
+	return nil
 }
 
 // A finished flow is kept without a change; an existing approval client
@@ -2093,7 +2185,7 @@ func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
 		t.Errorf("changed the flow API %d times, want 0", n)
 	}
-	if !slices.Contains(res.MapperEventsLog, `[skip] login flow "meho approval sign-in" exists`) {
+	if !slices.Contains(res.MapperEventsLog, `[skip] login flow "meho approval sign-in level" exists`) {
 		t.Errorf("events miss the kept flow line: %v", res.MapperEventsLog)
 	}
 }
@@ -2143,9 +2235,9 @@ func TestBootstrap_FinishesAFlowSetupThatStoppedHalfWay(t *testing.T) {
 			// A stop after the last change leaves a finished flow, so the
 			// next run keeps it.
 			finished := slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
-				return strings.HasPrefix(e, `[created] login flow "meho approval sign-in"`) ||
-					strings.HasPrefix(e, `[updated] login flow "meho approval sign-in": finished`) ||
-					e == `[skip] login flow "meho approval sign-in" exists`
+				return strings.HasPrefix(e, `[created] login flow "meho approval sign-in level"`) ||
+					strings.HasPrefix(e, `[updated] login flow "meho approval sign-in level": finished`) ||
+					e == `[skip] login flow "meho approval sign-in level" exists`
 			})
 			if !finished {
 				t.Errorf("events miss the flow line: %v", res.MapperEventsLog)
@@ -2175,11 +2267,161 @@ func TestBootstrap_DoesNotBindAFlowWithOtherSteps(t *testing.T) {
 	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
 		t.Errorf("changed the flow API %d times, want 0", n)
 	}
-	want := `[skip] login flow "meho approval sign-in" has other steps than the bootstrap makes; the approval client is not bound to it`
+	want := `[skip] login flow "meho approval sign-in level" has other steps than the bootstrap makes; the approval client is not bound to it`
 	if !slices.Contains(res.MapperEventsLog, want) {
 		t.Errorf("events miss the line %q: %v", want, res.MapperEventsLog)
 	}
 	if got := approvalFlowStepLines(fake); !slices.Equal(got, append(slices.Clone(wantApprovalFlowStepLines), "0 auth-cookie ALTERNATIVE")) {
 		t.Errorf("the flow was changed: %v", got)
+	}
+}
+
+// The realm gets the name of the approval level next to the names it
+// has (#6281); a second run changes nothing.
+func TestBootstrap_NamesTheApprovalLevelAndKeepsOtherLevels(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.setRealmAttr(levelMapAttribute, `{"meho-touch":3}`)
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var levels map[string]int
+	raw, _ := fake.realmAttr(levelMapAttribute)
+	if err := json.Unmarshal([]byte(raw), &levels); err != nil {
+		t.Fatalf("acr.loa.map: %v", err)
+	}
+	if !maps.Equal(levels, map[string]int{"meho-touch": 3, "meho-approve": 2}) {
+		t.Errorf("acr.loa.map = %v, want meho-touch 3 and meho-approve 2", levels)
+	}
+	if _, ok := fake.realmAttr("frontendUrl"); !ok {
+		t.Error("the other realm attributes were dropped")
+	}
+	puts := fake.calls["PUT /realm"]
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if fake.calls["PUT /realm"] != puts {
+		t.Error("the second run changed the realm")
+	}
+	if !slices.Contains(res.MapperEventsLog, `[skip] sign-in level "meho-approve" exists`) {
+		t.Errorf("events miss the kept level line: %v", res.MapperEventsLog)
+	}
+}
+
+// A level step that someone changed keeps its settings, and the
+// approval client is not bound to the flow.
+func TestBootstrap_DoesNotBindAFlowWhoseLevelStepHasOtherSettings(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedApprovalFlow(fake)
+	for _, s := range fake.flows[approvalLevelFlowAlias].Steps {
+		if s.Config != "" {
+			fake.setStepSettings(s.Config, map[string]string{"loa-condition-level": "2", "loa-max-age": "36000"})
+		}
+	}
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) != 0 {
+			t.Errorf("the approval client is bound to %v, want no binding", c.AuthenticationFlowBindingOverrides)
+		}
+	}
+	if !slices.Contains(res.MapperEventsLog, otherStepsEvent()) {
+		t.Errorf("events miss the other-steps line: %v", res.MapperEventsLog)
+	}
+	if got := levelSettingsOf(fake)["loa-max-age"]; got != "36000" {
+		t.Errorf("the level step settings were changed: %q", got)
+	}
+}
+
+// A level step without settings (a run that stopped before them) gets
+// them, and the client is bound.
+func TestBootstrap_GivesTheLevelStepItsSettings(t *testing.T) {
+	fake := newFakeKeycloak()
+	flow := seedApprovalFlow(fake)
+	for _, s := range fake.flows[approvalLevelFlowAlias].Steps {
+		s.Config = ""
+	}
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := levelSettingsOf(fake); !maps.Equal(got, approvalLevelSettings()) {
+		t.Errorf("settings of the level step = %v", got)
+	}
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-cli-approve" && c.AuthenticationFlowBindingOverrides["browser"] != flow.ID {
+			t.Errorf("browser flow = %q, want %q", c.AuthenticationFlowBindingOverrides["browser"], flow.ID)
+		}
+	}
+}
+
+// The bootstrap stops before it changes the flow or the levels when
+// another name already has the approval level (#6281).
+func TestBootstrap_StopsWhenAnotherNameHasTheApprovalLevel(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.setRealmAttr(levelMapAttribute, `{"gold":2}`)
+	_, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err == nil || !strings.Contains(err.Error(), `the name "gold" already has level 2 in acr.loa.map`) {
+		t.Fatalf("Bootstrap error = %v, want the level conflict", err)
+	}
+	if got, _ := fake.realmAttr(levelMapAttribute); got != `{"gold":2}` {
+		t.Errorf("acr.loa.map changed: %q", got)
+	}
+	if n := fake.calls["POST /authentication/flows"] + fake.calls["POST /authentication/flows..."]; n != 0 {
+		t.Errorf("made the flow (%d calls) before the stop", n)
+	}
+}
+
+// A realm acr.loa.map that is not a JSON object, such as the JSON value
+// null, stops the bootstrap before it writes the realm, like the realm
+// stage of the backend.
+func TestBootstrap_StopsWhenTheRealmLevelMapIsNotAnObject(t *testing.T) {
+	for _, raw := range []string{`null`, `[2]`} {
+		t.Run(raw, func(t *testing.T) {
+			fake := newFakeKeycloak()
+			fake.setRealmAttr(levelMapAttribute, raw)
+			_, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err == nil || !strings.Contains(err.Error(), "the realm attribute acr.loa.map is not a JSON object") {
+				t.Fatalf("Bootstrap error = %v, want the not-a-JSON-object stop", err)
+			}
+			if got, _ := fake.realmAttr(levelMapAttribute); got != raw {
+				t.Errorf("acr.loa.map changed: %q", got)
+			}
+		})
+	}
+}
+
+// The bootstrap stops when the approval client has its own acr.loa.map:
+// Keycloak would then not use the realm's approval level (#6281). An
+// empty map is fine.
+func TestBootstrap_StopsWhenTheApprovalClientHasItsOwnLevelMap(t *testing.T) {
+	for _, tc := range []struct {
+		own     string
+		wantErr bool
+	}{
+		{own: `{"gold":1}`, wantErr: true},
+		{own: `{}`, wantErr: false},
+	} {
+		t.Run(tc.own, func(t *testing.T) {
+			fake := newFakeKeycloak()
+			old := fullOpts().withDefaults().desiredCLIApproveClient()
+			old.ID = "uuid-existing-approve"
+			old.Attributes[levelMapAttribute] = tc.own
+			fake.clients[old.ID] = old
+			_, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Bootstrap: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "the client meho-cli-approve has its own acr.loa.map") {
+				t.Fatalf("Bootstrap error = %v, want the client level map stop", err)
+			}
+			if got, ok := fake.realmAttr(levelMapAttribute); ok {
+				t.Errorf("acr.loa.map was set: %q", got)
+			}
+		})
 	}
 }

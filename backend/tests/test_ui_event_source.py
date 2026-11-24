@@ -13,6 +13,7 @@ reused REST handler), pause-via-edit, and soft-delete.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -198,6 +199,33 @@ def test_list_page_renders_with_new_button_for_admin() -> None:
     assert "Event Sources" in resp.text
     assert "prod-am" in resp.text
     assert "New event source" in resp.text
+
+
+def test_list_edit_link_targets_the_event_source() -> None:
+    """The Edit link points at the source, with the slug still url-encoded.
+
+    A regression guard for the same fault as the KB View link: the converted
+    href was written as a quoted string holding ``{{ item.slug | urlencode }}``,
+    which the template rendered literally. The slug must survive the
+    conversion *and* stay encoded, so a slug needing encoding is used here.
+
+    Found by the visible label so another anchor cannot satisfy it.
+    """
+    _seed_tenant()
+    _seed_event_source(slug="prod am")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources")
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    edit_links = re.findall(r'<a\b[^>]*href="([^"]*)"[^>]*>\s*Edit\s*</a>', body)
+    assert edit_links, "no anchor labelled Edit in the event-source list"
+    assert edit_links == ["/ui/event-sources/prod%20am/edit"], edit_links
+    assert "{{" not in body, "a Jinja expression reached the rendered page"
 
 
 def test_list_operator_hides_write_affordances() -> None:
@@ -469,6 +497,55 @@ def test_create_slug_pattern_violation_names_the_slug_field() -> None:
     body = resp.text
     assert 'data-error-for="slug"' in body
     assert 'data-error-for="name"' not in body
+
+
+def test_create_blank_secret_names_the_secret_field() -> None:
+    """A secret of only spaces is refused on the form, and no source is made."""
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources",
+            data={
+                "name": "Blank",
+                "slug": "blank-secret",
+                "kind": "grafana",
+                "auth_strategy": "basic",
+                "status": "active",
+                "extras": "",
+                "secret": "   ",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    assert 'data-error-for="secret"' in resp.text
+    assert _get_row("blank-secret") is None
+
+
+def test_edit_blank_secret_names_the_secret_field() -> None:
+    _seed_tenant()
+    _seed_event_source(slug="prod-am", status="active")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.post(
+            "/ui/event-sources/prod-am/edit",
+            data={
+                "kind": "alertmanager",
+                "auth_strategy": "hmac-sha256",
+                "status": "active",
+                "extras": "",
+                "secret": "   ",
+            },
+            **_csrf(session_id),
+        )
+    finally:
+        mock.stop()
+    assert resp.status_code == 200
+    assert 'data-error-for="secret"' in resp.text
 
 
 def test_create_conflict_names_both_uniqueness_fields() -> None:

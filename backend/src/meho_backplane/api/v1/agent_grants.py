@@ -26,7 +26,8 @@ Route inventory
   :class:`~meho_backplane.agents.grant_schemas.AgentElevationCreate`.
   Returns the row with HTTP 201. Role: ``tenant_admin``.
 * ``DELETE /api/v1/agents/grants/{grant_id}`` — revoke a grant. Returns
-  204; 404 when absent / cross-tenant. Role: ``tenant_admin``.
+  204; 404 when absent / cross-tenant. Role: ``tenant_admin``; a
+  ``deny`` or ``needs-approval`` grant also needs a person.
 
 Why ``tenant_admin``-only for reads
 -------------------------------------
@@ -68,9 +69,13 @@ from meho_backplane.agents.grant_schemas import (
     AgentGrantListResponse,
     AgentGrantRead,
 )
-from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_human_principal, require_role
+from meho_backplane.agents.grants import (
+    AgentGrantService,
+    GrantRevokeNeedsPersonError,
+    GrantValidationError,
+)
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.rbac import ensure_human_principal, require_human_principal, require_role
 
 __all__ = ["router"]
 
@@ -78,13 +83,24 @@ router = APIRouter(prefix="/api/v1/agents/grants", tags=["agent-grants"])
 
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
-#: Human-only governance gate (meho-internal#289). Attached to grant
+#: Human-only governance gate. Attached to grant
 #: **create** and **elevate** so a non-human ``principal_kind`` (agent /
 #: service / runner) cannot mint or widen a grant over REST, even holding
 #: the ``tenant_admin`` role an agent principal is minted with — the REST
-#: half of :mod:`meho_backplane.mcp.human_only`'s policy. Read / show /
-#: revoke keep the plain ``tenant_admin`` gate.
+#: half of :mod:`meho_backplane.mcp.human_only`'s policy. Read / show keep
+#: the plain ``tenant_admin`` gate. Revoke keeps it for an ``auto-execute``
+#: row; a ``deny`` or ``needs-approval`` row needs a person, because
+#: removing it can let a broader grant apply again (:func:`revoke_grant`).
 _require_human = Depends(require_human_principal)
+
+#: The text of the 403 when a machine login revokes a ``deny`` or
+#: ``needs-approval`` grant.
+_REVOKE_NEEDS_PERSON: Final[str] = (
+    "only a person removes an agent grant whose verdict is deny or needs-approval. "
+    "Remove it as a person in the operator console, or with "
+    "`meho agent grant revoke <grant-id>`. A machine login may remove an "
+    "auto-execute grant."
+)
 
 _GRANT_OP_IDS: Final[dict[str, str]] = {
     "list": "agent.grant.list",
@@ -220,14 +236,23 @@ async def revoke_grant(
     """Revoke (delete) a permission grant.
 
     Returns 204 on success; 404 when the grant is absent or belongs to
-    another tenant. The revocation is audited via the audit middleware.
+    another tenant. A machine login (agent / service / runner) removes
+    only an ``auto-execute`` grant; a ``deny`` or ``needs-approval``
+    grant gets 403 ``human_principal_required`` and stays. The
+    revocation is audited via the audit middleware.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_GRANT_OP_IDS["revoke"],
         audit_op_class="write",
     )
     service = AgentGrantService()
-    deleted = await service.revoke(operator.tenant_id, grant_id)
+    try:
+        deleted = await service.revoke(
+            operator.tenant_id, grant_id, auto_execute_only=not is_human_principal(operator)
+        )
+    except GrantRevokeNeedsPersonError:
+        ensure_human_principal(operator, remediation=_REVOKE_NEEDS_PERSON)
+        raise
     if not deleted:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

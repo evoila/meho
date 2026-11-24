@@ -77,6 +77,7 @@ __all__ = [
     "TargetListResponse",
     "TargetSummary",
     "TargetUpdate",
+    "TargetWriteResult",
     "project_target_to_summary",
     "validate_ca_pin_pem",
 ]
@@ -356,6 +357,22 @@ class Target(BaseModel):
     deleted_at: datetime | None = None
 
 
+class TargetWriteResult(Target):
+    """The answer of a target create or update: the target, plus warnings.
+
+    ``warnings`` holds plain lines about a setting that is allowed but
+    risky, for example a Keycloak target that manages the realm MEHO
+    itself signs in with
+    (:func:`~meho_backplane.targets.keycloak_realm_warnings.keycloak_realm_warnings`).
+    Empty when there is nothing to say.
+    """
+
+    warnings: tuple[str, ...] = Field(
+        default=(),
+        description="Plain lines about a setting that is allowed but risky. Empty when none.",
+    )
+
+
 class TargetCreate(BaseModel):
     """POST /api/v1/targets body.
 
@@ -452,7 +469,7 @@ class TargetCreate(BaseModel):
     @field_validator("host", "fqdn")
     @classmethod
     def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
-        """SSRF guard (evoila-bosnia/meho-internal#153).
+        """SSRF guard.
 
         :func:`check_target_host` runs first and refuses a malformed host.
 
@@ -468,8 +485,20 @@ class TargetCreate(BaseModel):
         """
         if value is not None:
             check_target_host(value, str(info.field_name))
-            assert_public_destination(value)
         return value
+
+    @model_validator(mode="after")
+    def _reject_non_public_destination_with_port(self) -> TargetCreate:
+        """Run the SSRF guard with the target's port.
+
+        A ``host:port`` allowlist entry admits a host on that port only,
+        so the guard needs the port. It runs here, after every field is
+        parsed, and screens ``host`` and ``fqdn`` with ``self.port``.
+        """
+        for value in (self.host, self.fqdn):
+            if value is not None:
+                assert_public_destination(value, self.port)
+        return self
 
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetCreate:
@@ -574,8 +603,11 @@ class TargetUpdate(BaseModel):
     # #3711. Entries are merged into the stored map: a string value adds or
     # replaces that entry, a ``null`` value removes it. An explicit
     # ``{"secret_field_map": null}`` clears the whole map. Absent = untouched.
+    # One change may remove every stored entry and add a full new set, so it
+    # holds up to twice the limit; the merged map keeps the limit
+    # (``merge_secret_field_map``).
     secret_field_map: dict[SecretFieldName, SecretFieldName | None] | None = Field(
-        default=None, max_length=SECRET_FIELD_MAP_MAX_ENTRIES
+        default=None, max_length=2 * SECRET_FIELD_MAP_MAX_ENTRIES
     )
     extras: dict[str, Any] | None = None
     notes: str | None = None
@@ -609,7 +641,7 @@ class TargetUpdate(BaseModel):
     @field_validator("host", "fqdn")
     @classmethod
     def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
-        """SSRF guard (evoila-bosnia/meho-internal#153) — same as create.
+        """SSRF guard — same as create.
 
         ``None`` is the PATCH absent-marker and passes untouched; a
         non-null ``host``/``fqdn`` is screened exactly like
@@ -618,8 +650,23 @@ class TargetUpdate(BaseModel):
         """
         if value is not None:
             check_target_host(value, str(info.field_name))
-            assert_public_destination(value)
         return value
+
+    @model_validator(mode="after")
+    def _reject_non_public_destination_with_port(self) -> TargetUpdate:
+        """Run the SSRF guard when the body carries its own port.
+
+        A ``host:port`` allowlist entry admits a host on that port only.
+        When the body sends ``port``, the sent ``host`` / ``fqdn`` are
+        screened with it here. When it does not, the port is the stored
+        one, which only the route handler knows, so it screens them in
+        ``_validate_update_body_fields``.
+        """
+        if self.port is not None:
+            for value in (self.host, self.fqdn):
+                if value is not None:
+                    assert_public_destination(value, self.port)
+        return self
 
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetUpdate:

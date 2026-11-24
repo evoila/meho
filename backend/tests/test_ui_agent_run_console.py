@@ -381,10 +381,17 @@ def test_run_console_renders_form_and_budget() -> None:
     # collapsed inline and its controls rendered narrow.
     assert "form-control" not in body
     assert "label-text" not in body
+    # `input-bordered` and `textarea-bordered` went the same way in v5 --
+    # `.input` and `.textarea` carry the border themselves, and both
+    # modifiers compile to zero rules. They were pinned here only as part
+    # of a longer class string; what this guards is the width, so the
+    # string is matched without them (#1167 clears them per touched file).
+    assert "textarea min-h-28 font-mono text-sm w-full" in body
+    assert "input input-sm font-mono w-full" in body
+    assert "textarea-bordered" not in body
+    assert "input-bordered" not in body
     # Controls fill their wrapper; work_ref stays capped narrower than
     # the prompt.
-    assert "textarea textarea-bordered min-h-28 font-mono text-sm w-full" in body
-    assert "input input-bordered input-sm font-mono w-full" in body
     assert "flex flex-col gap-1 max-w-md" in body
 
 
@@ -507,6 +514,29 @@ def test_run_post_returns_transcript_with_stream_token() -> None:
     # stream URL, not in the token).
     assert str(session_id) not in body
     assert session_id.hex not in body
+
+
+def test_run_post_counts_work_ref_length_after_nfc() -> None:
+    """A ticket id of 130 composed letters sent in NFD form (260 code points) is taken."""
+    import unicodedata
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run",
+            data={"input": "go", "work_ref": unicodedata.normalize("NFD", "\u00c4" * 130)},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "/ui/agents/a1/run/stream?token=" in response.text
 
 
 def test_run_transcript_stop_dialog_opts_out_of_autopen() -> None:
@@ -981,6 +1011,33 @@ def test_run_cancel_role_backstop_is_403() -> None:
         mock.stop()
     assert response.status_code == 403, response.text
     assert response.json()["detail"] == "agent_run_cancel_forbidden"
+
+
+def test_run_cancel_of_another_persons_run_says_who_may_stop_it() -> None:
+    """A refused stop of another person's run is 403 with the rule in the detail."""
+    from meho_backplane.auth.operator import RUN_STOP_RULE
+    from meho_backplane.operations.agent_run import RunNotOwnedCancellationError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(
+        _FakeInvoker(
+            cancel_error=RunNotOwnedCancellationError(operator_sub=_OP_A, role=TenantRole.OPERATOR)
+        )
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{uuid.uuid4()}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == f"agent_run_cancel_forbidden: {RUN_STOP_RULE}"
 
 
 def test_run_cancel_non_uuid_handle_is_422() -> None:

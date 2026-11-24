@@ -299,6 +299,24 @@ Round-trip shape:
 5. **302 to the original `return_to`.** Operator lands on the page
    they were originally bounced from.
 
+**The console approval sign-in (#6282).** When MEHO requires the
+approval level, an approve in the console needs one more sign-in with the
+console's approval client (`UI_KEYCLOAK_APPROVE_CLIENT_ID`, default
+`meho-web-approve`, the secret of `meho-web`, bound to the approval
+sign-in flow). `meho_backplane.ui.auth.approval_sign_in_routes` adds two
+routes to the same router: `GET /ui/auth/approval-sign-in?return_to=…`
+(needs a session; PKCE, `prompt=login`, `max_age=0`,
+`acr_values=meho-approve`; the pending flow keeps the session id, so the
+callback does not need the `SameSite=Strict` session cookie) and
+`GET /ui/auth/approval-callback` (same `state` and binding-cookie checks,
+code exchange with the approval client, JWT check, then the token is
+kept Fernet-encrypted in `web_session.approval_token` only when `azp` is
+the approval client and `sub` is the session's person). The approvals
+modal links there instead of `?fresh_sign_in=1` under `required`
+(`ui/routes/approvals/sign_in.py`). The normal login above does not
+change. Details: [`approvals.md`](approvals.md), "The console approval
+asks for the same level".
+
 Expired-callback-state recovery (G0.29 #2089, Leg 1): the
 authorization round-trip has a short window (the verifier-store TTL,
 ≤10 min). An operator who stepped away mid-login and completed the
@@ -481,18 +499,21 @@ backplane Python base image already follows).
 `base.html` is the layout every page extends. Its structure (shortened):
 
 ```html
-<html data-theme="meho-dark">
+<html data-theme="evoila">
   <head>
     <script src="/ui/static/src/app/approvals-bell.js" defer>
     <script src="/ui/static/src/app/modal-dialogs.js" defer>
     {% block component_scripts %}{% endblock %}   <!-- Alpine.data() registrations; MUST precede alpine.min.js -->
     <!-- _head_assets.html include (shared with wall.html): -->
-    <script src="/ui/static/src/app/theme.js">    <!-- sync: pre-paint theme -->
     <link href="/ui/static/dist/tailwind.css">
+    <link href="/ui/static/brand/evoila-daisyui.css">  <!-- after the bundle: unlayered beats @layer base -->
+    <link href="/ui/static/brand/evoila-tokens.css">
+    <link href="/ui/static/brand/evoila-fonts.css">
     <script src="/ui/static/src/vendor/htmx.min.js" defer>
     <script src="/ui/static/src/app/csrf-token.js" defer>
     <script src="/ui/static/src/app/session-expiry.js" defer>
     <script src="/ui/static/src/app/page-tenant.js" defer>
+    <script src="/ui/static/src/app/work-ref-refused.js" defer>   <!-- swaps in a refused ticket id search -->
     <script src="/ui/static/src/vendor/sse.min.js" defer>
     <script src="/ui/static/src/vendor/alpine.min.js" defer>
   </head>
@@ -911,6 +932,31 @@ cached (skipped where `node` is missing).
 Installing needs HTTPS (or `localhost`). Opening the app needs the same
 network access as the console, for example the VPN.
 
+## Operations page: Run answers at once (#5111)
+
+Pressing Run in the operations Run dialog (`POST /ui/operations/call`) no
+longer waits for the whole operation. The route starts a background run and
+answers within about a second (the same pattern as the console approve,
+[`approvals.md`](approvals.md)). The details are in
+[`async-governed-dispatch.md`](async-governed-dispatch.md), "The console Run
+button answers at once".
+
+- `ui/routes/operations/run_view.py` turns a stored run into the view state
+  (`running`, `finished`, `failed`, `uncertain`, `cancelled`, `no_result`).
+- `ui/templates/operations/_run_state.html` draws it into
+  `#operations-run-result-region`. While the run goes on it asks
+  `GET /ui/operations/runs/{run_id}` every 3 seconds (`hx-trigger="every 3s"`,
+  `outerHTML`) and carries `data-run-lock` and `data-meho-watch-run`. A final
+  view has neither of the `hx-*` attributes, so the asking stops.
+- `ui/static/src/app/operation-run-lock.js` (loaded by `base.html`) keeps the
+  Run button disabled while the region holds a `data-run-lock` element,
+  stops a second Run meanwhile, and lets a 400 form error (HTML) replace
+  the result view, also while the view asks again.
+- The result, error and approval link use the unchanged
+  `operations/_result.html`. A call with `reveal_secret: true` still runs
+  inline.
+- Tests: `backend/tests/test_ui_operations_background_run.py`.
+
 ## Approval notifications
 
 A person can switch on "Notify me about approvals in this browser" on the
@@ -1014,6 +1060,131 @@ Code: `web_push/` (`keys.py`, `endpoints.py`, `models.py`, `store.py`,
 
 On iPhone and iPad, web push works only in the installed app (iOS 16.4 and
 newer), so the switch says to install MEHO first.
+
+## Your tools: sign out one tool kind
+
+With `MCP_CLIENT_PER_TOOL_KIND` on, each tool kind signs in with its own
+Keycloak login client. The account page then has a card "Your tools". It
+lists each tool kind with its login client and its last use:
+
+| Tool kind | Login client | Sign-out button |
+|---|---|---|
+| Web console | `UI_KEYCLOAK_CLIENT_ID` | no: "Active sessions" signs out a browser |
+| Command line | `KEYCLOAK_CLI_CLIENT_ID` | yes |
+| Claude Code | `meho-mcp-code` | yes |
+| Claude Desktop | `meho-mcp-desktop` | yes |
+| Other MCP client | `meho-mcp` | yes |
+
+A kind whose client id is not set is left out.
+
+- **Last use** is the newest audit row of the person (every tenant) whose
+  `client` block names that client, in the last 90 days. Audit rows name
+  the client only while `AUDIT_CLIENT_IDENTITY` is on. `last_use_by_client`
+  makes one read per tool kind, through the index
+  `audit_log_operator_sub_client_azp_occurred_at_idx` (migration `0179`)
+  on `(operator_sub, (payload -> 'client') ->> 'azp', occurred_at)`. So
+  each read finds the newest row of that client directly, however many
+  rows the person has (about 2 ms for all five reads with 3 million rows
+  of one person on PostgreSQL 16). The query must use the same
+  expression as the index: `AUDIT_LOG_CLIENT_AZP` in `db/models.py`
+  writes the JSON keys into the SQL text, so PostgreSQL also uses the
+  index in a reused query plan. A tool with no such row shows "none in
+  the last 90 days".
+- **"Sign out this tool"** asks for a confirm, then posts
+  `POST /ui/account/tools/sign-out` with the form field `tool` (the tool
+  kind key, never a client id). With the Keycloak admin client (it needs
+  the realm role `manage-users`), `end_tool_logins` ends both kinds of
+  login of the person for that one client:
+  - it reads the person's ordinary logins
+    (`GET /admin/realms/{realm}/users/{user id}/sessions`) first, so a
+    failed read changes nothing;
+  - `DELETE .../users/{user id}/consents/{client id}` ends the consent
+    and the offline login. MEHO's login clients ask for no consent, so
+    this call leaves ordinary logins alone (404 when there is no offline
+    login);
+  - `DELETE /admin/realms/{realm}/sessions/{id}` ends each ordinary login
+    that holds only this client.
+
+  Keycloak ends an ordinary login only as a whole. A login that this
+  client shares with another client (both signed in through one browser
+  login) is kept, so the other tool keeps working. Then the tool can
+  still renew through that login, so the result line is in the info
+  style and starts with "Partly signed out". It names the other tool and
+  says how to end the shared login in the Keycloak account page, or to
+  ask an admin to end it in the Keycloak admin console. The user id is
+  the person of the session, never a form field. `tests/integration/test_keycloak_tool_sign_out.py` checks against
+  a real Keycloak that only the signed-out tool stops renewing.
+- After at least one login ended, MEHO writes the audit row
+  `auth.tool_sign_out` (method `INTERNAL`, status 200, payload
+  `client_id`, `tool`, `outcome`, `offline_login_ended`,
+  `sessions_ended`, `shared_with`). `outcome` is `signed_out`, or
+  `partly_signed_out` when a shared login was kept. The row is written in
+  the current tenant of the web session, but the sign-out ends the
+  tool's logins of the person in the whole Keycloak realm: a login is
+  per person, not per tenant. The outcomes are listed in
+  [`../architecture/audit.md`](../architecture/audit.md#known-internal-path-values). A failed call (an error answer, no
+  answer, no admin client) shows an error line and writes the same row
+  with status 502, the `error` class name, and `outcome` `failed`. When
+  the call failed after a login already ended
+  (`ToolSignOutIncompleteError`), `outcome` is `partly_signed_out` and
+  the row says what ended. A 403 from Keycloak
+  (`KeycloakForbiddenError`) gets its own line: the admin client lacks
+  `manage-users`. No login at all says "Nothing changed"; only shared
+  logins says so too and names the other tools. Neither writes a row.
+- Before each row, MEHO logs `tool_sign_out` with the person, the client
+  and what ended, so the event is kept when the row cannot be written.
+  When the write fails, `sign_out_tool` raises `ToolSignOutAuditError`
+  and logs `tool_sign_out_audit_failed`. The card shows an error line,
+  never "signed out": Keycloak may already have ended logins, but the
+  sign-out has no audit row. After the sign-out, the route reads the last
+  uses again. When that read fails too (the database is down), the route
+  logs `ui_account_tools_last_use_read_failed` and still shows the card
+  with its result line. Each row then says its last use is unknown.
+- The tool's last access token works until it ends: the access token
+  lifetime of the realm (about five and a half minutes on the built-in
+  realm: 300 seconds plus 30 seconds leeway). The card says so. Signing out is not a
+  block: the tool can sign in again, and with a signed-in browser that
+  can happen without a question.
+- With the switch off, the card is not shown and the route answers 404.
+
+Code: `auth/tool_sign_out.py` (tool kinds, last use, the sign-out and the
+audit row), `ui/routes/account_tools.py` (the route and the card rows),
+`templates/account/_tools.html`. Tests: `tests/test_ui_account_tools.py`.
+
+### An admin signs out a tool of another person
+
+There is no console page for this. A tenant admin runs
+`meho admin tools sign-out --user <name or id> --tool <kind>`. The verb
+calls the typed operation `tools.sign_out` of the synthetic connector
+`tools-admin-1.x` (`connectors/tools/ops.py`) through the normal
+dispatch path:
+
+- `caution` with `requires_approval`, a `tenant_admin` role floor, and a
+  requester check: only a person asks, not an agent, a service login or
+  a call on someone's behalf. Every call waits for approval. Every
+  tenant admin may approve their own request, so no second person is
+  needed.
+- `tool` is one of the kinds above that have a sign-out button. Like the
+  card, the operation refuses while `MCP_CLIENT_PER_TOOL_KIND` is off:
+  the requester check refuses the call at once, before any approval
+  request.
+- `user` is found in MEHO's own sign-in realm through MEHO's Keycloak
+  admin client, never a Keycloak target (`auth/realm_users.py`): by user
+  id, else by exact username. The person must be in a role group of the
+  caller's tenant: a group (or a parent group) whose `meho_tenant` or
+  `tenant_id` attribute names the tenant. MEHO reads every page of the
+  person's groups. A failed read is an error, never "not found".
+- The approval card names the person by id (`user.id`). The approved run
+  signs out that id and checks the tenant again; it never looks the name
+  up again. A card without a person id is refused.
+- The run calls the same `sign_out_tool`, with `for_user`. The audit row
+  `auth.tool_sign_out` has the admin who ran the call (the approver) as
+  `operator_sub`, and in the payload the admin who asked (`requested_by`,
+  from the approval request) and `user_id` and `username` of the person. A failed Keycloak call is an
+  error result and writes only the 502 row with `outcome` `failed`.
+
+Tests: `tests/test_tools_sign_out_op.py`, `tests/test_realm_users.py`,
+`cli/internal/cmd/admin/tools/tools_test.go`.
 
 ## Dependencies
 
@@ -1182,13 +1353,18 @@ The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
 A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 (not thread-safe for concurrent `render()` calls). The pygments CSS is
 generated once at module load and injected as an inline `<style>` block
-in the entry-detail template. It is emitted **theme-scoped** (#2452): a
-default/dark token set under `.kb-code` (pygments `github-dark`) plus a
-`[data-theme="meho-light"] .kb-code` override (pygments `default`), with
-pygments' own opaque container background stripped so the block sits on
-the live `var(--color-base-200)` surface the template pins — code blocks
-stay legible in both `meho-dark` and `meho-light` instead of forcing a
-light background via the dead DaisyUI 4 `--b2` variable.
+in the entry-detail template. It is **one token set** under `.kb-code`
+(pygments `default`, whose dark token colours read on the evoila theme's
+light surface), with pygments' own opaque container background stripped
+so the block sits on the live `var(--color-base-200)` surface the
+template pins — rather than forcing a light background via the dead
+DaisyUI 4 `--b2` variable (#2452).
+
+It used to carry two sets, a dark one under `.kb-code` and a light
+override under a `data-theme` scope, because the console had two themes.
+With one theme the dark set could never be selected, so every KB page
+shipped a stylesheet it could not use; it was dropped with the second
+theme.
 
 ## KB editor modal + mobile reflow (G10.2-T3 #872)
 
@@ -1393,11 +1569,10 @@ keeps a full-screen wall display from logging out mid-stream.
 
 | Route | Renders |
 | ----- | ------- |
-| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
+| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Shows agent announcements only (#3762) and a side card that says only trusted agents post and links the audit log. Accepts `?principal=&target=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
 | `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
-| `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
+| `GET /ui/broadcast/stream` | SSE bridge behind `require_ui_operator` (`text/event-stream`). The feed view's `sse-connect` target. Accepts `principal` / `target` filters. |
 | `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite read of the tenant's last-24h stored announcements seeded into the shared `broadcastFeed` controller. |
-| `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
 | `GET/POST /ui/broadcast/overrides`, `DELETE /ui/broadcast/overrides/{override_id}` | The Overrides tab (`ui/routes/broadcast/overrides.py`). A `tenant_admin` lists, creates and deletes broadcast override rules. For another role the list answers 403 with a gated view that shows no rules, and a create or delete answers 403. |
 
 Every broadcast route above except the Overrides tab needs the `operator` role (`require_ui_operator`,
@@ -1454,15 +1629,13 @@ the colour policy stays one auditable map.
 
 | File | Purpose |
 | ---- | ------- |
-| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, drawer slot. Injects the controller `<script src>` into the head-level `{% block component_scripts %}` so it executes before `alpine.min.js` (#1692). |
-| `broadcast/_filter_bar.html` | The op_class / principal / target / op_id controls. The three server filters `hx-get` to `/ui/broadcast/feed`; op_id dispatches a `broadcast-op-id-changed` window event for the client-side filter. |
+| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, side card (who posts, where operations are recorded). Injects the controller `<script src>` into the head-level `{% block component_scripts %}` so it executes before `alpine.min.js` (#1692). |
+| `broadcast/_filter_bar.html` | The principal / target controls. Both server filters `hx-get` to `/ui/broadcast/feed`. No operation filter since #3762. |
 | `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
-| `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
-| `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
-| `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
+| `broadcast/_event_row.html` | Server-authored announcement row (time · agent · announcement text bound via `x-text` · phase · targets · claim details). No operation row and no drawer since #3762. |
 | `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
-| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
+| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html`. No kind switch since #3762. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, `visibleEvents` (announcements only), the timestamp / phase / targets / claim helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
 
@@ -1666,7 +1839,11 @@ parsing it client-side keeps the untrusted data out of every attribute
 context; `tojson`'s `<`/`>` escaping prevents a `</script>` in a field
 from closing the element early.
 
-**The `op_id` scalar sinks (follow-up to B1, same PR #1044).** The same
+**The `op_id` scalar sinks (follow-up to B1, same PR #1044).** Today the
+Broadcast page has no `op_id` filter (#3762). The live feed's `x-data`
+still uses a single-quoted attribute, and its only server value is
+`autoScroll: {{ wall | tojson }}`, a boolean; no query parameter reaches
+it. The history below explains why the attribute is single-quoted. The same
 `tojson`-in-a-double-quoted-`x-data` class shipped on the live feed too:
 `_feed.html`'s `opIdFilter: {{ op_id_filter | tojson }}` and
 `_filter_bar.html`'s `x-data="{ opId: {{ op_id_filter | tojson }} }"`.
@@ -1736,24 +1913,18 @@ The page works on a phone screen (about 390 px wide) and still looks the
 same on a laptop:
 
 * **Rows.** Below the `sm` width `broadcast/_event_row.html` uses a
-  6-column grid: time and person on line one, the operation (or the
-  announcement text) on line two, status and target on line three. The
-  class and payload cells and the column header show from `sm` up. Newest
-  events stay on top, as before.
-* **Filters.** Below `md` the four filters fold away behind a "Filters"
-  button (Alpine `filtersOpen` on the form), so the newest events sit at
+  6-column grid: time and agent on line one, the announcement text on
+  line two, the details button and the targets on line three. The phase
+  and claim cells and the column header show from `sm` up. Newest
+  announcements stay on top, as before.
+* **Filters.** Below `md` the two filters fold away behind a "Filters"
+  button (Alpine `filtersOpen` on the form), so the newest announcements sit at
   the top of the screen. Without JavaScript the fields stay visible.
-* **Announcements.** An agent announcement has no audit row, so it has
-  no detail drawer. On a phone a tap on it (or on the small button in
-  its status cell, which carries `aria-expanded`) folds out a details
+* **Details.** On a phone a tap on an announcement (or on its small
+  button, which carries `aria-expanded`) folds out a details
   block under the row: the phase, the full text without cutting, the
   targets and the claim metadata (`detailsOpen`, local to the row). From
   `sm` up the columns show these, and the block stays hidden.
-* **Details.** A tap on an operation row opens the detail drawer as before. Below
-  `lg` the drawer sits under the feed, so `openDrawer` scrolls it into
-  view once it is swapped in. It swaps with `settle:0ms`: htmx keeps the
-  old element's classes until the settle step, and the empty placeholder
-  is `hidden` below `lg` (it shows from `lg` up only).
 * **Sidebar.** `base.html` starts the sidebar closed on every page load
   below `lg`, so a phone shows the page and not the menu. Before, the
   saved open/closed choice (`meho.sidebar`, default open) opened the menu
@@ -2079,10 +2250,18 @@ one.
   there is no `script-src` policy yet. The `<head>` avoids inline
   script so a future nonce-based CSP can land without template
   rewrites.
-- **Two themes and a toggle.** The console ships `meho-dark` (the
-  default) and `meho-light`; `static/src/app/theme.js` and the theme
-  button switch between them. DaisyUI's `dim` theme is only the
-  plugin's fallback default in `styles.css`.
+- **One theme, from the brand package.** The console renders the evoila
+  light theme, which ships in `meho-ui` and is linked in
+  `_head_assets.html` as three plain stylesheets (`evoila-daisyui.css`,
+  `evoila-tokens.css`, `evoila-fonts.css`) served from the
+  `/ui/static/brand` mount. They load *after* the compiled bundle on
+  purpose: they are unlayered author rules, which beat DaisyUI's
+  `@layer base` output, so the theme takes effect without the vendored
+  plugin knowing about it — and needs no Tailwind processing, being
+  variables rather than utilities. DaisyUI's built-in `light` is the
+  plugin-level floor, so a variable the brand theme does not set fails
+  light. `meho-dark`, `meho-light` and `theme.js` are gone, and
+  `tests/test_ui_brand_theme.py` fails if any of them returns.
 
 ## Topology query overlays + 30s polling-refresh (Task #882)
 
@@ -2781,7 +2960,7 @@ Every list / detail / probe path filters on `session_ctx.tenant_id`:
 * List: `WHERE targets.tenant_id = :tenant_id` is the first clause in the substrate query.
 * Detail: `resolve_target` raises 404 on a cross-tenant name.
 * Probe: same `resolve_target` gate before the write.
-* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
+* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible. The query does not load `raw_payload`, the stored raw answer of each row (#6818); the card never shows it.
 * Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
 * Recent-ops fragment: resolves the target name in the session's tenant (`resolve_target`, 404 on a cross-tenant name) after the role gate, so the fragment never shows another tenant's rows.
 
@@ -3141,8 +3320,8 @@ between the two agents surfaces, and the agent detail page carries a
   `agents/runs/list.html` page on a browser nav, the
   `agents/runs/_table_rows.html` `<tbody>` fragment on a filter swap.
   Filters: `status` (the runtime `AgentRunStatus` `StrEnum` used directly
-  as the `Query` type — an out-of-enum value 422s) + `work_ref` (exact
-  match). Both ride `hx-push-url` so the filtered view is bookmarkable.
+  as the `Query` type — an out-of-enum value 422s) + `work_ref` (whole
+  ticket id). Both ride `hx-push-url` so the filtered view is bookmarkable.
   Columns: run-id prefix, status pill, agent name, trigger provenance,
   model + provider + tier, turns, work_ref chip, relative created,
   duration.
@@ -3684,11 +3863,10 @@ are mutually-exclusive style variants emitted in the same cascade layer:
 no `badge-<color>` modifier `--badge-color` is unset, so `color` falls back to
 inheritance. On a plain card that inherits `base-content` (readable), but inside
 a coloured alert it inherits the alert's `*-content` token — near-black on
-badge-ghost's `base-200` surface in `meho-dark`, near-white on `base-200` in
-`meho-light` — so the badges vanished in both themes. `styles.css` carries an
+badge-ghost's `base-200` surface — so the badges vanished. `styles.css` carries an
 unlayered `.alert .badge-ghost.badge-outline` rule (in the "Chrome + component
 voice" block) that beats the layered DaisyUI declarations regardless of emission
-order, pinning `base-content` on `base-200` so the labels read in both themes;
+order, pinning `base-content` on `base-200` so the labels read;
 it is scoped to `.alert` so the ~15 on-card usages keep their inherited colour.
 
 ## Vault console — confirm-gated writes (G10.18-T2 #1957)

@@ -42,7 +42,7 @@
         <h4 class="text-sm font-semibold">State-changing operation</h4>
         <p class="text-xs">
           Creating a user is approval-gated: confirming parks a request that a
-          MEHO-SA-Operator or a tenant admin must approve.
+          tenant admin must approve.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>
@@ -62,8 +62,8 @@
       <input type="hidden" name="target" value="{{ target }}" />
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">
-          UserRepresentation <span class="opacity-50">(JSON object; at least a username)</span>
+        <span class="label-text mb-1 text-xs text-muted">
+          UserRepresentation <span class="text-subtle">(JSON object; at least a username)</span>
         </span>
         <textarea
           name="representation"
@@ -76,32 +76,32 @@
       </label>
 
       <fieldset class="rounded-box border border-base-300 p-3">
-        <legend class="px-1 text-xs opacity-70">Password (from Vault)</legend>
-        <p class="mb-2 text-xs opacity-60">
+        <legend class="px-1 text-xs text-muted">Password (from Vault)</legend>
+        <p class="mb-2 text-xs text-subtle">
           The password is read from Vault at dispatch time &mdash; it is never
           typed here. Leave blank for an SSO-only user.
         </p>
         <label class="form-control">
-          <span class="label-text mb-1 text-xs opacity-70">Vault KV path (password secret ref)</span>
+          <span class="label-text mb-1 text-xs text-muted">Vault KV path (password secret ref)</span>
           <input
             type="text"
             name="password_secret_ref"
             maxlength="512"
             class="input input-bordered input-sm w-full font-mono"
-            placeholder="rdc-hetzner-dc/keycloak/operator-a"
+            placeholder="example/keycloak/operator-a"
             aria-label="Password secret ref (Vault KV path)"
             autocomplete="off"
           />
         </label>
         <div class="mt-2 grid gap-2 sm:grid-cols-2">
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Mount <span class="opacity-50">(optional)</span></span>
+            <span class="label-text mb-1 text-xs text-muted">Mount <span class="text-subtle">(optional)</span></span>
             <input type="text" name="password_secret_mount" maxlength="512"
                    class="input input-bordered input-sm w-full font-mono" placeholder="secret"
                    aria-label="Vault mount" autocomplete="off" />
           </label>
           <label class="form-control">
-            <span class="label-text mb-1 text-xs opacity-70">Key <span class="opacity-50">(optional)</span></span>
+            <span class="label-text mb-1 text-xs text-muted">Key <span class="text-subtle">(optional)</span></span>
             <input type="text" name="password_secret_key" maxlength="512"
                    class="input input-bordered input-sm w-full font-mono" placeholder="password"
                    aria-label="Vault secret key" autocomplete="off" />

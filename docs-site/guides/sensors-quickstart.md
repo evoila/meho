@@ -1,14 +1,14 @@
 # Watch your estate with sensors
 
-Everything so far was interactive: you asked, MEHO answered. Sensors
+Everything so far was interactive: you asked, MEHO answered. [Sensors](../reference/words.md#sensor)
 make the backplane watch on its own. A **sensor** pins one tuple —
-*operation + params + assertion + cadence + severity* — that a
+*[operation](../reference/words.md#operation) + params + assertion + cadence + severity* — that a
 built-in runner evaluates on a schedule, entirely deterministically
-(no LLM in the loop). **Dashboards** compose sensors into a single
+(no LLM in the loop). **[Dashboards](../reference/words.md#dashboard)** compose sensors into a single
 rolled-up state, and an optional agent **investigator** can triage a
 dashboard the moment it goes red.
 
-This guide registers a sensor on the Kubernetes target from the
+This guide registers a sensor on the Kubernetes [target](../reference/words.md#target) from the
 previous guides, composes a dashboard, breaks something on purpose,
 and reads the result.
 
@@ -26,7 +26,7 @@ and reads the result.
 
 ## The five states
 
-Every sensor evaluation lands in exactly one of five states — the
+Every sensor evaluation lands in exactly one of [five states](../reference/words.md#five-states) — the
 same vocabulary everywhere (sensor projection, dashboard rollup, UI):
 
 | State | Meaning |
@@ -39,7 +39,7 @@ same vocabulary everywhere (sensor projection, dashboard rollup, UI):
 
 ## Step 1 — pick a safe operation
 
-A sensor may only pin an operation whose `safety_level` is **`safe`**
+A sensor may only pin an operation whose [`safety_level`](../reference/words.md#risk-level) is **`safe`**
 — the runner auto-executes on a schedule with nobody watching, so
 `caution`/`dangerous` ops are refused at create time (422
 `sensor_requires_safe_operation`). Find the op exactly as in the
@@ -57,7 +57,7 @@ call we want the runner to repeat is the one you already ran by hand:
 
 ### Pick the connector version that matches the target
 
-A connector can state the target versions its operations work on, for
+A [connector](../reference/words.md#connector) can state the target versions its operations work on, for
 example `vmware-rest-8.0` for vCenter 8.0.x and `vmware-rest-9.0` for
 vCenter 9.0.x. MEHO checks the target's version each time the sensor
 runs. When the version is outside the connector's range, MEHO does not
@@ -71,7 +71,7 @@ unqualified_target_version: this operation works only on target versions >=9.0,<
 
 The text after `unqualified_target_version:` can differ between
 connectors. For an operation from an API file, MEHO first looks for the
-same operation on the connector version that matches the target, and
+same operation on the [connector version](../reference/words.md#connector-version) that matches the target, and
 runs it there when it exists and is turned on.
 
 So pin the connector whose version matches the target. To see the
@@ -155,7 +155,7 @@ last probe, so it is always up to date:
 - **`meho sensor create`** refuses a sensor whose connector does not fit
   its target, with 422 `sensor_connector_mismatch` and the same warning.
   Use the connector the warning names. If you want this sensor anyway,
-  add `--force` (`force: true` in REST and MCP). The warning then stays
+  add `--force` (`force: true` in REST and [MCP](../reference/words.md#mcp)). The warning then stays
   in the list.
 
 MEHO cannot check a sensor whose target has no known version yet. Probe
@@ -163,12 +163,27 @@ the target, or set its version, and the list shows the result.
 
 To change a sensor later, use `meho sensor edit` (see
 [Change a sensor or a dashboard](#change-a-sensor-or-a-dashboard)).
-There is deliberately **no pause verb**. Nor is `paused`
-a self-protection you can wait for: the runner parks a sensor **only**
-when its stored cadence (`cron_expr` / `timezone`) no longer parses,
-stamping `status_reason` with `invalid_cadence:<error>`. There is no
-failure counter — a sensor that evaluates `critical` or `unknown`
-forever stays `active` forever. The way to stop one is to delete it:
+To stop a sensor for a while, pause it. A paused sensor is not run, so it
+does not call its target. It keeps its id, its result history and its place
+in every dashboard:
+
+```bash
+meho sensor pause <uuid>
+meho sensor resume <uuid>
+```
+
+Pause and resume are safe to run twice. Use them, for example, while you fix
+the credential of the target.
+
+MEHO also pauses a sensor for you in two cases. The first is a stored
+cadence that no longer parses (`status_reason` is `invalid_cadence:<error>`).
+The second is a target that refuses the login several times in a row
+(`status_reason` is `auth_failed:ConnectorAuthError`). By default this is 3
+times; set `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` to change it. This stops a
+stale credential from being tried on every run. MEHO then mails a warning to
+the mail recipients (`--notify-email`) of every dashboard that holds the
+sensor. Fix the credential, then resume the sensor. A sensor that reads `critical` or `unknown` for other
+reasons stays `active`. To remove a sensor and its history, delete it:
 
 ```bash
 meho sensor delete <uuid>
@@ -206,7 +221,7 @@ The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
 (`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete` /
-`meho_sensor_results`) —
+`meho_sensor_pause` / `meho_sensor_resume` / `meho_sensor_results`) —
 **dashboards have no MCP
 tools today**.
 
@@ -243,6 +258,24 @@ Each evaluation stores its evidence on the sensor's projection
 history with `meho sensor results <sensor_id>` (filters `--from`,
 `--to`, `--state`). MEHO keeps this history for 7 days by default
 (`CHECKS_EVIDENCE_RETENTION_DAYS`).
+
+## Run a sensor once now
+
+A new sensor waits one full interval for its first run. To see a result
+sooner, or to check a sensor again between two scheduled runs, ask MEHO
+to run it now:
+
+```bash
+meho sensor run <sensor_id>
+meho sensor results <sensor_id>
+```
+
+MEHO does not run the check inside the command. It makes the sensor due
+at once, and the runner runs it at its next tick (10 seconds by default),
+with its normal login and rules. Read the new result with
+`meho sensor results`. A paused sensor is refused: run
+`meho sensor resume <sensor_id>` first. Sending the command twice is safe.
+It needs the `tenant_admin` role.
 
 ## Change a sensor or a dashboard
 
@@ -314,7 +347,7 @@ It ends at the end time. It ends earlier when the sensor gets worse,
 for example from `degraded` to `critical`. Then the warnings come back:
 the advisory warns again, and when the sensor still fails at the end
 time, the dashboard's recipients get a mail that says the
-acknowledgement ended. MEHO writes an audit row when you acknowledge,
+acknowledgement ended. MEHO writes an [audit row](../reference/words.md#audit-record) when you acknowledge,
 and when it ends.
 
 You need the `operator` role or higher, or the approver right (a person
@@ -490,7 +523,7 @@ MEHO can fire a **diagnose-only** agent investigation: affected
 sensors are correlated through the topology graph so one underlying
 cause produces exactly one investigation, known-noise verdicts are
 suppressed, and the agent writes a structured finding — verdict,
-evidence, recommended action — into tenant memory
+evidence, recommended action — into [tenant](../reference/words.md#tenant) [memory](../reference/words.md#memory)
 (`checks-noise-<group-key>`), retrievable via `search_memory`.
 
 It is off until you opt in, and it has real prerequisites:
@@ -499,7 +532,7 @@ It is off until you opt in, and it has real prerequisites:
   tenant (the name is configurable deploy-side). The
   [checks investigator example](https://github.com/evoila/meho/tree/main/examples/checks-investigator)
   shows it: a read-only toolset, and an agent login registered with
-  `--grants read-everything`, so writes wait for approval.
+  `--grants read-everything`, so writes wait for [approval](../reference/words.md#approval).
 - The agent runtime, which is **experimental** maturity — check the
   [feature-maturity index](../reference/maturity.md) before leaning
   on it.
@@ -577,7 +610,7 @@ in the scheduler guide.
 | Symptom | What it means | Fix |
 |---|---|---|
 | 422 `sensor_requires_safe_operation` | The pinned op is `caution`/`dangerous`. Sensors auto-execute unattended, so only `safe` ops qualify — by design. | Pick a read-class op; check `safety_level` on the search hit. |
-| 422 `sensor_operation_not_found` | `(connector_id, op_id)` resolves to nothing — usually a bare product name as `connector_id`. | Use the `<impl_id>-<version>` form (`k8s-1.x`), and an `op_id` from `meho operation search`. |
+| 422 `sensor_operation_not_found` | `(connector_id, op_id)` resolves to nothing — usually a bare product name as `connector_id`. | Use the `<impl_id>-<version>` form (`k8s-1.x`), and an [`op_id`](../reference/words.md#op_id) from `meho operation search`. |
 | 409 `sensor_name_conflict` | Sensor names are unique per tenant. | Rename or delete the old one. |
 | 422 `sensor_connector_mismatch`, or a warning in `meho sensor list` | The connector does not work with the target's product or version. The sensor would read `unknown`. | Use the connector the warning names. See [When the connector does not fit the target](#when-the-connector-does-not-fit-the-target). |
 | A plain 422 validation error *before* any of the codes above | Schema validation runs first: the comparator `type` must be one of `threshold` / `equals` / `in` / `bool` / `freshness` (not `gt`/`lt` — those are the threshold's `op`), the cadence must be exactly one of interval (5–86400 s) XOR cron, the assertion is capped at 8 KiB, and a `status` field in the body is rejected. | Fix the spec shape; the error names the field. |

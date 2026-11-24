@@ -487,12 +487,35 @@ a bound blast-radius preview) does not apply here — `file.write` is
 `dangerous`, not `destructive`, because its backup + rollback make it
 recoverable.
 
+`sysctl.write` of a key or a value that can make the kernel run a program
+or write a file is a credential call: a person approves each call, and no
+standing grant, no agent grant and no run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+A key that MEHO cannot read as a plain parameter name waits too.
+`connectors/linux/op_classes.py` tells these calls apart from the params
+(`sysctl_write_can_run_a_program`, registered with
+`declare_credential_check`). The key check that runs before any command
+(`validate_sysctl_key` in `connectors/linux/ops_host.py`) also refuses, with
+a message, a key that `sysctl` would not read as a parameter name, on both
+`sysctl.read` and `sysctl.write`. The published key schema of the two
+operations stays the same. A plain tuning key with a number keeps the
+rules of the op: a standing grant still covers it. The approval card shows
+the key and the value (the generic params echo).
+
 `script.run` is the **intentional arbitrary-code surface** — a typed verb
 governed by approval, not an interactive shell. It exists so the aborted
 first-boot script can be re-run (or a multi-step fix applied) *through* the
 backplane rather than around it. It returns `stdout` as a list of lines so
 a large output spills to a `result_query` handle through the JSONFlux
 reducer rather than flooding agent context; `stderr` is capped inline.
+
+`script.run` sends a fixed command over SSH, and that command holds no
+value. Without sudo it is always `bash -s`; with sudo it is the fixed
+`_sudo.py` command (see "Root elevation"). Everything else goes on stdin,
+with and without sudo: the script, every `env` and `secret_env` value, and
+the `arguments`. The interpreter gets the `arguments` as its own arguments.
+The host's process list shows `bash -s` for a call without sudo, and a
+script that reads stdin gets end-of-file.
 
 ### Firewall changes with a timed way back
 
@@ -564,6 +587,32 @@ file stays as it was and the op returns `written: false`. A new file is
 created `0600` and owned by root. If a non-root service must read a new
 file, change its mode afterwards.
 
+### Put a secret in a file (`secret.move` to `linux:`)
+
+`linux.file.write` takes the file content as a parameter, so the caller must
+know it. It is the wrong tool for a secret. The secret broker has a `linux`
+store for this (write side only): `secret.move --to
+'linux:<target>/<absolute path>#<owner>'`. It writes only inside the home
+directory of `<owner>` (MEHO reads it from the host), and only as the owner:
+`<owner>` is a normal user, never `root` and never a system user (a user id
+below the host's first normal user id). The file gets mode 0600, and a missing parent
+directory gets mode 0700. The value goes over the SSH channel's standard
+input through the same sudo helper as `file.write`, and never appears in a
+result, an audit row, a preview, a log line or an error. It refuses places
+outside a home (`/etc`, `/run`, `/usr`, `/var/lib`, `/opt`, `/srv` and the
+system folders), places in a home that the system runs or reads for logins
+(for example a `.ssh` folder, `.config/systemd` or `.bashrc`, compared in
+lower case), a home that does not exist, a link in
+any folder of the path below the home, and a target that is not a
+`linux-ssh` target. A person approves each move. The approval card names the
+target, its host and its port, and the approved run writes only to that
+target, host and port. The ref
+grammar and the full rules are in
+[connectors-secret-broker.md](connectors-secret-broker.md), "The `linux:`
+store".
+Code: `connectors/linux/secret_endpoint.py` and
+`connectors/linux/secret_sink_target.py`.
+
 ### Root elevation
 
 Every write that needs root funnels through `_sudo.py`'s
@@ -596,11 +645,11 @@ differently, by design:
   (`register_preview_builder`, fail-soft). For `file.write` it echoes only
   shape — path + content byte size + backup path + validate command, never
   the `content`. For `script.run` it shows interpreter + argument byte size +
-  env-var **names** + the `secret_env` **reference mapping**
+  each `env` name **with its value** + the `secret_env` **reference mapping**
   (`ENV → <vault-path>#<field>`, the non-secret Vault pointers) + working
   directory + sudo intent + timeout, and **the script itself** (see "What the
-  approver of `script.run` reads" below) — never the argument values / env
-  values / resolved `secret_env` values.
+  approver of `script.run` reads" below) — never the argument values /
+  resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
@@ -614,13 +663,69 @@ the approver reads it. `linux/script_preview.py` builds these preview fields:
 
 | Field | What it holds |
 |---|---|
-| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also with the value glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are. This list is narrower than the `k8s.job.create` rule, where `-p` is a secret flag after any program. A password glued to `-u` (`curl -uuser:password`) is hidden in a script too. A new line ends a command, but a line continuation (a `\` at the end of a line) does not: the value of a flag may be on the next line. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. Cut at 64 KiB. |
+| `script` | The script text. Values that look like secrets are replaced by a marker, in two passes. First the shell-aware command-line hider that the `k8s.job.create` preview uses (`redaction/command_line.py`, `hide_shell_script`): the value of a `NAME=VALUE` whose name holds a secret word (`PGPASSWORD=...`, `export AWS_SECRET_ACCESS_KEY=...`), the value after a secret flag (`--password x`), the password in `curl -u user:password` and in a URL, tokens with a known vendor prefix. In a script, `-p` is a secret flag only for `sshpass`, `mysql*`, `mariadb*`, `mongo*` (`mongosh`, `mongodump`) and a command with the word `login` (`docker login`, `podman login`, `helm registry login`), also with the value glued (`mysql -pVALUE`), so `mkdir -p`, `cp -p`, `ssh -p 22` and `docker run -p 8080:80` stay as they are. This list is narrower than the `k8s.job.create` rule, where `-p` is a secret flag after any program. A password glued to `-u` (`curl -uuser:password`) is hidden in a script too. A new line ends a command, but a line continuation (a `\` at the end of a line) does not: the value of a flag may be on the next line. Then the packaged default redaction policy (`docs/codebase/redaction.md`): a bearer token, a JWT, a private key block, a quoted `"password": "..."` pair. Any change counts as hidden. The hidden text is cut into pages of 64 KiB, so a secret that crosses a page border is still hidden; the preview holds page 1. |
+| `script_pages` | How many pages the shown text has. |
 | `script_bytes` | The size of the full script in UTF-8 bytes. |
 | `script_sha256` | The SHA-256 of the full script as it runs, to compare with a reviewed copy. Left out when values were hidden: with the rest of the text in view, the hash would let a reader test guesses of the hidden value. |
-| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. |
+| `script_values_hidden`, `script_truncated` | `true` when the shown text differs from the script that runs. `script_truncated` means the text has more than one page. |
 | `script_unavailable` | Set, with no text and no hash, when the redaction pass fails. |
 | `script_ref` | The optional `script_ref` param: where the reviewed copy lives. |
 | `script_check` | `matches` or `does not match`, when the caller sent the optional `expected_sha256` param. |
+
+The hiding pass runs in a worker thread (`asyncio.to_thread`), so the backend
+keeps answering other requests while it works. In `preview_operation`
+with the `PREVIEW_TYPED_WRITES` switch on, the preview builder of a credential
+write runs only for a caller whom the policy does not refuse.
+
+Next to the script fields, `ops_write.py` (`_linux_script_run_preview`) adds:
+
+| Field | What it holds |
+|---|---|
+| `env_var_names` | The `env` names, sorted. |
+| `env` | Each `env` name with its value, sorted by name, each value as the handler exports it. An `env` value can change which code the script runs (for example `TAR_OPTIONS` or `GIT_SSH_COMMAND`), so the approver reads every one. Person-only (see below). |
+| `env_note` | One line: the approver sees every env value; put secrets in `secret_env`, not in `env`. Person-only (see below). |
+| `secret_env` | The `ENV → <vault-path>#<field>` references, never a value. |
+
+The params hash of the approval request covers `env`, so the approved run
+uses the `env` values on the card: an approval or a run with other values is
+refused (`ParamsMismatchError`).
+
+**Who sees the `env` values.** `env` and `env_note` are person-only card
+fields (`register_person_only_preview_keys`, always on for this op). A
+person who opens the request in the console approval window sees every
+value, and so does `meho approvals show` with a person's sign-in. The MCP
+approval tools (`meho_approvals_get`, `meho_approvals_list`) read the
+stored request through `proposed_effect_for_agent`, which drops these two
+keys: an agent gets `env_var_names` only, also for a request another
+principal sent. The REST approval list and detail follow the same rule
+for `linux.script.run`: a person's login gets the values, and a read by an
+agent or a token (an agent, service or runner login) shows the names only.
+The agent's own `preview_operation` answer (with `PREVIEW_TYPED_WRITES` on)
+has `env_var_names` only too: the builder adds `env` and `env_note` only
+when `ctx.agent_preview` is false.
+
+**The script gets the card's value.** The wrapper
+(`build_script_run_wrapper`) decodes each `env` and `secret_env` value with
+a command substitution, which drops line breaks at the end. Right after it,
+the wrapper adds the same number of line breaks back as `$'\n'`. No
+pattern is matched, so the host's locale (also a multibyte one such as
+`zh_CN.GBK`) cannot change the bytes: the script gets each value byte for
+byte as the card shows it, also a value that ends in line breaks or is
+empty. A value cannot hold a NUL byte: the check before the wait
+(`_refuse_nul_byte`) refuses an `env` value or a `secret_env` reference with one, and the run refuses a
+value read from Vault with one, before the script starts.
+
+**No secret in `env`.** The card shows every `env` value, so the op's check
+before the wait for approval (`_refuse_before_wait`, registered with
+`register_park_check`; its part `_refuse_secret_in_env`) refuses a call when an `env` name holds a secret
+word (the command-line rule `is_secret_shaped_name`: `PASS`, `PWD`,
+`SECRET`, `TOKEN`, `KEY`, `CREDENTIAL`, `AUTH`, also inside a longer name)
+or an `env` value has a secret shape (`has_secret_shape`, the rules that
+hide secrets in the script text: a password in a URL, a JWT, a bearer
+token, a private key block, a token with a known vendor prefix, a secret
+on a command line). The answer is `refused_before_approval`; it names the
+`env` name, never the value, and asks for `secret_env`. No approval request
+is stored. A plain value such as `TAR_OPTIONS=x` still waits.
 
 When `expected_sha256` is set and the script does not match it, the handler
 refuses to run the script. The preview lives only in the approval row's
@@ -631,7 +736,40 @@ The console approval modal shows the text as code in a "Script to run"
 block (`ui/templates/approvals/_script.html`), with the hash, the reviewed
 copy and the check. `meho approvals show` and the `meho approvals approve`
 prompt print the same block, one line per script line
-(`cli/internal/cmd/approvals/script.go`).
+(`cli/internal/cmd/approvals/script.go`). The `env` values show in the
+preview fields: the console table renders them as JSON, and the CLI prints
+the preview as JSON made safe for the terminal (`output.SafeLines`), so a
+control character in a value shows as a visible escape (`\u001b`). The MCP
+approval tools return the card without `env` and `env_note` (see above).
+
+**Longer than one page.** `linux.script.run` accepts a script of at most
+1,048,576 bytes (1 MiB, `SCRIPT_MAX_BYTES`): a larger one is refused when
+the request is made, before it waits for approval, by a params check
+(`_check_script_size`) with a plain text. The schema has `maxLength` too, so
+a client sees the limit. It counts characters and the check counts bytes.
+When both fail, the plain text replaces the schema error
+(`operations/_validate.py`, `params_errors`). While the request waits, the
+approver reads every page: `GET /api/v1/approvals/{id}/script?page=N`
+(same access as `GET /api/v1/approvals/{id}`), `meho approvals show <id>
+--script-page N`, and the "previous page" / "next page" links of the console
+block. All three use `operations/approval_script.py`, which decrypts the
+stored script without deleting it (`approval_handoff.read`; only the
+approved run uses `consume`), hides secret values over the whole script and
+then cuts pages (`shown_script`). The redaction pass runs once per request,
+in a worker thread and not in the event loop. Its result holds no secret
+values; the last 8 are kept in memory, so reading the other pages does not
+run it again. The checksum is of the whole script and is the same on every
+page; with hidden values no page shows one. After the decision MEHO no
+longer keeps the script: the REST read answers 410 with a plain sentence,
+the console block has no page links and says that only page 1 is shown, and
+a page link of a modal opened before the decision shows that sentence. A
+stored script that MEHO cannot decrypt gives 409 (REST) or a plain sentence
+(console), not a server error. A script that is not valid UTF-8 (a lone
+surrogate) is refused when the request is made, with a plain text. The
+console shows control and format characters of the script (an escape code,
+a right-to-left override, a zero-width space) as visible marks such as
+`\u202e`, the same set the CLI escapes (`ui/templating.py`,
+`visible_marks`). There is no MCP tool for it.
 
 ### Approval + secret hygiene
 
@@ -646,10 +784,12 @@ own write-root allow-list (`/etc`, `/var/lib`, `/run`, `/opt`, `/srv`,
 deliberately not writable here.
 
 **Operator rule (shared-machinery caveat):** do not put a bare secret in
-`content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
-verbatim so the approved call can be re-dispatched, so a secret placed
-there is durable on the approval row (the same rule as the guest
-`program.run` / `file.write` verbs). For `script.run`, pass the credential by
+`content` / `arguments` / `env`. Both ops are credential writes: MEHO keeps
+their params encrypted, for the one approved run (the custody row of
+`approval_handoff.py`), and leaves `ApprovalRequest.params` empty. The row
+is deleted when the request runs or ends without a run. The `script.run`
+approval card shows every `env` value to the approver, and a secret-looking
+`env` name or value is refused (see above). For `script.run`, pass the credential by
 reference via `secret_env` (below) — the backplane resolves it server-side at
 run time, so the value never touches the params.
 
@@ -657,11 +797,10 @@ run time, so the value never touches the params.
 
 `script.run` is `safety_level=dangerous`, `requires_approval=True`, and pinned
 `credential_write`: its `script` / `arguments` / `env` are base64-carried on
-the wire but stored **verbatim** in `ApprovalRequest.params` (needed to
-re-dispatch the exact call on approval) and in the audit params. That is the
-right design for re-dispatch, but it means a script cannot safely *receive* a
-credential through `arguments` / `env` — any secret placed there is durable on
-the approval row and in audit. The only server-side secret resolution the
+the wire, and the params of the waiting call are kept encrypted for the one
+approved run (not in `ApprovalRequest.params`). But the approval card shows
+the script and every `env` value, so a script must not *receive* a
+credential through `arguments` / `env`. The only server-side secret resolution the
 connector otherwise performs is the sudo password (`_resolve_sudo_password`,
 read from the target's own Vault secret) and the SSH auth material.
 
@@ -717,8 +856,9 @@ to extend it to.
 
 ### Reserved env names (`env` and `secret_env`)
 
-The approver of `script.run` sees the script and the env **names**, not the
-env values. So an env value must not change which code runs. `env` and
+The approver of `script.run` sees the script and each `env` name with its
+value, but never a `secret_env` value: MEHO reads it from Vault only at run
+time. So a `secret_env` value must not change which code runs. `env` and
 `secret_env` refuse the same reserved names:
 
 - the wrapper's own shell variables: `tmp`, `args`, `f`;

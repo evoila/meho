@@ -14,7 +14,7 @@ category, labels and the "always wait" mark (see
   Nothing is written.
 * ``POST /api/v1/policy/classification`` -- ask for the edit. It is a
   change of rights, so the answer is ``202`` with the id of the approval
-  request: a second tenant admin must approve it.
+  request: a tenant admin must approve it in the web console.
 * ``PATCH /api/v1/connectors/{connector_id}/classification`` -- the same
   request for one whole connector.
 
@@ -41,10 +41,11 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.policy.bulk import (
     ClassificationEditError,
     ClassificationOffError,
+    one_thing_refusal,
     preview_classification_edit,
     request_classification_edit,
 )
-from meho_backplane.policy.classification import DEFAULT_TAXONOMY
+from meho_backplane.policy.classification import DEFAULT_TAXONOMY, label_text_ok
 from meho_backplane.policy.store import (
     ClassificationEdit,
     classification_enabled,
@@ -54,6 +55,7 @@ from meho_backplane.policy.store import (
 __all__ = [
     "CLASSIFICATION_PATCH_RESPONSES",
     "ClassificationEditBody",
+    "ClassificationInForce",
     "ClassificationRequestResponse",
     "ConnectorClassificationBody",
     "classification_patch",
@@ -118,7 +120,8 @@ class ClassificationEditBody(BaseModel):
         default=None,
         description=(
             "true: every call of a matched operation waits for approval. false: back to "
-            "the operation's own value, never below it."
+            "the operation's own value, never below it. false is refused when the "
+            "install's policy makes a matched operation always wait."
         ),
     )
 
@@ -142,14 +145,29 @@ class ConnectorClassificationBody(BaseModel):
     always_wait: bool | None = None
 
 
+class ClassificationInForce(BaseModel):
+    """What applies to one operation: the code's value, overrides, classification, floors.
+
+    A floor (a minimum-level rule in the code) can keep a wait or a level
+    that the classification alone would not set.
+    """
+
+    risk: str
+    waits: bool
+
+
 class ClassificationValues(BaseModel):
-    """The classified values of one operation, before the floors."""
+    """The classified values of one operation, before the floors, and what is in force.
+
+    ``in_force`` is ``null`` when the operation's row is gone.
+    """
 
     category: str | None
     labels: dict[str, str]
     risk: str | None
     always_wait: bool
     rule_ref: str
+    in_force: ClassificationInForce | None
 
 
 class ClassificationPreviewRow(BaseModel):
@@ -179,7 +197,7 @@ class ClassificationPreviewResponse(BaseModel):
 
 
 class ClassificationRequestResponse(BaseModel):
-    """The answer to an edit request: it waits until a second tenant admin approves it."""
+    """The answer to an edit request: it waits until a tenant admin approves it in the console."""
 
     status: str
     approval_request_id: str | None
@@ -257,7 +275,7 @@ async def classification_request_response(
         status=status,
         approval_request_id=extras.get("approval_request_id"),
         message=(
-            "The change waits until another tenant admin approves it."
+            "The change waits until a tenant admin approves it in the web console."
             if status == "awaiting_approval"
             else str(result.get("error") or "The change is stored.")
         ),
@@ -280,7 +298,7 @@ def _entry_out(entry: Any) -> ClassificationEntryOut:
         scope=entry.scope,
         match=match,
         category=entry.category,
-        labels=dict(entry.labels),
+        labels={k: v for k, v in entry.labels.items() if label_text_ok(k, v)},
         risk=entry.risk,
         always_wait=entry.always_wait,
     )
@@ -291,7 +309,8 @@ CLASSIFICATION_PATCH_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
         "model": ClassificationRequestResponse,
         "description": (
-            "category / labels were sent: the change waits until another tenant admin approves it."
+            "category / labels were sent: the change waits until a tenant admin "
+            "approves it in the web console."
         ),
     },
 }
@@ -302,9 +321,11 @@ def classification_patch(
 ) -> ClassificationEdit | None:
     """The classification edit in a PATCH *body*, or ``None`` when it sets none.
 
-    ``category`` and ``labels`` are a change of rights that waits for a
-    second admin, so they cannot ride along with fields that are stored at
-    once: a body with both is refused with ``400``.
+    ``category`` and ``labels`` are a change of rights that waits for an
+    admin's approval, so they cannot ride along with fields that are stored at
+    once: a body with both is refused with ``400``. The route edits one
+    group or operation, so an id with ``*``, ``?`` or ``[`` is refused with
+    ``400`` too.
     """
     category = getattr(body, "category", None)
     labels = getattr(body, "labels", None)
@@ -315,11 +336,22 @@ def classification_patch(
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=(
-                "classification_mixed: category and labels wait for another tenant admin, "
+                "classification_mixed: category and labels wait for a tenant admin's approval, "
                 f"so send them in a request of their own, without {', '.join(mixed)}."
             ),
         )
+    _refuse_a_pattern(match)
     return ClassificationEdit(match=match, category=category, labels=labels, always_wait=None)
+
+
+def _refuse_a_pattern(match: dict[str, str]) -> None:
+    """``400`` when an id in the path of a one-thing route holds a wildcard."""
+    refusal = one_thing_refusal(match)
+    if refusal is not None:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"classification_wildcard: {refusal}",
+        )
 
 
 @router.get("", response_model=ClassificationListResponse)
@@ -361,7 +393,7 @@ async def preview_classification(
 _REQUEST_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
         "model": ClassificationRequestResponse,
-        "description": "The change waits until another tenant admin approves it.",
+        "description": "The change waits until a tenant admin approves it in the web console.",
     },
 }
 
@@ -375,7 +407,7 @@ _REQUEST_RESPONSES: dict[int | str, dict[str, Any]] = {
 async def request_classification(
     body: ClassificationEditBody, operator: Operator = _require_admin
 ) -> JSONResponse:
-    """Ask for one edit. It waits until another tenant admin approves it.
+    """Ask for one edit. It waits until a tenant admin approves it in the web console.
 
     Refused with ``400`` (nothing asked) when the edit is not valid, matches
     no operation, or would give an operation a conflict: run the preview
@@ -398,8 +430,11 @@ async def classify_connector(
     """Ask to set the category, labels or "always wait" of one whole connector.
 
     Its groups and operations take these values unless they have their own.
-    Waits until another tenant admin approves it.
+    Waits until a tenant admin approves it in the web console. A connector id with
+    ``*``, ``?`` or ``[`` is refused with ``400``: this route edits one
+    connector, never a pattern.
     """
+    _refuse_a_pattern({"connector": connector_id})
     edit = ClassificationEdit(
         match={"connector": connector_id},
         category=body.category,

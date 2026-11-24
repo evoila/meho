@@ -29,7 +29,9 @@ MEHO keeps:
 - one index row per session: tenant, session id, who uploaded it,
   project, app, start and end time, state (`open`, `ended` or
   `unfinished`) and the file hashes;
-- one audit row for each upload, read and delete.
+- one audit row for each upload, read and delete;
+- with the switch `AUDIT_SESSION_LINKS` on: the links from MEHO's audit
+  log to the session (see "From an audit row to its session" below).
 
 MEHO never keeps:
 
@@ -294,12 +296,45 @@ use the session routes.
 | Upload own sessions | `read_only` | `meho sessions push`, `POST /api/v1/sessions` |
 | List sessions | `operator` | `meho sessions list`, `GET /api/v1/sessions` |
 | Read a session | `operator` | `meho sessions show`, `GET /api/v1/sessions/{session_id}` |
+| Download a session as whole files | `operator` | `meho sessions get <session-id> <folder>`, `GET /api/v1/sessions/{session_id}/uploads/{seq}` |
 | Delete a session | `tenant_admin` | `meho sessions delete`, `DELETE /api/v1/sessions/{session_id}` |
 | Open an upload in quarantine | `tenant_admin` | `GET /api/v1/sessions/{session_id}/uploads/{seq}` |
 | Read or set the retention period | `tenant_admin` | `GET` / `PUT /api/v1/sessions/retention` |
 
 Every call sees only the caller's tenant. A session of another tenant
 answers `404 session_not_found`.
+
+## From an audit row to its session
+
+This part works only with the switch `AUDIT_SESSION_LINKS` set to `true`
+(off by default). With it off, MEHO stores no links and its answers do not
+change.
+
+At upload time MEHO finds the audit rows of the session's MEHO calls:
+
+- an MCP call: the same person, the same tool and the same arguments,
+  inside the session's start and end time. A call that two of your agents
+  made at the same time with the same arguments is skipped, because it
+  does not show which agent made it. A session with no start time gets no
+  link.
+- a `meho` command the agent ran: the same person, the operation or the
+  command (for example `meho vmware vm list`), written while the command
+  ran. A command that was still running at one upload links at the next. Two agents that share one
+  `meho login` still get their own rows. A row that both of them could
+  have written gets no link.
+
+Then an audit row of a call that is part of a stored session names that
+session. A person with the right to read sessions sees it:
+
+- `meho audit show <audit-id>` prints `stored_session: <id>`;
+- `GET /api/v1/audit/show/{audit_id}` returns `stored_session_id`;
+- the console's audit drawer shows a "Stored session" part. For a run that
+  MEHO started itself, it links to the run page.
+
+Read the session with `meho sessions show <id>`. It lists the MCP
+sessions of the session; for a run that MEHO started itself, the run and
+its ticket id. A reader without the right, and a row with no stored
+session, get no link.
 
 ## Retention per tenant
 
@@ -335,6 +370,9 @@ A quarantined upload is stored, with the known secrets replaced. Only a
 tenant admin can download it. An operator gets
 `403 session_upload_quarantined`, and MEHO writes an audit row for the
 refused download. `meho sessions show` marks the upload as in quarantine.
+`meho sessions get` skips it for an operator and says so. A file that
+needs the skipped upload is written only up to it, and is marked
+incomplete.
 
 ## Related
 

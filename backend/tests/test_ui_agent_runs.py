@@ -53,6 +53,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 
 from ._ui_role_helpers import allow_ui_operator_role
@@ -357,6 +358,51 @@ def test_list_work_ref_filter_narrows_rows() -> None:
     body = response.text
     assert str(matching)[:8] in body
     assert str(other)[:8] not in body
+
+
+# A ticket id that is valid only after cleaning: 256 characters with
+# spaces around it, and 130 decomposed letters (260 before NFC, 130 after).
+_PADDED_LONG_REF = "  " + "x" * 256 + "  "
+_DECOMPOSED_REF = "A\u0308" * 130
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [(_PADDED_LONG_REF, "x" * 256), (_DECOMPOSED_REF, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_list_work_ref_filter_counts_length_after_cleaning(typed: str, stored: str) -> None:
+    """The search box cleans first, then checks the length, like the REST filter."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    matching = _seed_run(tenant_id=_TENANT_A, work_ref=stored)
+    other = _seed_run(tenant_id=_TENANT_A, work_ref="gh:evoila/meho#99")
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs", params={"work_ref": typed})
+    assert response.status_code == 200, response.text
+    assert str(matching)[:8] in response.text
+    assert str(other)[:8] not in response.text
+
+
+@pytest.mark.parametrize("headers", [{}, {"HX-Request": "true"}], ids=["page", "htmx"])
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
+    ids=["invisible", "too-long"],
+)
+def test_list_work_ref_filter_refuses_a_bad_ticket_id(
+    typed: str, message: str, headers: dict[str, str]
+) -> None:
+    """A refused value is a 422 page or fragment that shows the rule and lists no run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs", params={"work_ref": typed}, headers=headers)
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-work-ref-refused" in response.text
+    assert message in response.text
+    assert str(run_id)[:8] not in response.text
+    assert ("<html" in response.text) is not bool(headers)
 
 
 def test_list_empty_state_renders() -> None:

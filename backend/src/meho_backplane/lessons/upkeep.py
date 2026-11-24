@@ -3,15 +3,20 @@
 
 """The weekly knowledge upkeep job and its report.
 
-Too many old or doubled entries make the agent worse. Once per interval
+Too many old or doubled entries make the agent worse. The job is off by
+default (``KNOWLEDGE_UPKEEP_ENABLED=true`` turns it on), because it changes
+which entries knowledge search returns. Once per interval
 (``KNOWLEDGE_UPKEEP_INTERVAL_SECONDS``, one week by default) this job:
 
 1. **Merges duplicates.** Knowledge entries of one tenant with exactly
    the same body are one entry. Case and spaces count: ``MODE=prod`` and
    ``MODE=PROD`` say different things. The job keeps one: a ``confirmed``
    entry first, else the oldest. Each other copy gets ``status: replaced``
-   and ``replaced_by: <slug of the kept entry>``. Before the change the job
-   locks both entries and reads them again. When either was edited or
+   and ``replaced_by: <slug of the kept entry>``, but only when the kept
+   entry is ``confirmed`` or both entries have the same creator
+   (``created_by_sub``). Any other pair is listed for a reviewer
+   (``merge_for_review``) and neither entry changes. Before the change the
+   job locks both entries and reads them again. When either was edited or
    deleted after the scan, it leaves both as they are.
 2. **Retires expired entries.** A knowledge entry whose ``expires_at`` has
    passed gets ``status: retired``. A candidate gets an ``expires_at`` six
@@ -81,7 +86,7 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.kb.revisions import update_head_metadata
-from meho_backplane.kb.schemas import KB_SOURCE
+from meho_backplane.kb.schemas import KB_SOURCE, META_CREATED_BY_SUB
 from meho_backplane.lesson_header import header_expires_at
 from meho_backplane.lessons.metrics import LearningMetrics, compute_learning_metrics
 from meho_backplane.lessons.retrievals import (
@@ -93,6 +98,7 @@ from meho_backplane.lessons.retrievals import (
 )
 from meho_backplane.lessons.upkeep_report import (
     MergedEntry,
+    MergeForReview,
     RefreshedEntry,
     ReviewCandidate,
     UpkeepReport,
@@ -139,6 +145,7 @@ class _Changes:
         self.retired: dict[uuid.UUID, list[str]] = defaultdict(list)
         self.refreshed: dict[uuid.UUID, list[RefreshedEntry]] = defaultdict(list)
         self.for_review: dict[uuid.UUID, list[ReviewCandidate]] = defaultdict(list)
+        self.merge_for_review: dict[uuid.UUID, list[MergeForReview]] = defaultdict(list)
 
 
 class _Seen(BaseModel):
@@ -211,8 +218,25 @@ async def _read(stmt: Any) -> list[Any]:
         return list((await session.execute(stmt)).all())
 
 
-async def _plan_merges(plan: _Plan) -> None:
-    """Plan to mark every copy but one of each knowledge body ``replaced``."""
+def _may_merge(copy: _Seen, keeper: _Seen) -> bool:
+    """Return whether the job may mark *copy* replaced by *keeper*.
+
+    The job writes as the system login, so it follows the owner rule of a
+    writer: it retires an entry only for a kept entry that a reviewer
+    confirmed, or that has the same creator. Two entries with no creator
+    (written by MEHO itself) count as the same creator.
+    """
+    if _status(keeper.metadata) == "confirmed":
+        return True
+    return copy.metadata.get(META_CREATED_BY_SUB) == keeper.metadata.get(META_CREATED_BY_SUB)
+
+
+async def _plan_merges(plan: _Plan, changes: _Changes) -> None:
+    """Plan to mark every copy but one of each knowledge body ``replaced``.
+
+    A pair the job may not merge (:func:`_may_merge`) goes to the report
+    for a reviewer instead.
+    """
     rows = await _read(
         select(
             Document.id,
@@ -237,7 +261,15 @@ async def _plan_merges(plan: _Plan) -> None:
             _Seen(id=r.id, source_id=r.source_id, body=r.body, metadata=dict(r.doc_metadata or {}))
             for r in copies
         ]
-        plan.merges[copies[0].tenant_id].extend((copy, seen[0]) for copy in seen[1:])
+        keeper = seen[0]
+        tenant_id = copies[0].tenant_id
+        for copy in seen[1:]:
+            if _may_merge(copy, keeper):
+                plan.merges[tenant_id].append((copy, keeper))
+            else:
+                changes.merge_for_review[tenant_id].append(
+                    MergeForReview(slug=copy.source_id, same_as=keeper.source_id)
+                )
 
 
 async def _mark_replaced(session: AsyncSession, copy: _Seen, keeper: _Seen) -> bool:
@@ -429,7 +461,7 @@ async def run_upkeep(*, now: datetime | None = None) -> dict[uuid.UUID, UpkeepRe
     since = now - timedelta(seconds=get_settings().knowledge_upkeep_interval_seconds)
     plan = _Plan()
     changes = _Changes()
-    await _plan_merges(plan)
+    await _plan_merges(plan, changes)
     await _plan_retires(plan, now=now)
     await _plan_refreshes_and_list_candidates(plan, changes, since=since, now=now)
     async with get_sessionmaker()() as session:
@@ -440,7 +472,7 @@ async def run_upkeep(*, now: datetime | None = None) -> dict[uuid.UUID, UpkeepRe
         )
         await session.commit()
         tenant_ids = set((await session.scalars(select(Tenant.id))).all())
-    tenant_ids |= {*plan.merges, *plan.retires, *plan.refreshes}
+    tenant_ids |= {*plan.merges, *plan.retires, *plan.refreshes, *changes.merge_for_review}
     reports: dict[uuid.UUID, UpkeepReport] = {}
     failed: list[uuid.UUID] = []
     for tenant_id in sorted(tenant_ids):
@@ -479,11 +511,15 @@ def _report(
         retired_count=len(changes.retired[tenant_id]),
         refreshed_count=len(changes.refreshed[tenant_id]),
         for_review_count=len(changes.for_review[tenant_id]),
+        merge_for_review_count=len(changes.merge_for_review[tenant_id]),
         merged=changes.merged[tenant_id][:limit],
         retired=sorted(changes.retired[tenant_id])[:limit],
         refreshed=changes.refreshed[tenant_id][:limit],
         for_review=sorted(
             changes.for_review[tenant_id], key=lambda c: (-c.sessions, -c.targets, c.slug)
+        )[:limit],
+        merge_for_review=sorted(
+            changes.merge_for_review[tenant_id], key=lambda m: (m.same_as, m.slug)
         )[:limit],
         numbers=numbers,
     )
@@ -522,6 +558,7 @@ async def _write_total(reports: dict[uuid.UUID, UpkeepReport], duration_ms: floa
             "retired_count": sum(r.retired_count for r in reports.values()),
             "refreshed_count": sum(r.refreshed_count for r in reports.values()),
             "for_review_count": sum(r.for_review_count for r in reports.values()),
+            "merge_for_review_count": sum(r.merge_for_review_count for r in reports.values()),
         },
     )
 

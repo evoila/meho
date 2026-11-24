@@ -15,6 +15,8 @@ Rules:
 
 * The store key carries the caller's MEHO tenant id, and the store checks
   the caller, so a handle of another tenant or another person is a miss.
+* A hosted agent with a connector list reads only results stored under a
+  list inside its own. Any other result is a miss.
 * A miss (unknown, expired, another caller) fails with one clear message:
   a stored result lasts one hour by default, so the fix is to run the
   inventory read again.
@@ -57,6 +59,8 @@ from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     ResultRecordKindError,
     get_result_handle_store,
+    record_connector_scope,
+    result_profile_scope,
 )
 
 if TYPE_CHECKING:
@@ -150,11 +154,18 @@ def _validation_summary(exc: ValidationError) -> str:
 
 
 def _decode_envelope(
-    store: ResultHandleStore, raw: bytes, *, operator_sub: str, handle_id: UUID
+    store: ResultHandleStore,
+    raw: bytes,
+    *,
+    operator_sub: str,
+    handle_id: UUID,
+    mcp_profile: str | None,
 ) -> InventoryEnvelope:
     """Decode and check one stored record (sync, runs in a worker thread)."""
     try:
-        stored = store.decode_document(raw, operator_sub=operator_sub, handle_id=handle_id)
+        stored = store.decode_document(
+            raw, operator_sub=operator_sub, handle_id=handle_id, mcp_profile=mcp_profile
+        )
     except ResultRecordKindError:
         raise InventoryLoadError(
             f"handle {handle_id} holds rows, not one inventory. Pass the handle that "
@@ -236,16 +247,34 @@ async def load_inventories(
         raise InventoryLoadError(
             f"give at most {MAX_INVENTORY_HANDLES} inventories, handles and inline ones together"
         )
+    # Imported lazily: the operations package imports the connectors package.
+    from meho_backplane.operations._target_connector_limit import (
+        allowed_connectors_var,
+        stored_result_within_limit,
+    )
+
     resolved = store if store is not None else get_result_handle_store()
     ordered = list(dict.fromkeys(_parse_handle_id(raw) for raw in handle_ids))
+    allowed = allowed_connectors_var.get()
     envelopes: list[InventoryEnvelope] = []
     for handle_id in ordered:
         raw = await resolved.fetch_record(tenant_id=operator.tenant_id, handle_id=handle_id)
         if raw is None:
             raise _not_found(handle_id)
+        # A hosted agent with a connector list reads only results stored
+        # under a list inside its own; any other result is a miss.
+        if allowed is not None and not stored_result_within_limit(
+            await asyncio.to_thread(record_connector_scope, raw), allowed
+        ):
+            raise _not_found(handle_id)
         envelopes.append(
             await asyncio.to_thread(
-                _decode_envelope, resolved, raw, operator_sub=operator.sub, handle_id=handle_id
+                _decode_envelope,
+                resolved,
+                raw,
+                operator_sub=operator.sub,
+                handle_id=handle_id,
+                mcp_profile=result_profile_scope(operator.mcp_tool_profile),
             )
         )
     for number, document in enumerate(inventories, start=1):

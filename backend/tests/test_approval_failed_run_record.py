@@ -44,7 +44,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import dispatch, grant_approval, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -75,6 +75,21 @@ _REQUESTER = Operator(
     tenant_id=_TENANT_ID,
     tenant_role=TenantRole.OPERATOR,
 )
+
+
+@pytest.fixture(autouse=True)
+def _rest_may_approve_the_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests check how a failed run is recorded after a REST approve.
+
+    ``keycloak.user.create`` is a change of rights, which an admin approves
+    only in the web console (``test_approval_rights_change.py`` checks that).
+    Here it is taken off the change-of-rights list and the list of writes
+    with login facts, so the REST ``/decide`` route can approve it and run it.
+    """
+    monkeypatch.setattr(
+        grant_approval, "_RIGHTS_CHANGE_OPS", grant_approval._RIGHTS_CHANGE_OPS - {_OP_ID}
+    )
+    monkeypatch.delitem(grant_approval._GRANT_OPS, _OP_ID, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +130,7 @@ async def keycloak_target() -> AsyncIterator[Any]:
                 secret_ref="tenants/team-a/kc-admin",
                 auth_model="shared_service_account",
                 vpn_required=False,
-                extras={},
+                extras={"managed_realm": "example"},
                 fingerprint={"version": "26.0.5"},
                 notes="seeded by test_approval_failed_run_record",
             )
@@ -158,6 +173,7 @@ def _approve(request_id: uuid.UUID, *, users_status: int) -> tuple[dict[str, Any
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         with TestClient(app) as client:
@@ -323,6 +339,7 @@ def _approve_in_background(request_id: uuid.UUID, *, users_status: int) -> dict[
             fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.TENANT_ADMIN.value,
+            platform_admin=True,
             tenant_id=str(_TENANT_ID),
         )
         headers = {"Authorization": f"Bearer {token}"}

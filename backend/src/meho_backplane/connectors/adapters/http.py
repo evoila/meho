@@ -53,10 +53,9 @@ natively. The per-target TLS trust has three states, in precedence order:
    as an unconfigured client would).
 
 Each resolved TLS context is carried by the per-target pinning
-**transport** (:func:`build_pinned_async_transport`), not passed as a
+**transport** (:func:`build_port_pinned_async_transport`), not passed as a
 client ``verify=`` argument, because the client is handed an explicit
-``transport=`` that enforces destination pinning at the socket
-(evoila-bosnia/meho-internal#275): ``connect_tcp`` re-screens the host
+``transport=`` that enforces destination pinning at the socket: ``connect_tcp`` re-screens the host
 and dials only a guard-validated address from that same resolution, so a
 resolver change between the guard's screen and the socket connect cannot
 reach a blocked destination. Only the TCP target is rewritten — TLS SNI,
@@ -82,13 +81,17 @@ unpinned target's key is unchanged in its pin slot from the #1781 shape.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import os
 import ssl
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any, cast
 
+import anyio
 import httpx
 import structlog
+from httpx._decoders import SUPPORTED_DECODERS
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
@@ -98,7 +101,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
-from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
@@ -113,8 +116,7 @@ class SsrfBlockedError(httpx.ConnectError):
     """Dispatch refused: the target resolves to a non-public address.
 
     Connect-time arm of the target SSRF guard
-    (:mod:`meho_backplane.targets.ssrf_guard`,
-    evoila-bosnia/meho-internal#153): raised by
+    (:mod:`meho_backplane.targets.ssrf_guard`): raised by
     :meth:`HttpConnector._http_client` *before* any pooled client is
     built or request issued, when the stored ``host`` is — or now
     resolves to — a private / loopback / link-local (``169.254.0.0/16``
@@ -142,8 +144,7 @@ class ResponseTooLargeError(Exception):
     otherwise buffers every vendor response fully into memory, so a single
     oversized body — from a compromised/malicious appliance, a MITM on a
     ``verify_tls=false`` channel, or a pathologically large legitimate
-    listing — could exhaust the single-replica pod's heap and OOM-kill it
-    (evoila-bosnia/meho-internal#297).
+    listing — could exhaust the single-replica pod's heap and OOM-kill it.
 
     A plain :class:`Exception` (not an :class:`httpx.HTTPError`): it is a
     policy rejection, not a transport fault, so it flattens through the
@@ -259,7 +260,7 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
     return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
 
 
-def _pin_target_addresses(host: str) -> list[str] | None:
+def _pin_target_addresses(host: str, port: int | None = None) -> list[str] | None:
     """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
 
     Wraps :func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`
@@ -276,7 +277,7 @@ def _pin_target_addresses(host: str) -> list[str] | None:
     the pre-check's rejection is: the verdict is deterministic policy.
     """
     try:
-        return screen_dial_addresses(host)
+        return screen_dial_addresses(host, port)
     except TargetDestinationBlockedError as exc:
         raise SsrfBlockedError(str(exc)) from exc
 
@@ -343,7 +344,7 @@ def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
 #: parse (JSONFlux, dispatcher step 8) — while bounding a multi-GB transfer
 #: from a compromised/malicious appliance, a ``verify_tls=false`` MITM, or a
 #: pathological legitimate listing that would otherwise OOM the
-#: single-replica pod (evoila-bosnia/meho-internal#297). Mirrors the
+#: single-replica pod. Mirrors the
 #: streamed byte-cap idiom the spec-fetch (``openapi._MAX_SPEC_BYTES``) and
 #: event-ingest (``events_ingest._read_capped_body``) paths already enforce;
 #: this closes the same gap on the outbound-dispatch path.
@@ -394,11 +395,206 @@ def _reject_oversize_content_length(resp: httpx.Response) -> None:
     if length > _MAX_RESPONSE_BYTES:
         raise ResponseTooLargeError(
             f"vendor response Content-Length {length} exceeds the "
-            f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
+            f"{_MAX_RESPONSE_BYTES}-byte response-body cap on bytes on the wire"
         )
 
 
-async def _read_capped_json_response(
+def _body_over_cap_error(ceiling: str) -> ResponseTooLargeError:
+    return ResponseTooLargeError(
+        f"vendor response body exceeded the {_MAX_RESPONSE_BYTES}-byte "
+        f"response-body cap on {ceiling}"
+    )
+
+
+def _content_codings(resp: httpx.Response) -> list[str]:
+    """Return the ``Content-Encoding`` values of a response, without ``identity``."""
+    codings = (
+        value.strip().lower()
+        for value in resp.headers.get_list("content-encoding", split_commas=True)
+    )
+    return [coding for coding in codings if coding not in ("", "identity")]
+
+
+def _reject_stacked_content_codings(codings: list[str]) -> None:
+    """Refuse a response that names more than one content coding.
+
+    httpx decodes every layer of one wire chunk in a single step, before the
+    decoded-size check can run, so MEHO accepts at most one coding.
+    """
+    if len(codings) > 1:
+        raise ResponseTooLargeError(
+            f"vendor response names {len(codings)} content codings "
+            f"({', '.join(codings)}); MEHO accepts at most one"
+        )
+
+
+def _rebuilt_headers(resp: httpx.Response, codings: list[str], body_size: int) -> httpx.Headers:
+    """Copy the headers, without the encoding headers when the body was decoded.
+
+    Only a non-empty body under one coding that httpx knows was decoded. An
+    empty body (a HEAD answer) and a coding httpx does not know keep all
+    headers, so the caller still sees the ``Content-Encoding`` of the body.
+    """
+    headers = resp.headers.copy()
+    if body_size and len(codings) == 1 and codings[0] in SUPPORTED_DECODERS:
+        del headers["content-encoding"]
+        if "content-length" in headers:
+            del headers["content-length"]
+    return headers
+
+
+class _WireCappedStream(httpx.AsyncByteStream):
+    """Count the raw wire bytes of a response and stop past the cap.
+
+    It sits under :meth:`~httpx.Response.aiter_bytes`, so every raw chunk is
+    counted before httpx decodes it. A check in the decoded loop would miss
+    a chunk that decodes to no output (for example padding after the end of
+    a gzip stream), because ``aiter_bytes`` yields nothing for it.
+    """
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        total = 0
+        async for chunk in self._inner:
+            total += len(chunk)
+            if total > _MAX_RESPONSE_BYTES:
+                raise _body_over_cap_error("bytes on the wire")
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+#: Upper time limit, in seconds, that a stop waits for the close of an answer.
+_STOP_CLOSE_LIMIT_S = 5.0
+
+#: Strong references to read tasks that outlive a stop, so the event loop
+#: cannot collect one before its close ends.
+_stopped_reads: set[asyncio.Future[Any]] = set()
+
+
+def _stopped_read_done(task: asyncio.Future[Any]) -> None:
+    _stopped_reads.discard(task)
+    if not task.cancelled():
+        # The caller already got the stop; an error of the read has no reader.
+        task.exception()
+
+
+#: True inside a read that :func:`_run_stop_safe` already protects, so a
+#: nested call (the stream read calls the client's ``send``) adds no task.
+_inside_stop_safe: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_inside_stop_safe", default=False
+)
+
+
+#: Marks a read whose scope was stopped before the work returned.
+_NO_ANSWER: Any = object()
+
+
+async def _close_when_done(
+    task: asyncio.Future[Any], discard: Callable[[Any], Awaitable[None]]
+) -> None:
+    """Wait for a read the caller no longer waits for, then close its answer."""
+    await asyncio.wait({task})
+    if task.cancelled() or task.exception() is not None:
+        return
+    result = task.result()
+    if result is not _NO_ANSWER:
+        await discard(result)
+
+
+def _keep_until_done(task: asyncio.Future[Any]) -> None:
+    _stopped_reads.add(task)
+    task.add_done_callback(_stopped_read_done)
+
+
+async def _run_stop_safe[T](
+    work: Callable[[], Awaitable[T]],
+    *,
+    discard: Callable[[T], Awaitable[None]] | None = None,
+) -> T:
+    """Run *work* so that a stop cannot cut the close of an answer.
+
+    httpcore closes an answer or a connection inside ``AsyncShieldCancellation``.
+    That shield holds against anyio cancel scopes, but not against a plain
+    ``task.cancel()``. So *work* runs in its own task, inside an anyio cancel
+    scope. A stop on the caller cancels that scope, which respects httpcore's
+    shield, and the close runs to its end. Then the caller gets the stop
+    (``CancelledError``).
+
+    The work can also end with an answer just before the stop reaches the
+    caller. The caller then never gets that answer, so *discard* (when given)
+    closes it in its own task.
+    """
+    if _inside_stop_safe.get():
+        return await work()
+    scope = anyio.CancelScope()
+
+    async def _inside_scope() -> Any:
+        # The task runs in a copy of the caller's context, so this stays inside it.
+        _inside_stop_safe.set(True)
+        result: Any = _NO_ANSWER
+        with scope:
+            result = await work()
+        return result
+
+    task: asyncio.Future[Any] = asyncio.ensure_future(_inside_scope())
+    _keep_until_done(task)
+    try:
+        # Not asyncio.shield: it logs an error when the read fails after a stop.
+        await asyncio.wait({task})
+    except asyncio.CancelledError:
+        scope.cancel()
+        waited = task
+        if discard is not None:
+            # Started before any await, so a second stop cannot skip it.
+            waited = asyncio.ensure_future(_close_when_done(task, discard))
+            _keep_until_done(waited)
+        await asyncio.wait({waited}, timeout=_STOP_CLOSE_LIMIT_S)
+        raise
+    result = task.result()
+    if result is _NO_ANSWER:
+        raise RuntimeError("the read ended without an answer")
+    return cast("T", result)
+
+
+async def _next_chunk(chunks: AsyncIterator[bytes]) -> bytes | None:
+    """Return the next part of a body, or ``None`` at its end."""
+    try:
+        return await anext(chunks)
+    except StopAsyncIteration:
+        return None
+
+
+class _StopSafeCloseStream(httpx.AsyncByteStream):
+    """Read and close a streamed answer through :func:`_run_stop_safe`.
+
+    The caller of ``client.stream(...)`` reads and closes the answer in its
+    own task, after ``send`` returned. When a body read fails (for example
+    after a time limit), httpcore closes the connection inside that read. A
+    stop during either close would leave the connection open, so each read
+    and the close run in a protected task too.
+    """
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        chunks = aiter(self._inner)
+        while (chunk := await _run_stop_safe(lambda: _next_chunk(chunks))) is not None:
+            yield chunk
+
+    async def aclose(self) -> None:
+        await _run_stop_safe(self._inner.aclose)
+
+
+async def _close_answer(response: httpx.Response) -> None:
+    await response.aclose()
+
+
+async def _stream_capped_json_response(
     client: httpx.AsyncClient,
     method: str,
     path: str,
@@ -420,24 +616,34 @@ async def _read_capped_json_response(
     (:meth:`httpx.AsyncClient.stream` -> the pooled
     :class:`_SameOriginRedirectClient`'s ``send`` override, so the
     same-origin redirect and destination-pinning transport behaviour is
-    unchanged) and enforces a two-part cap: a ``Content-Length`` fast-reject
-    up front, then a running byte total across
-    :meth:`~httpx.Response.aiter_raw` chunks that aborts the moment the
-    body would exceed :data:`_MAX_RESPONSE_BYTES`. At most the cap (plus one
-    trailing chunk) is ever held in memory, and an over-cap body raises
-    :exc:`ResponseTooLargeError` before :func:`json_payload_or_empty` can
-    parse it.
+    unchanged). An over-cap body raises :exc:`ResponseTooLargeError` before
+    :func:`json_payload_or_empty` can parse it.
 
-    The cap iterates :meth:`~httpx.Response.aiter_raw` — the raw wire bytes,
-    still carrying whatever ``Content-Encoding`` the vendor applied — rather
-    than :meth:`~httpx.Response.aiter_bytes`, which yields already-decoded
-    bytes. Buffering the raw bytes keeps them consistent with the retained
-    ``Content-Encoding`` header, so the re-materialised response decodes
-    exactly once on first access (a plaintext body under a ``gzip`` header
-    would otherwise make httpx attempt a second decode and raise
-    :exc:`httpx.DecodingError`). The running total therefore counts
-    compressed transfer bytes, matching the ``Content-Length`` fast-reject
-    above, which measures that same compressed length.
+    The cap has two ceilings, both :data:`_MAX_RESPONSE_BYTES`. The first
+    bounds the compressed transfer: ``Content-Length`` and
+    :class:`_WireCappedStream` count the bytes on the wire. The stream
+    wrapper checks every raw chunk before it is decoded, also a chunk that
+    decodes to no output. The second bounds the decoded body: the loop iterates
+    :meth:`~httpx.Response.aiter_bytes`, which decodes ``Content-Encoding``
+    chunk by chunk, and stops as soon as the decoded total passes the cap.
+    So a small compressed body that expands a great deal (a compression
+    bomb) is refused too. The error message names the ceiling that was
+    passed.
+
+    httpx decodes one wire chunk in a single step. A wire chunk is at most
+    64 KiB (the read size of httpcore), and gzip or deflate expands it at
+    most about 1032 times, so one chunk of one coding decodes to at most
+    about 64 MiB. Memory is bounded by the cap plus that one chunk. A
+    response that names more than one coding is refused before its body is
+    read, because httpx would decode all layers of a chunk in that one
+    step. MEHO accepts at most one coding.
+
+    Because the kept bytes are already decoded, the rebuilt response drops
+    the ``Content-Encoding`` and ``Content-Length`` headers when the body
+    was really decoded. An empty body (a HEAD answer) and a coding that
+    httpx does not know keep all headers, so callers can still read
+    ``Content-Encoding`` there. Otherwise httpx would decode the plain bytes
+    a second time and raise :exc:`httpx.DecodingError`.
 
     An under-cap body is joined and re-materialised into a fully-read
     :class:`httpx.Response` carrying the original status, headers, request,
@@ -458,25 +664,64 @@ async def _read_capped_json_response(
     ) as resp:
         # A HEAD answer has no body: its Content-Length is the size of the
         # resource (for example a large file), not of anything read here.
+        codings = _content_codings(resp)
         if method.upper() != "HEAD":
             _reject_oversize_content_length(resp)
+            _reject_stacked_content_codings(codings)
+        if not isinstance(resp.stream, httpx.AsyncByteStream):
+            raise RuntimeError("an async client returned a sync response stream")
+        resp.stream = _WireCappedStream(resp.stream)
         chunks: list[bytes] = []
         total = 0
-        async for chunk in resp.aiter_raw():
+        async for chunk in resp.aiter_bytes():
             total += len(chunk)
             if total > _MAX_RESPONSE_BYTES:
-                raise ResponseTooLargeError(
-                    f"vendor response body exceeded the "
-                    f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
-                )
+                raise _body_over_cap_error("decoded bytes")
             chunks.append(chunk)
         return httpx.Response(
             status_code=resp.status_code,
-            headers=resp.headers,
+            headers=_rebuilt_headers(resp, codings, total),
             content=b"".join(chunks),
             request=resp.request,
             extensions=resp.extensions,
         )
+
+
+async def _read_capped_json_response(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    extensions: dict[str, Any] | None = None,
+    timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    content: bytes | None = None,
+) -> httpx.Response:
+    """Issue the request with a streamed, byte-capped read (see the worker).
+
+    The worker runs through :func:`_run_stop_safe`, so a stop that comes while
+    an answer closes leaves no connection open and no pool slot taken. The
+    client's ``send`` has the same protection, but the stream is read and
+    closed after ``send`` returns, so this read needs its own. The caller
+    still gets the stop.
+    """
+    return await _run_stop_safe(
+        lambda: _stream_capped_json_response(
+            client,
+            method,
+            path,
+            params=params,
+            json=json,
+            data=data,
+            headers=headers,
+            extensions=extensions,
+            timeout=timeout,
+            content=content,
+        )
+    )
 
 
 # Hard cap on the same-origin redirect chain followed by
@@ -564,7 +809,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     auth headers (NSX's ``X-XSRF-TOKEN``) nor — on a method-preserving
     ``307``/``308`` — the credential request body, so the login secret and
     session token leak to the redirect target (open-redirect SSRF /
-    auth-token forwarding, evoila/meho-internal#101 row L11).
+    auth-token forwarding).
 
     This client is built with ``follow_redirects=False`` and re-implements
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
@@ -583,6 +828,21 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         stream: bool = False,
         auth: Any = httpx.USE_CLIENT_DEFAULT,
         follow_redirects: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        # Every request of the pooled client passes here, also a direct
+        # ``client.request(...)``: a stop cannot cut the close of an answer
+        # (after a time limit, or of a 3xx before the next hop).
+        # A streamed answer is closed later by the caller; that close is
+        # protected too.
+        response = await _run_stop_safe(
+            lambda: self._send_same_origin(request, stream, auth), discard=_close_answer
+        )
+        if stream and isinstance(response.stream, httpx.AsyncByteStream):
+            response.stream = _StopSafeCloseStream(response.stream)
+        return response
+
+    async def _send_same_origin(
+        self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:
         # Always issue the underlying request without httpx's own redirect
         # following; this class owns the redirect decision so the
@@ -734,7 +994,7 @@ class HttpConnector(Connector):
            (evoila/meho#209) stays byte-identical to a connector with no
            TLS config at all.
         """
-        # SSRF guard (evoila-bosnia/meho-internal#153): re-screen the
+        # SSRF guard: re-screen the
         # *resolved* destination on every acquisition, before the pooled
         # client is built or served. The create/update schema validators
         # already rejected a non-public literal, but the stored value can
@@ -747,7 +1007,7 @@ class HttpConnector(Connector):
         # lookup so a previously-pooled client for a now-rebinding
         # hostname is refused too.
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
@@ -807,7 +1067,7 @@ class HttpConnector(Connector):
             )
             verify_arg = _insecure_ssl_context()
         # Pin the connection to a guard-validated address at the
-        # socket boundary (evoila-bosnia/meho-internal#275). The
+        # socket boundary. The
         # ``_http_client`` pre-check above screens the stored name
         # on every acquisition; this transport re-screens inside
         # ``connect_tcp`` and dials only an address from that same
@@ -819,7 +1079,8 @@ class HttpConnector(Connector):
         # blocked answer surfaces as ``SsrfBlockedError`` via
         # ``_pin_target_addresses``, reaching the dispatcher's
         # ``ConnectError`` arm and staying out of the retry policy.
-        transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
+        # The screen gets the port the socket dials.
+        transport = build_port_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
         client_class = self._client_class or _SameOriginRedirectClient
         return client_class(
             base_url=self._base_url(target),
@@ -835,7 +1096,7 @@ class HttpConnector(Connector):
             # ``follow_redirects=True`` would replay the request off
             # origin and forward NSX's ``X-XSRF-TOKEN`` and the
             # login body to an attacker-controlled ``Location``
-            # (open-redirect SSRF, evoila/meho-internal#101 row L11).
+            # (open-redirect SSRF).
             transport=transport,
         )
 
@@ -846,7 +1107,7 @@ class HttpConnector(Connector):
         must not share the pooled client's cookie jar (evoila/meho#3890).
         """
         try:
-            await assert_public_destination_async(str(target.host))
+            await assert_public_destination_async(str(target.host), self._dial_port(target))
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         return self._build_http_client(target)
@@ -871,6 +1132,19 @@ class HttpConnector(Connector):
         """
         del target, operator
         return path
+
+    def _dial_port(self, target: Target) -> int | None:
+        """The port the client dials for *target*, or ``None`` when it cannot tell.
+
+        Read from the connector's own :meth:`_base_url`, so a connector with
+        another default scheme (or port) is checked on the port it dials.
+        A base URL that cannot be built gives ``None``; the guard then
+        screens the host as before and the usual error comes later.
+        """
+        try:
+            return _effective_port(httpx.URL(self._base_url(target)))
+        except (KeyError, ValueError, httpx.InvalidURL):
+            return None
 
     def _base_url(self, target: Target) -> str:
         scheme = _effective_scheme(target)

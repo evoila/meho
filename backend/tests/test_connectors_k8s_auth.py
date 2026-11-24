@@ -45,7 +45,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors._shared import credential_backend as cb
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -116,10 +116,10 @@ _TARGET_A = _StubTarget(
     secret_ref="k8s/rke2-meho",
 )
 _TARGET_B = _StubTarget(
-    name="rke2-infra",
-    host="rke2-infra.test.invalid",
+    name="example-rke2",
+    host="example-rke2.test.invalid",
     port=None,
-    secret_ref="k8s/rke2-infra",
+    secret_ref="k8s/example-rke2",
 )
 
 
@@ -765,8 +765,8 @@ async def test_api_client_same_secret_ref_different_tenants_get_distinct_clients
     assert c_a is not c_b
     assert factory.call_count == 2
     assert set(connector._api_clients.keys()) == {
-        target_cache_key(tenant_a),
-        target_cache_key(tenant_b),
+        target_secret_cache_key(tenant_a),
+        target_secret_cache_key(tenant_b),
     }
 
 
@@ -830,8 +830,8 @@ async def test_ws_client_same_secret_ref_different_tenants_get_distinct_clients(
     assert c_a is not c_b
     assert len(built) == 2
     assert set(connector._ws_api_clients.keys()) == {
-        target_cache_key(tenant_a),
-        target_cache_key(tenant_b),
+        target_secret_cache_key(tenant_a),
+        target_secret_cache_key(tenant_b),
     }
 
 
@@ -1105,7 +1105,7 @@ def test_fingerprint_with_route_operator_forwards_to_kubeconfig_loader() -> None
     to the injected ``KubeconfigLoader`` verbatim — back-to-back with a
     dispatch-style call, both legs see the same identity.
 
-    The v0.8.0 dogfood cycle (#1302 + ``claude-rdc-hetzner-dc#771``)
+    The v0.8.0 dogfood cycle (#1302 + a consumer repository)
     surfaced ``vault OIDC malformed jwt: must have three parts`` on
     probe for K8s targets while dispatch worked. The bug: probe
     hard-coded the synthesised system operator (placeholder JWT) on

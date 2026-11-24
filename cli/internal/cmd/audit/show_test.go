@@ -61,10 +61,10 @@ func TestRunShowHappyPath(t *testing.T) {
 		}
 		tname := "vcenter-lab"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.AuditEntry{
+		_ = json.NewEncoder(w).Encode(api.AuditEntryDetail{
 			Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 			Ts:           mustTS(t, "2026-05-13T15:42:11Z"),
-			PrincipalSub: "damir",
+			PrincipalSub: "operator-a",
 			TargetName:   &tname,
 			Method:       "GET",
 			Path:         "/api/v1/vsphere/vm/list",
@@ -90,7 +90,7 @@ func TestRunShowHappyPath(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"id:", "11111111-1111-1111-1111-111111111111",
-		"principal_sub:", "damir",
+		"principal_sub:", "operator-a",
 		"target_name:", "vcenter-lab",
 		"op_id:", "vsphere.vm.list",
 		"op_class:", "read",
@@ -171,7 +171,7 @@ func TestRunShowJSONVerbatim(t *testing.T) {
 		// Hand-encode so the integer isn't normalised through
 		// json.Marshal's float path.
 		_, _ = w.Write([]byte(`{"id":"11111111-1111-1111-1111-111111111111",` +
-			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"damir",` +
+			`"ts":"2026-05-13T15:42:11Z","tenant_id":null,"principal_sub":"operator-a",` +
 			`"principal_name":null,"target_id":null,"target_name":null,` +
 			`"method":"GET","path":"/x","status_code":200,"request_id":null,` +
 			`"duration_ms":null,"payload":{"hit_count":9007199254740993},` +
@@ -202,10 +202,10 @@ func TestRunShowJSONVerbatim(t *testing.T) {
 // with different optional-field populations.
 func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 	var buf bytes.Buffer
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		Method:       "GET",
 		Path:         "/x",
 		StatusCode:   200,
@@ -229,6 +229,46 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 		"agent_session_id:  -",
 		"broadcast_event_id: -",
 		"payload:           -",
+		"policy_decision:   -",
+		"policy_rule:       -",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "policy_version:") {
+		t.Errorf("summary shows policy_version with no version: %s", out)
+	}
+}
+
+// TestPrintEntrySummaryShowsPolicyRule — the summary names the policy
+// rule that matched the call, and the policy version when there is one
+// (#6044).
+func TestPrintEntrySummaryShowsPolicyRule(t *testing.T) {
+	var buf bytes.Buffer
+	decision := "needs-approval"
+	rule := "default:person.token (shadow)"
+	version := 3
+	printEntrySummary(&buf, &api.AuditEntryDetail{
+		Id:             mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:             mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub:   "alice",
+		Method:         "DISPATCH",
+		Path:           "x.y",
+		StatusCode:     200,
+		OpId:           "x.y",
+		OpClass:        "write",
+		ResultStatus:   "ok",
+		Payload:        map[string]any{},
+		PolicyDecision: &decision,
+		PolicyRule:     &rule,
+		PolicyVersion:  &version,
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"policy_decision:   needs-approval",
+		"policy_rule:       default:person.token (shadow)",
+		"policy_version:    3",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q in %s", want, out)
@@ -241,10 +281,10 @@ func TestPrintEntrySummaryShowsDashForNullFields(t *testing.T) {
 func TestPrintEntrySummaryShowsActor(t *testing.T) {
 	actor, name := "agent:reader", "reader"
 	var buf bytes.Buffer
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-		PrincipalSub: "damir",
+		PrincipalSub: "operator-a",
 		ActorSub:     &actor,
 		ActorName:    &name,
 		OpId:         "x.y",
@@ -256,6 +296,33 @@ func TestPrintEntrySummaryShowsActor(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q in %s", want, out)
 		}
+	}
+}
+
+// TestPrintEntrySummaryShowsStoredSession — the summary names the stored
+// agent session of the row and how to read it, and prints no
+// "stored_session:" line for a row without one (#4904).
+func TestPrintEntrySummaryShowsStoredSession(t *testing.T) {
+	stored := "claude-session-1"
+	entry := api.AuditEntryDetail{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+		PrincipalSub: "operator-a",
+		OpId:         "x.y",
+		ResultStatus: "ok",
+		Payload:      map[string]any{},
+	}
+	var without bytes.Buffer
+	printEntrySummary(&without, &entry)
+	if strings.Contains(without.String(), "stored_session:") {
+		t.Errorf("summary shows stored_session with none stored: %s", without.String())
+	}
+	entry.StoredSessionId = &stored
+	var with bytes.Buffer
+	printEntrySummary(&with, &entry)
+	want := "stored_session:    claude-session-1 (meho sessions show claude-session-1)"
+	if !strings.Contains(with.String(), want) {
+		t.Errorf("summary missing %q in %s", want, with.String())
 	}
 }
 
@@ -289,10 +356,10 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printEntrySummary(&buf, &api.AuditEntry{
+			printEntrySummary(&buf, &api.AuditEntryDetail{
 				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
-				PrincipalSub: "damir",
+				PrincipalSub: "operator-a",
 				OpId:         "x.y",
 				ResultStatus: "ok",
 				Payload:      tc.payload,
@@ -315,16 +382,16 @@ func TestPrintEntrySummaryShowsVia(t *testing.T) {
 // lowercase-hyphenated strings; optional strings render verbatim.
 func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	var buf bytes.Buffer
-	pname := "Damir"
+	pname := "Operator A"
 	tname := "vcenter-lab"
 	tenantName := "team-a"
 	dur := "12.3"
-	printEntrySummary(&buf, &api.AuditEntry{
+	printEntrySummary(&buf, &api.AuditEntryDetail{
 		Id:               mustUUID(t, "11111111-1111-1111-1111-111111111111"),
 		Ts:               mustTS(t, "2026-05-13T00:00:00Z"),
 		TenantId:         mustUUIDPtr(t, "22222222-2222-2222-2222-222222222222"),
 		TenantName:       &tenantName,
-		PrincipalSub:     "damir",
+		PrincipalSub:     "operator-a",
 		PrincipalName:    &pname,
 		TargetId:         mustUUIDPtr(t, "33333333-3333-3333-3333-333333333333"),
 		TargetName:       &tname,
@@ -345,7 +412,7 @@ func TestPrintEntrySummaryRendersUUIDsAndOptionals(t *testing.T) {
 	for _, want := range []string{
 		"tenant_id:         22222222-2222-2222-2222-222222222222",
 		"tenant_name:       team-a",
-		"principal_name:    Damir",
+		"principal_name:    Operator A",
 		"target_id:         33333333-3333-3333-3333-333333333333",
 		"target_name:       vcenter-lab",
 		"request_id:        44444444-4444-4444-4444-444444444444",
@@ -401,5 +468,36 @@ func TestFormatPayloadScalarJSONNumberRendersExact(t *testing.T) {
 	n := json.Number("9007199254740993")
 	if got := formatPayloadScalar(n); got != "9007199254740993" {
 		t.Errorf("json.Number precision lost; got %q", got)
+	}
+}
+
+// TestPrintEntrySummaryShowsSecretReadAs — the summary names the login a
+// secret store accepted, and prints no line when the field is empty.
+func TestPrintEntrySummaryShowsSecretReadAs(t *testing.T) {
+	login := "approver-sub"
+	for _, tc := range []struct {
+		name  string
+		login *string
+		want  bool
+	}{{"set", &login, true}, {"missing", nil, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printEntrySummary(&buf, &api.AuditEntryDetail{
+				Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+				Ts:           mustTS(t, "2026-05-13T00:00:00Z"),
+				PrincipalSub: "operator-a",
+				SecretReadAs: tc.login,
+				OpId:         "x.y",
+				ResultStatus: "ok",
+				Payload:      map[string]any{},
+			})
+			got := strings.Contains(buf.String(), "secret_read_as:")
+			if got != tc.want {
+				t.Errorf("secret_read_as line present = %v, want %v in %s", got, tc.want, buf.String())
+			}
+			if tc.want && !strings.Contains(buf.String(), "approver-sub") {
+				t.Errorf("login missing in %s", buf.String())
+			}
+		})
 	}
 }

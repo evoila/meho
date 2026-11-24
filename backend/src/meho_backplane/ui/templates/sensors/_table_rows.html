@@ -23,6 +23,8 @@
   The ``Target`` column shows the target's detected product and version. A
   warning under the operation says when the connector does not fit them.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {%- set ago = (now_utc - ts).total_seconds() | int -%}
   {%- if ago < 60 -%}just now
@@ -39,12 +41,12 @@
         <td class="font-medium">
           {{ row.name }}
           {% if row.status != "active" %}
-            <span class="badge badge-outline badge-sm ml-1">{{ row.status }}</span>
+            {{ badge(row.status, variant="outline", class="ml-1") }}
           {% endif %}
         </td>
         <td class="text-xs">
           <span class="font-mono">{{ row.connector_id }}</span>
-          <span class="opacity-60">/ {{ row.op_id }}</span>
+          <span class="text-subtle">/ {{ row.op_id }}</span>
           {% if row.fit_warning %}
             <div class="text-warning mt-1" role="alert" data-fit-warning>{{ row.fit_warning }}</div>
           {% endif %}
@@ -53,10 +55,10 @@
           {% if row.target_name %}
             <span class="font-mono">{{ row.target_name }}</span>
             {% if row.target_label %}
-              <span class="opacity-60">/ {{ row.target_label }}</span>
+              <span class="text-subtle">/ {{ row.target_label }}</span>
             {% endif %}
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">{{ row.cadence_label }}</td>
@@ -67,28 +69,28 @@
           {% if row.last_value is not none %}
             <span class="font-mono">{{ row.last_value }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.last_evaluated_at %}
             <span class="text-xs" title="{{ row.last_evaluated_at.isoformat() }}">{{ _rel(row.last_evaluated_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.state_since %}
             <span class="text-xs" title="{{ row.state_since.isoformat() }}">{{ _rel(row.state_since) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
       </tr>
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="8" class="text-center text-sm opacity-60 py-6">
+      <td colspan="8" class="text-center text-sm text-subtle py-6">
         No sensors match. Register one via
         <code>meho sensor create &lt;name&gt;</code>.
       </td>

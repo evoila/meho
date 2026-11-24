@@ -277,13 +277,20 @@ async def find_similar_entries(
 async def _search(
     tenant_id: uuid.UUID, query: str, metadata_filters: dict[str, Any] | None
 ) -> list[RetrievalHit]:
-    """Rank the kb passages of the tenant and of the shared scope against *query*."""
+    """Rank the kb passages of the tenant and of the shared scope against *query*.
+
+    The word search always needs every word (``any_word=False``), also with
+    ``KB_SEARCH_PLAIN_SENTENCES`` on: *query* is the whole new entry, and
+    extra word hits could push an entry that is close in meaning out of the
+    candidates.
+    """
     own = await retrieve(
         tenant_id=tenant_id,
         query=query,
         source=KB_SOURCE,
         limit=CANDIDATE_LIMIT,
         metadata_filters=metadata_filters,
+        any_word=False,
     )
     return await add_shared_hits(
         own,
@@ -292,6 +299,7 @@ async def _search(
         kind=None,
         limit=CANDIDATE_LIMIT,
         metadata_filters=metadata_filters,
+        any_word=False,
     )
 
 

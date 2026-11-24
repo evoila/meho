@@ -2,7 +2,8 @@
 
 **Status:** decided — product owner, 2026-10-19
 **Self-approval for MEHO-SA-Operators:** shipped in 0.44.0. See [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md).
-**Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md) (proposed, waits for the owner's confirmation). It replaces rule 1 "One group per person": a login keeps exactly one base level (read-only, operator or admin), and may have any number of custom roles on top. The rest of this record stays.
+**Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md). It replaces rule 1 "One group per person": a login keeps exactly one base level (read-only, operator or admin), and may have any number of custom roles on top. The rest of this record stays.
+**Changed by:** [the four default roles](2026-11-18-four-default-roles.md) (not built yet). New installs will get three role groups (Readers, Operators, Admins) and the platform admin group. MEHO will read MEHO-SA-Operators as Operators and MEHO-Approvers as Readers.
 **Issue:** [#4590](https://github.com/evoila/meho/issues/4590)
 **Initiative:** [#3959](https://github.com/evoila/meho/issues/3959) — people log in with their company account, and their group decides their tenant and role
 **Used by:** `meho admin keycloak bootstrap-clients`, the built-in Keycloak setup ([#4040](https://github.com/evoila/meho/issues/4040)), the company login recipes under #3959 ([`docs-site/install/login/`](../../docs-site/install/login/index.md))
@@ -23,8 +24,8 @@ person's group in Keycloak.
 | --- | --- | --- | --- |
 | `MEHO-Readers` | `read_only` | – | Read only. |
 | `MEHO-Operators` | `operator` | – | Run actions. Risky changes wait until a second person approves. |
-| `MEHO-SA-Operators` | `operator` | – | Same as Operators for now. "SA" means self-approval. That rule comes later with [#3325](https://github.com/evoila/meho/issues/3325). |
-| `MEHO-Admins` | `tenant_admin` | – | Manage the tenant. |
+| `MEHO-SA-Operators` | `operator` | – | Same rights as Operators, and they may approve their own changes. "SA" means self-approval. Shipped in 0.44.0, see [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md). |
+| `MEHO-Admins` | `tenant_admin` | – | Manage the tenant. They may approve their own changes too. |
 | `MEHO-Approvers` | `read_only` | `approver` = `true` | Approve other people's changes. Cannot run actions. |
 
 Every group also carries `tenant_id`: the UUID of the tenant. For now
@@ -48,7 +49,7 @@ each site has one tenant, so all five groups carry the same
    no `tenant_id`. MEHO refuses the login with
    `401 missing_tenant_claim`.
 3. **Stock mapper only.** The human login clients (`meho-cli`,
-   `meho-mcp`, and later `meho-web`) each have three User Attribute
+   `meho-mcp`, `meho-mcp-code`, `meho-mcp-desktop`, and later `meho-web`) each have three User Attribute
    mappers: `tenant_id`, `tenant_role` and `approver`. No scripts. No
    fixed values on a client that many people share.
 4. **Nobody sets these values on a person.** The mapper looks at the

@@ -60,6 +60,11 @@ from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_stric
 from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
     ENSURE_PASSKEY_CODE_SKIP_OP_ID,
 )
+from meho_backplane.connectors.keycloak.ops_authflow_rights import (
+    names_missing_rights,
+    register_rights_check,
+)
+from meho_backplane.connectors.keycloak.ops_write_current_state import with_current_binding
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
@@ -68,8 +73,8 @@ from meho_backplane.connectors.keycloak.ops_write_merge import (
     unrequested_changes,
 )
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -95,6 +100,8 @@ _CONDITION_CONFIG = {"credentials": _PASSKEY_CREDENTIAL, "included": "false"}
 _CONDITION_CONFIG_ALIAS = f"{PASSKEY_FLOW_ALIAS} - skip code after passkey"
 #: Keycloak joins several credential types in one config value with ``##``.
 _CONFIG_DELIMITER = "##"
+#: The realm-management role the run needs: it copies a flow and changes the realm.
+_ROLES = ("manage-realm",)
 #: A flow step row and its settings (``None`` when it has none).
 _Step = tuple[dict[str, Any], dict[str, Any] | None]
 
@@ -183,9 +190,7 @@ async def _read_steps(
     realm: str,
     alias: str,
 ) -> list[dict[str, Any]]:
-    path = fill_path(
-        _AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": quote_segment(alias)}
-    )
+    path = fill_path(_AUTH_FLOW_EXECUTIONS_PATH, {"realm": realm, "flowAlias": alias})
     return _rows(await get_admin_list_strict(connector, target, path, operator=operator))
 
 
@@ -200,7 +205,7 @@ async def _read_config(
     config_id = row.get("authenticationConfig")
     if not isinstance(config_id, str) or not config_id:
         return None
-    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": quote_segment(config_id)})
+    path = fill_path(_AUTH_CONFIG_PATH, {"realm": realm, "id": config_id})
     body = await connector._get_admin_json(target, path, operator=operator)
     config = body.get("config")
     return config if isinstance(config, dict) else {}
@@ -324,7 +329,7 @@ async def _finish_copy(
     if step_added:
         path = fill_path(
             _AUTH_FLOW_ADD_STEP_PATH,
-            {"realm": realm, "flowAlias": quote_segment(_name(rows[sub]))},
+            {"realm": realm, "flowAlias": _name(rows[sub])},
         )
         await connector._write_admin(
             target,
@@ -367,7 +372,7 @@ async def _set_up_condition(
     if row.get("requirement") != "REQUIRED":
         path = fill_path(
             _AUTH_FLOW_EXECUTIONS_PATH,
-            {"realm": realm, "flowAlias": quote_segment(PASSKEY_FLOW_ALIAS)},
+            {"realm": realm, "flowAlias": PASSKEY_FLOW_ALIAS},
         )
         await connector._write_admin(
             target,
@@ -380,7 +385,7 @@ async def _set_up_condition(
     if not has_config:
         path = fill_path(
             _AUTH_EXECUTION_CONFIG_PATH,
-            {"realm": realm, "executionId": quote_segment(str(row["id"]))},
+            {"realm": realm, "executionId": str(row["id"])},
         )
         await connector._write_admin(
             target,
@@ -407,7 +412,7 @@ async def _move_after_user_configured(
     wanted = names.index(_USER_CONFIGURED) + 1
     path = fill_path(
         _AUTH_EXECUTION_RAISE_PRIORITY_PATH,
-        {"realm": realm, "executionId": quote_segment(str(rows[children[position]]["id"]))},
+        {"realm": realm, "executionId": str(rows[children[position]]["id"])},
     )
     for _ in range(position - wanted):
         await connector._write_admin(
@@ -524,6 +529,7 @@ async def _bind(
     return unrequested_changes(before, after, requested)
 
 
+@names_missing_rights(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES)
 async def keycloak_authflow_ensure_passkey_code_skip(
     self: KeycloakConnector,
     operator: Operator,
@@ -533,13 +539,12 @@ async def keycloak_authflow_ensure_passkey_code_skip(
     """Give the realm's browser flow the step that skips the code after a passkey."""
     del params  # the op takes no params; the schema refuses any
     realm = resolve_realm_config(target).managed_realm
-    segment = quote_segment(realm)
-    realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": segment})
+    realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     before = await self._get_admin_json(target, realm_path, operator=operator)
     bound = before.get("browserFlow")
     if not isinstance(bound, str) or not bound:
         raise KeycloakUnexpectedResponseError("the realm has no browserFlow")
-    rows = await _read_steps(self, operator, target, segment, bound)
+    rows = await _read_steps(self, operator, target, realm, bound)
     sub = _code_subflow(rows)
     answer: dict[str, Any] = {
         "realm": realm,
@@ -551,9 +556,9 @@ async def keycloak_authflow_ensure_passkey_code_skip(
         "binding_changed": False,
         "unrequested_changes": [],
     }
-    if sub is not None and await _step_is_there(self, operator, target, segment, rows, sub):
+    if sub is not None and await _step_is_there(self, operator, target, realm, rows, sub):
         return {**answer, "flow_steps": _listed(rows)}
-    flows = await _top_level_flows(self, operator, target, segment)
+    flows = await _top_level_flows(self, operator, target, realm)
     built_in = any(flow.get("alias") == bound and flow.get("builtIn") is True for flow in flows)
     if bound != BUILT_IN_BROWSER_FLOW or not built_in:
         raise KeycloakPasskeyFlowError(
@@ -576,9 +581,7 @@ async def keycloak_authflow_ensure_passkey_code_skip(
         )
     copied = not any(flow.get("alias") == PASSKEY_FLOW_ALIAS for flow in flows)
     if copied:
-        path = fill_path(
-            _AUTH_FLOW_COPY_PATH, {"realm": segment, "flowAlias": quote_segment(bound)}
-        )
+        path = fill_path(_AUTH_FLOW_COPY_PATH, {"realm": realm, "flowAlias": bound})
         await self._write_admin(
             target,
             "POST",
@@ -587,7 +590,7 @@ async def keycloak_authflow_ensure_passkey_code_skip(
             json={"newName": PASSKEY_FLOW_ALIAS},
             idempotent_conflict=False,
         )
-    copy_rows, step_added = await _finish_copy(self, operator, target, segment, rows)
+    copy_rows, step_added = await _finish_copy(self, operator, target, realm, rows)
     unrequested = await _bind(self, operator, target, realm_path, bound)
     return {
         **answer,
@@ -624,4 +627,6 @@ async def _passkey_code_skip_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
 
 
-register_preview_builder(ENSURE_PASSKEY_CODE_SKIP_OP_ID, _passkey_code_skip_preview)
+register_rights_check(
+    ENSURE_PASSKEY_CODE_SKIP_OP_ID, _ROLES, with_current_binding()(_passkey_code_skip_preview)
+)

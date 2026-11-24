@@ -17,6 +17,9 @@ Route inventory
   tenant. Optional ``?status=`` filter (default ``pending``) and
   ``?order=oldest|newest`` sort (default ``newest``). Access:
   approvals-plane (see below).
+* ``GET /api/v1/approvals/{request_id}/script?page=N`` — one page (64 KiB) of
+  the script of a waiting ``linux.script.run`` request. Access:
+  approvals-plane, same as ``GET /{request_id}``.
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
   Body: :class:`ApproveRequestBody` (``params`` dict + optional
@@ -42,10 +45,11 @@ Every route above (plus ``/{id}`` show and ``/{id}/decide``) is gated by
 principal that is **either** ``operator``-or-higher on the linear tenant
 role lattice (``operator`` and ``tenant_admin`` retain access unchanged)
 **or** carries the orthogonal ``approver`` capability
-(``Operator.approver``). This decouples the *decide* right from the
-*dispatch* right: a dedicated approver provisioned as ``read_only`` role +
-``approver=true`` can clear a four-eyes gate here yet is denied
-``POST /api/v1/operations/call`` (still ``operator``-gated). The
+(``Operator.approver``). This keeps the *decide* right apart from the
+*dispatch* right: a principal with the flag may decide here but is denied
+``POST /api/v1/operations/call`` unless its role is ``operator`` or higher.
+MEHO does not set the flag from a token claim, and no role gives it today,
+so no ``read_only`` approver can be set up yet. The
 ``sub``-keyed self-approval refusal (#1401) is unchanged — an approver
 still cannot approve a request it parked. The principal-scoped
 ``GET /{id}/result`` read (#3209) is deliberately **not** on this gate: it
@@ -90,20 +94,28 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from meho_backplane.auth.agent_admission import is_agent_caller
 from meho_backplane.auth.approval_sign_in import (
     ApprovalAuth,
     check_fresh_approval_sign_in,
     fresh_sign_in_required,
 )
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.auth.rbac import (
     require_approvals_access,
     require_fresh_approval_sign_in,
     require_human_principal,
 )
+from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations._preview import (
+    proposed_effect_for_agent,
+    without_internal_effect_keys,
+    without_person_only_effect_keys,
+)
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
@@ -149,6 +161,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     get_decision_delegation,
     get_request,
+    is_self_approval,
     read_approval_result,
     record_approval_step_event,
     reject_request,
@@ -163,11 +176,24 @@ from meho_backplane.operations.approval_rerun import (
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
+from meho_backplane.operations.approval_script import (
+    ApprovalScriptGoneError,
+    ApprovalScriptMissingError,
+    ApprovalScriptUnreadableError,
+    read_script_page,
+)
 from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write_reveal
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.people_behind import entries_of, people_behind_line
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
+from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
+from meho_backplane.work_ref import (
+    WORK_REF_FILTER_DESCRIPTION,
+    WorkRefFilter,
+    work_ref_filter_values,
+)
 
 __all__ = ["router"]
 
@@ -186,7 +212,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 #: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
 _require_approvals_access = Depends(require_approvals_access)
 
-#: Human-only governance gate (meho-internal#289). Rejects a non-human
+#: Human-only governance gate. Rejects a non-human
 #: ``principal_kind`` (agent / service / runner) before the endpoint runs —
 #: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
 #: approval **decision** verbs (approve / reject / decide) are human-only on
@@ -294,6 +320,11 @@ class ApprovalResumeOutcomeView(BaseModel):
     #: do not run it again, check the target first. ``None`` for any other
     #: run. Additive.
     execution_outcome: str | None = None
+    #: Exit code of a finished command or script (for example
+    #: ``linux.script.run``). ``result_status`` can be ``ok`` (MEHO ran it)
+    #: while this is not 0 (the script failed). ``None`` when the result has
+    #: no exit code. Additive.
+    exit_code: int | None = None
 
 
 class OutcomeUnknownView(BaseModel):
@@ -343,6 +374,49 @@ class OutcomeCheckRequestBody(BaseModel):
     )
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class PersonBehindView(BaseModel):
+    """One person behind the agent, service or runner login that asked."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sub: str
+    #: The person's name from MEHO's records, or ``None`` when MEHO has none.
+    name: str | None = None
+    #: Why the person counts, as a code: ``registered``, ``owns``,
+    #: ``agent_definition``, ``changed_agent_definition``, ``gave_grant``,
+    #: ``made_schedule``, ``made_event_source``, ``started_run`` or
+    #: ``handed_over_run``.
+    why: str
+    #: The same reason in words, for example ``Set up by``.
+    why_text: str
+
+
+class ApprovalScriptPageView(BaseModel):
+    """One page of the script of a waiting ``linux.script.run`` request."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    #: The page number, from 1.
+    page: int
+    #: How many pages the script has.
+    pages: int
+    #: The script text of this page. Values that look like secrets are hidden.
+    #: ``None`` when MEHO could not check the script for them.
+    script: str | None = None
+    #: The size of the whole script in UTF-8 bytes.
+    script_bytes: int
+    #: SHA-256 of the whole script. The same on every page. Left out when
+    #: values were hidden.
+    script_sha256: str | None = None
+    script_values_hidden: bool = False
+    script_unavailable: str | None = None
+
+
 class ApprovalRequestView(BaseModel):
     """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
 
@@ -363,6 +437,17 @@ class ApprovalRequestView(BaseModel):
     #: the CLI mark a machine requester with it. ``None`` on a request made
     #: before MEHO saved it. Additive.
     principal_kind: str | None = None
+    #: The people behind the agent, service or runner login that asked
+    #: (who set it up, changed it, gave its grants, made its schedules or
+    #: started its run). They count as the requester. Left out of the
+    #: answer for a person's request, and when an agent, service or runner
+    #: login reads the request. Additive.
+    people_behind: list[PersonBehindView] | None = Field(default=None, exclude_if=_is_none)
+    #: ``False`` when a machine login asked and MEHO knows nobody behind it:
+    #: then only an Admin may approve. Left out of the answer for a
+    #: person's request, and when an agent, service or runner login reads
+    #: it. Additive.
+    people_behind_known: bool | None = Field(default=None, exclude_if=_is_none)
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -433,6 +518,10 @@ class ApprovalRequestView(BaseModel):
     created_at: str
     expires_at: str | None
     work_ref: str | None
+    #: The session that parked the request: an agent run, an MCP session, or
+    #: the ``meho login`` session of a CLI call. ``None`` when the call had
+    #: none. Additive; a client that ignores it is unaffected.
+    agent_session_id: uuid.UUID | None = None
     #: Redacted reviewer context (#3353): resolved target name + product/
     #: version, the concrete subject of a path-variable op, the parent
     #: composite op for a child park, a blast-radius summary, and a
@@ -451,11 +540,13 @@ class ApprovalRequestView(BaseModel):
     may_approve: bool | None = None
     #: Why the caller may or may not approve (#3329): ``ok``,
     #: ``own_change``, ``wrong_group``, ``role_too_low``, ``rights_change``,
-    #: ``no_approval_access``, ``not_a_person`` or ``not_pending``. With
+    #: ``no_approval_access``, ``not_a_person``, ``not_pending`` or
+    #: ``not_routed`` (approver routing sends the request to other login
+    #: groups). With
     #: ``may_approve`` true, ``own_change`` means a self-approval is
     #: allowed. ``None`` when ``may_approve`` is ``None``.
     may_approve_reason: str | None = None
-    #: This is a change of rights: another admin must approve it.
+    #: This is a change of rights: only an admin approves it, in the web console.
     rights_change: bool = False
 
 
@@ -608,6 +699,7 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         audit_id=outcome.audit_id,
         guidance=outcome.guidance,
         execution_outcome=outcome.execution_outcome,
+        exit_code=outcome.exit_code,
     )
 
 
@@ -644,13 +736,63 @@ def _execution_outcome(dispatch_result: Any) -> str | None:
     return UNCERTAIN_OUTCOME if envelope_is_uncertain(envelope) else None
 
 
+def _people_behind_fields(row: ApprovalRequest, operator: Operator) -> dict[str, Any]:
+    """``people_behind`` and ``people_behind_known`` of *row* for *operator*.
+
+    Only a person reads them: for an agent, service or runner login that
+    calls the API, both fields stay ``None`` and the answer leaves them out.
+    """
+    if not is_human_principal(operator):
+        return {}
+    if people_behind_line(row.principal_kind, row.people_behind) is None:
+        return {}
+    people = [
+        PersonBehindView(sub=entry.sub, name=entry.name, why=entry.why, why_text=entry.why_text)
+        for entry in entries_of(row.people_behind)
+    ]
+    return {"people_behind": people, "people_behind_known": bool(people)}
+
+
+#: The ops whose REST card hides person-only fields from a caller that is not
+#: a person. Every other op's card comes back as stored, for every caller.
+_PERSON_ONLY_REST_CARD_OPS: frozenset[str] = frozenset({"k8s.apply", "linux.script.run"})
+
+
+def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
+    """The ``proposed_effect`` of *row* as *operator* may read it.
+
+    Only for the ops in :data:`_PERSON_ONLY_REST_CARD_OPS`: a person reads
+    the full card, as in the console, and an agent, service or runner login
+    reads what the MCP approval tools return (:func:`proposed_effect_for_agent`),
+    so the ``env`` values of ``linux.script.run`` and the ``run_commands``
+    of ``k8s.apply`` stay out. Every other card
+    is the stored one, without the person-only keys for a caller that is not
+    a person (:func:`without_person_only_effect_keys`). No caller reads the
+    internal keys (:func:`without_internal_effect_keys`).
+    """
+    if is_human_principal(operator) and not is_agent_caller(operator):
+        return without_internal_effect_keys(row.proposed_effect)
+    if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
+        return without_person_only_effect_keys(row.proposed_effect)
+    shown = proposed_effect_for_agent(
+        row.op_id,
+        row.proposed_effect,
+        params=row.params,
+        connector_id=row.connector_id,
+        tenant=str(row.tenant_id),
+    )
+    return shown if shown is not None else row.proposed_effect
+
+
 def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
     delegation: Delegation | None = None,
     right: ApproveRight | None = None,
+    *,
+    operator: Operator,
 ) -> ApprovalRequestView:
-    """Convert an ORM row to a response view.
+    """Convert an ORM row to a response view for *operator*.
 
     *reviewer_context* is the redacted, resolved judging context (#3353),
     supplied only on the single-request path (its resolution runs a few
@@ -658,6 +800,8 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row. *right* (#3329) says
     whether the caller may approve the request; list and show pass it.
+    *operator* is the caller: the people behind a machine login are shown
+    only to a person.
     """
     expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
@@ -668,12 +812,13 @@ def _view(
         principal_act=row.principal_act,
         principal_name=row.principal_name,
         principal_kind=row.principal_kind,
+        **_people_behind_fields(row, operator),
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
         params_hash=row.params_hash,
         preview_hash=row.preview_hash,
-        proposed_effect=row.proposed_effect,
+        proposed_effect=_proposed_effect_for(operator, row),
         reveal_secret=bool(row.reveal_secret),
         waits_for_requester=is_secret_reveal(row),
         reveal_changes_something=is_write_reveal(row),
@@ -693,6 +838,7 @@ def _view(
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
+        agent_session_id=row.agent_session_id,
         reviewer_context=reviewer_context,
         delegation=(
             DelegationView(
@@ -834,9 +980,8 @@ async def _capture_operator_decision(
             detail="insufficient_role",
         ) from exc
     except SelfApprovalForbiddenError as exc:
-        # Same token-prefix + ``str(exc)`` hint as the /approve path so
-        # /decide's self-approval rejection also names the
-        # ``APPROVAL_ALLOW_SELF_APPROVAL`` break-glass flag (#1483).
+        # Same token prefix + ``str(exc)`` as the /approve path: the text
+        # says who may approve the change and where to ask.
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=f"self_approval_forbidden: {exc}",
@@ -888,14 +1033,17 @@ async def list_approvals(
             "Defaults to 'pending'."
         ),
     ),
-    work_ref: str | None = Query(
-        default=None,
-        description=(
-            "Filter by external change-ticket reference (exact match), e.g. "
-            "'gh:evoila/meho#1' — the requests authorised by change ticket X "
-            "(work_ref I2-T1 #1659). Omit for no work_ref filter."
+    work_ref: Annotated[
+        WorkRefFilter | None,
+        Query(
+            description=(
+                "Filter by external change-ticket reference, e.g. "
+                "'gh:evoila/meho#1' — the requests authorised by change ticket X "
+                "(work_ref I2-T1 #1659). Omit for no work_ref filter. "
+                + WORK_REF_FILTER_DESCRIPTION
+            ),
         ),
-    ),
+    ] = None,
     limit: int | None = Query(
         default=None,
         ge=1,
@@ -934,7 +1082,7 @@ async def list_approvals(
     ``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every
     state (the same sentinel ``meho_approvals_list`` accepts), and by
     change ticket via
-    ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
+    ``?work_ref=gh:evoila/meho#1`` (whole id, see the work_ref parameter). Returns newest-first
     (``created_at DESC``) by default; ``?order=oldest`` returns
     oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
     requests under one change ticket reads in the order it was sent
@@ -957,7 +1105,11 @@ async def list_approvals(
                 offset=offset,
                 order=order,
             )
-        return [_view(r, right=approve_right(operator, r)) for r in unknown_rows]
+            floor = await load_install_floor(session)
+        return [
+            _view(r, right=approve_right(operator, r, floor=floor), operator=operator)
+            for r in unknown_rows
+        ]
     # Validate status value against the closed enum; "all" means no filter.
     status_filter: ApprovalRequestStatus | None = None
     if status != "all":
@@ -978,7 +1130,7 @@ async def list_approvals(
         if status_filter is not None:
             stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
-            stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+            stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
         if order == "oldest":
             stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
         else:
@@ -988,8 +1140,11 @@ async def list_approvals(
             stmt = stmt.limit(limit)
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
+        floor = await load_install_floor(session)
 
-    return [_view(r, right=approve_right(operator, r)) for r in rows]
+    return [
+        _view(r, right=approve_right(operator, r, floor=floor), operator=operator) for r in rows
+    ]
 
 
 @router.get("/{request_id}", response_model=ApprovalRequestView)
@@ -1024,7 +1179,63 @@ async def get_approval_request(
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
         delegation = await get_decision_delegation(session, row)
-    return _view(row, reviewer_context, delegation, approve_right(operator, row))
+        floor = await load_install_floor(session)
+    return _view(
+        row,
+        reviewer_context,
+        delegation,
+        approve_right(operator, row, floor=floor),
+        operator=operator,
+    )
+
+
+@router.get("/{request_id}/script", response_model=ApprovalScriptPageView)
+async def get_approval_script_page(
+    request_id: Annotated[uuid.UUID, Path()],
+    page: Annotated[int, Query(ge=1, description="Page number, from 1.")] = 1,
+    operator: Operator = _require_approvals_access,
+) -> ApprovalScriptPageView:
+    """Read one page of the script of a ``linux.script.run`` request that waits for approval.
+
+    The pages are 64 KiB each, cut after values that look like secrets are
+    hidden over the whole script. Reading a page does not delete the stored
+    script. Same access as ``GET /{id}``. Only while the request waits for
+    approval: after the decision MEHO no longer keeps the script (410).
+    A request that has no script, and a page that does not exist, are 404.
+    A stored script that MEHO cannot read back (it cannot be decrypted) is
+    409 with a plain sentence.
+    """
+    async with get_sessionmaker()() as session:
+        try:
+            row = await get_request(session, tenant_id=operator.tenant_id, request_id=request_id)
+            fields = await read_script_page(session, row, page)
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="approval_request_not_found",
+            ) from exc
+        except ApprovalScriptGoneError as exc:
+            raise HTTPException(status_code=http_status.HTTP_410_GONE, detail=str(exc)) from exc
+        except ApprovalScriptUnreadableError as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ApprovalScriptMissingError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except ScriptPageOutOfRangeError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+    return ApprovalScriptPageView(
+        approval_request_id=row.id,
+        page=page,
+        pages=fields.get("script_pages", 1),
+        script=fields.get("script"),
+        script_bytes=fields["script_bytes"],
+        script_sha256=fields.get("script_sha256"),
+        script_values_hidden=bool(fields.get("script_values_hidden")),
+        script_unavailable=fields.get("script_unavailable"),
+    )
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)
@@ -1142,9 +1353,8 @@ async def _record_approval_decision(
         ) from exc
     except SelfApprovalForbiddenError as exc:
         # Keep the ``self_approval_forbidden`` token prefix (stable for
-        # clients matching on it) but append ``str(exc)``, which carries
-        # the ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
-        # exception already constructs (#1483).
+        # clients matching on it) and append ``str(exc)``, which says who
+        # may approve the change and where to ask.
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=f"self_approval_forbidden: {exc}",
@@ -1420,7 +1630,7 @@ async def withdraw_approval_request(
         decision="withdrawn",
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
-    return _view(request)
+    return _view(request, operator=operator)
 
 
 @router.post(
@@ -1483,7 +1693,11 @@ async def mark_approval_outcome_checked(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="note_required"
         ) from exc
-    return _view(request, right=approve_right(operator, request))
+    return _view(
+        request,
+        right=approve_right(operator, request, floor=await current_install_floor()),
+        operator=operator,
+    )
 
 
 class RerunRequestBody(BaseModel):
@@ -1781,9 +1995,16 @@ async def decide_approval_request(
         )
 
     # Approve needs a fresh approval sign-in (#3979, #5515); reject does not.
-    approval_auth = (
-        check_fresh_approval_sign_in(operator, get_settings()) if decision == "approved" else None
-    )
+    approval_auth = None
+    if decision == "approved":
+        settings = get_settings()
+        level = await sign_in_level_in_force(settings)
+        approval_auth = check_fresh_approval_sign_in(
+            operator,
+            settings,
+            level_in_force=level.in_force,
+            level_check_failed=level.check_failed,
+        )
     request = await _capture_operator_decision(
         request_id=request_id,
         decision=decision,
@@ -1826,7 +2047,7 @@ async def decide_approval_request(
             dispatch_result=dispatch_result.result,
             dispatch_error=dispatch_result.error,
             dispatch_execution_outcome=_execution_outcome(dispatch_result),
-            self_approved=request.principal_sub == operator.sub,
+            self_approved=is_self_approval(operator.sub, request),
             approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         )
 
@@ -1866,7 +2087,7 @@ async def _decide_in_background(
         reason=body.reason,
         decided_by=operator.sub,
         decided_by_name=operator.name,
-        self_approved=request.principal_sub == operator.sub,
+        self_approved=is_self_approval(operator.sub, request),
         approval_rule=str(request._approval_rule),  # type: ignore[attr-defined]
         run_id=run_id,
     )

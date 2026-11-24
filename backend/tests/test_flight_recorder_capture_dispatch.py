@@ -433,6 +433,121 @@ async def test_jsonflux_reduction_span_recorded(
     assert flux[0].attributes["handle"]
 
 
+@pytest.mark.asyncio
+async def test_trace_header_keeps_the_request_id_and_the_caller(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The header holds both, so the trace can be found without its audit row (#6452)."""
+    import structlog
+
+    tenant_id = await _seed_capture_tenant("fr-disp-find")
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list",
+        handler=_child_handler,
+        summary="List.",
+        description="List.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    request_id = uuid.uuid4()
+    structlog.contextvars.bind_contextvars(request_id=str(request_id))
+    try:
+        result = await dispatch(
+            operator=_make_operator(tenant_id),
+            connector_id="vault-1.x",
+            op_id="vault.kv.list",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        structlog.contextvars.unbind_contextvars("request_id")
+    assert result.status == "ok", result.error
+    traces = await _traces()
+    assert len(traces) == 1
+    assert traces[0].request_id == request_id
+    assert traces[0].operator_sub == "op-capture"
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_approved_call_belongs_to_the_agent_that_asked(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A person approves and runs the call; the agent that asked reads its trace."""
+    from meho_backplane.api.v1.audit import _load_trace_for
+    from meho_backplane.auth.operator import PrincipalKind
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+    from meho_backplane.operations.approval_queue import _dispatch_resume_with_bound_context
+
+    tenant_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            Tenant(
+                id=tenant_id,
+                slug="fr-disp-approved",
+                name="fr-disp-approved",
+                flight_recorder_enabled=True,
+                flight_recorder_agent_readable=True,
+            )
+        )
+        await s.commit()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list",
+        handler=_child_handler,
+        summary="List.",
+        description="List.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    request = ApprovalRequest(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        run_id=None,
+        principal_sub="agent-1",
+        principal_kind="agent",
+        op_id="vault.kv.list",
+        connector_id="vault-1.x",
+        target_id=None,
+        params_hash="0" * 64,
+        params={},
+        proposed_effect={},
+        status=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by="person-approver",
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+    approver = _make_operator(tenant_id).model_copy(update={"sub": "person-approver"})
+
+    result = await _dispatch_resume_with_bound_context(
+        operator=approver,
+        request=request,
+        resolved_target=_FakeTarget(),
+        effective_params={},
+    )
+
+    assert result.status == "ok", result.error
+    traces = await _traces()
+    assert len(traces) == 1
+    assert traces[0].operator_sub == "agent-1"
+
+    def _agent(sub: str) -> Operator:
+        return _make_operator(tenant_id).model_copy(
+            update={"sub": sub, "principal_kind": PrincipalKind.AGENT}
+        )
+
+    assert await _load_trace_for(_agent("agent-1"), traces[0].audit_id) is not None
+    assert await _load_trace_for(_agent("agent-2"), traces[0].audit_id) is None
+
+
 # ---------------------------------------------------------------------------
 # F7 -- a forced record_trace failure leaves the dispatch + audit intact
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ MEHO holds **no stateful MCP session store** -- a session id is issued
 on ``initialize`` purely for audit correlation and then forgotten
 (``mcp/server.py`` ``_issue_mcp_session_id``). A precise "concurrent
 sessions" count is therefore unknowable without building a session
-registry, which the finding (meho-internal#321) explicitly did not ask
+registry, which the finding explicitly did not ask
 for. The cheap, deterministic backstop that MEHO *can* enforce is a cap
 on how many new session handshakes a tenant may start per window: every
 ``initialize` is one new session, so bounding ``initialize`` volume per

@@ -116,6 +116,7 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.mcp.profiles import profile_connectors, profile_target_denial
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -131,6 +132,10 @@ from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._short_tool_texts import LIST_TARGETS_SHORT, QUERY_TOPOLOGY_SHORT
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
+from meho_backplane.operations._target_connector_limit import (
+    allowed_connectors_var,
+    targets_within_limit,
+)
 from meho_backplane.operations.answer_ready import ANSWER_READY_OUTPUT_PROPERTIES
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -1600,6 +1605,14 @@ async def _list_targets_handler(
 
     The page is returned through :func:`_reduce_target_page`, so a page
     over the JSONFlux threshold comes back as a result handle.
+
+    A session whose MCP profile has a connector list sees only the targets
+    whose connector is in the profile (#6099). Such a page can hold fewer
+    targets than ``limit`` and still have a ``next_cursor``.
+
+    A hosted agent with a ``connectors`` list sees only the targets whose
+    connector is in its list
+    (:func:`~meho_backplane.operations._target_connector_limit.targets_within_limit`).
     """
     tenant_id_arg = arguments.get("tenant_id")
     legacy_tenant_arg = arguments.get("tenant")
@@ -1611,13 +1624,18 @@ async def _list_targets_handler(
     tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
     scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
-    stmt = select(
-        TargetORM.id,
-        TargetORM.name,
-        TargetORM.aliases,
-        TargetORM.product,
-        TargetORM.host,
-    ).where(
+    # A profile or an agent with a connector list needs the whole row, so
+    # the resolver can pick each target's connector.
+    limited = (
+        profile_connectors(operator.mcp_tool_profile) is not None
+        or allowed_connectors_var.get() is not None
+    )
+    columns: tuple[Any, ...] = (
+        (TargetORM,)
+        if limited
+        else (TargetORM.id, TargetORM.name, TargetORM.aliases, TargetORM.product, TargetORM.host)
+    )
+    stmt = select(*columns).where(
         TargetORM.tenant_id == scope_tenant_id,
         TargetORM.deleted_at.is_(None),
     )
@@ -1627,19 +1645,12 @@ async def _list_targets_handler(
         product, _version, _impl_id = parse_connector_id(connector_id)
         stmt = stmt.where(TargetORM.product == product)
 
-    cursor = arguments.get("cursor")
-    if cursor is not None:
-        stmt = stmt.where(TargetORM.name > cursor)
-
     limit = int(arguments.get("limit", 100))
-    stmt = stmt.order_by(TargetORM.name).limit(limit)
+    rows, next_cursor, read_any = await _read_target_page(
+        stmt, arguments.get("cursor"), limit, whole_rows=limited
+    )
 
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        result = await session.execute(stmt)
-        rows = result.all()
-
-    if not rows and connector_id:
+    if not read_any and connector_id:
         await _reject_unknown_connector(scope_tenant_id, connector_id)
 
     targets = [
@@ -1651,11 +1662,54 @@ async def _list_targets_handler(
             "host": t.host,
         }
         for t in rows
+        if not limited or await profile_target_denial(operator.mcp_tool_profile, t) is None
     ]
-    # A full page implies there *may* be more rows; surface the last
-    # name as the keyset cursor. A short page is definitively the end.
-    next_cursor = targets[-1]["name"] if len(targets) == limit else None
     return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _read_target_page(
+    stmt: Any, cursor: str | None, limit: int, *, whole_rows: bool
+) -> tuple[list[Any], str | None, bool]:
+    """Read one page of targets: the rows, the next cursor, and whether any row was read.
+
+    A full page implies there *may* be more rows, so the last name is the
+    keyset cursor; a short page is the end. The cursor counts the rows
+    read, so a page that the MCP profile made shorter still points to the
+    next one.
+
+    With a hosted agent's ``connectors`` list, the page holds only the
+    targets the list allows, and the cursor is the name of the last of
+    them. The read goes on past the rows the list leaves out until the
+    page is full or the targets end. It reads at least
+    :data:`_AGENT_TARGET_READ_ROWS` rows at a time, so a small ``limit``
+    and a list that leaves out most targets do not cost one read per
+    target.
+    """
+    agent_limited = allowed_connectors_var.get() is not None
+    read_rows = max(limit, _AGENT_TARGET_READ_ROWS) if agent_limited else limit
+    kept: list[Any] = []
+    read_any = False
+    sessionmaker = get_sessionmaker()
+    while True:
+        page_stmt = stmt if cursor is None else stmt.where(TargetORM.name > cursor)
+        async with sessionmaker() as session:
+            result = await session.execute(page_stmt.order_by(TargetORM.name).limit(read_rows))
+            rows: list[Any] = list(result.scalars().all() if whole_rows else result.all())
+        read_any = read_any or bool(rows)
+        if not agent_limited:
+            return rows, (rows[-1].name if len(rows) == limit else None), read_any
+        kept.extend(await targets_within_limit(rows))
+        if len(kept) >= limit:
+            kept = kept[:limit]
+            return kept, kept[-1].name, read_any
+        if len(rows) < read_rows:
+            return kept, None, read_any
+        cursor = rows[-1].name
+
+
+#: The fewest target rows one read takes for a hosted agent with a
+#: ``connectors`` list (:func:`_read_target_page`).
+_AGENT_TARGET_READ_ROWS = 200
 
 
 async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> None:

@@ -385,6 +385,16 @@ egress rules to:
   on `broadcast.enabled: true` and is omitted when the broadcast subchart
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
+- The console address — only when
+  `networkPolicy.ingressControllerEgress.podLabels` is set (default
+  `{}`, #6612): `tcp/<ingressControllerEgress.port>` (default 8443) to
+  the Pods with those labels in `ingressControllerNamespace`. The
+  first-start `certificate` check connects to the backplane's own
+  address, and the host port or Service in front of the ingress sends
+  that connection to the ingress Pod before the rule is checked. This is
+  a separate key, not an `extraEgress` item, because a later values file
+  that sets `extraEgress` replaces the whole list. Install form 2 sets it
+  for RKE2's Traefik (`app.kubernetes.io/name: rke2-traefik`)
 - Operator rules — every item of `networkPolicy.extraEgress` (default
   `[]`), added after the rules above, exactly as written (#3516)
 
@@ -1058,12 +1068,10 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- | --- |
 | MEHO-Readers | `read_only` | |
 | MEHO-Operators | `operator` | |
-| MEHO-SA-Operators | `operator` | |
 | MEHO-Admins | `tenant_admin` | |
-| MEHO-Approvers | `read_only` | `approver` = `true` |
 | MEHO-Platform-Admins | (none, and no `tenant_id`) | `platform_admin` = `true` |
 
-**A person is in exactly one of the five role groups.** `MEHO-Platform-Admins`
+**A person is in exactly one of the three role groups.** `MEHO-Platform-Admins`
 is not a role group; it only adds `platform_admin`. The mappers take the first
 group that has the attribute; with two groups the result is not
 predictable. The realm keeps Keycloak's default user profile, which does
@@ -1076,7 +1084,7 @@ on a person directly: the claim always comes from the group.
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
 | `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
-| `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in` (password, then the one-time code), a 15-minute access token and no refresh token |
+| `meho-cli-approve` | public, authorization code + PKCE (S256) | redirect `http://127.0.0.1:*`; the approval sign-in: its own login flow `meho approval sign-in level` (password, then the one-time code; gives `acr` `meho-approve`), a 15-minute access token and no refresh token |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients`, `manage-realm` (the login flows, #6280) and `manage-users`; with the company login on, the chart adds `manage-identity-providers` (#4592) |
@@ -1485,7 +1493,7 @@ them).
 | `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. Not needed with the built-in Keycloak (`meho-backplane`). |
 | `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
 | `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
-| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*` (#2642 — inert stubs before that); a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors, the topology-refresh scheduler, runbook verify dispatch — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
+| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend. Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys render as `GSM_WIF_*`; a non-empty `audience` switches credential reads onto the calling operator's identity, which makes *background* dispatch (Sensors and the topology-refresh scheduler — the callers that dispatch with no operator JWT at all) need an identity of its own — an ambient pod identity or `checkRunner.*`. A runbook check step is not background dispatch: it runs with the token of the caller who advances the run. Connector `probe()` / `fingerprint()` are **not** covered by either: they carry a non-empty placeholder JWT, so they take the WIF branch and fail the exchange regardless. See `docs/deploying.md` § GSM / Vault-free, `deploy/values-examples/values-gsm-example.yaml` (SA-direct), and `deploy/values-examples/values-gsm-wif-example.yaml` (per-operator WIF). |
 | `checkRunner.enabled` / `.clientId` / `.clientSecret.*` | boolean / string / object | In-process check-runner service principal (#2642). `enabled: true` requires a non-empty `clientId` + `clientSecret.secretName`, and wires `CHECK_RUNNER_CLIENT_ID` (plain env) + `CHECK_RUNNER_CLIENT_SECRET` (`secretKeyRef` only). Default `false` renders nothing: background dispatch carries no bearer token and a Sensor whose target needs an operator-context credential read evaluates `unknown`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default) and the PostgreSQL is your own. |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same, for a Vault you bring yourself (not used with the built-in OpenBao). |
@@ -1506,6 +1514,7 @@ them).
 | `probes.startup.*` | `/healthz` httpGet + 15-min first-boot budget (#2393, #4102) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `networkPolicy.ingressControllerEgress.podLabels` / `.port` | `{}` / `8443` | Labels and Pod port of the ingress controller, so MEHO can reach its own console address (#6612). Empty labels: no rule. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `corePostgres.enabled` / `coreKeycloak.enabled` / `coreVault.enabled` | `true` | Built-in core parts (#4041), on by default since chart 0.2.0. When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). A bring-your-own install sets all three to `false`. |
@@ -1859,13 +1868,28 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 ## PR-level CI (`.github/workflows/ci.yml`)
 
 `ci.yml` is the central per-PR test harness. Every PR targeting `main`
-runs the toolchain jobs in parallel and every push to `main` re-runs the
-same matrix as a regression catch. Branch protection consumes the
+runs the toolchain jobs in parallel, and so does every merge-queue run.
+A push to `main` starts no `ci.yml` run (#6387). Every pull request
+reaches `main` through the merge queue, except the advisory path in
+`docs/RELEASING.md`, which the nightly run covers. The queue run already ran
+the full matrix on exactly that code. A run on every push would only
+repeat it, take heavy runners and be cancelled by the next merge. The nightly run on
+`main` keeps the caches on `main` warm.
+
+`backend/tests/test_ci_main_push.py` pins this. Branch protection consumes the
 required jobs' status per
 `branches/main/protection.required_status_checks.contexts` —
 re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697.
+
+A failed Docker Hub login does not fail a job. Every "Docker Hub login" step
+in `ci.yml` has `continue-on-error: true`. The test images come through the
+Harbor image proxy (the step "Read the CI repository secrets" sets the
+`MEHO_TEST_*_IMAGE` variables), so the login only
+adds pull headroom on Docker Hub. A short network problem on the way to Docker
+Hub then costs nothing, and cannot throw a pull request out of the merge queue.
+`backend/tests/test_ci_dockerhub_login_soft_fail.py` pins this.
 
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
@@ -1874,13 +1898,45 @@ to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
+### When a test runner dies (memory lines in the job log)
+
+Sometimes a test job ends with "lost communication with the server" and no
+failed test. The runner container was most likely killed because it ran out
+of memory. The files of the container are gone, but GitHub keeps the job log
+lines it already got.
+
+So the unit shards, the coverage shards and the integration shards print
+memory lines into the log of their pytest step. The sampler is
+`scripts/ci/memory_sampler.sh`:
+
+- One line every 15 seconds, starting with `[memory]`: the time, the
+  memory in use (without the file cache that the kernel frees first), the
+  limit, and the pytest worker with the most memory.
+- Each process that runs tests writes its process id and its running test
+  to a small file in `MEHO_CI_PROGRESS_DIR` (the hook
+  `pytest_runtest_protocol` in `backend/tests/conftest.py`). The sampler
+  reads the memory of only these processes, so a bigger process that is not
+  a pytest worker is never named.
+- Above 85 % of the limit, the line is followed by one line for each worker:
+  its memory and the test it runs at that moment. Without progress files
+  the line says so.
+- The lines are not in a log group: a group would also hide the test output
+  that comes between them. Search the log for `[memory]` instead.
+
+Where to look when a runner dies: open the log of the pytest step, go to
+the end, and read the last `[memory]` lines. If memory was high, the lines
+under it name the tests that ran. The "Print peak memory" step at the end
+of the job does not run when the runner dies, so these lines are the only
+trace. The integration shards have no "Print peak memory" step; a short
+"Stop memory sampling" step ends the sampler there.
+
 ### Merge queue (#769, #3253)
 
 Every workflow that owns a required status check triggers on
-`merge_group` in addition to `pull_request` and `push`: `ci.yml`,
+`merge_group` in addition to `pull_request`: `ci.yml`,
 `security-scan.yml`, `secret-scan.yml`, `dependency-license-check.yml`
 (all landed with #769), `chart.yml` (closed by #3253) and
-`migration-heads.yml` (#4204, see `docs/codebase/migrations.md`).
+`migration-heads.yml` (#4204, see `docs/codebase/migrations.md`). Except `ci.yml`, they also run on `push`.
 The `merge_group` event fires when a PR is admitted to the GitHub merge
 queue and runs the check matrix against the **synthesised merge
 commit** — PR head + current `main` tip + any PRs ahead in the queue. A
@@ -1922,7 +1978,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter on `pull_request` and `merge_group`; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter on `pull_request` and `merge_group`; when a migration lands on `main`, the `push` trigger of `migration-heads.yml` (the only run this check has on a push to `main`) also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 
 Two shapes are load-bearing for queue compatibility and appear across
 these workflows:
@@ -2027,16 +2083,33 @@ repo, #761). The set depends on the event:
 
 - `merge_group` only: `meho-runners-ci-heavy-queue` (6 runners, enough
   for the six shards of one merge-queue run).
-- Every other event (pull requests, `push` to `main` and the nightly
-  run): `meho-runners-ci-heavy`.
+- Every other event (pull requests and the nightly run):
+  `meho-runners-ci-heavy`.
+
+Measured wait for a heavy runner, 16 Nov 2026, 16:32 to 18:32 UTC
+(#6590). The data is from the Actions jobs API, one row per job:
+
+- Merge-queue runs: 42 jobs on `meho-runners-ci-heavy-queue`, none on
+  `meho-runners-ci-heavy`. Middle wait 7.3 min, longest 14.7 min. The
+  `test_no_merge_group_job_uses_the_shared_heavy_pool` test keeps it so.
+- Pull request runs: 127 jobs on `meho-runners-ci-heavy`. Middle wait
+  45 min, 90th percentile 91 min, longest 118 min. 21 of 22 runs
+  started six heavy jobs. The test map gave a narrow run for none of
+  them. Reasons seen: a migration changed (6 runs), a new source file
+  the map did not know (11, fixed by #6597 after the window), the map
+  picked 2,000 tests or more (2), a workflow or test helper changed (3).
+- No heavy job of a replaced pull request run kept a runner: no
+  cancelled job had started.
+- Pool size, from replaying the same jobs through a first-come queue
+  (the fit to the 45 min middle wait is a pool of about 11 runners):
+  +2 runners give a middle wait of about 24 min, +4 give about 19 min.
+  Under 20 min needs about 4 more runners. A pool change is for the
+  owner to decide.
 
 Why two sets: GitHub gives queued jobs to runners in queue order, with
 no priority for the merge queue. When many pull requests ran at once,
 their shards filled the heavy runners and the merge queue's shards
-waited behind them. Pushes to `main` stay on `meho-runners-ci-heavy`:
-otherwise every merged commit would run its shards on the 6 queue
-runners twice (merge-queue run, then push run), and the queue would
-merge only about half as fast. The nightly `python-coverage` shards
+waited behind them. The nightly `python-coverage` shards
 stay on `meho-runners-ci-heavy`. The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
@@ -2082,7 +2155,7 @@ Each `python-unit-shard` carries a 20-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
 ~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
 monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=900`; 660 s until 2026-10-24, scaled
+perf-budget-guard step (`budget_s=1200` for all six shards; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
 from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
@@ -2164,7 +2237,13 @@ shape (deterministic file-level matrix + fan-in):
   morning, and the count is 6. In the run that failed on time, the
   slowest shard carried 2,568 s of test time (933 s). Fresh file times
   with five shards would still leave 2,344 s (about 850 s); with six
-  shards it is 1,965 s (about 720 s). To change the count, edit the
+  shards it is 1,965 s (about 720 s). On 2026-11-17 shard 2 ran 915 s
+  in the merge queue, with every test passing (#6662). The file times
+  were refreshed again, and all six shards got a budget of 1200 s.
+  Measured in that merge-queue run: 765, 915, 873, 850, 805 and 854 s,
+  which is 64 to 76 percent of 1200 s, so every shard stays under 80
+  percent. The gate stays on. A seventh shard was not added: it changes
+  the required check names. To change the count, edit the
   matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
@@ -2187,15 +2266,19 @@ shape (deterministic file-level matrix + fan-in):
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
-  and, via `if: always()
-  && <fork guard>`, runs regardless of upstream results, then inspects
+  and, via `if: always()`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
   Success (#2140) — i.e. a red shard would let the PR merge. A hung shard
   hits its own `timeout-minutes` → `cancelled` leg → aggregate
-  `cancelled`/`failure` → the gate FAILS (not open). On a fork PR the fork
-  guard skips this job (and the shards), reporting the required context as
-  Success exactly as the old single job did. Since #3252 the step first
+  `cancelled`/`failure` → the gate FAILS (not open). The job runs on a fork
+  PR too (#4835). There the shards skip, because they use our own pool.
+  The job passes when lint passed, or when lint skipped for a docs-only or
+  no-backend diff. A failed or cancelled lint or shard, a lint that did not
+  run for a diff with backend code, or a failed detector fails it. When it
+  passes, its step summary says that the unit tests did not run and gives
+  the maintainer the commands to start a full run on the exact commit (see
+  [Fork-PR guard](#fork-pr-guard)). Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
   branches on `needs.changes.outputs.docs_only` (and, since #5296,
   `backend_python`): on the **docs-only fast
@@ -2389,7 +2472,7 @@ runs one short job instead.
 A pull request that changes only one connector folder runs **one** unit
 job instead of the six `python-unit-shard` legs. The job is named
 `Python unit tests for connector <name>`. It runs that connector's tests
-plus a fixed contract set. The merge queue and pushes to `main` always run
+plus a fixed contract set. The merge queue and the nightly run always run
 the six shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
@@ -2437,7 +2520,7 @@ the six shards, so every test still runs before a change lands on `main`.
 A pull request that would run all the `python-unit-shard` legs can run
 **one** unit job instead, with only the tests its change can break. The
 job is named `Python unit tests picked by the test map`. The merge queue
-and pushes to `main` always run all the shards, so every test still runs
+and the nightly run always run all the shards, so every test still runs
 before a change lands on `main`. A wrong pick costs one failed merge-queue
 run, not a broken `main`.
 
@@ -2472,7 +2555,13 @@ run, not a broken `main`.
   imports the changed file itself, all the shards run. Docs pick nothing.
   Every other file means all the shards: a migration, a template or data
   file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
-  workflow, the Go CLI, a source file the map does not know (a new one).
+  workflow, the Go CLI, a source file the map does not know that is gone
+  from the tree. A new source file (in the tree, not in the map) is
+  handled by import analysis like a file no test ran, and picks nothing
+  of its own: the tests come from the files that import it. A new file
+  that no file imports means all the shards, because it may be loaded by
+  name at run time (#6590: on 16 Nov 2026 about a third of the pull request
+  runs with a backend change ran all six shards only for this reason).
   No map, a map older than 7 days, 2,000 or more picked tests, or any
   error also means all the shards. Every selected run also runs
   `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.
@@ -2585,8 +2674,8 @@ on a secret:
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
-  the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
-  token value.
+  the job-env boolean `SPEC_SHELF_READY` — `true` when the token and the
+  `SPEC_SHELF_REPOSITORY` secrets are both set; never the token value.
 
 Licensing record, signoff gate, and the full provisioning/rotation runbook:
 [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).
@@ -2605,6 +2694,37 @@ example SonarCloud gets no coverage for the run) but never invalidates
 the test outcome, and `quality-gate.yml` already guards its own
 `actions/download-artifact` with `continue-on-error` for the same
 reason.
+
+### Internal names come from repository secrets
+
+The workflows name no internal host, repository or CA. They read four
+repository secrets instead:
+
+| Secret | Holds | Read by |
+|---|---|---|
+| `CI_IMAGE_PROXY` | `<host>/<project>` of the image proxy cache of the CI cluster | `ci.yml` (test images), `security-scan.yml` (Semgrep image), `runner-smoke.yml` |
+| `SPEC_SHELF_REPOSITORY` | `<owner>/<name>` of the vendor spec shelf | `ci.yml` (shelf checkout) |
+| `CI_PROXY_CA_NAME` | the common name of the CA that signs the proxy certificate | `runner-smoke.yml` |
+| `RKE2_OIDC_AUDIENCE` | the OIDC audience the CI cluster API server trusts | `pr-smoke.yml` |
+
+- **Why secrets, not repository variables.** The run logs of this
+  public repository can be read by everyone. GitHub prints each step's
+  `env:` and inputs in the log before the step runs, and a container
+  image before any step runs. A variable shows there in clear, before an
+  `::add-mask::` can hide it. A secret shows as `***` everywhere.
+- **No `container:` with the proxy.** `container.image` cannot read a
+  secret, so the Semgrep job runs its image with `docker run` in a step.
+- **The first step checks them.** In the jobs that need them, the step
+  "Read the CI repository secrets" (`scripts/ci/repo_secrets.sh`) fails
+  with a message that names an empty secret, so no test skips quietly.
+  It also hides the parts of a value that GitHub does not hide on its
+  own (the proxy host, the shelf name without its owner) and sets the
+  test images. In another repository (a fork that runs the workflows
+  itself) the images come from Docker Hub instead.
+- **Dependabot runs** read only the Dependabot secret store, so
+  `CI_IMAGE_PROXY` and `SPEC_SHELF_REPOSITORY` must be set there too.
+- `backend/tests/test_ci_repo_secrets.py` checks all of this, and that
+  no workflow reads these names from `vars`.
 
 ### Why no image build job
 
@@ -2658,6 +2778,35 @@ number, so they stopped working when the value moved. When a value
 cannot carry a comment on its own line (for example a shell line that
 ends in `\`), move it to a line that can.
 
+### Private name check (`private-names-check.yml`)
+
+The job `Private name check` keeps internal names out of public text. It
+reads only the lines a pull request adds, in every file except
+`CHANGELOG.md`, and compares them with a list of patterns.
+Files that Git treats as binary are read as text too (`git diff --text`),
+so a NUL byte or a `-diff` attribute cannot hide an added line.
+
+- The list is the repository secret `PRIVATE_NAME_LIST`: one pattern per
+  line, case does not matter. It is not stored in this repository, and
+  the job never prints it.
+- On a hit the job prints the file and the line number and the sentence
+  "this line holds a word of the private name list". It never prints the
+  word, the pattern or the line.
+- It runs on `pull_request` and on `merge_group`, with no path filter.
+  A pull request from a fork gets no secrets, so the job prints a note
+  and passes. The merge queue checks the same lines before the merge.
+- With no secret set, a pull request gets a warning and passes, and so
+  does the CI of a fork. In the merge queue of this repository a missing
+  secret fails the job, so the check cannot go quiet unnoticed.
+- The logic is in `scripts/ci/check_private_names.py`. Its tests use made-up
+  words only (`backend/tests/test_ci_check_private_names.py`).
+- Why not hashes of the words in the repository: most names are short, so
+  anyone can guess them one by one from a list of hashes.
+- The source of the list is kept outside this repository. A maintainer
+  sets or changes the secret. To make the check required, register the
+  context `Private name check` in branch protection (a manual step, as for
+  the other required contexts).
+
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
@@ -2677,7 +2826,7 @@ side without the other would silently lose coverage reporting in
 SonarCloud, or make SonarCloud import 0% backend coverage from a run
 that never produced the file.
 
-Why nightly: a push run on `main` used to start 8 coverage shards next
+Why nightly: before #6387 a push to `main` started 8 coverage shards next
 to the 4 unit shards, so every merge filled the 12-runner heavy pool.
 Coverage took about 3,000 heavy-runner minutes a day, and the next merge
 cancelled most of it. Meanwhile the merge queue's unit shards waited for
@@ -2706,9 +2855,10 @@ the test map, and sysmon cannot record that (see
 
 ### Fork-PR guard
 
-Every job that runs on a pull request carries the same `if:` guard the
-publish workflows use (the fan-in jobs wrap it in `always() && ...`;
-`merge-queue-watchdog` runs only on `merge_group`):
+Every job that runs on a pull request, except the six hosted jobs named
+below, carries the same `if:` guard the publish workflows use (the integration fan-in wraps
+it in `always() && ...`; `merge-queue-watchdog` runs only on
+`merge_group`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -2718,16 +2868,25 @@ This is defence in depth on top of branch protection — the
 `meho-runners-ci` self-hosted runner pool is internal infrastructure, so
 arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
-short-circuits on `push` events so main-branch CI is unaffected.
+short-circuits on `merge_group` and nightly `schedule` events, so those
+runs are unaffected.
 
-The six jobs that moved to GitHub-hosted runners (#4626, step 1) keep the
-same guard. On a hosted runner the guard no longer protects internal
-infrastructure. It stays because the `python-unit-lane` fan-in expects
-`python-lint`, the shards and itself to skip together on a fork PR, and
-because one identical guard on every `ci.yml` job keeps the
-`test_ci_fork_runner_isolation.py` invariant simple to reason about. A
-fork PR still gets every `ci.yml` required context reported as
-success-by-skip, exactly as before.
+The six jobs that moved to GitHub-hosted runners (#4626, step 1) have no
+guard since #4835: `changes`, `python-lint`, `go-lint-test`,
+`cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in
+`python-unit-lane`. On a pull request they run on GitHub-hosted runners
+with a read-only token and no secret, so a fork pull request runs them.
+The unit shards still skip on a fork PR. The `python-unit-lane` fan-in
+then passes when lint passed, or when lint skipped for a docs-only or
+no-backend diff, and its step summary says that the unit tests did not
+run. `test_ci_fork_runner_isolation.py` pins both sides:
+the six jobs have no guard, and every job on our own pool keeps it.
+`CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps
+to get a full CI run: push the exact commit the maintainer read, by its
+full SHA, to a branch here and open a draft pull request from it.
+Job results and change detector outputs reach a `run:` script only
+through `env:`, never as `${{ ... }}` text in the script. The same test
+file pins this for `ci.yml`.
 
 This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
 model — the full inventory, the disposable-runner routing pattern, and
@@ -2845,7 +3004,7 @@ their isolation posture:
 
 | Workflow | Runs untrusted PR code? | Isolation mechanism |
 | --- | --- | --- |
-| `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
+| `ci.yml` | yes (build/test/lint) | fork guard on every job that can use an own pool (skip on fork PR). Six jobs run on a fork PR (#4835): `changes`, `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness`, `helm-lint-template` and the fan-in `python-unit-lane`. They use hosted runners on a pull request and read no secret. The fan-in says in its step summary that the unit shards did not run. `CONTRIBUTING.md`, "Pull requests from forks", has the maintainer steps |
 | `image.yml` | yes (Docker build) | fork guard (skip on fork PR) on the `build` job, which runs on GitHub-hosted `ubuntu-latest` for pull requests and on `meho-runners-ci` only for `main` and tag pushes |
 | `chart.yml` | yes (helm template) | fork guard on the `validate` job, which runs on GitHub-hosted `ubuntu-latest`; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
@@ -2856,7 +3015,8 @@ their isolation posture:
 | `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route** (#6325) for pull requests; the merge-queue run uses a hosted runner (#6350) |
 | `linux-server-test.yml` | yes (shellcheck, and the unit tests run `deploy/linux-server/install.sh` against stub commands) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog and a second scanner binary over PR content) | **hosted runner** for pull requests; both scanner jobs are skipped in the merge queue (#6350) |
-| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
+| `private-names-check.yml` | yes (runs `scripts/ci/check_private_names.py` from the checkout of the pull request over its added lines) | **hosted runner** for every event, also the merge queue; a fork pull request gets no secrets, so the job prints a note and skips the checkout |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
@@ -2871,9 +3031,9 @@ their isolation posture:
   A fork PR (`head.repo.full_name != github.repository`) skips the job;
   a skipped required job reports **Success**, so branch protection is
   satisfied while nothing executes on the internal pool. Used where the
-  job genuinely needs an internal resource — `security-scan.yml` runs in
-  a container pulled through the internal Harbor proxy, so relocating it to a disposable
-  runner is impossible; the real scan runs on the trusted `merge_group`
+  job genuinely needs an internal resource — the Semgrep job of
+  `security-scan.yml` pulls its scan image through the internal image proxy
+  with `docker run`, so relocating it to a disposable runner is impossible; the real scan runs on the trusted `merge_group`
   (queue admission) and `push` refs instead.
 
 - **Route to a disposable runner.** Where the job needs no internal
@@ -2927,15 +3087,15 @@ for a pool that is full. Three rules:
    two pull requests can raise the same plugin version, or break the
    docs build together. A queue run starts about
    12 jobs on `meho-runners-ci`, 6 on `meho-runners-ci-heavy-queue`
-   (the unit shards) and 11 hosted jobs (rule 3).
+   (the unit shards) and 12 hosted jobs (rule 3).
 3. **A short job that must stay and does not need a pool may use a
    hosted runner.** It goes on `_HOSTED_ON_MERGE_GROUP_ALLOWED` in
    `backend/tests/test_ci_fork_runner_isolation.py`, with its reason.
    Today these are: `docs-site.yml` `deploy` and `build`,
    `plugin-version-check.yml` `plugin-version`, `ci.yml` `changes`,
    `python-unit-lane`, `python-integration` and `helm-lint-template`,
-   `chart.yml` `changes` and `helm-test-gate`, and `migration-heads.yml`
-   `check`. Each runs for seconds to about a minute, so it does not fill the
+   `chart.yml` `changes` and `helm-test-gate`, `migration-heads.yml`
+   `check`, and `private-names-check.yml` `check`. Each runs for seconds to about a minute, so it does not fill the
    hosted limit. The two kind installs of `chart.yml` (`helm-test` and
    `helm-test-byo`) are hosted too, for a different reason: they need
    more CPU than the heavy queue pool has today (#6347).
@@ -3049,7 +3209,7 @@ smoke capacity scales linearly with PR throughput.
 
 Cluster auth + RBAC for `meho-ci-*` namespaces is provisioned in the
 consumer's own repo, not in this repo — see
-[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
+[`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md)
 for the full contract (Section 1: auth options; Section 2: RBAC verb
 set; Verification: end-to-end check).
 
@@ -3126,8 +3286,9 @@ Steps, in order:
    `azure/setup-helm@v5.0.1` (same SHA as `chart.yml`).
 5. **Configure kubectl (OIDC mode)** — `actions/github-script@v9.0.0`
    mints an OIDC ID token via `core.getIDToken(audience)` against the
-   consumer-chosen audience (a default in the workflow, override
-   via `vars.RKE2_OIDC_AUDIENCE`). Skipped when Option A's inputs
+   consumer-chosen audience from the repository secret
+   `RKE2_OIDC_AUDIENCE`. There is no default: when the secret is empty,
+   the step fails with a message that names it. Skipped when Option A's inputs
    aren't set, so Option B's kubeconfig path takes over below.
 6. **Build kubeconfig** — assembles `$HOME/.kube/config` from either
    the OIDC token + CA cert (Option A) or the base64-decoded
@@ -3345,10 +3506,7 @@ options (OIDC trust preferred over a long-lived kubeconfig secret),
 namespace-scoped RBAC for `meho-ci-*`, the `meho-image-pushed`
 `repository_dispatch` event shape, and the verification commands
 either side can run to prove the contract holds — lives in
-[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md).
-The companion script
-[`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
-automates the kubectl portion of the check.
+[`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md).
 
 ## Acceptance contracts (v0.1 deploy goal)
 
@@ -3422,4 +3580,4 @@ commands.
 - External Secrets Operator: https://external-secrets.io/
 - ESO Vault provider: https://external-secrets.io/latest/provider/hashicorp-vault/
 - ESO ExternalSecret API: https://external-secrets.io/latest/api/externalsecret/
-- Cross-repo handshake spec: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
+- Cross-repo handshake spec: [`docs/cross-repo/ci-cluster-coordination.md`](../cross-repo/ci-cluster-coordination.md)

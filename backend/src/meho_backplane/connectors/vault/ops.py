@@ -77,6 +77,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import record_caller_kv_read
 from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
@@ -404,6 +405,7 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
             mount_point=mount,
             raise_on_deleted_version=False,
         )
+        record_caller_kv_read(operator, secret_payload)
         # Structural unwrap -- raises KeyError on a malformed hvac
         # payload (e.g. ``{"data": {}}`` missing the nested ``data`` or
         # ``metadata`` keys). The dispatcher's ``connector_error``
@@ -782,7 +784,9 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
 
     1. ``GET /v1/<mount>/data/<path>`` — the current version. Vault
        authorizes this with ``read`` on the data path. A missing secret
-       stops here with ``InvalidPath``; nothing is written.
+       stops here with ``InvalidPath``; nothing is written. A read that
+       returns the secret data notes the caller's login for the audit
+       row, also when step 2 fails.
     2. ``POST /v1/<mount>/data/<path>`` with the supplied fields merged
        over the current top-level keys (``dict.update``, so a nested
        object is replaced as a whole) and ``cas`` set to the version read
@@ -814,13 +818,40 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
 
     async with vault_client_for_target(operator, target) as client:
         patch_payload = await asyncio.to_thread(
-            client.secrets.kv.v2.patch,
+            _patch_noting_read,
+            operator,
+            client.secrets.kv.v2,
             path=path,
             secret=secret,
-            mount_point=mount,
+            mount=mount,
         )
         version = patch_payload["data"]["version"]
         return {"version": version}
+
+
+def _patch_noting_read(
+    operator: Operator, kv_v2: Any, *, path: str, secret: dict[str, Any], mount: str
+) -> Any:
+    """Run hvac's ``patch`` and note the caller's login when its read returns the secret.
+
+    hvac's ``patch`` reads the current version through
+    ``self.read_secret_version`` before it writes. The read goes through a
+    wrapper on this client's own KV-v2 object, so the login is noted right
+    after the read, also when the write after it fails. The client is made
+    for this one call, so no other call sees the wrapper.
+    """
+    plain_read = kv_v2.read_secret_version
+
+    def read_and_note(*args: Any, **kwargs: Any) -> Any:
+        payload = plain_read(*args, **kwargs)
+        record_caller_kv_read(operator, payload)
+        return payload
+
+    kv_v2.read_secret_version = read_and_note
+    try:
+        return kv_v2.patch(path=path, secret=secret, mount_point=mount)
+    finally:
+        kv_v2.read_secret_version = plain_read
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1208,7 @@ async def vault_kv_metadata_delete(
 VAULT_KV_WRITE_CAPABILITIES: dict[str, frozenset[str]] = {
     "vault.kv.put": frozenset({"create", "update"}),
     "vault.kv.patch": frozenset({"read", "update"}),
+    "vault.kv.generate": frozenset({"read", "create", "update"}),
     "vault.kv.delete": frozenset({"update"}),
     "vault.kv.metadata.delete": frozenset({"delete", "read"}),
 }
@@ -1201,7 +1233,7 @@ def vault_kv_write_target_path(op_id: str, params: dict[str, Any]) -> str:
     * ``vault.kv.delete`` soft-deletes versions via ``POST
       <mount>/delete/<path>`` (hvac's ``delete_secret_versions``), which
       Vault authorizes with ``update`` on that **delete** path — NOT the
-      data path (#3274, lab-verified in claude-rdc-hetzner-dc#2814).
+      data path (#3274, lab-verified).
     * ``vault.kv.metadata.delete`` sends ``DELETE <mount>/metadata/<path>``
       (hvac's ``delete_metadata_and_all_versions``) and reads the same
       path before and after, so it authorizes on the **metadata** path
@@ -1683,8 +1715,14 @@ async def register_vault_typed_operations(
     from meho_backplane.connectors.vault.ops_kv_folder import (
         register_vault_kv_folder_operations,
     )
+    from meho_backplane.connectors.vault.ops_kv_generate import (
+        register_vault_kv_generate_operation,
+    )
 
     await register_vault_kv_folder_operations(
+        when_to_use=kv_when_to_use, embedding_service=embedding_service
+    )
+    await register_vault_kv_generate_operation(
         when_to_use=kv_when_to_use, embedding_service=embedding_service
     )
     await register_vault_auth_operations(embedding_service=embedding_service)

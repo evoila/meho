@@ -61,6 +61,7 @@ from meho_backplane.ui.routes.agents.forms import (
     submit_edit,
     submit_toggle,
 )
+from meho_backplane.ui.routes.agents.live_grants import register_live_grants_route
 from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
     resolve_human_admin_or_403,
@@ -84,7 +85,6 @@ from meho_backplane.ui.routes.agents.principals_views import (
 )
 from meho_backplane.ui.routes.agents.run import (
     INPUT_MAX,
-    WORK_REF_MAX,
     cancel_run,
     render_run_console,
     stream_run_events,
@@ -149,7 +149,7 @@ async def _run_submit_handler(
     request: Request,
     name: str,
     input_: str = Form(default="", alias="input", max_length=INPUT_MAX),
-    work_ref: str | None = Form(default=None, max_length=WORK_REF_MAX),
+    work_ref: str | None = Form(default=None),
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_run_operator_dep,
 ) -> HTMLResponse:
@@ -270,6 +270,8 @@ async def _edit_submit_handler(
     system_prompt: str = Form(default="", max_length=SYSTEM_PROMPT_MAX),
     turn_budget: str | None = Form(default=None, max_length=TURN_BUDGET_MAX_LEN),
     enabled: bool = Form(default=False),
+    grant_set: str = Form(default="", alias="starting_grants", max_length=GRANT_SET_MAX),
+    grant_targets: list[str] = _grant_targets_form,
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:
@@ -285,6 +287,8 @@ async def _edit_submit_handler(
         system_prompt=system_prompt,
         turn_budget=turn_budget,
         enabled=enabled,
+        grant_set=grant_set,
+        grant_targets=grant_targets,
     )
 
 
@@ -615,6 +619,7 @@ def build_agents_router() -> APIRouter:
     router = APIRouter(tags=["ui-agents"])
     _register_static_prefix_routes(router)
     _register_principals_routes(router)
+    register_live_grants_route(router)
     _register_read_routes(router)
     _register_run_routes(router)
     _register_write_routes(router)

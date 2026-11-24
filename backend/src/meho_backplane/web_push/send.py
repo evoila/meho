@@ -31,7 +31,8 @@ so the request never waits for a push service.
   burst of decisions (for example many requests expiring at once) does not
   flood a phone.
 * A push service that answers 404 or 410 (the browser dropped the
-  subscription) gets its row deleted.
+  subscription) gets its row deleted. When that delete fails, MEHO logs it
+  and the other sends of the step go on.
 * Messages go only to the browser makers' push services (checked again here,
   not only when the subscription was stored), without following redirects.
   Logs name the row id, the person, the push service and the status. Never
@@ -54,6 +55,7 @@ from typing import Any
 import httpx
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Tenant
@@ -201,10 +203,14 @@ def _snapshot(tenant_id: uuid.UUID, request: ApprovalRequest) -> ApprovalRequest
         id=request.id,
         tenant_id=tenant_id,
         principal_sub=request.principal_sub,
+        principal_kind=request.principal_kind,
+        people_behind=request.people_behind,
         op_id=request.op_id,
         params=request.params,
         proposed_effect=request.proposed_effect,
         rights_change=request.rights_change,
+        approver_roles=request.approver_roles,
+        approver_rule=request.approver_rule,
         status=request.status,
     )
 
@@ -354,8 +360,20 @@ async def _deliver(
         return
     status = response.status_code
     if status in (404, 410):
-        async with get_sessionmaker()() as db, db.begin():
-            await delete_gone(db, subscription_id=target.id)
+        # A failed delete must not stop the other sends of this step. A
+        # refused connection or a timeout can come as a bare OSError.
+        try:
+            async with get_sessionmaker()() as db, db.begin():
+                await delete_gone(db, subscription_id=target.id)
+        except (SQLAlchemyError, OSError) as exc:
+            _log.warning(
+                "web_push_gone_not_removed",
+                service=service,
+                status=status,
+                error=type(exc).__name__,
+                **fields,
+            )
+            return
         _log.info("web_push_subscription_gone", service=service, status=status, **fields)
     elif not 200 <= status < 300:
         _log.warning("web_push_send_refused", service=service, status=status, **fields)
@@ -375,6 +393,12 @@ def reset_for_testing(*, window: float = RATE_LIMIT_SECONDS) -> None:
 
 
 async def wait_for_sends_for_testing() -> None:
-    """Wait until every background send (and summary) has finished."""
-    while _TASKS:
-        await asyncio.gather(*list(_TASKS), return_exceptions=True)
+    """Wait until every background send (and summary) has finished.
+
+    A task that ended stays in ``_TASKS`` until its done callback runs, one
+    loop turn later. Awaiting only ended tasks never gives the loop that
+    turn, so the check is on ``done()`` and not on the set: a loop on the
+    set would spin forever and never yield.
+    """
+    while pending := [task for task in _TASKS if not task.done()]:
+        await asyncio.gather(*pending, return_exceptions=True)

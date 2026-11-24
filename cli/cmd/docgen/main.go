@@ -39,6 +39,11 @@ import (
 // resolves to the repo's docs-site tree.
 const defaultOutPath = "../docs-site/reference/cli.md"
 
+// referenceNoteKey is the cobra annotation whose text the reference prints
+// under the short help. It holds a short note that belongs on the page but
+// not in the one-line short help.
+const referenceNoteKey = "docs-reference-note"
+
 // Public-safety redaction patterns. Cobra help strings are operator-facing
 // but a few embed internal planning references — GitHub issue numbers
 // (#3153), Goal/Task identifiers (G11.2-T6, G0.7), design-doc section
@@ -120,6 +125,9 @@ func renderCommand(sb *strings.Builder, c *cobra.Command, depth int) {
 	if short := redact(c.Short); short != "" {
 		fmt.Fprintf(sb, "%s\n\n", short)
 	}
+	if note := redact(c.Annotations[referenceNoteKey]); note != "" {
+		fmt.Fprintf(sb, "%s\n\n", note)
+	}
 	// The multi-paragraph `Long` help is deliberately omitted: it carries
 	// contributor-facing jargon and lab-recipe examples not suited to the
 	// public reference, and mechanical ref-redaction of mid-sentence
@@ -159,13 +167,25 @@ func render(root *cobra.Command) string {
 		"identities side by side. `meho login <url> --profile <name>` stores the login " +
 		"under that name. The flag wins over `$MEHO_PROFILE`.\n")
 	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
-	sb.WriteString("- `--work-ref` — external change-ticket reference " +
-		"(`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the " +
+	sb.WriteString("- `--work-ref` — external change-ticket reference, any ticket id on one " +
+		"line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). " +
+		"The CLI sends it as the " +
 		"`Meho-Work-Ref` header on every backplane request, so the audit rows carry it. " +
 		"Five commands have their own `--work-ref` flag that tags the run with the " +
 		"reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, " +
 		"and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the " +
-		"header. List commands filter by reference with `--filter-work-ref`.\n\n")
+		"header. List commands filter by reference with `--filter-work-ref`. " +
+		"The backplane cleans every ticket id with one rule: it removes white space at both " +
+		"ends, refuses an empty value, control characters (also a tab inside the id) and " +
+		"invisible characters, allows at most 256 characters, and stores the text in " +
+		"Unicode form NFC.\n\n")
+	sb.WriteString("## Login session\n\n")
+	sb.WriteString("`meho login` makes a random id for the login session and stores it " +
+		"with the login. Every command sends it in the `Meho-Session-Id` header, next to " +
+		"`Meho-Work-Ref`. MEHO stores it as the session id of the audit rows of the " +
+		"request and marks those rows with `session_from_client: true`, so a CLI call is " +
+		"not counted as an agent session. A token refresh keeps the id; the next " +
+		"`meho login` makes a new one.\n\n")
 	sb.WriteString("## Current tenant\n\n")
 	sb.WriteString("One login can be in several tenants. MEHO then works in one current " +
 		"tenant, and every command sends it in the `Meho-Tenant` header. Choose it with " +

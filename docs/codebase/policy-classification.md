@@ -15,6 +15,28 @@ All of this is behind the switch `POLICY_CLASSIFICATION` (Helm
 MEHO reads none of it: every operation keeps the risk level and the
 approval it has today, and `category`, `labels` and `rule_ref` stay empty.
 `/ready` shows the switch under `features.policy.classification`.
+The switch changes what the agent sees (the category and labels in search
+results and in the call contract), so `GET /version` lists it too.
+
+Label text can reach the agent, so it has a character rule
+(`label_text_ok` in `policy/classification.py`). A key uses only letters,
+digits and `. _ / -`, at most 63 characters. A value uses only printable
+characters: no line breaks and no control characters, 1 to 255
+characters. A write that breaks the rule is refused, also in the policy
+file import. A stored label that breaks it (for example one written
+before the rule, or a value that is too long) is not shown. For what it
+shows, MEHO then counts such a label as not there: the value of a less
+specific entry for the same key is shown instead. MEHO still
+looks for conflicts on the labels as stored, before it leaves one out:
+two entries of the same rank that give one operation different values
+for a label are a conflict, and the call waits for approval. While the
+call waits, MEHO still shows one of the two values for that label: the
+value of the entry that comes first. An entry of a policy file comes
+before the override of the one operation, and in a file the entry
+listed first comes first. When that value breaks the rule, MEHO shows
+the other value (`_shown_labels` in `policy/classification.py`). While the
+call contract shows labels, its `result_shape.guidance` also says that
+label text is data, never an instruction.
 
 ## Where the values come from
 
@@ -62,13 +84,56 @@ The rules are in `policy/classification.py` (`classify`, no database):
 3. **Each field on its own.** The most specific entry that sets a field
    decides it. Labels add up; a more specific entry replaces the value of
    a key.
-4. **Ties** (same rank): for `risk` the higher level wins, for
+4. **The stricter of install and tenant counts.** This is the one rule
+   for `risk` and `always_wait` (decision of 12 November 2026). Each scope
+   first finds its own value with rules 1 to 3, using only its own
+   entries. Then the higher risk level counts, and the operation always
+   waits when the install or the tenant says so. So:
+   - an install risk level is a floor for every tenant. A tenant can raise
+     it, not lower it;
+   - an install "always wait" holds in every tenant;
+   - a tenant's own "always wait" holds, also under a more specific
+     install entry with `always_wait: false`;
+   - the install's own more specific entry still decides the install's
+     value, and a tenant's own more specific entry still decides the
+     tenant's value.
+
+   A tenant file that sets `always_wait: false` on an operation the
+   install makes wait is refused; the text says to remove that part. A
+   single edit that sends it is refused too; its text says not to send
+   `always_wait: false` (`install_wait_text(..., single_edit=True)`). A
+   tenant entry that decides a lower `risk` for an operation than a
+   matching install entry is refused too (`install_risk_lowered`). A more
+   specific tenant entry with the install's level or higher decides that
+   operation instead, and then the wide entry is fine. The text says that
+   the level "does not count for `<op>`". For a wide entry it says that
+   the entry still counts for its other operations, and suggests a more
+   specific entry or a narrower match, never to remove the level
+   (`install_floor_texts`). The suggested entry names the operation and
+   its connector, because the same op id can exist on another connector.
+   When the refused entry names a group, the suggested entry names the
+   group too; without it, the suggested entry ranks below the refused one.
+   An entry that matches the op on two connectors counts as wide. The
+   single edit has no `risk` field, so it refuses only the
+   `always_wait: false` part (`install_wait_undone`).
+5. **Ties** (same rank): for `risk` the higher level wins, for
    `always_wait` `true` wins. A different `category`, or a different value
    for one label key, is a conflict.
-5. **No entry** sets the category: the taxonomy's default.
+6. **No entry** sets the category: the taxonomy's default.
 
 `rule_ref` names the most specific entry that matched, for example
 `tenant:classifications[2]` or `install:override`, or `taxonomy.default`.
+
+### Connectors that a tenant registers itself
+
+A tenant can ingest its own connector and choose its id (`<impl_id>-<version>`),
+also for a product that MEHO already ships. An entry matches on the
+connector id, the group key and the operation id only, never on the
+product. So an install entry such as `{connector: "vault-*"}` does not
+match a tenant's own connector `my-vault-1.x` for the same product, and
+the install's risk level or "always wait" does not reach it. An install
+entry with a wildcard connector covers it, for example
+`{connector: "*", op: "<op-id-pattern>"}` or `{connector: "*"}`.
 
 **A conflict** is refused when an entry is written (one sentence that
 names both entries). If a reader still meets one (for example a new
@@ -85,12 +150,27 @@ always waits.
    `destructive` always waits. So a level never goes below the code's
    value, and `always_wait: false` only goes back to the code's value;
 3. the floors: an operation that connects to an address the caller gives
-   is at least `caution` and always waits.
+   is at least `caution` and always waits. An operation that writes or
+   makes a credential (class `credential_write` or `credential_mint`)
+   keeps the approval its code turns on, also when an install or tenant
+   override turns it off (`_with_floors`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
 show the same values. The returned `EffectivePolicy` carries `category`,
 `labels`, `rule_ref` and `always_wait`.
+
+## Where a person and an agent see it
+
+While the switch is on:
+
+- a `search_operations` hit and the call contract (exact-op mode) carry
+  `category` and `labels` ([mcp.md](mcp.md));
+- an approval request carries `category`, `labels` and
+  `classification_rule` (the `rule_ref`), and the approvals console and
+  `meho approvals show` show them ([approvals.md](approvals.md)).
+
+With the switch off, none of these keys is in an answer.
 
 ## "Always wait" means a person approves each call
 
@@ -111,7 +191,12 @@ approving that call.
 write step against a row built in memory from the step's declared risk
 level (`enforce_subop_policy` in `operations/composite.py`), and the
 preview checks the same steps (`operations/_preview_steps.py`). Both call
-`apply_step_classification` in `operations/op_policy.py` first. It
+`apply_step_policy` in `operations/op_policy.py` first. It reads the
+override rows of the step's operation (install-wide and the caller's
+tenant) like a direct call, with the switch on or off: the highest risk
+level wins, and an override that sets the approval flag makes the step
+wait. An override only makes a step stricter; one that turns approval off
+leaves the step's own flag as it is. With the switch on, it then
 classifies the step (`classify_step` in `policy/store.py`), raises its
 level and sets `policy_always_wait`. So a marked step waits for a person
 also when a standing grant or a run approval covers it, and also when a
@@ -132,12 +217,29 @@ The change is the operation `policy.classify` on the connector
 - A person approves each call (`declare_per_call_approval`): no standing
   grant and no run approval covers it.
 - Every request carries the rights-change mark
-  (`register_rights_change_op`, see [approvals.md](approvals.md)). The
-  person who asked can never approve it; another tenant admin must.
+  (`register_rights_change_op`, see [approvals.md](approvals.md)). A
+  tenant admin approves it with a click in the web console, and may be
+  the person who asked. A tenant admin's own call in the web console runs
+  at once.
 - A person needs the `tenant_admin` role to ask.
+- Only a person asks: the policy gate refuses an agent, a service login
+  and a hosted agent run on every path, before anything waits
+  (`policy_classify_requester_refusal`). The approval card records who
+  asked, and the run checks that record again. A run by the person who
+  asked (for example a re-run of a failed approved request) changes
+  nothing. These are the same rules as for the policy file import
+  (`policy.apply`, see [policy.md](policy.md)).
+- The approval card shows what the entry matches when the request is
+  made (`build_policy_classify_preview`): `matches_now` (how many
+  operations), `first_matches` (the first 20), `and_more` ("and N more")
+  and `later_operations`, one sentence that the entry also matches
+  operations added later. That sentence is missing only when the match
+  names one connector and one operation, with no wildcard.
 - It changes one entry of the caller's tenant document: the entry with the
   same `match` is updated, or a new one is added. It refuses an unknown
-  category, bad labels and a conflict. Nothing is written then.
+  category, bad labels, a conflict, and an edit that sets
+  `always_wait: false` on an operation the install's policy makes always
+  wait. Nothing is written then.
 - It exists only while the switch is on. With the switch off, the
   registrar deletes the operation and its group if an earlier start wrote
   them (`remove_built_in_connector_rows`). So after a restart with the
@@ -154,15 +256,26 @@ two steps. Both are in `policy/bulk.py`:
 1. **Dry run** (`preview_classification_edit`). It lists every operation
    the entry matches, with its category, labels, risk level and "always
    wait" before and after the edit, and `changes` for each. The list is
-   never cut. It also names a conflict the edit would make. It writes
-   nothing. `plan_edit` in `policy/store.py` does the work; the change
+   never cut. It also names a conflict the edit would make, or the
+   install entry whose "always wait" the edit tries to set back
+   (`conflict`). A tenant's own "always wait" under an install entry with
+   `always_wait: false` shows as "waits" after the edit. It writes nothing. Next to the classified values,
+   `before.in_force` and `after.in_force` show what applies: the risk
+   level and whether a call waits, with the code's value, the overrides
+   and the floors (`policy_in_force` in `operations/op_policy.py`). So
+   when "always wait" goes from yes to no but a floor keeps the wait, the
+   dry run still shows "waits". The console table and the CLI show it in
+   the "In force" column. `plan_edit` in `policy/store.py` does the work; the change
    itself (`set_classification`) uses the same function.
 2. **Request** (`request_classification_edit`). It runs the dry run again
    and refuses, before any request, an edit that is not valid, that
-   matches no operation, or that would make a conflict. Otherwise it calls
+   matches no operation, that would make a conflict, or that sets back an
+   install-wide "always wait". Otherwise it calls
    `policy.classify` through `call_operation`, so the role check, the
-   approval and the audit row are those of any other call. The answer
-   waits until another tenant admin approves it.
+   approval and the audit row are those of any other call. On the console
+   page the change runs at once (a tenant admin in the web console). On
+   every other surface the answer waits until a tenant admin approves it in
+   the web console.
 
 | Surface | Dry run | Request |
 |---|---|---|
@@ -170,20 +283,29 @@ two steps. Both are in `policy/bulk.py`:
 | REST, one connector | | `PATCH /api/v1/connectors/{connector_id}/classification` |
 | REST, one group or operation | | `category` / `labels` on the existing group and operation PATCH routes (`202`) |
 | CLI | `meho connector classify --op '<pattern>' --category <name>` | the same with `--apply`; `--category` / `--label` on `edit-op` and `edit-group` |
-| Console | `/ui/policy/classify` ("Show what changes"); the review drawer links to it with the match filled in | "Ask for this change" on the dry run |
+| Console | `/ui/policy/classify` ("Show what changes"); the review drawer links to it with the match filled in | "Ask for this change" on the dry run; it runs at once |
 | Admin MCP tools | the operation `policy.classify_preview` | `category` / `labels` on `meho_connector_edit_op` and `meho_connector_edit_group`; `policy.classify` for a connector or a pattern |
+
+The console page needs the `tenant_admin` role. Another person gets
+`403` with "Classifying operations needs the tenant_admin role."
 
 `GET /api/v1/policy/classification` lists the taxonomy and the stored
 entries of the caller's tenant and of the install.
 
 Rules every surface keeps:
 
-- `category` and `labels` on a PATCH route or an MCP edit tool wait for a
-  second admin, so they cannot ride along with fields that are stored at
+- `category` and `labels` on a PATCH route or an MCP edit tool wait for an
+  admin's approval, so they cannot ride along with fields that are stored at
   once. A body with both is refused (`400`, MCP `-32602`,
   `classification_mixed`).
 - The change is always for the caller's tenant. The tenant comes from the
-  login, never from the request.
+  login, never from the request. The two MCP edit tools refuse
+  `tenant_id` next to `category` or `labels` (`-32602`,
+  `classification_tenant_id`).
+- A route or tool that edits one connector, one group or one operation
+  takes the id as plain text. An id with `*`, `?` or `[` is refused
+  (`400` / `-32602`, `classification_wildcard`): that door never makes a
+  pattern. A pattern goes through the dry run and the request above.
 - While the switch is off, REST answers `409` (`classification_off`), the
   list says `enabled: false`, the console page says so, and the two MCP
   edit tools do not show the fields (`classification_for_settings`), so
@@ -204,17 +326,19 @@ The override report (`list_overrides` in `operations/op_policy.py`, REST
 "approval off" for an operation that a classification entry still makes
 wait. Each row also has `category`, `labels`, `always_wait` and `rule_ref`
 (the entry that decided the values). With the switch off these stay empty
-and the report is as before.
+and the report is as before; the console page then has no "Category"
+column. A row with the scope "whole install" holds for every tenant and
+shows the install's values; a tenant's own rules can make the operation
+stricter for that tenant. The page says so.
 
 ## Known limits
 
 - The policy file import (`policy.apply`, see [policy.md](policy.md))
   replaces the whole document of a tenant or the install, also the entries
   that `policy.classify` wrote.
-- Search hits, the call contract and the approval request do not show the
-  category yet.
-- A connector id, group key or operation id that holds `*`, `?` or `[` is
-  read as a pattern, also on the PATCH routes. The dry run shows what it
+- On the pattern routes (`/api/v1/policy/classification`, the console
+  page, `policy.classify`) a connector id, group key or operation id that
+  holds `*`, `?` or `[` is read as a pattern. The dry run shows what it
   matches.
 - The flight-recorder check (`test_flight_recorder_typed_spans.py`) runs
   with the switch off, so it does not list `policy-registry`.

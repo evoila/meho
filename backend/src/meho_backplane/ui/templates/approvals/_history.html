@@ -52,6 +52,7 @@
     has_more          -- bool: whether a further page exists
     order             -- str: the order in use, "oldest" or "newest" (#3596)
     order_choice      -- str: the operator's explicit choice, "" when none
+    work_ref_error    -- str | None: why the work_ref filter was refused (no rows)
     in_order_work_ref -- str | None: the change ticket the "Approve group in
                          order" button runs (#3597); None hides the button
 -#}
@@ -81,7 +82,7 @@
         hx-include="[name='work_ref']"
         hx-push-url="/ui/approvals?tab={{ tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
       >
-        {{ "Outcome unknown" if tab == "outcome_unknown" else tab | capitalize }}
+        {{ {"outcome_unknown": "Outcome unknown", "for_you": "For you"}.get(tab, tab | capitalize) }}
       </button>
     {% endfor %}
   </div>
@@ -139,14 +140,16 @@
       >
         Approve group in order
       </button>
-      <span class="text-xs text-base-content/60">
+      <span class="text-xs text-subtle">
         Approves the steps oldest first and stops at the first failure.
       </span>
     </div>
   {% endif %}
 
   {# ---------- Rows ---------- #}
-  {% if requests %}
+  {% if work_ref_error %}
+    <div role="alert" class="alert alert-error text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+  {% elif requests %}
     <ul
       id="approvals-history-rows"
       class="divide-base-content/8 divide-y rounded-box border border-base-300 bg-base-100"
@@ -164,29 +167,29 @@
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
       <div class="card-body items-center py-10 text-center">
         {% if work_ref %}
-          <p class="text-base opacity-60">
+          <p class="text-base text-subtle">
             No {{ active_tab if active_tab != "all" else "" }} requests for
             <span class="font-mono">{{ work_ref }}</span>.
           </p>
-          <p class="text-sm opacity-40">Clear the change-ticket filter or pick another tab.</p>
+          <p class="text-sm text-subtle">Clear the change-ticket filter or pick another tab.</p>
         {% elif active_tab == "pending" %}
-          <p class="text-base opacity-60">No pending approvals</p>
-          <p class="text-sm opacity-40">
+          <p class="text-base text-subtle">No pending approvals</p>
+          <p class="text-sm text-subtle">
             New requests appear here the moment an agent action needs your sign-off.
           </p>
         {% elif active_tab == "outcome_unknown" %}
-          <p class="text-base opacity-60">No approved changes with an unknown outcome</p>
-          <p class="text-sm opacity-40">
+          <p class="text-base text-subtle">No approved changes with an unknown outcome</p>
+          <p class="text-sm text-subtle">
             An approved change shows here when MEHO does not know if it happened. Someone then checks the target.
           </p>
         {% elif active_tab == "all" %}
-          <p class="text-base opacity-60">No approval requests yet</p>
-          <p class="text-sm opacity-40">
+          <p class="text-base text-subtle">No approval requests yet</p>
+          <p class="text-sm text-subtle">
             Requests appear here once an agent action requires approval.
           </p>
         {% else %}
-          <p class="text-base opacity-60">No {{ active_tab }} requests</p>
-          <p class="text-sm opacity-40">Nothing has been {{ active_tab }} in this tenant yet.</p>
+          <p class="text-base text-subtle">No {{ active_tab }} requests</p>
+          <p class="text-sm text-subtle">Nothing has been {{ active_tab }} in this tenant yet.</p>
         {% endif %}
       </div>
     </div>

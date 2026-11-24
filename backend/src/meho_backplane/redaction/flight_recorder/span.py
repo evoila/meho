@@ -76,6 +76,7 @@ def redact_span(
     connector_id: str | None = None,
     method: str | None = None,
     tags: Iterable[str] = (),
+    stored_op_class: str | None = None,
     request_headers: Any = None,
     response_headers: Any = None,
     request_body: Any = None,
@@ -101,6 +102,7 @@ def redact_span(
         op_id,
         tags=tags,
         method=method,
+        stored_op_class=stored_op_class,
         delete_shaped_patterns=delete_shaped_patterns,
     )
 

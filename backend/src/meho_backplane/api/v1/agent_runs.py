@@ -81,11 +81,13 @@ from meho_backplane.agent.run import AgentRunEvent
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.models import AgentRunStatus
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import decode_work_ref_header, work_ref_var
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
+    RunNotOwnedCancellationError,
     UnauthorizedCancellationError,
 )
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -287,6 +289,18 @@ def _outcome_response(outcome: AgentRunOutcome) -> JSONResponse:
     )
 
 
+def _header_work_ref(raw: str | None) -> str | None:
+    """Return the text of a ``Meho-Work-Ref`` header read through ``Header()``.
+
+    Starlette gives header values as latin-1 text. Turn the value back
+    into its bytes and decode it like the audit middleware does, so a
+    ticket id sent as UTF-8 (such as ``Änderung-7``) stays the same text
+    on the run row. Only header values come here: latin-1 can encode
+    every one of them.
+    """
+    return decode_work_ref_header(raw.encode("latin-1")) if raw is not None else None
+
+
 @contextlib.contextmanager
 def _bound_work_ref(raw: str | None) -> Iterator[None]:
     """Bind the inbound ``Meho-Work-Ref`` header onto ``work_ref_var``.
@@ -296,8 +310,15 @@ def _bound_work_ref(raw: str | None) -> Iterator[None]:
     the header around its *post-response* audit write (so the binding is not
     live during the route handler). This binds the same header value for the
     duration of the invoker call so the run row inherits it, mirroring the
-    set/reset discipline the approval-queue boundary uses. A missing /
-    blank header binds nothing — the run's ``work_ref`` lands ``NULL``.
+    set/reset discipline the approval-queue boundary uses. A missing header
+    (``None``) binds nothing — the run's ``work_ref`` lands ``NULL``. A header
+    that is sent but blank never gets here: the audit middleware and
+    :func:`_header_work_ref` refuse it with the shared rule. A blank console
+    form value is turned into ``None`` before the call.
+
+    ``raw`` is normal text that already follows the shared rule. The REST
+    routes pass the header through :func:`_header_work_ref` first; the
+    console run passes its form value cleaned by ``form_work_ref``.
     """
     cleaned = raw.strip() if raw is not None else None
     if not cleaned:
@@ -361,7 +382,7 @@ async def run_agent(
     )
     invoker = get_agent_invoker()
     try:
-        with _bound_work_ref(meho_work_ref):
+        with _bound_work_ref(_header_work_ref(meho_work_ref)):
             outcome = await invoker.run(operator, name, body.input, async_mode=body.async_)
     except AgentNotFoundError as exc:
         raise HTTPException(
@@ -388,14 +409,17 @@ async def run_agent(
 
 @router.get("/runs", response_model=list[AgentRunSummaryResponse])
 async def list_runs(
-    work_ref: str | None = Query(
-        default=None,
-        description=(
-            "Filter by external change-ticket reference (exact match), e.g. "
-            "'gh:evoila/meho#11' — the runs that worked under change ticket X "
-            "(work_ref I3-T2 #1662). Omit for no work_ref filter."
+    work_ref: Annotated[
+        WorkRefFilter | None,
+        Query(
+            description=(
+                "Filter by external change-ticket reference, e.g. "
+                "'gh:evoila/meho#11' — the runs that worked under change ticket X "
+                "(work_ref I3-T2 #1662). Omit for no work_ref filter. "
+                + WORK_REF_FILTER_DESCRIPTION
+            ),
         ),
-    ),
+    ] = None,
     status: AgentRunStatus | None = Query(
         default=None,
         description=(
@@ -428,7 +452,7 @@ async def list_runs(
 
     Tenant-isolated server-side via the JWT — cross-tenant runs are
     invisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one
-    change ticket (exact match); ``?status=running`` narrows to one
+    change ticket (whole id, see the work_ref parameter); ``?status=running`` narrows to one
     lifecycle state; ``?agent_name=triage`` narrows to runs produced by
     that agent definition (an unknown name yields an empty list). Returns
     ``created_at DESC``.
@@ -512,6 +536,12 @@ async def cancel_run(
     request and the write -- is 409, not a 500. A ``read_only`` operator is
     rejected by the route's role gate; the service's own role check is a
     defence-in-depth backstop mapped to 403 should it ever fire.
+
+    A run that another login started is 403
+    ``agent_run_cancel_forbidden: <rule>``, and the run goes on. The rule
+    says who may stop it: the login that started the run, or a person with
+    the ``tenant_admin`` role or a platform admin in the tenant. An agent or
+    service login stops only its own runs.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["cancel"],
@@ -524,6 +554,11 @@ async def cancel_run(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="agent_run_not_found",
+        ) from exc
+    except RunNotOwnedCancellationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"agent_run_cancel_forbidden: {exc}",
         ) from exc
     except UnauthorizedCancellationError as exc:
         raise HTTPException(
@@ -624,7 +659,7 @@ async def run_agent_events(
             detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return StreamingResponse(
-        _events_generator(operator, name, body.input, meho_work_ref),
+        _events_generator(operator, name, body.input, _header_work_ref(meho_work_ref)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",

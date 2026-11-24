@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "EXPORT_REFUSED_SOURCE_KINDS",
     "SecretHandoffDestinationBlockedError",
     "SecretHandoffDigestMismatchError",
     "SecretHandoffError",
@@ -119,6 +120,13 @@ UNWRAP_PATH: Final[str] = "sys/wrapping/unwrap"
 #: The key of the wrapped payload that carries the value. The payload also
 #: carries the handoff's check key (:mod:`.handoff_check`).
 _WRAP_FIELD: Final[str] = "value"
+
+#: Source kinds ``secret.handoff.export`` refuses. A ``vault-target:`` source
+#: reads under a registered Vault target's role; the handoff is made under
+#: the operator's own identity, so the export keeps to sources of that one
+#: identity. Move such a secret to a ``vault:`` place with ``secret.move``
+#: first.
+EXPORT_REFUSED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"vault-target"})
 
 #: Handoff life when the caller does not set ``ttl_seconds``.
 DEFAULT_HANDOFF_TTL_SECONDS: Final[int] = 3600
@@ -298,6 +306,11 @@ async def secret_handoff_export(
     """
     del target
     source_ref = parse_secret_ref(str(params["from"]))
+    if source_ref.kind in EXPORT_REFUSED_SOURCE_KINDS:
+        raise SecretHandoffRefusedError(
+            f"secret.handoff.export does not read from a {source_ref.kind!r} source, so "
+            f"{_LOCAL_STORE} was not asked; use a 'vault:' source, {_RETRY_EXPORT}"
+        )
     source = resolve_secret_endpoint(source_ref)
     material = await _read_source(operator, source, f"{source_ref.kind}:{source_ref.ref}")
     ttl_seconds = int(params.get("ttl_seconds", DEFAULT_HANDOFF_TTL_SECONDS))
@@ -537,11 +550,20 @@ async def secret_handoff_import(
     """Use a handoff from another instance once and write the value into a sink.
 
     Op-id: ``secret.handoff.import``. Checks the sink before the handoff is
-    used, so a wrong sink path does not burn the handoff. Returns only
+    used, so a wrong sink path does not burn the handoff. The sink must be a
+    ``vault:`` place. Returns only
     ``status``, ``value_fingerprint`` and ``length``.
     """
     del target
     sink_ref = parse_secret_ref(str(params["to"]))
+    # A handoff writes only into this instance's Vault. A file on a host is
+    # written only by secret.move, which waits for a person on every call.
+    if sink_ref.kind != "vault":
+        raise SecretHandoffRefusedError(
+            f"secret.handoff.import writes only to a 'vault:' place, not to a "
+            f"{sink_ref.kind!r} place, so the handoff was not used and is still usable; "
+            "import into Vault, then use secret.move to place the secret elsewhere"
+        )
     sink = resolve_secret_endpoint(sink_ref)
     sink_name = f"{sink_ref.kind}:{sink_ref.ref}"
     _check_sink(operator, sink, sink_name)

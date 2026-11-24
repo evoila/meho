@@ -91,10 +91,12 @@ from meho_backplane.memory.service import MemoryService
 from meho_backplane.middleware import RequestContextMiddleware, verify_jwt_and_bind
 from meho_backplane.operations import _audit as dispatch_audit
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
+from tests._rest_write_helpers import run_writes_at_once
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -672,6 +674,7 @@ def _rest_client() -> tuple[TestClient, _Caller]:
     rest_app.include_router(_probe)
     caller = _Caller()
     rest_app.dependency_overrides[verify_jwt_and_bind] = caller
+    run_writes_at_once(rest_app)
     return TestClient(rest_app, raise_server_exceptions=False), caller
 
 
@@ -720,6 +723,33 @@ async def test_rest_dispatch_keeps_only_the_execution_record(
     assert rows[0].status_code == 200
     assert rows[1].status_code >= 400
     assert len(await read_usage_events()) == 2
+
+
+@pytest.mark.usefixtures("stub_ops")
+async def test_rest_call_stores_the_cli_session_and_its_source(
+    rest: tuple[TestClient, _Caller],
+) -> None:
+    """The ``Meho-Session-Id`` header lands on the dispatch row, marked as the CLI's."""
+    client, _caller = rest
+    cli_session = uuid.uuid4()
+    with_header = client.post(
+        "/api/v1/operations/call",
+        json=_call_body(_OK_OP),
+        headers={"Meho-Session-Id": str(cli_session)},
+    )
+    without_header = client.post("/api/v1/operations/call", json=_call_body(_OK_OP))
+    assert with_header.status_code == 200
+    assert without_header.status_code == 200
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [
+        ("operation_execution", "DISPATCH", _OK_OP),
+        ("operation_execution", "DISPATCH", _OK_OP),
+    ]
+    assert rows[0].agent_session_id == cli_session
+    assert rows[0].payload[SESSION_FROM_CLIENT_KEY] is True
+    assert rows[1].agent_session_id is None
+    assert SESSION_FROM_CLIENT_KEY not in rows[1].payload
 
 
 @pytest.mark.usefixtures("stub_ops")

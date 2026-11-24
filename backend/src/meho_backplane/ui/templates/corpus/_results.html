@@ -52,6 +52,8 @@
                           "no grounded answer" string renders the same way with
                           an empty citation list. Set only by the Ask mode.
 -#}
+
+{% from "_components.html" import badge %}
 {#- Shared cited-chunk card list, reused by the ``cited`` and ``ask_fallback``
     branches so the #1919 citation render lives in one place. -#}
 {% macro chunk_cards(cited) %}
@@ -105,7 +107,7 @@
                  itself the (clickable) link -- so a non-navigable source still
                  surfaces where it came from, without pretending to be a link. #}
               {% if chunk.source_url and not link.clickable %}
-                <p class="text-xs font-mono opacity-50 break-all" title="Source object path">
+                <p class="text-xs font-mono text-subtle break-all" title="Source object path">
                   {{ chunk.source_url }}
                 </p>
               {% endif %}
@@ -117,14 +119,10 @@
                  visible as metadata. When no title was supplied the id remains
                  the heading (``link.label``), so it is not repeated as a badge. #}
               {% if chunk_title and chunk.document_id %}
-                <span class="badge badge-ghost badge-outline font-mono" title="Document id">
-                  {{ chunk.document_id }}
-                </span>
+                {{ badge(chunk.document_id, variant="quiet-outline", size="md", class="font-mono", title="Document id") }}
               {% endif %}
               {% if chunk.collection %}
-                <span class="badge badge-ghost badge-outline" title="Source collection">
-                  {{ chunk.collection }}
-                </span>
+                {{ badge(chunk.collection, variant="quiet-outline", size="md", title="Source collection") }}
               {% endif %}
               {% if chunk.score is not none %}
                 <span
@@ -210,7 +208,7 @@
     <div class="alert {{ alert_class }}" role="alert" aria-live="assertive">
       <div>
         <h3 class="font-semibold">{{ error_kind }} ({{ error_status }})</h3>
-        <p class="text-sm opacity-90">{{ error_message | default("The search could not be completed.") }}</p>
+        <p class="text-sm text-muted">{{ error_message | default("The search could not be completed.") }}</p>
       </div>
     </div>
 
@@ -226,14 +224,14 @@
         <h3 class="font-semibold">
           Answer unavailable &mdash; showing retrieved chunks
         </h3>
-        <p class="text-sm opacity-90">
+        <p class="text-sm text-muted">
           The grounded answer could not be composed (failed leg:
           <code class="font-mono">{{ ask_fallback_leg }}</code>{% if ask_fallback_cause %},
           cause <code class="font-mono">{{ ask_fallback_cause }}</code>{% endif %}).
           {% if cited %}The retrieved source chunks are shown below.{% endif %}
         </p>
         {% if ask_fallback_message %}
-          <p class="text-xs opacity-70">{{ ask_fallback_message }}</p>
+          <p class="text-xs text-muted">{{ ask_fallback_message }}</p>
         {% endif %}
       </div>
     </div>
@@ -258,7 +256,7 @@
       </div>
     </article>
     {% if cited %}
-      <p class="text-sm opacity-70" aria-live="polite">
+      <p class="text-sm text-muted" aria-live="polite">
         Grounded in {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
       </p>
       {{ chunk_cards(cited) }}
@@ -266,7 +264,7 @@
 
   {% elif cited %}
     {# ---------- Cited-chunk result cards ---------- #}
-    <p class="text-sm opacity-70" aria-live="polite">
+    <p class="text-sm text-muted" aria-live="polite">
       {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
       for <em>&ldquo;{{ query }}&rdquo;</em>
     </p>
@@ -276,8 +274,8 @@
     {# ---------- No-results state (a query ran, zero hits, not an error) ---------- #}
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body text-center py-10">
-        <p class="text-lg opacity-60">No cited chunks for &ldquo;{{ query }}&rdquo;</p>
-        <p class="text-sm opacity-40">
+        <p class="text-lg text-subtle">No cited chunks for &ldquo;{{ query }}&rdquo;</p>
+        <p class="text-sm text-subtle">
           The corpus returned no matches. Try a different query or another collection.
         </p>
       </div>
@@ -287,7 +285,7 @@
     {# ---------- Initial prompt (no query submitted yet) ---------- #}
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
       <div class="card-body text-center py-10">
-        <p class="text-base opacity-50">
+        <p class="text-base text-subtle">
           Pick a collection and enter a query to search the docs corpus.
         </p>
       </div>

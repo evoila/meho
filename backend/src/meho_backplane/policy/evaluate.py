@@ -23,8 +23,9 @@ The schema is fixed. There is no rule language. The order is fixed too:
    service login's wait (never a floor, except a sandbox delete grant).
 
 Some steps stay in the dispatcher and are not here: the children of an
-approved run, the wait of a secret reveal, the announce gate, the role
-floor check when an approved call resumes, and the satellite ladder.
+approved run, the wait of a secret reveal, the announce gate (it never
+asks a person for a claim, and asks every other caller), the role floor
+check when an approved call resumes, and the satellite ladder.
 
 The function is pure: no database, no settings, no log line. The caller
 does the lookups (:mod:`meho_backplane.policy.shadow`). While the
@@ -57,7 +58,9 @@ __all__ = [
     "Decision",
     "Lookups",
     "RuleRef",
+    "Step",
     "Verdict",
+    "admin_console_rights_change",
     "approver_groups",
     "evaluate",
 ]
@@ -133,9 +136,12 @@ class Asked:
 
     ``risk`` and ``always_wait`` are the effective values after overrides,
     classification and floors. ``op_class`` holds marks from the code:
-    ``root_shell``, ``credential_read``, ``per_call_approval``,
-    ``delete_shaped`` and ``classified_always_wait``. ``target`` is the
-    target id, or ``None``.
+    ``root_shell``, ``credential`` (the call reads, writes or makes a
+    credential), ``credential_waits`` (such a call waits for a person),
+    ``per_call_approval``, ``delete_shaped``, ``classified_always_wait``,
+    ``sandbox_delete_grant`` (in sandbox mode a delete grant may still clear
+    the call) and ``rights_change`` (the operation is a change of rights).
+    ``target`` is the target id, or ``None``.
     """
 
     connector_id: str | None
@@ -162,6 +168,10 @@ class Lookups:
     run approval that covers a service login's call. ``read_scope_denial``
     is the refusal text of a service login's read scope. ``sandbox`` and
     ``agent_grant_required`` are the settings at the time of the call.
+    ``rights_change_refusal`` is the refusal text of the checks of who may
+    make a change of rights, for an admin's call in the web console, and
+    ``rights_change_waits`` is ``True`` when that call waits all the same
+    (:func:`~meho_backplane.operations.rights_change_console.console_check`).
     """
 
     agent_grant: tuple[Verdict, str] | None = None
@@ -171,6 +181,8 @@ class Lookups:
     read_scope_denial: str | None = None
     sandbox: bool = False
     agent_grant_required: str = "off"
+    rights_change_refusal: str | None = None
+    rights_change_waits: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,12 +200,26 @@ class RuleRef:
 
 
 @dataclass(frozen=True)
+class Step:
+    """One step of the evaluator: the rule it matched and the answer of that rule."""
+
+    rule: RuleRef
+    verdict: Verdict
+
+    def line(self) -> str:
+        """The step as one trace line: ``<source> <rule id>: <verdict>``."""
+        return f"{self.rule.source} {self.rule.rule_id}: {self.verdict.value}"
+
+
+@dataclass(frozen=True)
 class Decision:
     """The answer of :func:`evaluate`.
 
     ``approvers`` names the groups that may approve, only when the call
     waits. ``waits_because`` is :data:`TOKEN_CALL_WAIT` when a person's
-    ``caution`` call waits only because it came with a token.
+    ``caution`` call waits only because it came with a token. ``steps``
+    holds every rule the evaluator matched, in order; ``trace`` is the
+    same as text lines.
     """
 
     verdict: Verdict
@@ -201,21 +227,21 @@ class Decision:
     approvers: tuple[str, ...] = ()
     waits_because: str | None = None
     trace: tuple[str, ...] = ()
+    steps: tuple[Step, ...] = ()
 
 
 def approver_groups(risk: str, op_id: str) -> tuple[str, ...]:
     """The groups that may approve another person's call of *op_id* at *risk*.
 
     Today's group rule: a ``dangerous`` or ``destructive`` change only a
-    MEHO-SA-Operator or a MEHO-Admin; a lower one also a MEHO-Operator and
-    a MEHO-Approver. An operation with the ``tenant_admin`` role floor only
-    a MEHO-Admin.
+    MEHO-Admin; a lower one also a MEHO-Operator. An operation with the
+    ``tenant_admin`` role floor only a MEHO-Admin.
     """
     if role_floor_for(op_id) is TenantRole.TENANT_ADMIN:
         return ("MEHO-Admins",)
     if risk in _HIGH_RISK:
-        return ("MEHO-SA-Operators", "MEHO-Admins")
-    return ("MEHO-Operators", "MEHO-SA-Operators", "MEHO-Admins", "MEHO-Approvers")
+        return ("MEHO-Admins",)
+    return ("MEHO-Operators", "MEHO-Admins")
 
 
 class _Steps:
@@ -224,17 +250,17 @@ class _Steps:
     def __init__(self, verdict: Verdict, rule: RuleRef) -> None:
         self.verdict = verdict
         self.rule = rule
-        self.trace: list[str] = [f"{rule.source} {rule.rule_id}: {verdict.value}"]
+        self.steps: list[Step] = [Step(rule, verdict)]
 
     def tighten(self, verdict: Verdict, rule: RuleRef, *, on_tie: bool = False) -> None:
         """Make the answer *verdict* when it is stricter (or as strict, with *on_tie*)."""
-        self.trace.append(f"{rule.source} {rule.rule_id}: {verdict.value}")
+        self.steps.append(Step(rule, verdict))
         if verdict.rank > self.verdict.rank or (on_tie and verdict.rank == self.verdict.rank):
             self.verdict, self.rule = verdict, rule
 
     def set(self, verdict: Verdict, rule: RuleRef) -> None:
         """Set the answer, also when it is looser (a grant that clears a wait)."""
-        self.trace.append(f"{rule.source} {rule.rule_id}: {verdict.value}")
+        self.steps.append(Step(rule, verdict))
         self.verdict, self.rule = verdict, rule
 
 
@@ -362,12 +388,45 @@ def _service_clear(steps: _Steps, hits: list[FloorHit], asked: Asked, found: Loo
         )
 
 
+def admin_console_rights_change(asker: Asker, asked: Asked) -> bool:
+    """An admin's call of a change of rights in the web interface: it may run at once."""
+    is_admin = asker.tenant_role is TenantRole.TENANT_ADMIN or "platform_admin" in asker.roles
+    return (
+        asker.kind == "person"
+        and asker.via == "web"
+        and is_admin
+        and asker.tenant_chosen
+        and "rights_change" in asked.op_class
+        and "credential_waits" not in asked.op_class
+        and "classified_always_wait" not in asked.op_class
+        and asked.risk != "destructive"
+    )
+
+
+def _rights_change_step(steps: _Steps, found: Lookups) -> None:
+    if found.rights_change_refusal is not None:
+        steps.set(
+            Verdict.DENY,
+            _default("rights_change.console_refused", found.rights_change_refusal),
+        )
+        return
+    if found.rights_change_waits:
+        return
+    steps.set(
+        Verdict.RUN,
+        _default("rights_change.console", "an admin's change of rights in the web runs at once"),
+    )
+
+
 def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     hits = call_floors(asker, asked)
     if hits and hits[0].verdict == "deny":
         return _Steps(Verdict.DENY, _floor_rule(hits[0]))
     steps = _non_agent_default(asker, asked)
     _apply_floors(steps, hits)
+    if steps.verdict is Verdict.WAIT and admin_console_rights_change(asker, asked):
+        _rights_change_step(steps, found)
+        return steps
     if asker.kind != "service":
         return steps
     if steps.verdict is Verdict.RUN and found.read_scope_denial is not None:
@@ -404,7 +463,7 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     if agent.verdict is Verdict.DENY or (agent.verdict is Verdict.WAIT and asker.kind != "agent"):
         return agent
     caller = _for_caller(replace(asker, acting_agent=None), asked, found, found.agent_grant)
-    caller.trace = [*agent.trace, *caller.trace]
+    caller.steps = [*agent.steps, *caller.steps]
     return caller if caller.verdict.rank >= agent.verdict.rank else agent
 
 
@@ -432,5 +491,6 @@ def evaluate(asker: Asker, asked: Asked, found: Lookups) -> Decision:
         rule=steps.rule,
         approvers=approver_groups(asked.risk, asked.op_id) if waiting else (),
         waits_because=_waits_because(asker, asked, steps.verdict),
-        trace=tuple(steps.trace),
+        trace=tuple(step.line() for step in steps.steps),
+        steps=tuple(steps.steps),
     )

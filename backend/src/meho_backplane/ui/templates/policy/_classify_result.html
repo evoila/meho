@@ -10,20 +10,45 @@
                        conflict it carries a button that asks for the change
                        with the same fields (``form``).
     * ``requested`` -- dict: {status, approval_request_id, error,
-                       matched_operations}: the answer to the request.
+                       matched_operations, approval_note}: the answer to
+                       the request: ``ok`` when it ran at once (a tenant
+                       admin in the console), ``awaiting_approval`` when
+                       it waits. ``approval_note`` (#6641) is a sentence
+                       about the wait, or ``None``.
 
-  The ask button posts with the page's CSRF token: the fragment is swapped
-  into the page, and HTMX inherits ``hx-headers`` from the page's form.
+  The ask button's form has no ``hx-headers``, and it does not inherit the
+  page form's: ``#classify-result`` sits next to that form, not inside it.
+  It still sends the CSRF token, because ``static/src/app/csrf-token.js``
+  adds the ``X-CSRF-Token`` header from the ``meho_csrf`` cookie to every
+  htmx request.
+
+  "In force" is what applies with the values: the code's value, the
+  overrides and the minimum-level rules (floors) included. So a floor that
+  keeps a wait still shows "waits" when "Always wait" goes to "no".
 -#}
+{%- macro in_force(values) -%}
+  {%- if values -%}
+    {{ values.risk }}, {{ "waits" if values.waits else "runs at once" }}
+  {%- else -%}
+    -
+  {%- endif -%}
+{%- endmacro -%}
 {% if error %}
   <p class="alert alert-error text-sm" data-classify-error>{{ error }}</p>
 {% elif requested %}
-  {% if requested.status == "awaiting_approval" %}
+  {% if requested.status == "ok" %}
+    <p class="alert alert-success text-sm" data-classify-done>
+      Done. The change for {{ requested.matched_operations }} operation(s) is stored.
+    </p>
+  {% elif requested.status == "awaiting_approval" %}
     <p class="alert alert-info text-sm" data-classify-requested data-approval-request-id="{{ requested.approval_request_id }}">
       The change for {{ requested.matched_operations }} operation(s) waits until
-      another tenant admin approves it.
+      a tenant admin approves it.
       <a class="link" href="/ui/approvals">Open the approvals page</a>
     </p>
+    {% if requested.approval_note %}
+      <p class="alert alert-warning text-sm [overflow-wrap:anywhere]" data-classify-approval-note>{{ requested.approval_note }}</p>
+    {% endif %}
   {% else %}
     <p class="alert alert-warning text-sm" data-classify-request-status="{{ requested.status }}">
       {{ requested.error or requested.status }}
@@ -44,11 +69,11 @@
       </p>
     {% else %}
       <form hx-post="/ui/policy/classify/request" hx-target="#classify-result" hx-swap="innerHTML"
-            hx-confirm="Ask for this change of {{ preview.matched_operations }} operation(s)? Another tenant admin must approve it.">
+            hx-confirm="Make this change of {{ preview.matched_operations }} operation(s)? It is a change of rights.">
         {% for name, value in form.items() %}
           <input type="hidden" name="{{ name }}" value="{{ value }}" />
         {% endfor %}
-        <button type="submit" class="btn btn-sm btn-warning" data-classify-request>Ask for this change</button>
+        <button type="submit" class="btn btn-sm btn-warning" data-classify-request>Make this change</button>
       </form>
     {% endif %}
     <div class="overflow-x-auto">
@@ -61,12 +86,13 @@
             <th>Category</th>
             <th>Labels</th>
             <th>Always wait</th>
+            <th>In force</th>
           </tr>
         </thead>
         <tbody>
           {% for row in preview.operations %}
             <tr data-classify-row data-op-id="{{ row.op_id }}" data-changes="{{ 'true' if row.changes else 'false' }}"
-                class="{{ '' if row.changes else 'opacity-60' }}">
+                class="{{ '' if row.changes else 'text-subtle' }}">
               <td class="font-mono text-xs">{{ row.connector_id }}</td>
               <td class="font-mono text-xs">{{ row.group_key or "" }}</td>
               <td class="font-mono text-xs">{{ row.op_id }}</td>
@@ -78,6 +104,9 @@
               </td>
               <td class="text-xs">
                 {{ "yes" if row.before.always_wait else "no" }} &rarr; {{ "yes" if row.after.always_wait else "no" }}
+              </td>
+              <td class="text-xs" data-classify-in-force>
+                {{ in_force(row.before.in_force) }} &rarr; {{ in_force(row.after.in_force) }}
               </td>
             </tr>
           {% endfor %}

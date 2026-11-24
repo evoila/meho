@@ -17,14 +17,18 @@ approval, so the park-time preview shows it. The fields are:
   with a known vendor prefix. Then the packaged default redaction policy
   that MEHO uses for error text (a bearer token, a JWT, a private key
   block, a quoted ``"password": "..."`` pair). The text is cut at
-  :data:`SCRIPT_SHOWN_MAX_BYTES`.
+  :data:`SCRIPT_SHOWN_MAX_BYTES` bytes per page.
+* ``script_pages`` -- the number of pages the shown text has. The preview
+  holds page 1. :func:`script_page_fields` gives any page; the approver reads
+  them in the console, in the CLI or over REST.
 * ``script_bytes`` -- the size of the full script in UTF-8 bytes.
 * ``script_sha256`` -- the SHA-256 of the full script as it will run, so the
   approver can compare it with a reviewed copy. Left out when values were
   hidden: with the rest of the text in view, the hash would let a reader test
   guesses of the hidden value.
 * ``script_values_hidden`` / ``script_truncated`` -- ``True`` when the shown
-  text differs from the script that runs.
+  text differs from the script that runs. ``script_truncated`` means the text
+  has more than one page.
 * ``script_unavailable`` -- set, and no text shown, when the redaction pass
   fails.
 * ``script_ref`` / ``script_check`` -- the reviewed source the caller named,
@@ -32,13 +36,14 @@ approval, so the park-time preview shows it. The fields are:
   SHA-256 of the script (``expected_sha256``).
 
 The arguments and the ``env`` values are not part of this module: the preview
-builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows only their
-size and names.
+builder in :mod:`~meho_backplane.connectors.linux.ops_write` shows the size of
+the arguments and each ``env`` name with its value.
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Final
 
 from meho_backplane.redaction.command_line import hide_shell_script
@@ -49,14 +54,25 @@ from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
 __all__ = [
     "SCRIPT_CHECK_MATCHES",
     "SCRIPT_CHECK_MISMATCH",
+    "SCRIPT_MAX_BYTES",
     "SCRIPT_SHOWN_MAX_BYTES",
+    "ScriptPageOutOfRangeError",
+    "ShownScript",
+    "has_secret_shape",
     "script_matches_expected",
+    "script_page_fields",
     "script_preview_fields",
     "script_sha256",
+    "script_too_large_message",
+    "shown_script",
+    "shown_script_page_fields",
 ]
 
-#: The most script text, in UTF-8 bytes, the approval preview holds.
+#: The most script text, in UTF-8 bytes, one page of the approval preview holds.
 SCRIPT_SHOWN_MAX_BYTES: Final[int] = 65_536
+
+#: The longest script, in UTF-8 bytes, that ``linux.script.run`` accepts: 16 pages.
+SCRIPT_MAX_BYTES: Final[int] = 1_048_576
 
 SCRIPT_CHECK_MATCHES: Final[str] = "matches"
 SCRIPT_CHECK_MISMATCH: Final[str] = "does not match"
@@ -94,12 +110,122 @@ def _hide_secret_values(script: str) -> tuple[str, bool]:
     return shown, shown != script or bool(result.manifest)
 
 
-def _cut(text: str, max_bytes: int) -> tuple[str, bool]:
-    """*text* cut to at most *max_bytes* UTF-8 bytes, and whether it was cut."""
+def has_secret_shape(text: str) -> bool:
+    """Whether *text* holds a value the script preview would hide as a secret.
+
+    The same rules as for the script text: a secret on a command line, a
+    password in a URL, a JWT, a bearer token, a private key block, a token
+    with a known vendor prefix.
+    """
+    return _hide_secret_values(text)[1]
+
+
+def script_too_large_message(size: int) -> str:
+    """The plain refusal text for a script of *size* bytes (more than the limit)."""
+    return (
+        f"The script is {size:,} bytes. MEHO accepts at most {SCRIPT_MAX_BYTES:,} bytes "
+        "(1 MiB) for linux.script.run. Keep the script shorter, for example copy a "
+        "large file to the host first."
+    )
+
+
+class ScriptPageOutOfRangeError(ValueError):
+    """The page asked for is not one of the pages of the script."""
+
+    def __init__(self, page: int, pages: int) -> None:
+        super().__init__(f"The script has {pages} page(s). Page {page} does not exist.")
+        self.page = page
+        self.pages = pages
+
+
+def _pages(text: str, page_bytes: int) -> list[str]:
+    """*text* cut into pages of at most *page_bytes* UTF-8 bytes.
+
+    A border never splits a UTF-8 character, and the pages joined are *text*.
+    An empty text is one empty page.
+    """
     data = text.encode("utf-8")
-    if len(data) <= max_bytes:
-        return text, False
-    return data[:max_bytes].decode("utf-8", "ignore"), True
+    if len(data) <= page_bytes:
+        return [text]
+    pages: list[str] = []
+    start = 0
+    while start < len(data):
+        end = min(start + page_bytes, len(data))
+        # 0b10xxxxxx is the middle of a character: step back to its start.
+        while end < len(data) and (data[end] & 0xC0) == 0x80:
+            end -= 1
+        pages.append(data[start:end].decode("utf-8"))
+        start = end
+    return pages
+
+
+@dataclass(frozen=True)
+class ShownScript:
+    """A script as the approver sees it: values hidden, cut into pages.
+
+    It holds no value that looks like a secret, so it may be kept for later
+    page reads (:func:`shown_script_page_fields`). ``pages`` is ``None`` when
+    the redaction pass failed: then no text and no hash is shown.
+    """
+
+    script_bytes: int
+    pages: tuple[str, ...] | None
+    values_hidden: bool
+    sha256: str | None
+
+
+def shown_script(script: str) -> ShownScript:
+    """Run the redaction pass over the whole *script* once and cut the result into pages.
+
+    Values that look like secrets are hidden over the whole script first, then
+    the hidden text is cut into pages, so a secret that crosses a page border
+    is hidden. ``sha256`` is the hash of the whole script, left out when values
+    were hidden.
+    """
+    size = len(script.encode("utf-8"))
+    try:
+        shown, hidden = _hide_secret_values(script)
+    except Exception:
+        # Fail closed: without the redaction pass, show no text and no hash.
+        return ShownScript(script_bytes=size, pages=None, values_hidden=False, sha256=None)
+    return ShownScript(
+        script_bytes=size,
+        pages=tuple(_pages(shown, SCRIPT_SHOWN_MAX_BYTES)),
+        values_hidden=hidden,
+        sha256=None if hidden else script_sha256(script),
+    )
+
+
+def shown_script_page_fields(shown: ShownScript, page: int = 1) -> dict[str, Any]:
+    """The script fields for page *page* (from 1) of *shown*.
+
+    Raises :class:`ScriptPageOutOfRangeError` when *page* is not a page of the
+    text.
+    """
+    fields: dict[str, Any] = {"script_bytes": shown.script_bytes}
+    if shown.pages is None:
+        if page != 1:
+            raise ScriptPageOutOfRangeError(page, 1)
+        fields["script_unavailable"] = _UNAVAILABLE_REASON
+        return fields
+    if not 1 <= page <= len(shown.pages):
+        raise ScriptPageOutOfRangeError(page, len(shown.pages))
+    fields["script"] = shown.pages[page - 1]
+    fields["script_pages"] = len(shown.pages)
+    if shown.values_hidden:
+        fields["script_values_hidden"] = True
+    if shown.sha256 is not None:
+        fields["script_sha256"] = shown.sha256
+    return fields
+
+
+def script_page_fields(script: str, page: int = 1) -> dict[str, Any]:
+    """The script fields for page *page* (from 1) of *script*.
+
+    :func:`shown_script`, then :func:`shown_script_page_fields`. Raises
+    :class:`ScriptPageOutOfRangeError` when *page* is not a page of the text.
+    """
+    return shown_script_page_fields(shown_script(script), page)
 
 
 def script_preview_fields(params: dict[str, Any]) -> dict[str, Any]:
@@ -109,21 +235,9 @@ def script_preview_fields(params: dict[str, Any]) -> dict[str, Any]:
     the fields.
     """
     script: str = params["script"]
-    fields: dict[str, Any] = {"script_bytes": len(script.encode("utf-8"))}
-    try:
-        shown, hidden = _hide_secret_values(script)
-    except Exception:
-        # Fail closed: without the redaction pass, show no text and no hash.
-        fields["script_unavailable"] = _UNAVAILABLE_REASON
-    else:
-        shown, truncated = _cut(shown, SCRIPT_SHOWN_MAX_BYTES)
-        fields["script"] = shown
-        if hidden:
-            fields["script_values_hidden"] = True
-        else:
-            fields["script_sha256"] = script_sha256(script)
-        if truncated:
-            fields["script_truncated"] = True
+    fields = script_page_fields(script, 1)
+    if fields.get("script_pages", 1) > 1:
+        fields["script_truncated"] = True
     script_ref = params.get("script_ref")
     if isinstance(script_ref, str) and script_ref:
         fields["script_ref"] = script_ref

@@ -4,7 +4,7 @@
 #
 # install.sh: install form 2 of MEHO on a plain Linux server, with no
 # internet. It runs as root from the unpacked download (form-2 design,
-# section 4, in meho-internal docs/design/2026-10-10-install-forms/).
+# section 4).
 #
 # On a machine without MEHO it runs the six steps of the design (section 5):
 #   1. check the machine                        lib/checks.sh, lib/firewall.sh
@@ -76,7 +76,6 @@ HOSTNAME_FQDN=""
 PUBLIC_ADDRESS=""
 FIRST_TENANT_ID=""
 ADMIN_USER="admin"
-APPROVER_USER="approver"
 CLUSTER_CIDR="10.42.0.0/16"
 SERVICE_CIDR="10.43.0.0/16"
 JOIN_ADDRESS=""
@@ -106,8 +105,8 @@ installs and starts RKE2 (the built-in Kubernetes) with its CIS hardening
 profile, installs the MEHO core, writes the first-login passwords and the
 unseal key to two files for root only, and installs the meho command. At
 the end it writes the CA of the console certificate to
-/var/lib/meho/console-ca.crt and shows the first-start list. A red line in
-the list does not stop the install.
+/var/lib/meho/console-ca.crt and names where to read the first-start list
+after the first login.
 
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
@@ -136,11 +135,8 @@ Options:
   --first-tenant-id <uuid>   The id of the first tenant. Default: a new
                              random id. Give the old id to keep it on a
                              move to another machine.
-  --admin-user <name>        The user name of the first admin, stored in
+  --admin-user <name>        The user name of the one Admin login, stored in
                              lower case. Default: admin.
-  --approver-user <name>     The user name of the second person, who
-                             approves, stored in lower case.
-                             Default: approver.
   --cluster-cidr <cidr>      The address range of the pods.
                              Default: 10.42.0.0/16.
   --service-cidr <cidr>      The address range of the services.
@@ -180,7 +176,6 @@ set_option() {
         --public-address) PUBLIC_ADDRESS=$2 ;;
         --first-tenant-id) FIRST_TENANT_ID=${2,,} ;;
         --admin-user) ADMIN_USER=${2,,} ;;
-        --approver-user) APPROVER_USER=${2,,} ;;
         --cluster-cidr) CLUSTER_CIDR=$2 ;;
         --service-cidr) SERVICE_CIDR=$2 ;;
         --join-address) JOIN_ADDRESS=$2 ;;
@@ -241,10 +236,6 @@ validate_options() {
     fi
     [[ $ADMIN_USER =~ $USER_NAME_RE ]] ||
         usage_error "--admin-user must be a user name of letters, digits and . _ - @, for example admin."
-    [[ $APPROVER_USER =~ $USER_NAME_RE ]] ||
-        usage_error "--approver-user must be a user name of letters, digits and . _ - @, for example approver."
-    [[ $ADMIN_USER != "$APPROVER_USER" ]] ||
-        usage_error "--admin-user and --approver-user must be two different names."
     is_ipv4_cidr "$CLUSTER_CIDR" ||
         usage_error "--cluster-cidr must be an IPv4 range, for example 10.42.0.0/16."
     is_ipv4_cidr "$SERVICE_CIDR" ||
@@ -335,7 +326,7 @@ prepare_machine() {
 use_install_answers() {
     local key bad=()
     for key in meho_version rke2_version installed_at hostname first_tenant_id \
-        admin_user approver_user cluster_cidr service_cidr; do
+        admin_user cluster_cidr service_cidr; do
         [[ -n $(record_value "$key") ]] || bad+=("$key")
     done
     ((${#bad[@]} == 0)) ||
@@ -345,7 +336,6 @@ use_install_answers() {
     PUBLIC_ADDRESS=$(record_value public_address)
     FIRST_TENANT_ID=$(record_value first_tenant_id)
     ADMIN_USER=$(record_value admin_user)
-    APPROVER_USER=$(record_value approver_user)
     CLUSTER_CIDR=$(record_value cluster_cidr)
     SERVICE_CIDR=$(record_value service_cidr)
     JOIN_ADDRESS=$(record_value join_address)
@@ -356,7 +346,6 @@ use_install_answers() {
     [[ -z $PUBLIC_ADDRESS ]] || is_ipv4 "$PUBLIC_ADDRESS" || bad+=(public_address)
     [[ $FIRST_TENANT_ID =~ $UUID_RE ]] || bad+=(first_tenant_id)
     [[ $ADMIN_USER =~ $USER_NAME_RE ]] || bad+=(admin_user)
-    [[ $APPROVER_USER =~ $USER_NAME_RE ]] || bad+=(approver_user)
     is_ipv4_cidr "$CLUSTER_CIDR" || bad+=(cluster_cidr)
     is_ipv4_cidr "$SERVICE_CIDR" || bad+=(service_cidr)
     [[ -z $JOIN_ADDRESS || $JOIN_ADDRESS =~ $JOIN_ADDRESS_RE ]] || bad+=(join_address)
@@ -416,17 +405,17 @@ update_meho() {
     wait_for_rke2 "$rke2_run"
 
     update_step "update the MEHO core"
-    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER"
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" \
+        "$CLUSTER_CIDR" "$SERVICE_CIDR"
     install_core "$DOWNLOAD_DIR"
 
-    update_step "install the meho command and meho-host, write the install record and read the first-start list"
+    update_step "install the meho command and meho-host, and write the install record"
     install_cli "$DOWNLOAD_DIR"
     install_meho_host "$DOWNLOAD_DIR"
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
+        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" \
         "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$RECORD_FROM_DISK"
-    read_first_start_list "$HOSTNAME_FQDN"
     print_update_result "$HOSTNAME_FQDN" "$installed_version"
 }
 
@@ -470,7 +459,8 @@ main() {
     if [[ -z $FIRST_TENANT_ID ]]; then
         FIRST_TENANT_ID=$(tenant_id)
     fi
-    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER"
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" \
+        "$CLUSTER_CIDR" "$SERVICE_CIDR"
     install_core "$DOWNLOAD_DIR"
 
     step "Step 5: write the two one-time files"
@@ -478,13 +468,12 @@ main() {
     local unseal_key_written=1
     copy_unseal_key || unseal_key_written=0
 
-    step "Step 6: install the meho command, write the install record and read the first-start list"
+    step "Step 6: install the meho command and write the install record"
     install_cli "$DOWNLOAD_DIR"
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
+        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" \
         "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$FROM_DISK"
-    read_first_start_list "$HOSTNAME_FQDN"
     print_result "$HOSTNAME_FQDN" "$unseal_key_written"
 }
 

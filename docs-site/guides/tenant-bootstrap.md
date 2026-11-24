@@ -6,24 +6,33 @@ first people log in.
 
 !!! warning "Each step waits for approval"
 
-    Every step that changes a Keycloak group runs at the **dangerous**
-    risk level, so each one waits for approval. Only a
-    **MEHO-SA-Operator** may approve their own `dangerous` change. Anyone
-    else needs a second person: a MEHO-SA-Operator or an admin. The
-    self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does **not**
-    cover the dangerous risk level.
+    Every step that changes a Keycloak group or user runs at the
+    **dangerous** risk level, so each one waits for approval.
 
-    Before you start, pick one of these:
+    Two kinds of step get different approvers:
 
-    - **You are a MEHO-SA-Operator** in your current tenant, and you
-      approve each step yourself, on purpose, in the web interface.
-    - **A second person** in your current tenant (a MEHO-SA-Operator or
-      an admin) approves each step.
-    - **An agent makes the requests** and you approve them. This is the
-      agent-requester pattern in
-      [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
-      The agent needs no grant for this: an agent's `dangerous` request
-      waits for a person's approval by default.
+    - **Create a group** (Step 2): a MEHO-Admin
+      may approve their own. Anyone else needs a second person: an
+      admin.
+    - **Create a user** (Step 4) and **add a person to a group**
+      (Step 5): these are changes of rights. An admin approves them with
+      a click in the web console. In MEHO's own login realm only a
+      platform admin approves them, and the person who asked approves
+      only a request they asked in the web console. Outside it a tenant
+      admin or a platform admin approves them, and may be the person who
+      asked. An Operator cannot approve them.
+      See [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
+
+    For Steps 4 and 5, an admin approves each change in the web console
+    (in MEHO's own login realm, a platform admin).
+    No setup below changes that.
+
+    For the group step, pick one of these before you start:
+
+    - **You are a MEHO-Admin** in your current
+      tenant, and you approve it yourself, on purpose, in the web
+      interface.
+    - **A second person** in your current tenant (an admin) approves it.
 
     The group operations stay at the dangerous risk level (decision
     record:
@@ -56,7 +65,7 @@ put people in them.
 
 The first tenant of a site is made at install time by
 `meho admin keycloak bootstrap-clients` (see
-[Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-five-groups)).
+[Keycloak realm setup](../install/keycloak-realm.md#step-5-create-the-three-groups)).
 This guide adds the next tenant through MEHO's Keycloak operations, so
 each change is approved and stored in the audit log.
 
@@ -66,10 +75,12 @@ each change is approved and stored in the audit log.
 - A Vault target registered in MEHO (here called `vault-main`), and the
   right to write Vault identities and groups.
 - An `operator` or `tenant_admin` login in your current tenant.
-- A second person who can approve, or the agent setup from the box
-  above. Step 8 needs a `tenant_admin` approver in the new tenant too,
-  because an approval belongs to one tenant. Step 8 explains the
-  choices.
+- For the group step: a second person who can approve, unless you
+  approve it yourself as in the box above. For the user and group
+  member steps: an admin who is not the person who asked (in MEHO's own
+  login realm, a platform admin). Step 8 needs
+  a `tenant_admin` approver in the new tenant too, because an approval
+  belongs to one tenant. Step 8 explains the choices.
 - This guide gives each person one tenant. For a person who works in
   two or more tenants with one login, follow
   [One person in several tenants](several-tenants.md).
@@ -159,9 +170,11 @@ meho keycloak user create --target keycloak-main -f alice.json \
   --password-secret-ref <vault-path-of-the-password> --temporary
 ```
 
-This step waits for approval too (risk level `dangerous`). A
-MEHO-SA-Operator or an admin must approve it, the same as the group
-steps.
+This step waits for approval too (risk level `dangerous`). Creating a
+user is a change of rights, so an admin (a tenant admin or a platform
+admin) approves it with a click in the web console. In MEHO's own login
+realm only a platform admin approves it. See
+[Changes of rights](approvals-and-break-glass.md#changes-of-rights).
 
 ## Step 5: Put each person in exactly one group
 
@@ -170,7 +183,9 @@ meho keycloak group member add --target keycloak-main \
   --username alice@acme.example --group-name MEHO-acme-Admins
 ```
 
-The second person approves it. Check the members:
+Adding a person to a group is a change of rights. An admin approves it
+with a click in the web console (in MEHO's own login realm, a platform
+admin). Check the members:
 
 ```bash
 meho keycloak group member list --target keycloak-main --id <group-id>
@@ -308,23 +323,14 @@ A policy written before that grant was added fails the cleanup.
 
 Pick one of these two ways to get an approver:
 
+- **The new `tenant_admin` approves their own requests.** A person with
+  the `tenant_admin` role is in MEHO-Admins, and MEHO-Admins may approve
+  their own changes, also `dangerous` ones. The new `tenant_admin`
+  approves the test write and the cleanup in the web interface.
 - **A second person in the new tenant.** Run Steps 4 to 6 again for a
   second person with the `tenant_admin` role. You make these requests
   in your current tenant, so your current approver approves them as
-  before.
-- **An agent requester in the new tenant.** The new `tenant_admin` sets
-  up the agent-requester pattern from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern)
-  in the new tenant. A scheduled run of the agent makes the test write
-  and, later, the delete instead of the person. The `tenant_admin`
-  approves both. The agent needs the setup below first. MEHO checks the
-  **requester's** own Vault access when it stores an approval request.
-  Without this setup the agent's request is refused with
-  `write_capability_denied`, and there is nothing to approve.
-
-The self-approval switch is not enough here. It covers the test write
-(risk level `caution`), but never the cleanup delete (risk level
-`dangerous`).
+  before: an admin who is not you approves Steps 4 and 5.
 
 Both sides need Vault access. The approver needs the Vault identity
 from Step 6, with the `tenant_admin` Vault group. The approved write
@@ -332,58 +338,20 @@ and the cleanup run under the approver's Vault policy. The requester
 needs a Vault identity too, because MEHO checks the requester's access
 before it stores the request. The read checks the reader's.
 
-### Set up the agent requester
-
-Skip this part if you chose a second person. The agent is registered in
-the new tenant, but its Vault identity is written through your current
-tenant's Vault target, like every identity in Step 6. So the Vault
-writes below wait for your current approver, as before.
-
-1. **Register the agent.** The new `tenant_admin`, logged in to the new
-   tenant, registers the agent principal. The test write
-   (`vault.kv.put`, risk level `caution`) and the cleanup
-   (`vault.kv.delete`, risk level `dangerous`) both wait for approval
-   without a grant: an agent's request above `safe` always waits for a
-   person.
-
-   ```bash
-   meho agent-principal register tenant-check
-   ```
-
-2. **Find the agent's login id.** The agent logs in to Vault with its own
-   Keycloak token. Its `sub` claim is the id of the Keycloak
-   service-account user, named `service-account-agent:<name>` in lower
-   case. The `jq` filter keeps only the exact username:
-
-   ```bash
-   meho keycloak user list --target keycloak-main --username service-account-agent:tenant-check --json \
-     | jq -r '[.result.rows[] | select(.username == "service-account-agent:tenant-check")]
-              | if length == 1 then .[0].id else error("expected one user, found \(length)") end'
-   ```
-
-3. **Give the agent a Vault identity with the tenant_admin group.** Run
-   Step 6, parts 2 to 4, with that id in place of the person's user id:
-   the identity with the `tenant_id=<tenant-uuid>` metadata, the alias
-   on the JWT mount, and membership in
-   `meho-tenant-<tenant-uuid>-tenant_admin`. The agent's token carries
-   `tenant_role=tenant_admin`, and only the `meho-tenant-admin` policy
-   covers both the write under `tenants/<tenant-uuid>/*` and the
-   `secret/delete/...` grant for the cleanup. Remember that the group's
-   member list replaces the old one: list the approver's entity id and
-   the agent's entity id together.
-
-4. **Create the agent definition and schedule the run.** Follow the
-   four steps of the agent-requester pattern. The run must be a
-   scheduled one. An agent you start by hand acts for you, and the
-   request then carries your `sub`, so you could not approve it.
-
 The new tenant has no targets yet, so register the Vault target in the
 new tenant first. It needs no password, because MEHO logs in to Vault
-with the person's own token. Then write one test secret, let the
-approver approve it, and read it back:
+with the person's own token. `meho targets add` waits for approval and
+prints an approval id, so approve it before you use the target:
 
 ```bash
 meho targets add vault-main --product vault --host vault.example.com --no-secret-ref
+meho approvals approve <approval-id-from-targets-add>
+```
+
+Then write one test secret, let the approver approve it, and read it
+back:
+
+```bash
 meho vault kv put --target vault-main secret tenants/<tenant-uuid>/smoke-test --data '{"ok": "yes"}'
 # The approver, logged in to the new tenant:
 meho approvals list
@@ -399,8 +367,7 @@ same error on the read means the identity or group is missing for the
 reader.
 
 Delete the test secret afterwards. The delete runs at the `dangerous`
-risk level, so the same `tenant_admin` approver (or the agent setup) is
-needed again:
+risk level, so the same `tenant_admin` approver is needed again:
 
 ```bash
 meho vault kv delete --target vault-main secret tenants/<tenant-uuid>/smoke-test --versions 1
@@ -418,6 +385,7 @@ meho approvals approve <approval-id>
 | `unknown_tenant_role` | `tenant_role` on the group is not `read_only`, `operator` or `tenant_admin`. | Fix it with `meho keycloak group update-attributes`. |
 | Login works, but an operation fails with `permission denied` from Vault | The person's Vault identity has no `tenant_id` metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity. | Step 6 for that person. Check with section 5 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
 | The approved test write or its cleanup fails with `permission denied` from Vault | The approver is an `operator`, not a `tenant_admin`. Or the `meho-tenant-admin` policy lacks the `secret/delete/...` grant for the cleanup. | Let a `tenant_admin` approve. Add the grant from section 2.3 of the [per-tenant Vault policies runbook](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md). |
-| The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. For an agent requester, the agent setup in Step 8. |
-| `approve` answers `self_approval_forbidden` | You asked for the change and tried to approve it yourself, and you are not a MEHO-SA-Operator. | A MEHO-SA-Operator or an admin approves, or use the agent-requester pattern (see the box at the top). |
+| The test write or the cleanup answers `write_capability_denied`, and no approval request appears | The requester's Vault identity has no `tenant_id` metadata, or is not in the tenant's `tenant_admin` Vault group. MEHO checks the requester's access before it stores the request. | Step 6 for the requester. |
+| `approve` answers `self_approval_forbidden` | You asked for the group step and tried to approve it yourself, and you are not a MEHO-Admin. | Ask a person in one of the groups the refusal names to approve it on the Approvals page of the web interface. |
+| `approve` answers `rights_change_required` ("This is a change of rights. Approve this change of rights in the web console." or "Only an admin may approve it.") | Steps 4 and 5 are changes of rights. You approved on the command line, or you are not an admin in this tenant. | An admin approves it on the Approvals page of the web console. |
 | `meho approvals list` in the new tenant shows nothing, but a request is waiting | The request was made in another tenant. Approvals belong to one tenant. | Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8). |

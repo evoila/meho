@@ -29,6 +29,7 @@
   Context: ``connector_id``, ``user_uuid``, ``target``, ``current_roles``,
   ``error``, ``csrf_token``.
 -#}
+{% from "_components.html" import badge %}
 {% from "_icons.html" import icon %}
 <dialog id="keycloak-user-modal" class="modal modal-open" aria-label="Assign Keycloak realm roles" data-keycloak-modal="role-assign">
   <div class="modal-box max-w-lg">
@@ -40,7 +41,7 @@
       </button>
     </div>
 
-    <p class="mt-1 text-xs opacity-60">
+    <p class="mt-1 text-xs text-subtle">
       User <code class="font-mono" data-user-uuid>{{ user_uuid }}</code>
     </p>
 
@@ -55,12 +56,14 @@
         </h4>
         <p class="text-xs">
           Assigning a realm role is a privilege grant: it gives the user every
-          permission the role carries. It is approval-gated &mdash; confirming
-          parks a request for a reviewer rather than executing immediately.
+          permission the role carries. It is a change of rights. Confirming runs
+          it at once when you may make it alone: in MEHO's own login realm only
+          a platform admin may, after a fresh sign-in. Otherwise it makes a
+          request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>
-          <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>requires approval</span>
+          <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>change of rights</span>
         </div>
       </div>
     </div>
@@ -71,15 +74,15 @@
       </div>
     {% else %}
       <div class="mt-3" data-keycloak-current-roles>
-        <span class="text-xs opacity-60">Currently assigned realm roles:</span>
+        <span class="text-xs text-subtle">Currently assigned realm roles:</span>
         {% if current_roles %}
           <div class="mt-1 flex flex-wrap gap-1">
             {% for role in current_roles %}
-              <span class="badge badge-ghost badge-sm font-mono">{{ role }}</span>
+              {{ badge(role, variant="quiet", class="font-mono") }}
             {% endfor %}
           </div>
         {% else %}
-          <span class="text-xs opacity-50">none</span>
+          <span class="text-xs text-subtle">none</span>
         {% endif %}
       </div>
     {% endif %}
@@ -95,8 +98,8 @@
     >
       <input type="hidden" name="target" value="{{ target }}" />
 
-      <div class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Realm role names to grant</span>
+      <div>
+        <span class="mb-1 text-xs text-muted">Realm role names to grant</span>
         <template x-for="(role, idx) in roles" :key="idx">
           <div class="mb-1 flex gap-1">
             <input
@@ -104,7 +107,7 @@
               name="roles"
               maxlength="512"
               x-model="roles[idx]"
-              class="input input-bordered input-sm w-full font-mono"
+              class="input input-sm w-full font-mono"
               placeholder="realm-role-name"
               aria-label="Realm role name to grant"
               autocomplete="off"
@@ -130,7 +133,7 @@
         </button>
         <button type="submit" data-action="submit" class="btn btn-sm btn-error gap-1">
           {{ icon("shield-check", class="size-4") }}
-          Grant roles (request approval)
+          Grant roles
         </button>
       </div>
     </form>

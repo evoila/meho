@@ -43,6 +43,7 @@ from meho_backplane.api.v1.connectors_ingest import set_llm_client_factory
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.targets.ops import register_targets_registry_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.main import app
@@ -135,7 +136,7 @@ def _admin_headers(key: Any, *, extra: dict[str, str] | None = None) -> dict[str
 
 
 async def _rows_with_work_ref(ref: str) -> list[AuditLog]:
-    """Look rows up the way ``meho audit query --work-ref`` does: exact match."""
+    """Look rows up by the whole ticket id, the way ``meho audit query --work-ref`` does."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         stmt = select(AuditLog).where(AuditLog.work_ref == ref).order_by(AuditLog.occurred_at)
@@ -262,7 +263,16 @@ def _install_shipped_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_targets_add_request_row_found_by_work_ref() -> None:
-    """``meho targets add --work-ref`` -> ``POST /api/v1/targets`` row has the ref."""
+    """``meho targets add --work-ref`` -> ``POST /api/v1/targets`` row has the ref.
+
+    A person's token call waits for approval, so the approval request
+    writes its own row too; both carry the ref.
+    """
+    embedder = AsyncMock()
+    embedder.encode_one.return_value = [0.1] * 384
+    embedder.encode.return_value = [[0.1] * 384]
+    embedder.dimension = 384
+    await register_targets_registry_operations(embedding_service=embedder)
     key = make_rsa_keypair("kid-wr-targets")
     with respx.mock as router:
         mock_discovery_and_jwks(router, public_jwks(key))
@@ -271,10 +281,13 @@ async def test_targets_add_request_row_found_by_work_ref() -> None:
             json={"name": "wr-host", "product": "ssh", "host": "target.example.test"},
             headers=_admin_headers(key, extra=_WITH_REF),
         )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
 
     rows = await _rows_with_work_ref(_WORK_REF)
-    assert [(row.method, row.path) for row in rows] == [("POST", "/api/v1/targets")]
+    assert sorted((row.method, row.path) for row in rows) == [
+        ("APPROVAL", "approval.request"),
+        ("POST", "/api/v1/targets"),
+    ]
 
 
 async def test_agent_grant_create_request_row_found_by_work_ref() -> None:

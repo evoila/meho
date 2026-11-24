@@ -19,17 +19,12 @@ write surface on top:
   error -- a Pydantic :class:`~pydantic.ValidationError`, a duplicate-name
   :class:`~meho_backplane.agents.service.AgentDefinitionExistsError`, or
   an :class:`~meho_backplane.agents.service.AgentIdentityRefInvalidError`
-  -- re-renders the modal as a **200** fragment carrying a top-of-form
-  error banner plus the per-field messages, and HTMX swaps it back into
-  the modal container in place. The 200 is load-bearing: HTMX's default
-  response handling silently drops a non-2xx fragment (``swap: false``),
-  so the earlier 409 / 422 re-renders were computed by the server but
-  never shown to the operator -- the button appeared to "do nothing"
-  (#2346). This mirrors the shipped error mold of the runbooks start-run
-  modal (:func:`~meho_backplane.ui.routes.runbooks.runs._render_start_error`)
-  and the conventions author modal
-  (:func:`~meho_backplane.ui.routes.conventions.write._render_create_error`),
-  both of which re-render inline errors as 200.
+  -- re-renders the modal as a **422** fragment carrying a top-of-form
+  error banner plus the per-field messages. HTMX does not swap a 4xx
+  answer by default, so the modal container has an ``hx-on::before-swap``
+  handler that swaps a 422 in place (the same shape as the register
+  modal). The 422 keeps the audit row of a refused form from reading
+  like a done change (#2346 was the earlier fix that showed the errors).
 * **``GET /ui/agents/{name}/edit``** -- HTMX-loaded edit modal, fields
   pre-populated server-side. ``name`` is read-only (not updatable per
   :class:`~meho_backplane.agents.schemas.AgentDefinitionUpdate`).
@@ -71,10 +66,12 @@ service-RBAC split the REST routes apply.
 Starting grants
 ---------------
 
-The create form asks for the first grants of the agent that
-``identity_ref`` names (#6192, helpers in
+The create and edit forms ask for the first grants of the agent that
+``identity_ref`` names (#6192, #6389, helpers in
 :mod:`~meho_backplane.ui.routes.agents.starting_grants`). The service
-needs the pick only when that agent has no grant yet. A missing or wrong
+needs the pick only when that agent has no grant yet: at create, and at
+edit when ``identity_ref`` changes to another agent. The form does not
+mark the pick required; the service decides. A missing or wrong
 pick, and a target name the service cannot resolve, re-render the modal
 with the text next to the pick. A pick that adds grants is for a person
 only, the same rule as the REST route. After such a pick the console
@@ -99,7 +96,7 @@ from pydantic import ValidationError
 
 from meho_backplane.agents.grant_sets import (
     PERSON_ONLY_REMEDIATION,
-    StartingGrantsError,
+    audit_fields,
     writes_rows,
 )
 from meho_backplane.agents.schemas import (
@@ -108,15 +105,14 @@ from meho_backplane.agents.schemas import (
     AgentModelTier,
 )
 from meho_backplane.agents.service import (
-    AgentDefinitionExistsError,
     AgentDefinitionService,
-    AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.rbac import ensure_human_principal
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.agents import starting_grants
+from meho_backplane.ui.routes.agents.form_saves import save_create, save_edit
 from meho_backplane.ui.routes.agents.views import _fetch_agent_or_404
 from meho_backplane.ui.templating import get_templates
 
@@ -224,6 +220,7 @@ async def render_edit_modal(
     agent = await _fetch_agent_or_404(session_ctx, name)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = _build_form_context(csrf_token, mode="edit")
+    context.update(await starting_grants.pick_context(session_ctx.tenant_id))
     context["values"] = {
         "name": agent.name,
         "identity_ref": agent.identity_ref,
@@ -290,8 +287,8 @@ async def submit_create(
 ) -> HTMLResponse:
     """Build an :class:`AgentDefinitionCreate` and persist it via the service.
 
-    Any recoverable input error re-renders the modal as a **200**
-    fragment (so HTMX swaps it back in place) carrying a top-of-form
+    Any recoverable input error re-renders the modal as a **422**
+    fragment (the container's ``hx-on::before-swap`` swaps it in place) carrying a top-of-form
     error banner + per-field messages: a Pydantic :class:`ValidationError`
     surfaces the offending fields, a duplicate ``(tenant, name)`` a
     ``name`` error, and an unknown / revoked ``identity_ref`` an
@@ -300,6 +297,10 @@ async def submit_create(
     create returns 204 + ``HX-Redirect: /ui/agents``, or to the agent's
     grants page after a pick that writes grants.
     """
+    # Bound first, so the audit row of an early refusal names the operation.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.create", audit_op_class="write", audit_agent_name=name
+    )
     targets = grant_targets or []
     raw_values = {
         "name": name,
@@ -313,8 +314,9 @@ async def submit_create(
     try:
         pick = starting_grants.parse_pick(grant_set, targets)
     except ValueError as exc:
-        return await _render_create_errors(
-            request, session_ctx, raw_values, field_errors={starting_grants.FIELD: str(exc)}
+        pick_error = {starting_grants.FIELD: str(exc)}
+        return await _render_errors(
+            request, session_ctx, "create", raw_values, field_errors=pick_error
         )
     try:
         body = AgentDefinitionCreate(
@@ -327,14 +329,15 @@ async def submit_create(
             starting_grants=pick,
         )
     except (ValidationError, ValueError) as exc:
-        return await _render_create_errors(request, session_ctx, raw_values, exc=exc)
+        return await _render_errors(request, session_ctx, "create", raw_values, exc=exc)
+    structlog.contextvars.bind_contextvars(**audit_fields(pick, agent=body.identity_ref))
     if writes_rows(pick):
         ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
 
-    field_errors = await _create(session_ctx, operator, body)
+    field_errors = await save_create(session_ctx, operator, body)
     if field_errors:
-        return await _render_create_errors(
-            request, session_ctx, raw_values, field_errors=field_errors
+        return await _render_errors(
+            request, session_ctx, "create", raw_values, field_errors=field_errors
         )
 
     _log.info(
@@ -350,45 +353,20 @@ async def submit_create(
     return _redirect_to_list()
 
 
-async def _create(
-    session_ctx: UISessionContext,
-    operator: Operator,
-    body: AgentDefinitionCreate,
-) -> dict[str, str] | None:
-    """Create the definition; return the field errors of a known failure."""
-    try:
-        await AgentDefinitionService().create(
-            tenant_id=session_ctx.tenant_id,
-            created_by_sub=operator.sub,
-            payload=body,
-        )
-    except StartingGrantsError as exc:
-        return {starting_grants.FIELD: starting_grants.error_text(exc)}
-    except AgentDefinitionExistsError:
-        return {"name": "an agent with this name already exists"}
-    except AgentIdentityRefInvalidError:
-        return {
-            "identity_ref": (
-                "identity_ref does not resolve to a registered, "
-                "non-revoked agent principal in this tenant"
-            )
-        }
-    return None
-
-
-async def _render_create_errors(
+async def _render_errors(
     request: Request,
     session_ctx: UISessionContext,
+    mode: str,
     values: dict[str, object],
     *,
     exc: ValidationError | ValueError | None = None,
     field_errors: dict[str, str] | None = None,
 ) -> HTMLResponse:
-    """Re-render the create modal with its errors and the starting grant pick."""
+    """Re-render the create or edit modal with its errors and the starting grant pick."""
     return _render_form_with_errors(
         request,
         csrf_session_id=str(session_ctx.session_id),
-        mode="create",
+        mode=mode,
         values=values,
         exc=exc,
         field_errors=field_errors,
@@ -407,6 +385,8 @@ async def submit_edit(
     system_prompt: str,
     turn_budget: str | None,
     enabled: bool,
+    grant_set: str = "",
+    grant_targets: list[str] | None = None,
 ) -> HTMLResponse:
     """Build an :class:`AgentDefinitionUpdate` and persist it via the service.
 
@@ -415,9 +395,14 @@ async def submit_edit(
     rather than a sparse diff. ``name`` is not patchable -- it only
     addresses the row. A 404 from an absent / cross-tenant name renders
     the 404 page; validation / identity_ref failures re-render the modal
-    inline.
+    inline. A changed ``identity_ref`` that names an agent with no grant
+    needs the starting grant pick, the same as a create (#6389).
     """
-    del operator  # gate only; the service write is tenant-scoped by session.
+    # Bound first, so the audit row of an early refusal names the operation.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.edit", audit_op_class="write", audit_agent_name=name
+    )
+    targets = grant_targets or []
     raw_values = {
         "name": name,
         "identity_ref": identity_ref,
@@ -425,7 +410,15 @@ async def submit_edit(
         "system_prompt": system_prompt,
         "turn_budget": turn_budget or "",
         "enabled": enabled,
+        **starting_grants.pick_values(grant_set, targets),
     }
+    try:
+        pick = starting_grants.parse_pick(grant_set, targets)
+    except ValueError as exc:
+        pick_error = {starting_grants.FIELD: str(exc)}
+        return await _render_errors(
+            request, session_ctx, "edit", raw_values, field_errors=pick_error
+        )
     try:
         body = AgentDefinitionUpdate(
             identity_ref=identity_ref,
@@ -433,44 +426,30 @@ async def submit_edit(
             system_prompt=system_prompt,
             turn_budget=_coerce_turn_budget(turn_budget),  # type: ignore[arg-type]
             enabled=enabled,
+            starting_grants=pick,
         )
     except (ValidationError, ValueError) as exc:
-        return _render_form_with_errors(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            mode="edit",
-            exc=exc,
-            values=raw_values,
-        )
+        return await _render_errors(request, session_ctx, "edit", raw_values, exc=exc)
+    structlog.contextvars.bind_contextvars(**audit_fields(pick, agent=identity_ref))
+    if writes_rows(pick):
+        ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
 
-    service = AgentDefinitionService()
-    try:
-        entry = await service.update(session_ctx.tenant_id, name, body)
-    except AgentIdentityRefInvalidError:
-        return _render_form_with_errors(
-            request,
-            csrf_session_id=str(session_ctx.session_id),
-            mode="edit",
-            field_errors={
-                "identity_ref": (
-                    "identity_ref does not resolve to a registered, "
-                    "non-revoked agent principal in this tenant"
-                )
-            },
-            values=raw_values,
+    field_errors = await save_edit(session_ctx, operator, name, body)
+    if field_errors:
+        return await _render_errors(
+            request, session_ctx, "edit", raw_values, field_errors=field_errors
         )
-    if entry is None:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail="agent_not_found")
 
     _log.info(
         "ui_agent_edit",
         tenant_id=str(session_ctx.tenant_id),
         operator_sub=session_ctx.operator_sub,
         name=name,
+        starting_grants=pick.set.value if pick is not None else None,
     )
     del request
+    if writes_rows(pick):
+        return starting_grants.grants_redirect(identity_ref)
     return _redirect_to_list()
 
 
@@ -489,12 +468,12 @@ async def submit_toggle(
     ``identity_ref`` (and so skips the identity-ref re-validation the
     service applies only when that field is set).
     """
-    del operator  # gate only.
     service = AgentDefinitionService()
     entry = await service.update(
         session_ctx.tenant_id,
         name,
         AgentDefinitionUpdate(enabled=enabled),
+        updated_by_sub=operator.sub,
     )
     if entry is None:
         from fastapi import HTTPException
@@ -556,16 +535,14 @@ def _render_form_with_errors(
     and sees a summary banner plus the field-level messages. ``exc``
     covers the Pydantic / coercion path; ``field_errors`` covers the
     service-raised duplicate-name and identity_ref cases. ``pick_ctx``
-    carries the starting grant pick values for the create modal.
+    carries the starting grant pick values for the create and edit modals.
 
-    The fragment is returned as **200**, not the semantically-matching
-    409 / 422: HTMX's default response handling does not swap a non-2xx
-    response (``swap: false``), so a 4xx re-render is computed but never
-    shown -- the invisible-error defect #2346 fixes. Returning 200 is the
-    same inline-error mold the runbooks start-run and conventions author
-    modals already ship. These ``/ui`` routes are HTMX-only (the REST
-    agents API carries the machine-readable status contract), so the
-    fragment status is a rendering concern, not an external contract.
+    The fragment is returned as **422**, so the audit row of a refused
+    form does not read like a done change. HTMX does not swap a 4xx
+    answer by default; the ``hx-on::before-swap`` handler on
+    ``#agents-modal-container`` (``agents/index.html`` and
+    ``agents/detail.html``) swaps a 422 in place, so the errors still
+    show (#2346).
     """
     if field_errors is not None:
         errors = field_errors
@@ -584,7 +561,7 @@ def _render_form_with_errors(
         request,
         template,
         context,
-        status_code=status.HTTP_200_OK,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
     )
     _set_csrf_cookie(response, csrf_token)
     return response

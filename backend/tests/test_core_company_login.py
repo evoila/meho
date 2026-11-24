@@ -17,10 +17,12 @@ import json
 import re
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import pytest
+import yaml
 
 from meho_backplane.core.company_login import (
     CLEANUP_CONFIG_KEY,
@@ -124,7 +126,8 @@ class CompanyKeycloak(FakeKeycloak):
 
     def _get(self, path: str, body: Any, params: dict[str, str]) -> Reply:
         if path == _BASE:
-            return Reply(200, {"realm": "meho", "browserFlow": "browser"})
+            realm = {"realm": "meho", "browserFlow": "browser"}
+            return Reply(200, {**realm, "attributes": copy.deepcopy(self.realm_attributes)})
         if path == f"{_BASE}/authentication/flows/browser/executions":
             return Reply(
                 200,
@@ -135,7 +138,10 @@ class CompanyKeycloak(FakeKeycloak):
             )
         if match := re.fullmatch(rf"{_BASE}/authentication/config/([^/]+)", path):
             config = self.auth_configs.get(match.group(1))
-            return Reply(200, copy.deepcopy(config)) if config else Reply(404, None)
+            if config:
+                return Reply(200, copy.deepcopy(config))
+            if match.group(1) not in self.configs:
+                return Reply(404, None)
         if match := re.fullmatch(rf"{_BASE}/groups/([^/]+)/members", path):
             assert params["briefRepresentation"] == "true"
             name = next(n for n, g in self.groups.items() if g["id"] == match.group(1))
@@ -272,14 +278,16 @@ async def test_off_by_default_touches_nothing_of_the_company_login() -> None:
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
     # The realm stage lists the login flows and reads the steps of the
     # realm file's own flows.
-    own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in', safe='')}/executions"
+    own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in level', safe='')}/executions"
+    # The settings of its level step, and the realm for its sign-in levels.
+    own_settings = tuple(f"{_BASE}/authentication/config/{config_id}" for config_id in kc.configs)
     # The recovery-code stage also reads the "Configure OTP" action and the
     # steps of the browser flow. These do not belong to the company login.
     recovery = (
         f"{_BASE}/authentication/required-actions/CONFIGURE_TOTP",
         f"{_BASE}/authentication/flows/browser/executions",
     )
-    allowed = (f"{_BASE}/authentication/flows", own, *recovery)
+    allowed = (f"{_BASE}/authentication/flows", _BASE, own, *own_settings, *recovery)
     calls = [path for _, path in kc.calls if path not in allowed]
     assert not any(kc._company_path(path) for path in calls)
     assert CompanyLoginPlan().enabled is False
@@ -654,6 +662,39 @@ async def test_an_unknown_meho_group_stops_the_stage_before_any_change() -> None
         await _run(kc, group_map={"Ops": "MEHO-Nobody"})
     assert kc.providers == {}
     assert kc.provider_mappers == {}
+
+
+_GUIDES = Path(__file__).resolve().parents[2] / "docs-site" / "install"
+_GUIDES_WITH_GROUP_MAP = (
+    "company-login-authentik.md",
+    "login/customer-keycloak.md",
+    "login/entra-id.md",
+)
+
+
+def _guide_group_map(page: str) -> dict[str, str]:
+    """The ``groupMap`` of the Helm values example on an install guide page."""
+    text = (_GUIDES / page).read_text(encoding="utf-8")
+    for block in re.findall(r"```yaml\n(.*?)```", text, flags=re.DOTALL):
+        values = yaml.safe_load(block)
+        company = (values or {}).get("coreKeycloak", {}).get("companyLogin", {})
+        if "groupMap" in company:
+            group_map: dict[str, str] = company["groupMap"]
+            return group_map
+    raise AssertionError(f"{page} has no coreKeycloak.companyLogin.groupMap example")
+
+
+@pytest.mark.parametrize("page", _GUIDES_WITH_GROUP_MAP)
+async def test_the_group_map_of_each_install_guide_works_on_a_new_realm(page: str) -> None:
+    group_map = _guide_group_map(page)
+    kc = _fresh()
+    await _run(kc, group_map=group_map)
+    assert set(kc.mappers()) == {f"{MAPPER_PREFIX}{name}" for name in group_map}
+    assert {m["config"]["group"] for m in kc.mappers().values()} == {
+        "/MEHO-Readers",
+        "/MEHO-Operators",
+        "/MEHO-Admins",
+    }
 
 
 async def test_missing_rights_name_the_roles_to_add() -> None:

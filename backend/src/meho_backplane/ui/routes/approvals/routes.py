@@ -37,13 +37,12 @@ carry the same access model the Bearer REST plane adopted in #3243/#3270:
 ``approve_request`` / ``reject_request`` run the shared service gate
 ``_check_reviewer_role``, which admits a principal that is
 ``operator``-or-higher **or** carries the orthogonal ``approver``
-capability (``Operator.approver``, lifted from the JWT ``approver`` claim
-by :func:`~meho_backplane.auth.jwt._operator_from_claims`). So a dedicated
-approver provisioned as ``read_only`` role + ``approver=true`` can clear a
-four-eyes gate through the console just as it can over REST/CLI, while a
-``read_only`` principal *without* the flag is still refused (403). The
-capability is scoped to the approvals decision: it grants no dispatch or
-other ``require_role``-gated console surface (those never read
+capability (``Operator.approver``). MEHO does not set this flag from a
+token claim, and no role gives it today, so no ``read_only`` approver can
+be set up yet. A ``read_only`` principal without the flag is refused
+(403), in the console and over REST/CLI alike. The capability is scoped
+to the approvals decision: it grants no dispatch or other
+``require_role``-gated console surface (those never read
 ``operator.approver``), and the ``sub``-keyed self-approval refusal
 (#1401) is unchanged -- an approver cannot decide a request it parked.
 
@@ -94,9 +93,9 @@ the badge -- the projection in :mod:`.render` omits them by construction.
 The modal shows, for a pending request, whether this person may approve
 it and why not. The answer comes from
 :func:`~meho_backplane.operations.approval_rights.approve_right`, which
-runs the same service checks as ``approve_request``: a MEHO-SA-Operator
+runs the same service checks as ``approve_request``: a MEHO-Admin
 may approve their own change; another person's ``dangerous`` or
-``destructive`` change needs a MEHO-SA-Operator or an admin; the
+``destructive`` change needs an admin; the
 break-glass switch covers only an own ``safe`` / ``caution`` change. The
 **Approve** button is disabled when the answer is no. **Deny** stays
 enabled (an operator withdrawing their own request is not an escalation).
@@ -139,13 +138,11 @@ import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.auth.approval_sign_in import (
-    WEB_FRESH_SIGN_IN_REMEDIATION,
-    check_fresh_web_approval_sign_in,
-    has_fresh_web_approval_sign_in,
-)
+from meho_backplane.auth.approval_sign_in import WEB_FRESH_SIGN_IN_REMEDIATION
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.rbac import require_approvals_access
+from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_context import (
@@ -186,13 +183,20 @@ from meho_backplane.operations.approval_rights import (
     approve_right,
     self_approval_confirmation,
 )
+from meho_backplane.operations.approval_script import (
+    ApprovalScriptGoneError,
+    ApprovalScriptMissingError,
+    ApprovalScriptUnreadableError,
+    read_script_page,
+)
+from meho_backplane.policy.routing import routing_enabled
+from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
-from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
     RESULT_STATE_PILL,
@@ -206,8 +210,15 @@ from meho_backplane.ui.routes.approvals.run_watch import (
     live_runs_for,
     start_approved_run,
 )
+from meho_backplane.ui.routes.approvals.sign_in import approve_sign_in_state, web_approval_auth
 from meho_backplane.ui.routes.approvals.waiting import WaitingFirstPager
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_approvals_router"]
 
@@ -231,11 +242,8 @@ _HISTORY_PAGE_SIZE: Final[int] = 25
 #: reads every pending request of the view, one batch at a time.
 _WAITING_SCAN_BATCH: Final[int] = 500
 
-#: Maximum work_ref length accepted by the history filter. ``work_ref`` is
-#: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
-#: bounding the wire shape rejects an oversized paste at the form boundary
-#: (FastAPI 422) rather than forwarding it into the WHERE clause.
-_MAX_WORK_REF_LENGTH: Final[int] = 512
+#: The bell counts the requests for a person up to here; it shows "99+" from 100.
+_BADGE_COUNT_CAP: Final[int] = 100
 
 #: The status-tab vocabulary the full-page console exposes. Each entry maps
 #: a tab key the template renders to the ``list_pending`` ``status``
@@ -253,7 +261,13 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
     # Approved requests whose outcome MEHO does not know (#5026). Not a
     # status: the list has its own rule (``list_outcome_unknown``).
     "outcome_unknown": "approved",
+    # The pending requests the signed-in person may approve. Only while
+    # approver routing is on (``POLICY_APPROVER_ROUTING``).
+    "for_you": "pending",
 }
+
+#: The tab of the pending requests the signed-in person may approve.
+_FOR_YOU_TAB: Final[str] = "for_you"
 
 #: The tab of approved runs whose outcome MEHO does not know (#5026).
 _OUTCOME_UNKNOWN_TAB: Final[str] = "outcome_unknown"
@@ -277,18 +291,6 @@ _HISTORY_PARTIALS: Final[frozenset[str]] = frozenset({"", _HISTORY_PARTIAL_ROWS}
 #: sent), newest first otherwise. ``oldest`` / ``newest`` are the explicit
 #: toggle. A foreign value is rejected (422).
 _HISTORY_ORDERS: Final[frozenset[str]] = frozenset({"", "oldest", "newest"})
-
-#: Operator-docs page the self-approval guidance deep-links to (#2669).
-#: Mirrors ``ui/maturity.py``'s ``MATURITY_INDEX_URL`` convention -- the
-#: console links to the published MkDocs site's ``latest`` alias so a solo
-#: operator who hits ``self_approval_forbidden`` reaches the two
-#: single-operator patterns (the recommended agent-requester and the
-#: audited break-glass) without reading source. The wire ``403`` /
-#: MCP-error text stays authoritative (it names the flag); this UI-only
-#: link is the docs-URL convention the field asked for.
-_SINGLE_OPERATOR_DOCS_URL: Final[str] = (
-    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
-)
 
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
@@ -464,8 +466,12 @@ async def _list_pending_waiting_first(
     work_ref: str | None,
     offset: int,
     order: ApprovalListOrder,
+    only_waiting: bool = False,
 ) -> tuple[list[ApprovalRequest], bool, set[uuid.UUID]]:
     """Page the Pending tab with the requests *operator* may approve first.
+
+    With *only_waiting* (the "For you" tab), only the requests *operator*
+    may approve.
 
     The split runs over every pending request of the view before the page
     is cut, so a request waiting for this person is on page one even when
@@ -475,9 +481,15 @@ async def _list_pending_waiting_first(
     batch before (not at a counted offset), so a request decided during the
     scan does not make the scan skip a row. Returns ``(rows, has_more, waiting ids)``.
     """
-    pager = WaitingFirstPager(operator, offset=offset, size=_HISTORY_PAGE_SIZE)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        pager = WaitingFirstPager(
+            operator,
+            offset=offset,
+            size=_HISTORY_PAGE_SIZE,
+            only_waiting=only_waiting,
+            floor=await load_install_floor(db_session),
+        )
         last: ApprovalRequest | None = None
         while True:
             batch = await list_pending(
@@ -494,6 +506,35 @@ async def _list_pending_waiting_first(
                 break
             last = batch[-1]
     return pager.page()
+
+
+async def _count_waiting_for(session: UISessionContext, operator: Operator) -> int:
+    """Count the pending requests *operator* may approve, up to :data:`_BADGE_COUNT_CAP`.
+
+    Reads the whole pending queue in batches, like
+    :func:`_list_pending_waiting_first`, so a request waiting for this
+    person counts also when many newer requests wait for other groups. The
+    scan stops at the cap: the badge shows "99+" from there on.
+    """
+    count = 0
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        floor = await load_install_floor(db_session)
+        last: ApprovalRequest | None = None
+        while True:
+            batch = await list_pending(
+                db_session,
+                tenant_id=session.tenant_id,
+                status="pending",
+                limit=_WAITING_SCAN_BATCH,
+                after=last,
+            )
+            count += sum(
+                1 for row in batch if approve_right(operator, row, floor=floor).may_approve
+            )
+            if count >= _BADGE_COUNT_CAP or len(batch) < _WAITING_SCAN_BATCH:
+                return min(count, _BADGE_COUNT_CAP)
+            last = batch[-1]
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -589,7 +630,7 @@ def build_approvals_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
-        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(default=""),
         offset: int = Query(default=0, ge=0),
         partial: str = Query(default=""),
         order: str = Query(default=""),
@@ -609,7 +650,7 @@ def build_approvals_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
-        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(default=""),
         offset: int = Query(default=0, ge=0),
         order: str = Query(default=""),
     ) -> HTMLResponse:
@@ -631,6 +672,16 @@ def build_approvals_router() -> APIRouter:
     ) -> HTMLResponse:
         """Render the request-detail + approve/deny modal (delegates below)."""
         return await _render_detail_modal(request, session, request_id)
+
+    @router.get("/ui/approvals/{request_id}/script", response_class=HTMLResponse)
+    async def approval_script_page(
+        request: Request,
+        request_id: uuid.UUID,
+        session: UISessionContext = _require_session,
+        page: int = Query(default=1, ge=1),
+    ) -> HTMLResponse:
+        """Render one page of the script block of a waiting script run."""
+        return await _render_script_page(request, session, request_id, page)
 
     @router.post("/ui/approvals/{request_id}/approve", response_class=HTMLResponse)
     async def approval_approve(
@@ -665,8 +716,13 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
     a recent backlog, not the full pending set). Tenant-scoped via the
     session.
     """
-    pending = await _list_pending_for_session(session)
-    context: dict[str, object] = {"pending_count": len(pending)}
+    operator = await _operator_or_none(session) if routing_enabled() else None
+    if operator is not None:
+        # Approver routing: count only what this person may approve.
+        count, for_you = await _count_waiting_for(session, operator), True
+    else:
+        count, for_you = len(await _list_pending_for_session(session)), False
+    context: dict[str, object] = {"pending_count": count, "for_you": for_you}
     return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
 
 
@@ -686,7 +742,7 @@ def _resolve_history_tab(tab: str) -> str:
     (a typo'd bookmark, a hand-edited URL) fails loud rather than silently
     coercing to a default that would render a misleading filtered view.
     """
-    if tab not in _HISTORY_TABS:
+    if tab not in _HISTORY_TABS or (tab == _FOR_YOU_TAB and not routing_enabled()):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown approvals tab '{tab}'.",
@@ -717,7 +773,8 @@ async def _build_history_context(
     projection + pager state, so they share this builder -- the markup is
     identical across a direct navigation and a tab/pager swap. The
     ``work_ref`` filter is applied only when non-blank (a blank box means
-    "no work_ref filter", i.e. every request for the active tab).
+    "no work_ref filter", i.e. every request for the active tab). It is
+    checked with the shared ticket id rule; a value that breaks it is a 422.
 
     ``order`` (#3596) is the operator's oldest/newest toggle. When it is
     empty, the Pending tab lists oldest first if a change ticket has two or
@@ -726,22 +783,49 @@ async def _build_history_context(
     """
     tab = _resolve_history_tab(tab)
     order_choice = _resolve_history_order(order)
-    work_ref_filter = work_ref.strip() or None
+    try:
+        work_ref_filter = filter_work_ref(work_ref)
+    except WorkRefError as exc:
+        return _history_view(
+            tab=tab,
+            order="newest",
+            order_choice=order_choice,
+            work_ref=work_ref,
+            requests=[],
+            offset=offset,
+            has_more=False,
+            in_order_work_ref=None,
+            work_ref_error=refused_filter_text(exc),
+        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         positions = await pending_chain_positions(
             db_session, tenant_id=session.tenant_id, work_ref=work_ref_filter
         )
+    pending_tab = tab in ("pending", _FOR_YOU_TAB)
     resolved_order: ApprovalListOrder
-    if order_choice == "oldest" or (order_choice == "" and tab == "pending" and positions):
+    if order_choice == "oldest" or (order_choice == "" and pending_tab and positions):
         resolved_order = "oldest"
     else:
         resolved_order = "newest"
-    operator = await _operator_or_none(session) if tab == "pending" else None
+    operator = await _operator_or_none(session) if pending_tab else None
     waiting: set[uuid.UUID] = set()
     if operator is not None:
         rows, has_more, waiting = await _list_pending_waiting_first(
-            session, operator, work_ref=work_ref_filter, offset=offset, order=resolved_order
+            session,
+            operator,
+            work_ref=work_ref_filter,
+            offset=offset,
+            order=resolved_order,
+            only_waiting=tab == _FOR_YOU_TAB,
+        )
+    elif tab == _FOR_YOU_TAB:
+        # Without the person, MEHO cannot say which requests are theirs. An
+        # empty list would read as "nothing waits for you".
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MEHO could not check your sign-in, so it cannot list the requests "
+            "for you. Open the Pending tab, or sign in again.",
         )
     else:
         rows, has_more = await _list_history_for_session(
@@ -762,8 +846,12 @@ async def _build_history_context(
             )
     # Where each approved run is now; a running row asks again (#5110).
     live = await live_runs_for(session.tenant_id, rows)
-    return {
-        "requests": [
+    return _history_view(
+        tab=tab,
+        order=resolved_order,
+        order_choice=order_choice,
+        work_ref=work_ref_filter or "",
+        requests=[
             {
                 **project_request_to_view(
                     row,
@@ -775,22 +863,55 @@ async def _build_history_context(
             }
             for row in rows
         ],
+        offset=offset,
+        has_more=has_more,
+        # "Approve group in order" (#3597): offered on the Pending tab when
+        # the filter names a change ticket with two or more pending requests.
+        in_order_work_ref=work_ref_filter if tab == "pending" and positions else None,
+    )
+
+
+def _history_view(
+    *,
+    tab: str,
+    order: str,
+    order_choice: str,
+    work_ref: str,
+    requests: list[dict[str, object]],
+    offset: int,
+    has_more: bool,
+    in_order_work_ref: str | None,
+    work_ref_error: str | None = None,
+) -> dict[str, object]:
+    """The template context of the history page and its list partial.
+
+    ``work_ref_error`` is the text for a refused ticket id search value;
+    the list is then empty and the caller answers 422.
+    """
+    return {
+        "requests": requests,
         "poll_seconds": POLL_SECONDS,
-        "order": resolved_order,
+        "order": order,
         "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
-        "tabs": list(_HISTORY_TABS.keys()),
-        "work_ref": work_ref.strip(),
+        "tabs": [t for t in _HISTORY_TABS if t != _FOR_YOU_TAB or routing_enabled()],
+        "work_ref": work_ref,
+        "work_ref_error": work_ref_error,
         "offset": offset,
         "page_size": _HISTORY_PAGE_SIZE,
         "next_offset": offset + _HISTORY_PAGE_SIZE,
         "has_more": has_more,
-        # "Approve group in order" (#3597): offered on the Pending tab when
-        # the filter names a change ticket with two or more pending requests.
-        "in_order_work_ref": work_ref_filter if tab == "pending" and positions else None,
+        "in_order_work_ref": in_order_work_ref,
     }
+
+
+def _history_response(response: HTMLResponse, context: dict[str, object]) -> HTMLResponse:
+    """Answer 422 when the context shows a refused ticket id search value."""
+    if context["work_ref_error"] is not None:
+        mark_work_ref_refused(response)
+    return response
 
 
 async def _render_index(
@@ -812,7 +933,9 @@ async def _render_index(
     context = await _build_history_context(session, tab, work_ref, offset, order)
     context["active_surface"] = "approvals"
     context["page_title"] = "Approvals"
-    return get_templates().TemplateResponse(request, "approvals/index.html", context)
+    return _history_response(
+        get_templates().TemplateResponse(request, "approvals/index.html", context), context
+    )
 
 
 async def _render_history(
@@ -838,12 +961,58 @@ async def _render_history(
             detail=f"Unknown approvals list partial '{partial}'.",
         )
     context = await _build_history_context(session, tab, work_ref, offset, order)
-    template = (
-        "approvals/_history_rows_oob.html"
-        if partial == _HISTORY_PARTIAL_ROWS
-        else "approvals/_history.html"
+    refused = context["work_ref_error"] is not None
+    if partial == _HISTORY_PARTIAL_ROWS and not refused:
+        return get_templates().TemplateResponse(
+            request, "approvals/_history_rows_oob.html", context
+        )
+    response = get_templates().TemplateResponse(request, "approvals/_history.html", context)
+    if refused and partial == _HISTORY_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole console, so it replaces the console instead.
+        mark_work_ref_refused(response, retarget="#approvals-history", reswap="outerHTML")
+        return response
+    return _history_response(response, context)
+
+
+async def _render_script_page(
+    request: Request, session: UISessionContext, request_id: uuid.UUID, page: int
+) -> HTMLResponse:
+    """Render the script block at page *page*, the fragment the page links swap in.
+
+    The same access as ``GET /api/v1/approvals/{id}/script``: a person who may
+    not read the request gets no page. When the request was decided since the
+    modal opened, or the stored script cannot be read back, the block says so
+    in plain words and has no page links.
+    """
+    require_approvals_access(await _resolve_operator(session))
+    fields: dict[str, object] = {}
+    async with get_sessionmaker()() as db_session:
+        try:
+            row = await get_request(db_session, tenant_id=session.tenant_id, request_id=request_id)
+            page_fields = await read_script_page(db_session, row, page)
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="approval_request_not_found"
+            ) from exc
+        except (ApprovalScriptGoneError, ApprovalScriptUnreadableError) as exc:
+            return get_templates().TemplateResponse(
+                request,
+                "approvals/_script.html",
+                {"fields": {"script_unavailable": str(exc)}, "script_request_id": None},
+            )
+        except (ApprovalScriptMissingError, ScriptPageOutOfRangeError) as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    preview = (row.proposed_effect or {}).get("preview")
+    if isinstance(preview, dict):
+        fields.update({k: v for k, v in preview.items() if k in ("script_ref", "script_check")})
+    fields.update(page_fields)
+    fields["script_page"] = page
+    return get_templates().TemplateResponse(
+        request,
+        "approvals/_script.html",
+        {"fields": fields, "script_request_id": row.id},
     )
-    return get_templates().TemplateResponse(request, template, context)
 
 
 async def _render_detail_modal(
@@ -867,17 +1036,19 @@ async def _render_detail_modal(
     ``error_*`` arguments let the decision handlers re-render this modal
     with a typed banner (e.g. a server-side self-approval 403) without a
     second round-trip; ``self_approval_error`` promotes that banner from a
-    bare error to the actionable single-operator guidance (#2669), and
+    bare error to the own-change banner, and
     ``fresh_sign_in_error`` to the "sign in again" guidance with the link
     to a new sign-in. ``error_hint`` is a sentence the banner shows after
     the refusal text (#3329: an approve refusal says the web interface is
     the normal place to approve).
 
-    An approve needs a recent sign-in that asked for the credentials
-    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`).
-    When the session's sign-in is already too old for any approval, the
-    modal offers the sign-in link in place of the Approve button
-    (``approve_needs_sign_in``); the POST checks again either way.
+    An approve needs the sign-in that ``APPROVAL_SIGN_IN_LEVEL`` asks for
+    (:mod:`meho_backplane.ui.routes.approvals.sign_in`, #6282): under
+    ``required`` the console's approval sign-in with the approval level,
+    else a recent sign-in that asked for the credentials. When the session
+    cannot approve, the modal offers the sign-in link in place of the
+    Approve button (``approve_needs_sign_in``); the POST checks again
+    either way.
     """
     operator = await _resolve_operator(session)
     approval, reviewer_context, delegation, chain = await _get_request_with_context_or_404(
@@ -886,9 +1057,11 @@ async def _render_detail_modal(
 
     # The same service checks as the approve (#3329): the sign and the
     # button state match what the POST decides. The POST checks again.
-    right = approve_right(operator, approval)
+    right = approve_right(operator, approval, floor=await current_install_floor())
     self_approval_blocked = not right.may_approve and right.reason == ApproveRightReason.OWN_CHANGE
-    approve_needs_sign_in = not has_fresh_web_approval_sign_in(operator, get_settings())
+    approve_needs_sign_in, sign_in_url = await approve_sign_in_state(
+        operator, session.session_id, _APPROVALS_PATH
+    )
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
         "request": project_request_to_view(approval, delegation, chain),
@@ -900,12 +1073,10 @@ async def _render_detail_modal(
         "approve_right": right,
         "approve_blocked": not right.may_approve,
         "self_approval_blocked": self_approval_blocked,
-        "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
-        "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,
         "self_approval_error": self_approval_error,
         "fresh_sign_in_error": fresh_sign_in_error,
         "approve_needs_sign_in": approve_needs_sign_in,
-        "sign_in_url": login_location(_APPROVALS_PATH, fresh_sign_in=True),
+        "sign_in_url": sign_in_url,
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
@@ -946,7 +1117,11 @@ async def _decide(
     operator = await _resolve_operator(session)
     try:
         approval = await _commit_decision(
-            operator=operator, request_id=request_id, decision=decision, reason=reason
+            operator=operator,
+            request_id=request_id,
+            decision=decision,
+            reason=reason,
+            session_id=session.session_id,
         )
     except HTTPException as exc:
         # Recoverable: re-render the modal with the typed error banner so
@@ -959,8 +1134,8 @@ async def _decide(
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         # A rejected self-approval (the service 403 the operator reached by
         # forging the disabled Approve button) is the one error worth more
-        # than a bare banner: re-render with the actionable single-operator
-        # guidance (both patterns + docs link) instead (#2669). Keyed on the
+        # than a bare banner: re-render with the own-change banner, which
+        # says who may approve and where to ask. Keyed on the
         # service error, because the detail is the plain refusal text (#3328).
         self_approval_error = isinstance(exc.__cause__, SelfApprovalForbiddenError)
         # The session's sign-in is too old to approve, or it already
@@ -1017,13 +1192,15 @@ async def _commit_decision(
     request_id: uuid.UUID,
     decision: str,
     reason: str,
+    session_id: uuid.UUID,
 ) -> ApprovalRequest:
     """Run approve/reject in one transaction + publish; map errors to HTTP.
 
-    An approve first needs the console session's sign-in to be recent and
-    to have asked for the credentials
-    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`,
-    the same checks as REST). A reject needs no new sign-in. The
+    An approve first needs the sign-in ``APPROVAL_SIGN_IN_LEVEL`` asks for
+    (:func:`~meho_backplane.ui.routes.approvals.sign_in.web_approval_auth`,
+    #6282): under ``required`` the console approval sign-in of the session
+    *session_id* with the approval level, else a recent sign-in that asked
+    for the credentials. A reject needs no new sign-in. The
     self-approval guard, role gate, tenant-isolation 404, already-decided
     409 and the sign-in age and one-use rules of the request's risk level
     all live in the service
@@ -1037,7 +1214,7 @@ async def _commit_decision(
     try:
         async with sessionmaker() as db_session:
             if decision == "approved":
-                approval_auth = check_fresh_web_approval_sign_in(operator, get_settings())
+                approval_auth = await web_approval_auth(operator, session_id)
                 request = await approve_request(
                     db_session,
                     request_id,

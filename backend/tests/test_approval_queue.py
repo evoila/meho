@@ -50,10 +50,10 @@ from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import policy_rule_var, work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_handoff import (
     ApprovalExecutionPayload,
@@ -84,7 +84,9 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_agent_a_known_person
 
 # ---------------------------------------------------------------------------
 # Module-level handlers (closures are rejected by derive_handler_ref)
@@ -96,6 +98,24 @@ async def _approval_test_ok_handler(
 ) -> dict[str, Any]:
     """Module-level handler for ``approval-test.op`` (integration tests)."""
     return {"result": "executed", "params": params}
+
+
+#: Sessions seen inside the resumed run of the CLI session test:
+#: (agent session, audit session) as the two resolvers return them.
+_cli_resume_seen: list[tuple[uuid.UUID | None, uuid.UUID | None]] = []
+
+
+async def _cli_session_recording_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Record which session the run sees, for the CLI session resume test."""
+    from meho_backplane.operations._audit import (
+        resolve_agent_session_id,
+        resolve_audit_session_id,
+    )
+
+    _cli_resume_seen.append((resolve_agent_session_id(), resolve_audit_session_id()))
+    return {"result": "executed"}
 
 
 async def _approval_test_dangerous_handler(
@@ -182,7 +202,7 @@ def _make_operator(
 ) -> Operator:
     # Defaults to a USER (human) principal: deciding a parked op — approve /
     # reject / decide / expire — is a human-only action on every transport
-    # (v0.1-spec §7, meho-internal#289), so ``_check_reviewer_role`` now
+    # (v0.1-spec §7), so ``_check_reviewer_role`` now
     # refuses a machine ``principal_kind`` (agent / service / runner). These
     # service-level tests exercise the reviewer path, so the default reviewer
     # must be human; a test modelling an agent *parker* passes
@@ -270,7 +290,7 @@ async def test_credential_write_parks_only_an_opaque_handle(session: AsyncSessio
     assert request.resume_parent == {"op_id": "composite.rotate"}
     assert request.execution_handle is not None
     assert secret not in repr(request)
-    assert secret not in _view(request).model_dump_json()
+    assert secret not in _view(request, operator=_make_operator()).model_dump_json()
     assert secret not in repr(_row_to_dict(request))
 
     async with get_sessionmaker()() as fresh:
@@ -568,7 +588,7 @@ async def test_create_pending_request_captures_bound_work_ref(
         work_ref_var.reset(token)
 
     assert request.work_ref == "gh:evoila/meho#1659"
-    assert _view(request).work_ref == "gh:evoila/meho#1659"
+    assert _view(request, operator=_make_operator()).work_ref == request.work_ref
     assert _row_to_dict(request)["work_ref"] == "gh:evoila/meho#1659"
 
 
@@ -593,10 +613,10 @@ async def test_create_pending_request_work_ref_null_when_unbound(
 
 @pytest.mark.asyncio
 async def test_list_pending_filters_by_work_ref(session: AsyncSession) -> None:
-    """``list_pending(work_ref=...)`` returns only exact-match requests.
+    """``list_pending(work_ref=...)`` returns only the requests of that ticket id.
 
     work_ref I2-T1 #1659 AC2 (service layer behind ``meho approvals list
-    --work-ref``): an exact ``work_ref`` filter narrows to the matching
+    --work-ref``): a ``work_ref`` filter narrows to the matching
     requests; an unrelated ref returns none.
     """
     operator = _make_operator()
@@ -666,6 +686,7 @@ async def test_approve_request_flips_status(session: AsyncSession) -> None:
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -696,6 +717,7 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -723,6 +745,83 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     # #3733: the park is a gate decision; the approve is an approval decision.
     assert request_rows[0].event_class == "policy_decision"
     assert decision_rows[0].event_class == "approval_decision"
+
+
+@pytest.mark.asyncio
+async def test_request_and_its_audit_row_name_the_policy_rule(session: AsyncSession) -> None:
+    """The bound policy rule lands on the request and its "request" row (#6044).
+
+    The "decision" row stays empty, the same as ``policy_decision``: no gate
+    ran on the approver's task.
+    """
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
+    params: dict[str, object] = {}
+    stamp = RuleStamp(
+        source="default", rule_id="person.token", text="a token call waits", policy_version=2
+    )
+    token = policy_rule_var.set(stamp)
+    try:
+        pending = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
+        )
+        await session.commit()
+    finally:
+        policy_rule_var.reset(token)
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        rows = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars()}
+    assert stored is not None
+    assert stored.policy_rule == {
+        "source": "default",
+        "rule_id": "person.token",
+        "text": "a token call waits",
+        "decided": False,
+    }
+    assert stored.policy_version == 2
+    assert rows["approval.request"].policy_rule == "default:person.token (shadow)"
+    assert rows["approval.request"].policy_version == 2
+    assert rows["approval.decision"].policy_rule is None
+    assert rows["approval.decision"].policy_version is None
+
+
+@pytest.mark.asyncio
+async def test_request_without_a_bound_rule_leaves_the_columns_empty(
+    session: AsyncSession,
+) -> None:
+    """With the switch off nothing binds a rule, so the columns stay NULL (#6044)."""
+    params: dict[str, object] = {}
+    pending = await create_pending_request(
+        session,
+        operator=_make_operator(sub="requester-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as fresh:
+        stored = await fresh.get(ApprovalRequest, pending.id)
+        row = (
+            await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request"))
+        ).scalar_one()
+    assert stored is not None
+    assert (stored.policy_rule, stored.policy_version) == (None, None)
+    assert (row.policy_rule, row.policy_version) == (None, None)
 
 
 @pytest.mark.asyncio
@@ -762,6 +861,39 @@ async def test_platform_admin_decision_row_names_the_role_source(session: AsyncS
 
 
 @pytest.mark.asyncio
+async def test_a_decision_row_names_the_bound_kind_of_the_approver(session: AsyncSession) -> None:
+    """The approver's right came from a binding of the policy file."""
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub", role=TenantRole.READ_ONLY).model_copy(
+        update={"approver": True, "bound_kind": RoleGroup.APPROVERS}
+    )
+    params: dict[str, Any] = {}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        proposed_effect={"safety_level": "caution"},
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            await fresh.execute(select(AuditLog).where(AuditLog.method == "APPROVAL"))
+        ).scalars()
+        by_path = {row.path: row.payload for row in rows}
+    assert by_path["approval.decision"]["bound_kind"] == "Approvers"
+    assert "bound_kind" not in by_path["approval.request"]
+
+
+@pytest.mark.asyncio
 async def test_approve_request_records_reason_in_decision_payload(
     session: AsyncSession,
 ) -> None:
@@ -781,6 +913,7 @@ async def test_approve_request_records_reason_in_decision_payload(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     without_reason = await create_pending_request(
         session,
@@ -790,6 +923,7 @@ async def test_approve_request_records_reason_in_decision_payload(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -833,6 +967,7 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     to_reject = await create_pending_request(
         session,
@@ -842,6 +977,7 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -889,6 +1025,7 @@ async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) ->
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -963,6 +1100,7 @@ async def test_approve_request_params_none_skips_hash_check(
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -997,6 +1135,7 @@ async def test_approve_request_audit_id_matches_decision_row(
         target=None,
         params=original_params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1028,6 +1167,7 @@ async def test_approve_request_raises_on_already_decided(session: AsyncSession) 
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1282,6 +1422,7 @@ async def test_read_only_with_approver_can_approve(session: AsyncSession) -> Non
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -1427,6 +1568,7 @@ async def test_self_approval_allowed_under_break_glass(
         target=None,
         params=params,
         params_hash=params_hash,
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -2200,6 +2342,7 @@ async def test_approve_allows_request_within_deadline(
     """
     requester = _make_operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
     reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    await give_agent_a_known_person(_TENANT_ID, "agent-requester")
     params = {"key": "value"}
 
     request = await create_pending_request(
@@ -2211,6 +2354,7 @@ async def test_approve_allows_request_within_deadline(
         params=params,
         params_hash=compute_params_hash(params),
         expires_at=datetime.now(UTC) + timedelta(hours=1),
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
 
@@ -2983,6 +3127,7 @@ async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
     # Park an agent-run request directly (run_id set) — the realistic shape
     # the agent runtime parks via the contextvar.
     requester = _make_operator(sub="agent-run-sub", principal_kind=PrincipalKind.AGENT)
+    await give_agent_a_known_person(_TENANT_ID, "agent-run-sub")
     params = {"path": "secret/agent"}
     async with get_sessionmaker()() as s:
         pending = await create_pending_request(
@@ -2994,6 +3139,7 @@ async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
             params=params,
             params_hash=compute_params_hash(params),
             run_id=uuid.uuid4(),
+            proposed_effect={"safety_level": "caution"},
         )
         await s.commit()
     return pending.id
@@ -3205,6 +3351,39 @@ async def test_proposed_effect_carries_catalog_safety_level(
 
 
 @pytest.mark.asyncio
+async def test_create_pending_request_stores_cli_session_id(
+    session: AsyncSession,
+) -> None:
+    """With only the CLI session id bound, the parked row and its audit row carry it."""
+    from meho_backplane.operations._audit import client_session_id_var
+
+    session_id = uuid.uuid4()
+    params = {"key": "value"}
+    token = client_session_id_var.set(session_id)
+    try:
+        request = await create_pending_request(
+            session,
+            operator=_make_operator(sub="human-sub"),
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+    finally:
+        client_session_id_var.reset(token)
+    await session.commit()
+
+    assert request.agent_session_id == session_id
+    audit_row = (
+        (await session.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+        .scalars()
+        .one()
+    )
+    assert audit_row.agent_session_id == session_id
+
+
+@pytest.mark.asyncio
 async def test_create_pending_request_persists_session_lineage(
     session: AsyncSession,
 ) -> None:
@@ -3312,6 +3491,7 @@ async def test_decision_audit_row_backlinks_and_inherits_session(
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
+            proposed_effect={"safety_level": "caution"},
         )
     finally:
         agent_session_id_var.reset(token)
@@ -3507,6 +3687,221 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
     chain_root = roots_by_path["approval.request"]
     child_paths = sorted(child.path for child in chain_root.children)
     assert child_paths == ["approval.decision", "lineagetest.op"]
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_decision_rows_of_a_cli_parked_request_keep_the_client_mark(
+    session: AsyncSession,
+) -> None:
+    """Approve and expiry rows of a CLI-parked request say the session came from the CLI.
+
+    The decision rows are written on the approver's task (no header, or the
+    approver's own CLI session) or by the expiry sweep, so they must take the
+    mark from the stored request. A request parked by an agent session gets
+    decision rows without the mark.
+    """
+    from meho_backplane.operations._audit import (
+        SESSION_FROM_CLIENT_KEY,
+        agent_session_id_var,
+        client_session_id_var,
+    )
+
+    requester = _make_operator(sub="cli-requester")
+    cli_session = uuid.uuid4()
+    past = datetime.now(UTC) - timedelta(minutes=5)
+
+    async def _park(op_id: str, *, expires_at: datetime | None = None) -> ApprovalRequest:
+        return await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id=op_id,
+            target=None,
+            params={},
+            params_hash=compute_params_hash({}),
+            expires_at=expires_at,
+        )
+
+    token = client_session_id_var.set(cli_session)
+    try:
+        console_approved = await _park("vault.kv.cli-console")
+        cli_approved = await _park("vault.kv.cli-cli")
+        expired = await _park("vault.kv.cli-expired", expires_at=past)
+    finally:
+        client_session_id_var.reset(token)
+    agent_session = uuid.uuid4()
+    agent_token = agent_session_id_var.set(agent_session)
+    try:
+        agent_parked = await _park("vault.kv.agent")
+    finally:
+        agent_session_id_var.reset(agent_token)
+    await session.commit()
+
+    reviewer = _make_operator(sub="console-reviewer", role=TenantRole.TENANT_ADMIN)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, console_approved.id, operator=reviewer)
+        await approve_request(s, agent_parked.id, operator=reviewer)
+        await s.commit()
+    reviewer_token = client_session_id_var.set(uuid.uuid4())
+    try:
+        async with get_sessionmaker()() as s:
+            await approve_request(
+                s,
+                cli_approved.id,
+                operator=_make_operator(sub="cli-reviewer", role=TenantRole.TENANT_ADMIN),
+            )
+            await s.commit()
+    finally:
+        client_session_id_var.reset(reviewer_token)
+    async with get_sessionmaker()() as s:
+        await expire_stale_requests(s, operator=reviewer)
+        await s.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    by_request = {row.payload["approval_request_id"]: row for row in rows}
+    for request in (console_approved, cli_approved, expired):
+        row = by_request[str(request.id)]
+        assert row.agent_session_id == cli_session
+        assert row.payload[SESSION_FROM_CLIENT_KEY] is True
+    assert by_request[str(expired.id)].payload["decision"] == "expired"
+    agent_row = by_request[str(agent_parked.id)]
+    assert agent_row.agent_session_id == agent_session
+    assert SESSION_FROM_CLIENT_KEY not in agent_row.payload
+
+
+@pytest.mark.asyncio
+async def test_cli_session_park_approve_resume_stays_a_client_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLI login session keeps its audit label but is never an agent session.
+
+    The requester parks the op with ``Meho-Session-Id`` bound (the CLI login
+    session). A reviewer with their own CLI session approves, and the run
+    resumes. The parked row marks the session as from the client; the run's
+    audit row carries the requester's session; inside the run no agent
+    session is bound, so the reflex advisory adds nothing to the answer.
+    """
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.broadcast.reflex import REFLEX_ADVISORY_EXTRAS_KEY
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.operations._audit import agent_session_id_var, client_session_id_var
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    reset_dispatcher_caches()
+    clear_registry()
+    _cli_resume_seen.clear()
+
+    class _OkConnector(Connector):
+        product = "clisessiontest"
+        version = "1.x"
+        impl_id = "clisessiontest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="clisessiontest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="clisessiontest", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="clisessiontest",
+        version="1.x",
+        impl_id="clisessiontest",
+        op_id="clisessiontest.op",
+        handler=_cli_session_recording_handler,
+        summary="Test op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    cli_session = uuid.uuid4()
+    requester = _make_operator(sub="cli-requester", principal_kind=PrincipalKind.USER)
+    params = {"x": 1}
+
+    token = client_session_id_var.set(cli_session)
+    try:
+        parked_result = await dispatch(
+            operator=requester,
+            connector_id="clisessiontest-1.x",
+            op_id="clisessiontest.op",
+            target=None,
+            params=params,
+        )
+    finally:
+        client_session_id_var.reset(token)
+    assert parked_result.status == "awaiting_approval"
+    approval_request_id = uuid.UUID(parked_result.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        parked = await s.get(ApprovalRequest, approval_request_id)
+        assert parked is not None
+        assert parked.agent_session_id == cli_session
+        assert parked.session_from_client is True
+
+    reviewer = _make_operator(sub="cli-reviewer", principal_kind=PrincipalKind.USER)
+    reviewer_session = uuid.uuid4()
+    token = client_session_id_var.set(reviewer_session)
+    try:
+        async with get_sessionmaker()() as s:
+            approved = await approve_request(s, approval_request_id, operator=reviewer)
+            await s.commit()
+        resumed = await resume_dispatch_after_approval(operator=reviewer, request=approved)
+        assert client_session_id_var.get() == reviewer_session
+    finally:
+        client_session_id_var.reset(token)
+
+    assert resumed.status == "ok"
+    assert REFLEX_ADVISORY_EXTRAS_KEY not in (resumed.extras or {})
+    assert _cli_resume_seen == [(None, cli_session)]
+    assert agent_session_id_var.get() is None
+
+    async with get_sessionmaker()() as fresh:
+        dispatch_row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .one()
+        )
+    assert dispatch_row.agent_session_id == cli_session
 
     reset_dispatcher_caches()
     clear_registry()
@@ -3756,6 +4151,7 @@ async def _park_for_delegation(session: AsyncSession) -> uuid.UUID:
         target=None,
         params={"name": "test"},
         params_hash=compute_params_hash({"name": "test"}),
+        proposed_effect={"safety_level": "caution"},
     )
     await session.commit()
     return pending.id

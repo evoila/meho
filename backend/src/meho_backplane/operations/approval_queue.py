@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -103,8 +103,11 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.secret_read_as import current_secret_read_as
+from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
+    HIDDEN_PARAM_MARKER,
     classify_op,
     holds_hidden_param_values,
     scrub_secret_named_values,
@@ -112,15 +115,24 @@ from meho_backplane.broadcast.events import (
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
+    ApprovalRequestKey,
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
 )
+from meho_backplane.op_classes import hidden_stored_param
 from meho_backplane.operations._audit import (
+    SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
+    client_session_id_var,
     parent_audit_id_var,
     policy_decision_var,
-    resolve_agent_session_id,
+    policy_rule_columns,
+    policy_rule_var,
+    resolve_audit_session_id,
+    run_id_var,
+    session_is_from_client,
+    step_id_var,
     work_ref_var,
 )
 from meho_backplane.operations._errors import (
@@ -133,6 +145,10 @@ from meho_backplane.operations._errors import (
     result_target_gone_since_approval,
 )
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
+from meho_backplane.operations._target_connector_limit import (
+    restored_connector_limit,
+    stored_connector_limit,
+)
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
     params_hash_candidates,
@@ -157,12 +173,14 @@ from meho_backplane.operations.approval_resume_checks import (
     preview_changed_since_request,
     target_changed_since_request,
 )
+from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import (
     is_secret_reveal,
     result_waiting_for_requester,
     without_secret_values,
 )
 from meho_backplane.operations.grant_approval import (
+    ASKED_IN_WEB_CONSOLE,
     RIGHTS_CHANGE_REFUSAL,
     check_grant_approval,
     check_rights_change_approval,
@@ -170,11 +188,30 @@ from meho_backplane.operations.grant_approval import (
     grant_changed_since_request,
     is_rights_change,
 )
+from meho_backplane.operations.people_behind import (
+    behind_subs,
+    find_people_behind,
+    is_person_behind,
+    people_behind_unknown,
+    whys_of,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.routing import (
+    ROUTING_INVALID_RULE,
+    group_names,
+    narrow,
+    routing_enabled,
+    routing_refusal,
+    stamp_approver_set,
+    stored_kinds,
+    today_kinds,
+)
+from meho_backplane.policy.routing_floor import load_install_floor
 from meho_backplane.version import running_release_id
+from meho_backplane.work_ref import work_ref_filter_values
 
 __all__ = [
     "EXPIRED_REASON_MESSAGES",
@@ -189,6 +226,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalRoleFloorError",
+    "ApprovalRoutingError",
     "ApprovalRule",
     "ApprovalSignInReusedError",
     "ApprovalSignInTooOldError",
@@ -204,10 +242,12 @@ __all__ = [
     "RightsChangeApprovalError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "UnknownRequesterApprovalError",
     "WithdrawForbiddenError",
     "approval_expired_reason",
     "approval_release_changed",
     "approval_result_state",
+    "approval_risk_level",
     "approve_request",
     "claim_resume",
     "composite_resume_binding",
@@ -219,7 +259,9 @@ __all__ = [
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
+    "is_admin_approver",
     "is_high_risk_level",
+    "is_self_approval",
     "list_pending",
     "may_approve_high_risk",
     "parse_delegation",
@@ -234,6 +276,7 @@ __all__ = [
     "request_waits_only_for_token_call",
     "result_state_of_envelope",
     "resume_dispatch_after_approval",
+    "rights_change_note",
     "take_approval_lock",
     "withdraw_request",
 ]
@@ -259,12 +302,14 @@ _DECISION_STATUS_CODE_EXPIRED: int = 410
 #: MEHO was updated while the request waited (#5030), or the target changed
 #: or no longer resolves (:func:`refuse_resume_if_target_changed`).
 _RESUME_REFUSED_STATUS_CODE: int = 409
+#: The audit status of a park refused because the stored routing is not valid.
+_ROUTING_REFUSED_STATUS_CODE: int = 409
 
 #: Who may approve another person's ``dangerous`` or ``destructive`` change,
 #: in words for the refusal texts. The rule itself is in
 #: :func:`_check_approver_group`; the groups come from the decision record
 #: ``docs/decisions/approval-groups-and-self-approval.md`` (#3325).
-_HIGH_RISK_APPROVERS_TEXT: Final[str] = "a MEHO-SA-Operator or a MEHO-Admin"
+_HIGH_RISK_APPROVERS_TEXT: Final[str] = "a MEHO-Admin"
 
 
 class ApprovalRule(StrEnum):
@@ -273,8 +318,8 @@ class ApprovalRule(StrEnum):
     Recorded as ``approval_rule`` on the ``approval.decision`` audit row
     and on the ``approval.approved`` step event, next to ``self_approved``.
 
-    * ``sa_operator_self_approval`` — a MEHO-SA-Operator or a MEHO-Admin
-      approved their own change (both groups may, #5969).
+    * ``sa_operator_self_approval`` — an Admin (MEHO-Admins) approved
+      their own change. The stored value keeps its name.
     * ``break_glass_self_approval`` — the requester approved their own
       ``safe`` or ``caution`` change under ``APPROVAL_ALLOW_SELF_APPROVAL``.
     * ``sa_operator_or_admin`` — another person's ``dangerous`` or
@@ -459,15 +504,16 @@ class SelfApprovalForbiddenError(ApprovalError):
 
     Raised by :func:`approve_request` when
     ``operator.sub == request.principal_sub``, the person is not in the
-    MEHO-SA-Operators or MEHO-Admins group
+    MEHO-Admins group
     (:attr:`~meho_backplane.auth.operator.Operator.may_self_approve`), and
     the audited single-operator break-glass mode
     (``Settings.approval_allow_self_approval``) does not cover the change.
     Break-glass never covers a ``dangerous`` or ``destructive`` change
     (*high_risk*). The route layer maps this to 403.
 
-    The message says who can approve instead. For a lower-risk change it
-    also names the break-glass switch.
+    The message says who can approve instead and where to ask: the groups
+    in *approver_kinds* (:func:`_approver_kinds`), on the Approvals page.
+    The text names no setting and no other way to approve the change.
 
     Reject is deliberately *not* guarded — an operator withdrawing their
     own pending request is not a privilege escalation.
@@ -478,38 +524,43 @@ class SelfApprovalForbiddenError(ApprovalError):
         request_id: uuid.UUID,
         *,
         principal_sub: str,
+        approver_kinds: Sequence[str],
         high_risk: bool = False,
         web_click_allowed: bool = False,
+        behind: bool = False,
     ) -> None:
         self.request_id = request_id
         self.principal_sub = principal_sub
         self.high_risk = high_risk
-        if high_risk:
-            who_can = (
-                f"Ask {_HIGH_RISK_APPROVERS_TEXT} to approve this dangerous or destructive change."
-            )
-        elif web_click_allowed:
+        self.behind = behind
+        if web_click_allowed:
             # #3980: the change waits only because it came with a token.
             who_can = (
                 "This change waits only because it came with a token, so you may "
                 "approve it yourself with a click in the web interface."
             )
+        elif approver_kinds:
+            who_can = (
+                f"Ask another person in {group_names(approver_kinds)} to approve it. "
+                "They find it on the Approvals page of the web interface."
+            )
         else:
-            who_can = "Ask another operator, an admin or an approver to approve it."
+            who_can = "No group may approve this change, so it waits until it expires."
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
-            "You cannot approve your own change. Only members of the "
-            "MEHO-SA-Operators and MEHO-Admins groups may approve their own "
-            f"changes. {who_can}"
-        )
-        break_glass = (
-            ""
-            if high_risk
-            else " (set APPROVAL_ALLOW_SELF_APPROVAL=true for audited single-operator break-glass)"
-        )
+        if behind:
+            self.reason_text = (
+                "You cannot approve this change. You set up, changed or started the "
+                "agent, add-on or runner that asked for it, so it counts as your own "
+                f"change. {who_can}"
+            )
+        else:
+            self.reason_text = (
+                "You cannot approve your own change. Only members of the "
+                f"MEHO-Admins group may approve their own changes. {who_can}"
+            )
         super().__init__(
             f"operator {principal_sub!r} may not approve approval_request "
-            f"{request_id}: {self.reason_text}{break_glass}"
+            f"{request_id}: {self.reason_text}"
         )
 
 
@@ -544,6 +595,7 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
     ``docs/decisions/approval-groups-and-self-approval.md``. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
     answers 403; the approve routes catch this one first to show its text.
+    *reason* replaces that text (:class:`ApprovalRoutingError` passes its own).
     """
 
     def __init__(
@@ -553,11 +605,12 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         operator_sub: str,
         role: str,
         safety_level: str,
+        reason: str | None = None,
     ) -> None:
         self.request_id = request_id
         self.safety_level = safety_level
         #: The plain refusal text, without ids, for the web interface.
-        self.reason_text = (
+        self.reason_text = reason or (
             f"You cannot approve this {safety_level} change of another person. "
             f"Only {_HIGH_RISK_APPROVERS_TEXT} may approve dangerous and "
             "destructive changes."
@@ -572,11 +625,53 @@ class ApprovalGroupForbiddenError(UnauthorizedApprovalError):
         )
 
 
+class ApprovalRoutingError(ApprovalGroupForbiddenError):
+    """The person is not in a login group kind the request is routed to.
+
+    Raised by :func:`approve_request` when the ``POLICY_APPROVER_ROUTING``
+    switch is on, the request stored the group kinds that may approve it
+    (:mod:`meho_backplane.policy.routing`), and the person's kind is not one
+    of them. Subclasses :class:`ApprovalGroupForbiddenError`, so every
+    approve route answers 403 with :attr:`reason_text`: one sentence that
+    names who may approve.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str, reason: str) -> None:
+        super().__init__(
+            request_id, operator_sub=operator_sub, role=role, safety_level="", reason=reason
+        )
+
+
+class UnknownRequesterApprovalError(ApprovalGroupForbiddenError):
+    """MEHO knows nobody behind the login that asked; only an admin may approve.
+
+    Raised by :func:`approve_request` when an agent, service or runner login
+    made the request, MEHO found no person behind it at park time
+    (:func:`~meho_backplane.operations.people_behind.people_behind_unknown`),
+    and the approver is not an admin. Subclasses
+    :class:`ApprovalGroupForbiddenError`, so every approve route answers 403
+    with :attr:`reason_text`.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
+        super().__init__(
+            request_id,
+            operator_sub=operator_sub,
+            role=role,
+            safety_level="",
+            reason=(
+                "You cannot approve this change. MEHO does not know who set up the "
+                "login that asked for it, so only an Admin may approve it. "
+                "Ask an Admin to approve it on the Approvals page of the web interface."
+            ),
+        )
+
+
 class NonHumanApprovalError(UnauthorizedApprovalError):
     """A machine (non-human) principal tried to decide an approval request.
 
     Approving / rejecting / deciding a parked op is a **human** decision
-    (v0.1-spec §7, meho-internal#289). Raised by :func:`_check_reviewer_role`
+    (v0.1-spec §7). Raised by :func:`_check_reviewer_role`
     when ``operator.principal_kind`` is a machine kind (agent / service /
     runner), independent of tenant role or the ``approver`` capability — an
     agent principal is minted ``tenant_admin``, so a role/approver check
@@ -639,17 +734,25 @@ class RightsChangeApprovalError(ApprovalRoleFloorError):
     """The person may not approve this change of rights.
 
     Raised by :func:`approve_request` when the request carries the
-    rights-change mark and the person is the requester or not an admin
-    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`).
+    rights-change mark and the person is not an admin
+    (:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`),
+    or approves on the command line or over REST instead of with a click in
+    the web console. *reason* is :data:`RIGHTS_CHANGE_REFUSAL` or
+    :data:`~meho_backplane.operations.grant_approval.RIGHTS_CHANGE_CONSOLE_ONLY`.
     Subclasses :class:`ApprovalRoleFloorError`, so every approve route
     answers 403 with its text.
     """
 
-    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, role: str) -> None:
-        super().__init__(
-            request_id, operator_sub=operator_sub, role=role, denial=RIGHTS_CHANGE_REFUSAL
-        )
-        self.reason_text = RIGHTS_CHANGE_REFUSAL
+    def __init__(
+        self,
+        request_id: uuid.UUID,
+        *,
+        operator_sub: str,
+        role: str,
+        reason: str = RIGHTS_CHANGE_REFUSAL,
+    ) -> None:
+        super().__init__(request_id, operator_sub=operator_sub, role=role, denial=reason)
+        self.reason_text = reason
 
 
 class ResultAccessForbiddenError(ApprovalError):
@@ -992,7 +1095,8 @@ class ApprovalExpiredReason(StrEnum):
 #: What the requester reads for each expiry reason (#5030), on every surface.
 EXPIRED_REASON_MESSAGES: Final[dict[ApprovalExpiredReason, str]] = {
     ApprovalExpiredReason.DEADLINE_PASSED: (
-        "The request waited too long without a decision. Ask again if the change is still needed."
+        "The time for this request ran out before the operation ran. "
+        "Ask again if the change is still needed."
     ),
     ApprovalExpiredReason.RELEASE_CHANGED: (
         "MEHO was updated while the request waited, and an approval covers "
@@ -1034,35 +1138,318 @@ _IDEMPOTENT_LIVE_STATUSES: Final[tuple[str, ...]] = (
 )
 
 
-async def _find_idempotent_request(
+@dataclass(frozen=True)
+class _Asker:
+    """What the approve checks read about who asked, as one call sends it.
+
+    *kind* is the kind of login, *people* the casefolded subs of the people
+    behind it (:func:`behind_subs`, the compare of the self-approval rule),
+    *reveal_secret* the choice to reveal secret values. A waiting request
+    is given back to a call only when all three are the same.
+    """
+
+    kind: str | None
+    people: frozenset[str]
+    reveal_secret: bool
+
+    def asked(self, request: ApprovalRequest) -> bool:
+        """True when *request* was asked by the same kind of login, people and choice."""
+        return (
+            request.principal_kind == self.kind
+            and bool(request.reveal_secret) == self.reveal_secret
+            and behind_subs(request.people_behind) == self.people
+        )
+
+
+async def _key_holders(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     principal_sub: str,
     idempotency_key: str,
-) -> ApprovalRequest | None:
-    """Return the live request that holds *idempotency_key* for this principal.
+) -> list[ApprovalRequest]:
+    """Return every live request of this login that *idempotency_key* gets back.
 
     Scoped to the tenant **and** the principal, so a key never matches
-    another tenant's or another requester's request.
+    another tenant's or another requester's request. The request that holds
+    the key in its own column comes first, then the requests the key is
+    linked to (:class:`ApprovalRequestKey`), newest first.
 
     ``populate_existing`` refreshes a row the session already holds. The
     retry loop in :func:`_resolve_idempotent_request` calls this again after
     its locked re-read missed; by then the row may have been approved on
     another connection. Without the refresh the session would keep the
     cached ``pending`` state, treat the row as overdue again, and loop.
+
+    A key is linked to a request by a same-call reuse, or by a call that
+    got its own request for a key another request holds.
+    """
+    live_for_caller = (
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == principal_sub,
+        ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+    )
+    held = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.idempotency_key == idempotency_key, *live_for_caller)
+        .execution_options(populate_existing=True)
+    )
+    linked = (
+        select(ApprovalRequest)
+        .join(ApprovalRequestKey, ApprovalRequestKey.approval_request_id == ApprovalRequest.id)
+        .where(ApprovalRequestKey.idempotency_key == idempotency_key, *live_for_caller)
+        .order_by(ApprovalRequest.created_at.desc())
+        .execution_options(populate_existing=True)
+    )
+    found: list[ApprovalRequest] = []
+    for stmt in (held, linked):
+        found.extend((await session.execute(stmt)).scalars())
+    return found
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    asker: _Asker,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this caller.
+
+    A request of :func:`_key_holders` counts only when *asker* asked it: the
+    same kind of login, the same people behind the login and the same
+    choice to reveal secret values. A request asked otherwise is not
+    returned, so the call gets its own request.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    return next((found for found in holders if asker.asked(found)), None)
+
+
+async def _refuse_key_held_for_another_call(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    is_this_call: Callable[[ApprovalRequest], bool],
+) -> None:
+    """Refuse the call when *idempotency_key* gets back a request of another call.
+
+    Runs before the call gets a request back for the key or stores its own.
+    Every live request the key gets back is checked: the one that holds the
+    key in its own column and every linked one, asked the same way or
+    another way (:class:`_Asker`). One that holds the key for another call
+    (*is_this_call* is false) refuses the call.
+
+    A ``pending`` request past its deadline does not count, but only after
+    a locked re-read (:func:`_holds_key_after_lock`): an approve that
+    started before the deadline holds the row lock until it commits, and
+    the approved request keeps the key.
+
+    Raises:
+        IdempotencyKeyConflictError: a live request of another call holds
+            the key.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    for holder in holders:
+        if is_this_call(holder):
+            continue
+        if _is_overdue_pending(holder) and not await _holds_key_after_lock(session, holder):
+            continue
+        raise IdempotencyKeyConflictError(holder.id)
+
+
+async def _holds_key_after_lock(session: AsyncSession, request: ApprovalRequest) -> bool:
+    """Lock *request*, read it again, and say whether it still holds its key.
+
+    ``SELECT ... FOR UPDATE`` waits for a decision that holds the row lock
+    (:func:`_load_for_tenant` with ``for_update``) to commit. The request holds
+    its key when it is ``approved``, or ``pending`` within its deadline.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.id == request.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    return (
+        locked is not None
+        and locked.status in _IDEMPOTENT_LIVE_STATUSES
+        and not _is_overdue_pending(locked)
+    )
+
+
+async def _link_reuse_key(
+    session: AsyncSession, request: ApprovalRequest, idempotency_key: str | None
+) -> None:
+    """Link *idempotency_key* to *request*, so a later retry finds it.
+
+    *request* is a reused request, or a request that got its own row while
+    a request of another asker holds the key in its own column.
+
+    Nothing to do without a key, or when the row already holds this key.
+    The insert runs in a savepoint: when a call that arrives at the same
+    moment already linked the same key, the duplicate is dropped and the
+    outer transaction stays usable.
+    """
+    if idempotency_key is None or request.idempotency_key == idempotency_key:
+        return
+    try:
+        async with session.begin_nested():
+            session.add(
+                ApprovalRequestKey(
+                    approval_request_id=request.id,
+                    idempotency_key=idempotency_key,
+                    created_at=_now(),
+                )
+            )
+            await session.flush()
+    except IntegrityError:
+        _log().info(
+            "approval_request_reuse_key_already_linked",
+            approval_request_id=str(request.id),
+        )
+
+
+async def _write_reuse_audit_row(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Write the ``approval.reuse`` audit row of a call that got *request*.
+
+    Same transaction as the call. The row names the reused request and the
+    caller's own session. Its id is kept in ``request._reuse_audit_id``, so
+    the answer's ``audit_id`` is this row and not the first call's
+    ``approval.request`` row.
+    """
+    audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
+        operator=operator,
+        request=request,
+        path=_REUSE_PATH,
+        status_code=_APPROVAL_STATUS_CODE,
+        duration_ms=0.0,
+        caller_session=True,
+    )
+    request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
+
+
+def _is_composite_step() -> bool:
+    """True when this call is a step a multi-step operation sent through ``dispatch_child``."""
+    from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
+
+    return composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+
+
+def _same_call_reuse_applies(
+    run_id: uuid.UUID | None,
+    resume_parent: dict[str, Any] | None,
+    requester: ResumeRequester | None,
+) -> bool:
+    """True when a direct call may get the waiting request of the same call.
+
+    Needs the switch ``APPROVAL_SAME_CALL_REUSE``. A call inside an agent
+    run, a step of a multi-step operation (one sent through
+    ``dispatch_child``, or one saved to restart after approval), or a re-run
+    for an earlier requester always gets its own request.
+    """
+    from meho_backplane.settings import get_settings
+
+    if run_id is not None or resume_parent is not None or requester is not None:
+        return False
+    if _is_composite_step():
+        return False
+    return get_settings().approval_same_call_reuse
+
+
+async def _own_people_behind(
+    session: AsyncSession, operator: Operator
+) -> list[dict[str, Any]] | None:
+    """The people behind the caller's own login (``None`` for a person)."""
+    return await find_people_behind(
+        session,
+        tenant_id=operator.tenant_id,
+        sub=operator.sub,
+        client_id=operator.client_id,
+        kind=operator.principal_kind.value,
+        runner_id=operator.runner_id,
+    )
+
+
+async def _find_same_call_pending_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+    asker: _Asker,
+) -> ApprovalRequest | None:
+    """Return the waiting request of this login for the same call, or ``None``.
+
+    Used only with ``APPROVAL_SAME_CALL_REUSE`` on. Scoped to the tenant and
+    the login, so a caller never learns about the request of another person.
+    Only a ``pending`` request inside its deadline counts: an approved one
+    may have run, and an overdue one can no longer be approved. Nothing is
+    expired here. A request of an agent run or of a step of a multi-step
+    operation (``resume_parent`` set, or ``composite_step`` not false) never
+    counts: approving it runs that run or that step, not this direct call. A
+    request made before migration 0183 has ``composite_step`` NULL, so it
+    never counts either. The match
+    is the same as for a retry key: same operation, connector, target, params,
+    ``preview_hash`` and ``work_ref``, plus the same *asker*: the kind of
+    login, the people behind it and the ``reveal_secret`` choice
+    (:class:`_Asker`). The approval checks read only the kind and the list
+    stored on the request.
     """
     stmt = (
         select(ApprovalRequest)
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.principal_sub == principal_sub,
-            ApprovalRequest.idempotency_key == idempotency_key,
-            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+            ApprovalRequest.op_id == op_id,
+            ApprovalRequest.connector_id == connector_id,
+            ApprovalRequest.target_id == target_id
+            if target_id is not None
+            else ApprovalRequest.target_id.is_(None),
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.run_id.is_(None),
         )
+        .order_by(ApprovalRequest.created_at)
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(stmt)).scalars().first()
+    for existing in (await session.execute(stmt)).scalars():
+        # Checked here, not in SQL: a JSON column can hold JSON ``null``
+        # instead of SQL NULL for a direct call.
+        if (
+            existing.resume_parent is None
+            # NULL is a request made before migration 0183: it may be a step.
+            and existing.composite_step is False
+            and params_hash_matches(params, existing.params_hash)
+            and existing.preview_hash == preview_hash
+            and existing.work_ref == work_ref_var.get()
+            and asker.asked(existing)
+            and not _is_overdue_pending(existing)
+        ):
+            return existing
+    return None
 
 
 def _reuse_idempotent_request(
@@ -1081,15 +1468,14 @@ def _reuse_idempotent_request(
     compared too, so two runs under different change tickets never share
     one request.
     """
-    same_call = (
-        existing.op_id == op_id
-        and existing.connector_id == connector_id
-        and existing.target_id == target_id
-        and params_hash_matches(params, existing.params_hash)
-        and existing.preview_hash == preview_hash
-        and existing.work_ref == work_ref_var.get()
-    )
-    if not same_call:
+    if not _is_same_keyed_call(
+        existing,
+        op_id=op_id,
+        connector_id=connector_id,
+        target_id=target_id,
+        params=params,
+        preview_hash=preview_hash,
+    ):
         raise IdempotencyKeyConflictError(existing.id)
     _log().info(
         "approval_request_reused",
@@ -1103,8 +1489,32 @@ def _reuse_idempotent_request(
     return existing
 
 
+def _is_same_keyed_call(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+) -> bool:
+    """True when *existing* was asked for this call: what a retry key compares.
+
+    The same operation, connector, target, params (:func:`params_hash_matches`),
+    ``preview_hash`` and ``work_ref``.
+    """
+    return (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and params_hash_matches(params, existing.params_hash)
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
+
+
 async def _insert_idempotent_request(
-    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str
+    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str, asker: _Asker
 ) -> ApprovalRequest | None:
     """Insert *request* in a savepoint; return the winner if a racer got there first.
 
@@ -1112,6 +1522,13 @@ async def _insert_idempotent_request(
     racing inserts fail. That insert's savepoint rolls back, the outer
     transaction stays usable, and the row the other request committed is
     returned. Returns ``None`` when *request* itself was inserted.
+
+    The index also refuses the insert when a request of another *asker*
+    holds the key (:func:`_find_idempotent_request` does not return it).
+    Then *request* keeps the key in :class:`ApprovalRequestKey` instead of
+    its own column. The caller holds the key lock
+    (:func:`_take_idempotency_key_lock`), so a second call with this key
+    looks it up only after this one commits, and finds this request.
     """
     try:
         async with session.begin_nested():
@@ -1123,11 +1540,31 @@ async def _insert_idempotent_request(
             tenant_id=request.tenant_id,
             principal_sub=request.principal_sub,
             idempotency_key=idempotency_key,
+            asker=asker,
         )
-        if existing is None:
-            raise
-        return existing
+        if existing is not None:
+            return existing
+        request.idempotency_key = None
+        session.add(request)
+        await session.flush()
+        await _link_reuse_key(session, request, idempotency_key)
     return None
+
+
+async def _take_idempotency_key_lock(
+    session: AsyncSession, *, tenant_id: uuid.UUID, principal_sub: str, idempotency_key: str
+) -> None:
+    """Take the lock of one retry key of one login, until the transaction ends.
+
+    Every call with a retry key takes it before it looks the key up. So two
+    calls with the same key never look it up and store a request at the same
+    moment: the second one looks the key up only after the first one
+    committed, and finds the request the first one stored or linked. That
+    holds also when the request that held the key is decided in between.
+    """
+    await take_approval_lock(
+        session, "idempotency-key", f"{tenant_id}\0{principal_sub}\0{idempotency_key}"
+    )
 
 
 #: The acting identity for every expiry: the sweeper and the late-retry path
@@ -1209,6 +1646,7 @@ async def _resolve_idempotent_request(
     tenant_id: uuid.UUID,
     principal_sub: str,
     idempotency_key: str,
+    asker: _Asker,
 ) -> tuple[ApprovalRequest | None, ApprovalRequest | None]:
     """Find what *idempotency_key* holds right now: ``(live, expired)`` (#3486).
 
@@ -1231,6 +1669,7 @@ async def _resolve_idempotent_request(
             tenant_id=tenant_id,
             principal_sub=principal_sub,
             idempotency_key=idempotency_key,
+            asker=asker,
         )
         if existing is None:
             return None, None
@@ -1287,6 +1726,36 @@ def _bounded_expires_at(
     return min(requested, ceiling)
 
 
+def _policy_rule_fields() -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of a new request, from ``policy_rule_var``."""
+    stamp = policy_rule_var.get()
+    if stamp is None:
+        return {}
+    return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
+
+
+#: Audit path of a call that got the waiting request of the same call
+#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
+#: ``approval.request`` row.
+_REUSE_PATH = "approval.reuse"
+
+#: Audit paths written on the task of the call that waits.
+_CALLER_PATHS = frozenset({"approval.request", _REUSE_PATH})
+
+#: Audit paths that carry the runbook run and step of the call.
+_RUNBOOK_STEP_PATHS = frozenset({*_CALLER_PATHS, "approval.result"})
+
+
+def _request_row_columns() -> dict[str, Any]:
+    """The columns the rows of ``_CALLER_PATHS`` take from the waiting call's task.
+
+    The matched policy rule, and the login a secret store accepted
+    for the parking call so far (``secret_read_as``), for example the read of
+    the sink secret for the approval card of ``secret.move``.
+    """
+    return {**policy_rule_columns(), "secret_read_as": current_secret_read_as()}
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -1298,6 +1767,7 @@ async def _write_audit_row(
     status_code: int,
     duration_ms: float,
     extra_payload: dict[str, Any] | None = None,
+    caller_session: bool = False,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
 
@@ -1322,14 +1792,30 @@ async def _write_audit_row(
     itself is the one stored as ``request.request_audit_id``, so it
     parent-links to the contextvar value instead of self-parenting;
     decision rows parent-link to the stored id.
+
+    *caller_session* is ``True`` for the ``approval.reuse`` row: it is
+    written on the task of the call that got the waiting request, so it
+    names that call's own session, not the session stored on *request*.
     """
     payload: dict[str, Any] = {
         "approval_request_id": str(request.id),
         "op_id": request.op_id,
         "connector_id": request.connector_id,
-        "principal_sub": request.principal_sub,
+        # Two pairs, each id next to the name of the same person:
+        # ``principal_sub`` / ``principal_name`` is the person who acted on
+        # this row (the row's ``operator_sub``), ``requester_sub`` /
+        # ``requester_name`` is the person who asked for the operation.
+        "principal_sub": operator.sub,
+        "requester_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    if request.principal_name:
+        payload["requester_name"] = request.principal_name
+    # The class of the operation that waits, as the approval request stores
+    # it (the stored class of an ingested row counts). Only on the "request" row.
+    op_class = (request.proposed_effect or {}).get("op_class")
+    if path == "approval.request" and isinstance(op_class, str):
+        payload["op_class"] = op_class
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
     # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
@@ -1344,12 +1830,50 @@ async def _write_audit_row(
         payload["principal_name"] = principal_name
     # #5239: the role of a platform admin without a group in this tenant.
     payload.update(tenant_role_source_payload(operator))
+    # The group kind the policy file's bindings gave the person who acted on
+    # this row (POLICY_APPROVER_ROUTING), so a decision row says where the
+    # approver's right came from.
+    if operator.bound_kind is not None:
+        payload["bound_kind"] = operator.bound_kind.value
     # The login client of the person who acted on this row (the requester on
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.
     apply_client_block(payload, operator)
+    # Approver routing: the group kinds that may approve the request and
+    # the routing entry that set them. Only on a request routed while the
+    # POLICY_APPROVER_ROUTING switch was on.
+    if request.approver_rule is not None:
+        payload["approver_rule"] = request.approver_rule
+        payload["approver_roles"] = request.approver_roles
+    # The runbook run and step of a check that waits or reads its result
+    # (the "request" and "result" rows). Both rows are written on the task
+    # of the runbook step, so the vars are bound. A "decision" row is written
+    # on the approver's task and gets neither.
+    run_id: uuid.UUID | None = None
+    step_id: str | None = None
+    if path in _RUNBOOK_STEP_PATHS:
+        run_id = run_id_var.get()
+        step_id = step_id_var.get()
+        if run_id is not None:
+            payload["run_id"] = str(run_id)
+        if step_id is not None:
+            payload["step_id"] = step_id
     if extra_payload:
         payload.update(extra_payload)
+    # A request parked from the CLI stores the CLI login session as its
+    # session id. The decision rows are written later, on the approver's or
+    # the expiry sweep's task, so the listener that marks CLI rows does not
+    # see them: mark them here from the stored flag.
+    agent_session_id = request.agent_session_id
+    from_client = bool(request.session_from_client)
+    if caller_session:
+        agent_session_id = resolve_audit_session_id()
+        from_client = session_is_from_client()
+    if from_client:
+        payload[SESSION_FROM_CLIENT_KEY] = True
+    # The reviewer's name next to ``reviewed_by`` on an approve or reject row.
+    if principal_name and payload.get("reviewed_by") == operator.sub:
+        payload["reviewed_by_name"] = principal_name
     # policy-gate verdict (#130). The parked "request" row is written on the
     # requester's task, where the dispatcher (or, for a step inside a
     # multi-step operation, the step gate ``composite.enforce_subop_policy``,
@@ -1362,6 +1886,12 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
+    # The matched policy rule (#6044), only on the "request" row. A
+    # "decision" row can be written on the task of another call: a retry
+    # that expires an old overdue request writes that request's decision
+    # row while the retry's own rule is bound.
+    if path in _CALLER_PATHS:
+        policy_kwargs.update(_request_row_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1392,7 +1922,7 @@ async def _write_audit_row(
         tenant_id=operator.tenant_id,
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
-        agent_session_id=request.agent_session_id,
+        agent_session_id=agent_session_id,
         event_class=event_class,
         method="APPROVAL",
         path=path,
@@ -1408,6 +1938,8 @@ async def _write_audit_row(
         # durable source of truth -- it keeps both audit rows aligned with
         # the value the request was parked under.
         work_ref=request.work_ref,
+        run_id=run_id,
+        step_id=step_id,
         **policy_kwargs,
     )
     session.add(row)
@@ -1433,6 +1965,9 @@ class ResumeRequester(NamedTuple):
     #: The requester record on the card (``permission_preflight["requester"]``),
     #: so a re-park keeps it (#6314). ``None`` when the card has none.
     subject: dict[str, Any] | None = None
+    #: The people behind the requester (:mod:`~meho_backplane.operations.people_behind`),
+    #: so a re-park keeps the list of the first request. ``None`` for a person.
+    people_behind: list[dict[str, Any]] | None = None
 
 
 #: Where the card keeps the requester record (#3898, #6314).
@@ -1472,6 +2007,9 @@ async def create_pending_request(
     requester: ResumeRequester | None = None,
     reveal_secret: bool = False,
     rights_change: bool = False,
+    category: str | None = None,
+    wait_reason: str | None = None,
+    install_category: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1531,10 +2069,12 @@ async def create_pending_request(
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past
             its deadline is not returned: it is expired in this
-            transaction and a new request is parked. The new row then
-            carries the expired one as ``_expired_request`` (else
+            transaction and a new request is parked. The returned row
+            then carries the expired one as ``_expired_request`` (else
             ``None``), so the caller can publish ``approval.expired``
-            after commit. ``None`` keeps the old behaviour.
+            after commit. That holds also when the returned row is
+            another waiting request that the call got (``_reused``).
+            ``None`` keeps the old behaviour.
         requester: The requester to save on the row instead of *operator*
             (#4217). Set for a composite step that waits again while an
             approved request is re-run: the new request belongs to the
@@ -1550,6 +2090,17 @@ async def create_pending_request(
             run deleted the payload. It is not part of *params_hash*, so
             the retry check and the approval surfaces compare the call
             without it.
+        category: The category the classification gave the operation
+            (the looked-up row's ``policy_category``). Approver routing
+            matches a tenant's ``category`` entry on it
+            (:func:`~meho_backplane.policy.routing.stamp_approver_set`).
+        wait_reason: Why the policy gate made the call wait. The
+            ``approval.request`` audit row keeps it as ``wait_reason``.
+        install_category: The category the install's policy alone gives
+            the operation (the looked-up row's
+            ``policy_install_category``). The install's routing entries
+            match on it, so a tenant that moves the operation to another
+            category cannot take it away from the install's routing.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1563,8 +2114,10 @@ async def create_pending_request(
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
 
+    expired_request: ApprovalRequest | None = None
+
     def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
-        return _reuse_idempotent_request(
+        reused = _reuse_idempotent_request(
             existing,
             op_id=op_id,
             connector_id=connector_id,
@@ -1572,17 +2125,69 @@ async def create_pending_request(
             params=params,
             preview_hash=preview_hash,
         )
+        # A late retry can expire its old request and still get another
+        # waiting request: the caller then sends the old one's expiry event.
+        reused._expired_request = expired_request  # type: ignore[attr-defined]
+        return reused
 
-    expired_request: ApprovalRequest | None = None
+    # What the approve checks will read about who asked. A waiting request
+    # is given back to this call only when it was asked the same way.
+    if requester is not None:
+        principal_kind = requester.kind
+        people_behind = requester.people_behind
+    else:
+        principal_kind = operator.principal_kind.value
+        people_behind = await _own_people_behind(session, operator)
+    asker = _Asker(principal_kind, behind_subs(people_behind), reveal_secret)
+
     if idempotency_key is not None:
-        live, expired_request = await _resolve_idempotent_request(
+        await _take_idempotency_key_lock(
             session,
             tenant_id=operator.tenant_id,
             principal_sub=operator.sub,
             idempotency_key=idempotency_key,
         )
+        live, expired_request = await _resolve_idempotent_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+            asker=asker,
+        )
+        await _refuse_key_held_for_another_call(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+            is_this_call=lambda held: _is_same_keyed_call(
+                held,
+                op_id=op_id,
+                connector_id=connector_id,
+                target_id=target_id,
+                params=params,
+                preview_hash=preview_hash,
+            ),
+        )
         if live is not None:
             return _reuse(live)
+
+    if _same_call_reuse_applies(run_id, resume_parent, requester):
+        same_call = await _find_same_call_pending_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params=params,
+            preview_hash=preview_hash,
+            asker=asker,
+        )
+        if same_call is not None:
+            reused = _reuse(same_call)
+            await _link_reuse_key(session, reused, idempotency_key)
+            await _write_reuse_audit_row(session, operator, reused)
+            return reused
 
     if proposed_effect is None:
         proposed_effect = {
@@ -1614,11 +2219,9 @@ async def create_pending_request(
         principal_sub = requester.sub
         principal_act = requester.act
         principal_name = requester.name
-        principal_kind = requester.kind
     else:
         principal_sub = operator.sub
         principal_name = await principal_display_name(session, operator)
-        principal_kind = operator.principal_kind.value
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1644,7 +2247,13 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    if classify_op(op_id) == "credential_write":
+    # A credential write, and a call whose param a connector hides (the
+    # manifest of a k8s.apply of a Secret), keep their params and the
+    # parent's params only in the encrypted one-time handoff: the row never
+    # holds them, also not when the request is approved and never runs.
+    if classify_op(op_id) == "credential_write" or (
+        params is not None and hidden_stored_param(op_id, params) is not None
+    ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
@@ -1662,6 +2271,7 @@ async def create_pending_request(
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
         principal_name=principal_name,
         principal_kind=principal_kind,
+        people_behind=people_behind,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -1673,7 +2283,8 @@ async def create_pending_request(
         created_at=created_at,
         expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
+        session_from_client=session_is_from_client(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,
@@ -1682,14 +2293,35 @@ async def create_pending_request(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
         reveal_secret=reveal_secret,
+        composite_step=_is_composite_step(),
+        allowed_connectors=stored_connector_limit(),
+        **_policy_rule_fields(),
     )
     if rights_change or is_rights_change(request):
         request.rights_change = True
+        # Who asked where: in MEHO's own login realm only a request asked
+        # with a click in the web console is approved by the login that asked.
+        asked_in_console = (
+            requester is None and operator.web_session and is_human_principal(operator)
+        )
+        request.proposed_effect = {
+            **(request.proposed_effect or {}),
+            ASKED_IN_WEB_CONSOLE: asked_in_console,
+        }
+    try:
+        await stamp_approver_set(
+            session, request, category=category, install_category=install_category
+        )
+    except ValueError as exc:
+        await _audit_routing_refusal(operator, request, request_audit_id, str(exc))
+        raise
     if idempotency_key is None:
         session.add(request)
         await session.flush()
     else:
-        winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
+        winner = await _insert_idempotent_request(
+            session, request, idempotency_key=idempotency_key, asker=asker
+        )
         if winner is not None:
             return _reuse(winner)
     request._expired_request = expired_request  # type: ignore[attr-defined]
@@ -1709,6 +2341,7 @@ async def create_pending_request(
         path="approval.request",
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"wait_reason": wait_reason} if wait_reason else None,
     )
 
     _log().info(
@@ -1726,6 +2359,62 @@ async def create_pending_request(
     # fails. The transient attr does not persist to the DB row.
     request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def rights_change_note(request: ApprovalRequest) -> str | None:
+    """The note for a change of rights that no other admin could approve (#6641).
+
+    The request is stored all the same, so an admin added later can still
+    approve it. ``None`` for any other request, when another admin could
+    approve, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+
+    The note is extra help only. When reading it fails, the answer is
+    ``None`` and the request still waits for approval as stored.
+    """
+    if not is_rights_change(request):
+        return None
+    try:
+        return await only_admin_note(request.tenant_id, request.principal_sub)
+    except Exception:
+        _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
+        return None
+
+
+async def _audit_routing_refusal(
+    operator: Operator, request: ApprovalRequest, audit_id: uuid.UUID, routing_error: str
+) -> None:
+    """Write the audit row of a park refused because the stored routing is not valid.
+
+    The caller's transaction rolls back with the refusal, so the row is
+    written in its own session. Its id *audit_id* is the request's
+    ``request_audit_id``, the id the "request" row would have had. A failed
+    write is logged; the park is refused either way.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            await _write_audit_row(
+                session,
+                audit_id=audit_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                operator=operator,
+                request=request,
+                path="approval.request",
+                status_code=_ROUTING_REFUSED_STATUS_CODE,
+                duration_ms=0.0,
+                extra_payload={
+                    "result_status": "routing_invalid",
+                    "approver_rule": ROUTING_INVALID_RULE,
+                    "routing_error": routing_error,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log().exception(
+            "approval_routing_refusal_audit_failed", approval_request_id=str(request.id)
+        )
 
 
 def _approval_lock_key(scope: str, key: str) -> int:
@@ -1757,8 +2446,8 @@ async def take_approval_lock(session: AsyncSession, scope: str, key: str) -> Non
 
 
 def _is_destructive(request: ApprovalRequest) -> bool:
-    """Whether the parked operation is ``destructive`` (read off ``proposed_effect``)."""
-    return (request.proposed_effect or {}).get("safety_level") == "destructive"
+    """Whether the parked operation counts as ``destructive`` (:func:`approval_risk_level`)."""
+    return approval_risk_level(request) == "destructive"
 
 
 async def _check_sign_in_use(
@@ -1881,7 +2570,7 @@ async def approve_request(
        (#3243); else 403.
     3. The row is still ``pending`` (else 409).
     4. Who may approve (#1401, #3328, :func:`_check_approver_group`):
-       the approver's own change only for a MEHO-SA-Operator, or for a
+       the approver's own change only for an Admin, or for a
        ``safe`` / ``caution`` change under the audited break-glass mode
        (``Settings.approval_allow_self_approval``); else 403,
        :class:`SelfApprovalForbiddenError`. Another person's
@@ -1952,11 +2641,14 @@ async def approve_request(
             (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
         SelfApprovalForbiddenError: Approver is the requester, is not a
-            MEHO-SA-Operator, and break-glass does not cover the change
+            Admin, and break-glass does not cover the change
             (G11.7-T1 #1401, #3328).
         ApprovalGroupForbiddenError: Another person's ``dangerous`` or
             ``destructive`` change, and the approver is not in a group that
             may approve it (#3328).
+        ApprovalRoutingError: With approver routing on, the person is not
+            in a login group kind the request stored as the ones that may
+            approve it (:mod:`meho_backplane.policy.routing`).
         ApprovalRoleFloorError: The operation needs a role from the person
             who runs it, and the approver's role is below it.
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
@@ -1995,16 +2687,21 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
-    self_approved = operator.sub == request.principal_sub
+    self_approved = is_self_approval(operator.sub, request)
     extra: dict[str, Any] = {
         "decision": "approved",
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
         **grant_audit_fields(request, operator),
+        **_behind_audit_fields(operator.sub, request),
     }
     if reason:
         extra["reason"] = reason
+    # The install's routing entry that counted at this click (the floor).
+    floor = getattr(request, "_approver_floor", None)
+    if floor is not None:
+        extra["approver_floor"] = floor
     if approval_auth is not None:
         extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     extra.update(_approver_client_fields(operator, user_agent))
@@ -2201,22 +2898,48 @@ async def withdraw_request(
     return request
 
 
-def params_with_secret_fields_hidden(params: dict[str, Any] | None) -> dict[str, Any] | None:
+def params_with_secret_fields_hidden(
+    params: dict[str, Any] | None, *, op_id: str
+) -> dict[str, Any] | None:
     """The stored params with each secret-named value replaced, or ``None``.
 
     ``None`` when *params* is ``None`` or holds no secret-named value
     (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
     a row without such a field is never rewritten. A number under such a
-    name (a PIN, a password sent as a number) is hidden too. The other
-    fields keep their value, as in the audit row's raw copy.
+    name (a PIN, a password sent as a number) is hidden too. The param that
+    *op_id* declared with
+    :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
+    replaced too, when its check flags the params (the manifest of a
+    ``k8s.apply`` that holds a Secret). The other fields keep their value,
+    as in the audit row's raw copy.
     """
     if params is None:
         return None
     hidden, found = scrub_secret_named_values(params, hide_numbers=True)
+    name = hidden_stored_param(op_id, params)
+    if name is not None:
+        hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
+        found = True
     if not found:
         return None
     return cast(dict[str, Any], hidden)
+
+
+def resume_parent_without_inputs(
+    resume_parent: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The parent of a step request that never runs, kept as its ``op_id`` only.
+
+    A request that ends without a run never goes back into its multi-step
+    operation, so the row needs no inputs of that operation (its params,
+    saved state and finished steps). The approval pages and the runbook
+    check read only ``op_id``. ``None`` when *resume_parent* holds nothing
+    else, so such a row is not written.
+    """
+    if resume_parent is None or set(resume_parent) <= {"op_id"}:
+        return None
+    return {"op_id": resume_parent.get("op_id")}
 
 
 async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None:
@@ -2225,15 +2948,20 @@ async def end_run_input(session: AsyncSession, request: ApprovalRequest) -> None
     Deletes the encrypted custody row of a credential write
     (:func:`~meho_backplane.operations.approval_handoff.discard`) and
     replaces each secret-named value in the stored ``params`` (a password or
-    a licence key inside a deployment spec) with a marker. The caller holds
+    a licence key inside a deployment spec) with a marker. The parent of a
+    step of a multi-step operation keeps only its ``op_id``
+    (:func:`resume_parent_without_inputs`). The caller holds
     the row lock, flushes and commits. Rejected, withdrawn and expired
     requests end here; a request that runs has its values hidden when the
     run claim is won (:func:`claim_resume`).
     """
     await discard_handoff(session, request.id, request.tenant_id)
-    hidden = params_with_secret_fields_hidden(request.params)
+    hidden = params_with_secret_fields_hidden(request.params, op_id=request.op_id)
     if hidden is not None:
         request.params = hidden
+    parent = resume_parent_without_inputs(request.resume_parent)
+    if parent is not None:
+        request.resume_parent = parent
 
 
 async def claim_resume(
@@ -2305,12 +3033,12 @@ async def claim_resume(
             .where(ApprovalRequest.resumed_at.is_(None))
             .where(ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value)
             .values(resumed_at=stamp)
-            .returning(ApprovalRequest.params)
+            .returning(ApprovalRequest.params, ApprovalRequest.op_id)
             .execution_options(synchronize_session=False)
         )
         row = claimed.first()
         won = row is not None
-        hidden = params_with_secret_fields_hidden(row[0]) if row is not None else None
+        hidden = params_with_secret_fields_hidden(row[0], op_id=row[1]) if row is not None else None
         if hidden is not None:
             await session.execute(
                 update(ApprovalRequest)
@@ -2391,7 +3119,8 @@ async def consume_remote_write_approval(
     competing direct re-dispatch for a runner-targeted op.
 
     Returns ``True`` when this caller set ``resumed_at`` (owns the single mint),
-    ``False`` when a racing mint already claimed it.
+    ``False`` when a racing mint already claimed it or the request is not
+    ``approved`` any more (it expired after the read).
     """
     stamp = now or _now()
     claimed = await session.execute(
@@ -2399,6 +3128,7 @@ async def consume_remote_write_approval(
         .where(
             ApprovalRequest.id == request.id,
             ApprovalRequest.resumed_at.is_(None),
+            ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
         )
         .values(resumed_at=stamp)
         .execution_options(synchronize_session=False)
@@ -2763,6 +3493,9 @@ async def refuse_resume_if_preview_changed(
     preview hash: the login and the group it is for must still have the
     ids the approver saw
     (:func:`~meho_backplane.operations.grant_approval.grant_changed_since_request`).
+    A fourth check runs for an operation whose card shows the object as it is
+    now: that state must still be the one the approver saw
+    (:func:`~meho_backplane.operations.approval_state_pin.state_changed_since_request`).
     Returns ``None`` when all hold. Else the operation does not run: the
     refusal is stored as the request's run result, so every read surface
     shows the run as failed with the ``preview_changed_since_approval`` or
@@ -2789,6 +3522,8 @@ async def refuse_resume_if_preview_changed(
         reason = await object_changed_since_request(operator, request, target, params)
         if reason is None:
             reason = await grant_changed_since_request(operator, request, target, params)
+        if reason is None:
+            reason = await state_changed_since_request(operator, request, target, params)
         if reason is None:
             return None
         refusal = result_object_changed_since_approval(
@@ -2953,6 +3688,7 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
         request.principal_kind,
         client if isinstance(client, dict) else None,
         subject if isinstance(subject, dict) else None,
+        request.people_behind,
     )
 
 
@@ -3003,10 +3739,11 @@ def composite_resume_binding(
       approved sub-op's ``(op_id, params_hash)``, so that one sub-op clears its
       gate instead of parking again. It also sets
       :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
-      which is never consumed, so a second governed sub-op that would need its
-      own approval fails closed (``composite_resume_multi_gate_unsupported``)
-      instead of parking (#3351 review B1). A step marked
-      ``after_main_effect`` is the exception: it may wait again (#4217).
+      which is never consumed, so the steps of the re-entry know they run
+      after an approval. It hands the steps the earlier run stored
+      (``resume_parent["steps"]``) to the composite, so a step that already
+      ran is not sent again
+      (:mod:`~meho_backplane.operations.composite_steps`).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
 
@@ -3065,6 +3802,7 @@ def _composite_parent_binding(
         composite_resume_state_var,
         composite_resume_var,
     )
+    from meho_backplane.operations.composite_steps import composite_resume_steps
 
     parent_op_id = str(resume_parent["op_id"])
     saved_state = resume_parent.get("state")
@@ -3082,7 +3820,8 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
+        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+            yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)
         composite_resume_state_var.reset(state_token)
@@ -3154,18 +3893,21 @@ async def _dispatch_resume_with_bound_context(
     auto-executes every governed sub-op (all ``dangerous`` +
     ``requires_approval=False``), so a shipped composite completes in this one
     pass. ``composite_resume_scope_var`` is bound too — unconsumed for the whole
-    re-entry — so :func:`~meho_backplane.operations.composite.enforce_subop_policy`
-    can fail closed (``composite_resume_multi_gate_unsupported``) if a second
-    governed sub-op would need its own approval, rather than re-park and
-    re-run the earlier legs on a second resume (#3351 review B1). The
-    exception is a step marked ``after_main_effect`` (#4217): it saved where
-    to continue, so it may wait again. That new request is saved for the
-    requester of *request*, not for the reviewer who runs this re-run.
+    re-entry. A later governed sub-op that needs its own approval waits for
+    it again; the steps this run already did are stored with that request
+    (:mod:`~meho_backplane.operations.composite_steps`), so its resume does
+    not send them again. That new request is saved for the requester of
+    *request*, not for the reviewer who runs this re-run.
 
     #3898: the requester (from the row) is bound for the run
     (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
+
+    A hosted agent's connector list, stored on the row, is bound again
+    (:func:`~meho_backplane.operations._target_connector_limit.restored_connector_limit`),
+    so the run and each step of a multi-step operation stay on targets of
+    the agent's connectors, also after the agent stopped waiting.
 
     *reveal_secret* is the requester's ``reveal_secret: true``, stored on
     the request row. It goes on the params of the run, so the answer holds
@@ -3179,7 +3921,12 @@ async def _dispatch_resume_with_bound_context(
         resume_parent_override if resume_parent_override is not None else request.resume_parent
     )
     work_ref_token = work_ref_var.set(request.work_ref)
-    session_token = agent_session_id_var.set(request.agent_session_id)
+    # A CLI login session goes back on client_session_id_var, so the run's
+    # audit rows carry it but nothing treats the run as an agent session.
+    # The approver's own CLI session never labels the requester's run.
+    from_client = bool(request.session_from_client)
+    session_token = agent_session_id_var.set(None if from_client else request.agent_session_id)
+    client_token = client_session_id_var.set(request.agent_session_id if from_client else None)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     # #3548: the approver runs the op, but the parker asked for the data and is
     # the only one GET /approvals/{id}/result serves, so the parker owns any
@@ -3189,6 +3936,7 @@ async def _dispatch_resume_with_bound_context(
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
+            restored_connector_limit(request.allowed_connectors),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,
@@ -3213,6 +3961,7 @@ async def _dispatch_resume_with_bound_context(
     finally:
         handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
+        client_session_id_var.reset(client_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
     # Persist the reduced result envelope so the originating consumer can read it
@@ -3573,7 +4322,7 @@ def _check_reviewer_role(operator: Operator) -> None:
     """
     from meho_backplane.auth.operator import TenantRole, is_human_principal
 
-    # Human-only governance (v0.1-spec §7, meho-internal#289): a machine
+    # Human-only governance (v0.1-spec §7): a machine
     # principal (agent / service / runner) can never decide an approval,
     # regardless of tenant role or the ``approver`` capability. Checked
     # first so a machine token minted ``tenant_admin`` is refused here too.
@@ -3598,6 +4347,8 @@ def _check_reviewer_role(operator: Operator) -> None:
 #: approved only by the groups :func:`_check_approver_group` names.
 #: ``dangerous`` is here because a delete-class op can register on it.
 _HIGH_RISK_TIERS = frozenset({"dangerous", "destructive"})
+#: The four level names. Any other stored value counts as ``destructive``.
+_RISK_LEVELS = frozenset({"safe", "caution", "dangerous", "destructive"})
 
 
 def is_high_risk_level(level: str | None) -> bool:
@@ -3609,7 +4360,7 @@ def may_approve_high_risk(operator: Operator) -> bool:
     """True when *operator* may approve another principal's high-risk change (#3328).
 
     The groups of ``docs/decisions/approval-groups-and-self-approval.md``:
-    a MEHO-SA-Operator or a tenant admin. Run approvals use the same rule
+    a tenant admin. Run approvals use the same rule
     (:meth:`~meho_backplane.operations.run_approvals.RunApprovalService.approve`).
     """
     return operator.may_self_approve or operator.tenant_role == TenantRole.TENANT_ADMIN
@@ -3619,6 +4370,17 @@ def _request_safety_level(request: ApprovalRequest) -> str | None:
     """Return the risk level the dispatcher stamped on *request*, or ``None``."""
     level = (request.proposed_effect or {}).get("safety_level")
     return level if isinstance(level, str) else None
+
+
+def approval_risk_level(request: ApprovalRequest) -> str:
+    """The risk level that decides who may approve *request*.
+
+    The stamped level, or ``destructive`` when the request has none or a
+    value that is not one of the four level names: such a request counts
+    as the strictest level.
+    """
+    level = _request_safety_level(request)
+    return level if level in _RISK_LEVELS else "destructive"
 
 
 def request_waits_only_for_token_call(request: ApprovalRequest) -> bool:
@@ -3639,11 +4401,14 @@ def _check_self_approval(
 ) -> ApprovalRule | None:
     """Check a self-approval; return its rule, or ``None`` when it is not one.
 
-    A self-approval is ``operator.sub == request.principal_sub``. The
-    comparison is on the stable ``sub`` claim, so a renamed display name
-    can never turn into a self-approval. Then, in order:
+    A self-approval is ``operator.sub == request.principal_sub``, or
+    *operator* is one of the people behind the agent, service or runner
+    login that asked (``request.people_behind``,
+    :mod:`~meho_backplane.operations.people_behind`). The comparison is on
+    the stable ``sub`` claim, so a renamed display name can never turn into
+    a self-approval. Then, in order:
 
-    1. A MEHO-SA-Operator or a MEHO-Admin (:attr:`Operator.may_self_approve`)
+    1. A MEHO-Admin (:attr:`Operator.may_self_approve`)
        may approve their own change at every risk level. On the
        command line and REST the approve routes have already required a
        fresh sign-in (#3979).
@@ -3667,7 +4432,8 @@ def _check_self_approval(
     may approve (:mod:`~meho_backplane.operations.approval_rights`): that
     read approves nothing, so it logs no break-glass warning.
     """
-    if operator.sub != request.principal_sub:
+    behind = operator.sub != request.principal_sub
+    if behind and not is_person_behind(operator.sub, request.people_behind):
         return None
     if operator.may_self_approve:
         return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
@@ -3675,7 +4441,7 @@ def _check_self_approval(
     if token_wait and operator.web_session:
         return ApprovalRule.TOKEN_CALL_SELF_APPROVAL
 
-    high_risk = _request_safety_level(request) in _HIGH_RISK_TIERS
+    high_risk = approval_risk_level(request) in _HIGH_RISK_TIERS
 
     from meho_backplane.settings import get_settings
 
@@ -3692,7 +4458,68 @@ def _check_self_approval(
         return ApprovalRule.BREAK_GLASS_SELF_APPROVAL
 
     raise SelfApprovalForbiddenError(
-        request.id, principal_sub=operator.sub, high_risk=high_risk, web_click_allowed=token_wait
+        request.id,
+        principal_sub=operator.sub,
+        approver_kinds=_approver_kinds(request),
+        high_risk=high_risk,
+        web_click_allowed=token_wait,
+        behind=behind,
+    )
+
+
+def _approver_kinds(request: ApprovalRequest) -> tuple[str, ...]:
+    """The login group kinds that may approve *request* for another person.
+
+    The same rules the approve checks: today's group rule
+    (:func:`~meho_backplane.policy.routing.today_kinds`), and with approver
+    routing on, only the kinds the request stored as well. Used for the
+    "who may approve" part of :class:`SelfApprovalForbiddenError`.
+    """
+    kinds = today_kinds(approval_risk_level(request), request.op_id)
+    if not routing_enabled():
+        return kinds
+    stored = stored_kinds(request.approver_roles)
+    if stored is None:
+        return kinds
+    return narrow(kinds, stored)
+
+
+def is_self_approval(sub: str, request: ApprovalRequest) -> bool:
+    """True when *sub* approving *request* counts as an own change.
+
+    *sub* is the requester, or one of the people behind the agent, service
+    or runner login that asked (``request.people_behind``).
+    """
+    return sub == request.principal_sub or is_person_behind(sub, request.people_behind)
+
+
+def _behind_audit_fields(sub: str, request: ApprovalRequest) -> dict[str, Any]:
+    """``approver_behind_requester`` and its reasons, when *sub* is behind the requester."""
+    whys = whys_of(sub, request.people_behind)
+    if not whys:
+        return {}
+    return {"approver_behind_requester": True, "approver_behind_why": whys}
+
+
+def is_admin_approver(operator: Operator) -> bool:
+    """True when *operator* is a person who is an admin in the chosen tenant."""
+    is_admin = operator.tenant_role == TenantRole.TENANT_ADMIN or operator.platform_admin
+    return is_admin and operator.tenant_chosen and is_human_principal(operator)
+
+
+def _check_requester_known(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`UnknownRequesterApprovalError` when only an admin may approve *request*.
+
+    That is the case when an agent, service or runner login asked and MEHO
+    found no person behind it. An unknown origin never gets less control
+    than a known one.
+    """
+    if not people_behind_unknown(request.principal_kind, request.people_behind):
+        return
+    if is_admin_approver(operator):
+        return
+    raise UnknownRequesterApprovalError(
+        request.id, operator_sub=operator.sub, role=operator.tenant_role.value
     )
 
 
@@ -3706,29 +4533,38 @@ def _check_approver_group(
     the risk level of the change; there are no per-system, per-connector
     or time-limited exceptions.
 
-    * A change of rights: only another admin
+    * A change of rights: only an admin, with a click in the web console
       (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
-      No self-approval rule below can allow it.
+      The admin may be the person who asked, or one of the people behind
+      the login that asked: that is recorded as
+      ``sa_operator_self_approval``. No other rule below can allow it.
     * A change of a login's or group's rights:
       :func:`~meho_backplane.operations.grant_approval.check_grant_approval`.
-    * Own change: :func:`_check_self_approval`.
+    * A request of a machine login with nobody known behind it: only an
+      admin (:func:`_check_requester_known`).
+    * Own change, also as one of the people behind the login that asked:
+      :func:`_check_self_approval`.
     * Another person's ``dangerous`` or ``destructive`` change: only a
-      MEHO-SA-Operator or a tenant admin may approve it, as the decision
+      tenant admin may approve it, as the decision
       record ``docs/decisions/approval-groups-and-self-approval.md`` says.
       Everyone else gets :class:`ApprovalGroupForbiddenError` (403).
     * Another person's lower-risk change (also one that waits only because
       it is marked ``requires_approval``): the reviewer rule of
       :func:`_check_reviewer_role` is enough.
 
-    A request without a stamped level is treated as lower-risk, the same
-    as the break-glass check and :func:`_check_destructive_preview_binding`.
+    A request without a stamped level counts as ``destructive`` here and
+    in the break-glass check (:func:`approval_risk_level`).
     """
     check_rights_change_approval(operator, request)
     check_grant_approval(operator, request)
+    _check_requester_known(operator, request)
+    if is_rights_change(request) and is_self_approval(operator.sub, request):
+        # The checks above decided: an admin, in the web console.
+        return ApprovalRule.SA_OPERATOR_SELF_APPROVAL
     self_rule = _check_self_approval(operator, request, log_break_glass=log_break_glass)
     if self_rule is not None:
         return self_rule
-    level = _request_safety_level(request)
+    level = approval_risk_level(request)
     if not is_high_risk_level(level):
         return ApprovalRule.REVIEWER
     if may_approve_high_risk(operator):
@@ -3737,7 +4573,7 @@ def _check_approver_group(
         request.id,
         operator_sub=operator.sub,
         role=operator.tenant_role.value,
-        safety_level=str(level),
+        safety_level=level,
     )
 
 
@@ -3762,6 +4598,54 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
         )
 
 
+def _check_routed_approver(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`ApprovalRoutingError` when *operator* is not in the stored group kinds.
+
+    Runs after today's checks. Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off, or when the request stored no
+    group kinds (it keeps today's rule).
+    """
+    if not routing_enabled():
+        return
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+
+
+async def _check_install_floor(
+    session: AsyncSession, operator: Operator, request: ApprovalRequest
+) -> None:
+    """Raise :class:`ApprovalRoutingError` when the install's current routing refuses *operator*.
+
+    The install's routing is a floor: it is checked first, with the
+    install's file as it is now, then the stored group kinds
+    (:func:`_check_routed_approver`). Does nothing while the
+    ``POLICY_APPROVER_ROUTING`` switch is off
+    (:class:`~meho_backplane.policy.routing_floor.InstallFloor`). When an
+    install entry counted, its place is kept on *request* for the approve
+    audit row (``approver_floor``).
+    """
+    floor = await load_install_floor(session)
+    if floor is None:
+        return
+    refusal = floor.refusal(operator, request)
+    if refusal is not None:
+        raise ApprovalRoutingError(
+            request.id,
+            operator_sub=operator.sub,
+            role=operator.tenant_role.value,
+            reason=refusal,
+        )
+    found = floor.check(request)
+    if found is not None and found.floor is not None:
+        request._approver_floor = found.floor  # type: ignore[attr-defined]
+
+
 def _shadow_approval(operator: Operator, request: ApprovalRequest, *, today: bool) -> None:
     """Compare the policy evaluator with today's answer, when ``POLICY_ENGINE_SHADOW`` is on."""
     from meho_backplane.policy.shadow import shadow_approval
@@ -3782,7 +4666,9 @@ async def _load_pending_for_approval(
     the most specific reason first: role gate → tenant-scoped load (under a
     row lock) → pending guard → deadline guard (security F12 / #274) →
     self-approval and group rule (#1401, #3328) → the op's role floor
-    (:func:`_check_approver_role_floor`) → params-hash check (only when
+    (:func:`_check_approver_role_floor`) → the install's current approver
+    routing (:func:`_check_install_floor`) → the stored approver group kinds
+    (:func:`_check_routed_approver`) → params-hash check (only when
     *params* is supplied) → destructive preview-binding re-verification
     (#3197). Returns the validated pending row and the
     rule that allowed the approval; the caller flips status + writes the
@@ -3809,6 +4695,8 @@ async def _load_pending_for_approval(
         _shadow_approval(operator, request, today=False)
         raise
     _shadow_approval(operator, request, today=True)
+    await _check_install_floor(session, operator, request)
+    _check_routed_approver(operator, request)
     if params is not None and not params_hash_matches(params, request.params_hash):
         raise ParamsMismatchError(request_id)
     _check_destructive_preview_binding(request)
@@ -3910,7 +4798,7 @@ async def list_pending(
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     if after is not None:
         if order == "oldest":
             stmt = stmt.where(
@@ -3970,6 +4858,11 @@ async def pending_chain_positions(
     returned; a lone request has no order to show. The numbers count
     pending requests only, so step 1 is always the oldest request that
     still waits. Tenant-isolated by the WHERE clause.
+
+    With *work_ref*, every row the filter matches is one group, keyed by
+    *work_ref*. The filter matches the cleaned id and the text as typed
+    (:func:`work_ref_filter_values`), so rows of one ticket stored in two
+    forms get one numbering, the same rows the filtered list shows.
     """
     stmt = (
         select(ApprovalRequest.id, ApprovalRequest.work_ref)
@@ -3981,10 +4874,10 @@ async def pending_chain_positions(
         .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
     )
     if work_ref is not None:
-        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.where(ApprovalRequest.work_ref.in_(work_ref_filter_values(work_ref)))
     groups: dict[str, list[uuid.UUID]] = {}
     for request_id, ref in (await session.execute(stmt)).all():
-        groups.setdefault(ref, []).append(request_id)
+        groups.setdefault(ref if work_ref is None else work_ref, []).append(request_id)
     positions: dict[uuid.UUID, ChainPosition] = {}
     for ref, ids in groups.items():
         if len(ids) < 2:
@@ -4156,7 +5049,8 @@ async def record_approval_step_event(
     }
     if decision == "approved":
         payload["reviewed_by"] = request.reviewed_by
-        payload["self_approved"] = request.reviewed_by == request.principal_sub
+        reviewer = request.reviewed_by
+        payload["self_approved"] = reviewer is not None and is_self_approval(reviewer, request)
         rule = getattr(request, "_approval_rule", None)
         if rule is not None:
             payload["approval_rule"] = str(rule)

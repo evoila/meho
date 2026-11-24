@@ -7,7 +7,8 @@
 ``category`` and ``labels``, like the REST PATCH routes. A change of them
 is a change of rights: the tool asks for it through
 :func:`~meho_backplane.policy.bulk.request_classification_edit`, and the
-change waits until another tenant admin approves it. It cannot ride along
+change waits until a tenant admin approves it in the web console. It
+cannot ride along
 with the fields the tool stores at once.
 
 The fields and their text exist only while the ``POLICY_CLASSIFICATION``
@@ -31,6 +32,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.policy.bulk import (
     ClassificationEditError,
     ClassificationOffError,
+    one_thing_refusal,
     request_classification_edit,
 )
 from meho_backplane.policy.store import ClassificationEdit, classification_enabled
@@ -48,7 +50,8 @@ CLASSIFICATION_TEXT: Final[str] = (
     " category (a category of the taxonomy) and labels (free key=value text) are a "
     "change of rights for your tenant: send them without other fields; the answer "
     "has status awaiting_approval and an approval_request_id, and the change waits "
-    "until another tenant admin approves it. For a whole connector or a pattern, use "
+    "until a tenant admin approves it in the web console. For a whole connector or a "
+    "pattern, use "
     "the operations policy.classify_preview (dry run) and policy.classify."
 )
 
@@ -113,19 +116,33 @@ async def request_from_tool(
 ) -> dict[str, Any] | None:
     """Ask for the classification edit in *arguments*; ``None`` when it has none.
 
-    Refused with ``-32602`` when it is mixed with *other_fields*, when the
-    switch is off, or when the edit is refused (unknown category, no
-    matching operation, a conflict).
+    Refused with ``-32602`` when it is mixed with *other_fields*, when it
+    comes with ``tenant_id`` (the change is always for the caller's
+    tenant), when an id in *match* holds a wildcard (the tool edits one
+    thing), when the switch is off, or when the edit is refused (unknown
+    category, no matching operation, a conflict).
     """
     category = arguments.get("category")
     labels = arguments.get("labels")
     if category is None and labels is None:
         return None
+    if arguments.get("tenant_id") is not None:
+        raise McpInvalidParamsError(
+            f"{tool}: classification_tenant_id: category and labels are always for your "
+            "own tenant, so send them without tenant_id.",
+            data={"error_code": "classification_tenant_id"},
+        )
+    refusal = one_thing_refusal(match)
+    if refusal is not None:
+        raise McpInvalidParamsError(
+            f"{tool}: classification_wildcard: {refusal}",
+            data={"error_code": "classification_wildcard"},
+        )
     mixed = [name for name in other_fields if arguments.get(name) is not None]
     if mixed:
         raise McpInvalidParamsError(
-            f"{tool}: classification_mixed: category and labels wait for another tenant "
-            f"admin, so send them in a call of their own, without {', '.join(mixed)}.",
+            f"{tool}: classification_mixed: category and labels wait for a tenant admin's "
+            f"approval, so send them in a call of their own, without {', '.join(mixed)}.",
             data={"error_code": "classification_mixed", "fields": mixed},
         )
     edit = ClassificationEdit(match=match, category=category, labels=labels, always_wait=None)

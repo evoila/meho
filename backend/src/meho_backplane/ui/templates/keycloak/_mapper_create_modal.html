@@ -32,7 +32,7 @@
     <div class="flex items-start justify-between gap-4">
       <div class="min-w-0">
         <h3 class="font-mono text-lg font-semibold">Add protocol mapper</h3>
-        <p class="mt-0.5 text-sm opacity-70">
+        <p class="mt-0.5 text-sm text-muted">
           Add a protocol mapper to client
           <code class="break-all">{{ client_uuid }}</code>.
         </p>
@@ -55,14 +55,15 @@
       <div>
         <h4 class="text-sm font-semibold">State-changing operation</h4>
         <p class="text-xs [overflow-wrap:anywhere]">
-          This adds a protocol mapper to the client. It
-          <span class="font-semibold">requires approval</span>: confirming
-          parks a request that a MEHO-SA-Operator or a tenant admin must
-          approve, because a mapper decides what goes into the login token.
+          This adds a protocol mapper to the client. It is
+          <span class="font-semibold">a change of rights</span>, because a mapper
+          decides what goes into the login token. In MEHO's own login realm, a
+          platform admin with a fresh sign-in runs it at once. Every other
+          confirm makes a request that waits for approval.
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           <span class="badge badge-error badge-sm" data-write-safety>safety: dangerous</span>
-          <span class="badge badge-outline badge-sm" data-write-requires-approval>requires approval</span>
+          <span class="badge badge-outline badge-sm" data-write-requires-approval>change of rights</span>
         </div>
       </div>
     </div>
@@ -78,7 +79,7 @@
       <input type="hidden" name="target" value="{{ target }}" />
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Mapper name</span>
+        <span class="label-text mb-1 text-xs text-muted">Mapper name</span>
         <input
           type="text"
           name="name"
@@ -92,7 +93,7 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Mapper type</span>
+        <span class="label-text mb-1 text-xs text-muted">Mapper type</span>
         <input
           type="text"
           name="protocol_mapper"
@@ -106,7 +107,7 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">Protocol</span>
+        <span class="label-text mb-1 text-xs text-muted">Protocol</span>
         <select
           name="protocol"
           class="select select-bordered select-sm w-full font-mono"
@@ -118,8 +119,8 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text mb-1 text-xs opacity-70">
-          Advanced <span class="opacity-50">(optional ProtocolMapperRepresentation JSON: the mapper ``config`` block)</span>
+        <span class="label-text mb-1 text-xs text-muted">
+          Advanced <span class="text-subtle">(optional ProtocolMapperRepresentation JSON: the mapper ``config`` block)</span>
         </span>
         <textarea
           name="representation"
@@ -141,7 +142,7 @@
         </button>
         <button type="submit" data-action="create" class="btn btn-warning btn-sm gap-1">
           {{ icon("zap", class="size-4") }}
-          Add (request approval)
+          Add
         </button>
       </div>
     </form>

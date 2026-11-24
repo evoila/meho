@@ -17,10 +17,10 @@ import (
 // needs. The cobra command fills this from flags + env vars; tests
 // fill it directly. Empty fields fall back to recipe defaults.
 type BootstrapOptions struct {
-	// KeycloakBaseURL is the realm-less root, e.g. "https://keycloak.evba.lab".
+	// KeycloakBaseURL is the realm-less root, e.g. "https://keycloak.example.test".
 	KeycloakBaseURL string
 
-	// Realm is the target realm where the clients land, e.g. "evba".
+	// Realm is the target realm where the clients land, e.g. "example".
 	Realm string
 
 	// AdminUsername / AdminPassword authenticate against the master
@@ -48,6 +48,12 @@ type BootstrapOptions struct {
 	// mapper.
 	WebClientID string
 
+	// WebApproveClientID is the console's approval sign-in client
+	// (#6282); defaults to "meho-web-approve". Must match the backplane's
+	// UI_KEYCLOAK_APPROVE_CLIENT_ID. The bootstrap does not make it. When
+	// the realm has it, it is bound to the approval sign-in flow.
+	WebApproveClientID string
+
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by browser-flow MCP clients — the mcp-remote stdio shim
 	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
@@ -65,14 +71,14 @@ type BootstrapOptions struct {
 	MCPResourceURI string
 
 	// TenantID is the first tenant's UUID, written as the `tenant_id`
-	// attribute on the five MEHO role groups (see roleGroups).
+	// attribute on the three MEHO role groups (see roleGroups).
 	TenantID string
 
 	// TenantName is the first tenant's short name (default "main"). The
-	// five role groups carry it in `meho_tenant`.
+	// three role groups carry it in `meho_tenant`.
 	TenantName string
 
-	// AddTenantName / AddTenantID add one more tenant: its five groups
+	// AddTenantName / AddTenantID add one more tenant: its three groups
 	// `MEHO-<name>-<Role>` (see extraTenantGroups). Empty name = no extra
 	// tenant. Empty id = reuse the id the groups already carry, else make
 	// a new UUID.
@@ -83,7 +89,7 @@ type BootstrapOptions struct {
 	// the first admin user and put it in MEHO-Admins and
 	// MEHO-Platform-Admins. When
 	// SkipUserProvisioning is true the user step is skipped (people come
-	// from a directory or another login system). The five groups are
+	// from a directory or another login system). The three groups are
 	// created either way: they carry the tenant and the role.
 	AdminUserUsername    string
 	AdminUserEmail       string
@@ -118,6 +124,12 @@ type BootstrapOptions struct {
 	// which is 30 days on a default Keycloak realm.
 	MCPOfflineSessionIdleSeconds int
 
+	// MCPProfiles names the MCP tool profiles that get a login client of
+	// their own (`--mcp-profile`): `meho-mcp-profile-<name>`, with the
+	// settings of the MCP client plus a fixed `mcp_profile` claim. See
+	// profileclients.go.
+	MCPProfiles []string
+
 	// DryRun true → log in, read the realm, and print each change a
 	// real run would make, without changing anything: every request
 	// other than a read is answered in the process (dryRunTransport).
@@ -149,6 +161,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.WebClientID == "" {
 		o.WebClientID = "meho-web"
+	}
+	if o.WebApproveClientID == "" {
+		o.WebApproveClientID = "meho-web-approve"
 	}
 	if o.BackplaneAudience == "" {
 		o.BackplaneAudience = "meho-backplane"
@@ -251,30 +266,30 @@ func (o BootstrapOptions) validate() error {
 			"--mcp-offline-session-idle must be a positive number of " +
 				"seconds (omit the flag to use the 48h default)")
 	}
+	if err := o.validateProfiles(); err != nil {
+		return err
+	}
 	return o.validateTenants()
 }
 
-// roleGroup is one of the five MEHO role groups. A person is in exactly
+// roleGroup is one of the three MEHO role groups. A person is in exactly
 // one of them. The group's attributes give the person their tenant and
 // role: the User Attribute mappers below read them into the token.
 type roleGroup struct {
 	Name       string
 	Role       string // the role part of the name and of `meho_tenant`
 	TenantRole string
-	Approver   bool
 }
 
 // adminGroupName is the role group the first admin user joins.
 const adminGroupName = "MEHO-Admins"
 
-// roleGroups are the five MEHO role groups, see
+// roleGroups are the three MEHO role groups, see
 // docs/decisions/login-role-groups.md.
 var roleGroups = []roleGroup{
 	{Name: "MEHO-Readers", Role: "Readers", TenantRole: "read_only"},
 	{Name: "MEHO-Operators", Role: "Operators", TenantRole: "operator"},
-	{Name: "MEHO-SA-Operators", Role: "SA-Operators", TenantRole: "operator"},
 	{Name: adminGroupName, Role: "Admins", TenantRole: "tenant_admin"},
-	{Name: "MEHO-Approvers", Role: "Approvers", TenantRole: "read_only", Approver: true},
 }
 
 // roleGroupAttributeKeys are the role-group attributes this command owns.
@@ -285,20 +300,16 @@ var roleGroupAttributeKeys = []string{"tenant_id", "tenant_role", "approver", "m
 var attributeDisplayOrder = append(slices.Clone(roleGroupAttributeKeys), "platform_admin")
 
 // desiredAttributes returns the attributes the command owns on g.
-// `approver` is set only on MEHO-Approvers; on the other groups it must
-// be absent. `tenant_id` keeps the text of --tenant-id as given, since
+// `approver` is owned but never set: it is removed when a group has one.
+// `tenant_id` keeps the text of --tenant-id as given, since
 // the `tenant_id` claim must stay as it was; `meho_tenant` takes the
 // UUID's standard form, so its three colon-separated parts hold.
 func (g roleGroup) desiredAttributes(tenantID, tenantName string) map[string][]string {
-	attrs := map[string][]string{
+	return map[string][]string{
 		"tenant_id":   {tenantID},
 		"tenant_role": {g.TenantRole},
 		"meho_tenant": {mehoTenantValue(standardUUID(tenantID), tenantName, g.Role)},
 	}
-	if g.Approver {
-		attrs["approver"] = []string{"true"}
-	}
-	return attrs
 }
 
 // userAttributeMapper builds a stock "User Attribute" mapper that copies
@@ -667,6 +678,9 @@ type Result struct {
 	AdminUserUUID    string
 	MapperEventsLog  []string // human-readable bullet list (one line per client / mapper / scope / group event)
 	ConfigKeysToSet  []string // chart values + env vars the operator must set
+
+	// ProfileMCPClientIDs are the clientIds of the clients of --mcp-profile.
+	ProfileMCPClientIDs []string
 }
 
 // Bootstrap is the public entry point. It mints an admin token, then
@@ -679,9 +693,12 @@ type Result struct {
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //     3a. Public approval sign-in client (`meho-cli-approve`, #5515) with
 //     the same mappers minus `meho-mcp-audience` and the same 4 default
-//     scopes, bound to its own login flow `meho approval sign-in`
+//     scopes, bound to its own login flow `meho approval sign-in level`
 //     (password form, then the one-time code when the person has one;
-//     made when missing)
+//     made when missing). The flow gives the approval level, named
+//     `meho-approve` in the realm's acr.loa.map (#6281). The console's
+//     approval client (`meho-web-approve`, #6282) is bound to the same
+//     flow when the realm has it
 //  4. Public MCP browser-flow client (`meho-mcp`), and the clients of
 //     the AI tool kinds (`meho-mcp-code`, `meho-mcp-desktop`, #6210)
 //     with the same settings as `meho-mcp` (steps 4 and 5)
@@ -693,8 +710,8 @@ type Result struct {
 //     limit, unless --cli-offline-access=0, which removes the scope.
 //     The MCP client also gets `client.offline.session.idle.timeout`
 //     (48h unless --mcp-offline-session-idle says otherwise).
-//  6. The five MEHO role groups with their attributes (roleGroups),
-//     MEHO-Platform-Admins, and the five groups of --add-tenant
+//  6. The three MEHO role groups with their attributes (roleGroups),
+//     MEHO-Platform-Admins, and the three groups of --add-tenant
 //  7. Admin user, set password, join MEHO-Admins and
 //     MEHO-Platform-Admins (skipped with SkipUserProvisioning)
 //
@@ -794,11 +811,21 @@ func Bootstrap(
 
 	// --- Approval sign-in client (#5515) ------------------------------------
 
+	for _, clientID := range []string{opts.CLIApproveClientID, opts.WebApproveClientID} {
+		if err := checkApprovalLevel(ctx, c, clientID); err != nil {
+			return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+		}
+	}
 	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile login flow %q: %w", approvalFlowAlias, err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, flowEvents...)
+	levelEvents, err := ensureApprovalLevel(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("name sign-in level %q: %w", approvalLevelName, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, levelEvents...)
 	desiredApprove := opts.desiredCLIApproveClient()
 	if flowID != "" {
 		desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
@@ -823,6 +850,11 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile approval client default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, approveScopeEvents...)
+	webApproveEvents, err := bindWebApproveClient(ctx, c, opts.WebApproveClientID, flowID)
+	if err != nil {
+		return nil, fmt.Errorf("bind console approval client %q: %w", opts.WebApproveClientID, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, webApproveEvents...)
 
 	// --- MCP browser-flow client --------------------------------------------
 
@@ -871,6 +903,12 @@ func Bootstrap(
 		res.MapperEventsLog = append(res.MapperEventsLog, events...)
 	}
 
+	// --- Clients of the MCP tool profiles (--mcp-profile) -------------------
+
+	if err := reconcileProfileMCPClients(ctx, c, opts, createdScopes, res); err != nil {
+		return nil, err
+	}
+
 	// --- Console login flow with the passkey touch level (#6213) -----------
 
 	touchEvents, err := reconcileTouch(ctx, c, opts.WebClientID)
@@ -916,7 +954,7 @@ func Bootstrap(
 		res.AdminUserUUID = userUUID
 	} else {
 		fmt.Fprintln(out, "==> --skip-user-provisioning: no admin user "+
-			"created; put people in the five groups yourself")
+			"created; put people in the three groups yourself")
 	}
 
 	res.ConfigKeysToSet = buildConfigKeySummary(opts)
@@ -968,12 +1006,14 @@ func dryRunSummary(opts BootstrapOptions, out io.Writer) {
 		"without meho-mcp-audience; no device flow, no offline_access)\n",
 		opts.CLIApproveClientID)
 	fmt.Fprintf(out, "==> login flow of the approval sign-in client: %q "+
-		"(always asks for the password; made if missing)\n", approvalFlowAlias)
+		"(always asks for the password; gives the approval level %q; made if missing)\n",
+		approvalFlowAlias, approvalLevelName)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
 	for _, t := range toolMCPClients {
 		fmt.Fprintf(out, "==> MCP client of %s: %s (same settings as %s)\n",
 			t.Tool, t.ID, opts.MCPClientID)
 	}
+	dryRunProfileSummary(opts, out)
 	fmt.Fprintf(out, "==> login flow of the console client %s (when the realm has it): %q "+
 		"(level %s asks for a passkey touch; made if missing)\n", opts.WebClientID, touchFlowAlias, touchACR)
 	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
@@ -1492,7 +1532,7 @@ func reconcileUser(
 // operator must set on the backplane side to match the realm config
 // this verb just provisioned. Printed at the end of the bootstrap.
 func buildConfigKeySummary(opts BootstrapOptions) []string {
-	return []string{
+	return append([]string{
 		"config.keycloakCliClientId: " + opts.CLIClientID,
 		"  (env: KEYCLOAK_CLI_CLIENT_ID=" + opts.CLIClientID + ")",
 		"# Surfaced via GET /api/v1/auth-config as `cli_client_id`;",
@@ -1506,5 +1546,5 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"Clients of the AI tool kinds: meho-mcp-code (Claude Code), meho-mcp-desktop (Claude Desktop).",
 		"# Set MCP_CLIENT_PER_TOOL_KIND=true on the backplane to list them in GET /api/v1/auth-config;",
 		"# then each tool signs in with its own client and keeps a saved login of its own.",
-	}
+	}, profileConfigKeySummary(opts)...)
 }

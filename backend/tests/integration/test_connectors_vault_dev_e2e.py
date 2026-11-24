@@ -3,8 +3,9 @@
 
 """G3.3-T7 — Vault dev-mode CI integration harness + kv/sys/auth e2e.
 
-Boots a real ``hashicorp/vault:1.18`` server in dev mode via
-testcontainers, seeds the surfaces every op in Initiative #366 touches
+Boots a real ``hashicorp/vault:1.18`` server and a real OpenBao 2.x
+server in dev mode via testcontainers (the whole suite runs once for each),
+seeds the surfaces every op in Initiative #366 touches
 (KV-v2 ``secret/``, ``userpass``, ``approle``, and a ``ci-readonly`` ACL
 policy for the G3.15-T2 #1410 policy reads), then dispatches every
 registered ``vault.kv.*`` / ``vault.sys.*`` / ``vault.auth.*`` op
@@ -18,7 +19,8 @@ classification hold end to end.
 What this harness proves (issue #551 DoD)
 =========================================
 
-* ``hashicorp/vault:1.18`` dev-mode container, image overridable via
+* ``hashicorp/vault:1.18`` dev-mode container (and ``openbao/openbao:2.7.1``,
+  overridable via ``MEHO_TEST_OPENBAO_IMAGE``), image overridable via
   ``MEHO_TEST_VAULT_IMAGE`` so the CI runner pulls through the
   in-cluster Harbor proxy (same env-knob shape as
   ``MEHO_TEST_PGVECTOR_IMAGE`` / ``MEHO_TEST_VALKEY_IMAGE``;
@@ -79,21 +81,25 @@ authenticated client.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import hvac
 import pytest
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
+    OpenBaoConnector,
     VaultConnector,
     register_vault_auth_jwt_operations,
     register_vault_identity_token_operations,
@@ -103,6 +109,7 @@ from meho_backplane.connectors.vault import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.approval_object_check import live_card
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.test_operations_dispatcher import _make_operator
@@ -161,6 +168,8 @@ class _VaultTarget:
     host: str = "127.0.0.1"
     port: int = 8200
     auth_model: str = "shared_service_account"
+    #: The version the live server reports; the resolver reads it.
+    version: str = "1.18.0"
 
     def __post_init__(self) -> None:
         import uuid
@@ -168,10 +177,7 @@ class _VaultTarget:
         self.id = uuid.uuid4()
         self.preferred_impl_id: str | None = None
 
-        class _FP:
-            version = "1.18.0"
-
-        self.fingerprint = _FP()
+        self.fingerprint = SimpleNamespace(version=self.version, product="vault")
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +185,21 @@ class _VaultTarget:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def vault_dev_addr() -> Iterator[str]:
-    """Boot ``hashicorp/vault:1.18 -dev``, seed it, yield its address.
+#: The two servers the suite runs against: (id, image variable, default
+#: image, product the fingerprint must report). OpenBao is 2.x; its image
+#: has no "latest" tag in use here so a new release never breaks a PR.
+_SERVERS: list[tuple[str, str, str, str]] = [
+    ("vault-1.18", "MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18", "vault"),
+    ("openbao-2.x", "MEHO_TEST_OPENBAO_IMAGE", "openbao/openbao:2.7.1", "openbao"),
+]
+
+#: Address of a running server -> the product its fingerprint must report.
+_EXPECTED_PRODUCT: dict[str, str] = {}
+
+
+@pytest.fixture(scope="module", params=_SERVERS, ids=[s[0] for s in _SERVERS])
+def vault_dev_addr(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Boot a dev-mode server (Vault 1.18 or OpenBao 2.x), seed it, yield its address.
 
     Module scope amortises the container boot across every op test.
     The image's default entrypoint runs ``vault server -dev``;
@@ -201,33 +219,44 @@ def vault_dev_addr() -> Iterator[str]:
 
     from tests._strategies import wait_for_log_message
 
-    image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18")
-    container = (
-        DockerContainer(image)
-        .with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN)
-        .with_env("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
-        .with_exposed_ports(8200)
-        .with_kwargs(cap_add=["IPC_LOCK"])
-    )
+    _server_id, image_var, default_image, expected_product = request.param
+    image = os.environ.get(image_var, default_image)
+    container = DockerContainer(image).with_exposed_ports(8200)
+    if expected_product == "openbao":
+        # Same flags as Vault; given on the command line so the test does
+        # not depend on which environment variable names the image reads.
+        container = container.with_command(
+            f"server -dev -dev-root-token-id={_DEV_ROOT_TOKEN} -dev-listen-address=0.0.0.0:8200"
+        )
+    else:
+        container = container.with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN).with_env(
+            "VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200"
+        )
+    container = container.with_kwargs(cap_add=["IPC_LOCK"])
     try:
         container.start()
     except Exception as exc:
         # Any boot failure (privileged denied, image pull rate-limit,
         # cgroup refusal) → clean skip, not a red suite — same stance
-        # the k3d / pgvector container fixtures take.
+        # the k3d / pgvector container fixtures take. Under CI the OpenBao
+        # case fails instead, so a broken image or proxy cannot hide it.
+        if expected_product == "openbao" and os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(f"openbao dev container failed to start ({type(exc).__name__}): {exc}")
         pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
 
     try:
         # Vault logs this line once the dev server is unsealed and
         # serving; testcontainers polls the log stream until it appears
         # or the timeout trips.
-        wait_for_log_message(container, "Vault server started!", timeout=60)
+        wait_for_log_message(container, "server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         addr = f"http://{host}:{port}"
         _seed_vault(addr)
+        _EXPECTED_PRODUCT[addr] = expected_product
         yield addr
     finally:
+        _EXPECTED_PRODUCT.pop(addr, None)
         container.stop()
 
 
@@ -392,6 +421,12 @@ async def vault_e2e(
         impl_id="vault",
         cls=VaultConnector,
     )
+    register_connector_v2(
+        product="vault",
+        version="2.x",
+        impl_id="vault-openbao",
+        cls=OpenBaoConnector,
+    )
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
@@ -427,6 +462,11 @@ async def vault_e2e(
     get_settings.cache_clear()
 
     target = _VaultTarget()
+    # What a probe of this server stores: the real version number and product.
+    target.fingerprint.version = _root_client(vault_dev_addr).sys.read_health_status(method="GET")[
+        "version"
+    ]
+    target.fingerprint.product = _EXPECTED_PRODUCT[vault_dev_addr]
     try:
         yield target, vault_dev_addr
     finally:
@@ -806,6 +846,28 @@ async def test_kv_metadata_delete_against_dev_vault(
 # ---------------------------------------------------------------------------
 # sys group — health / seal_status / mounts.list / auth.list
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_and_range_against_dev_server(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """The fingerprint names the product, and the version range picks the class.
+
+    Vault 1.18 gives ``hashicorp`` / ``vault`` and ``VaultConnector``;
+    OpenBao 2.x gives ``openbao`` / ``openbao`` and ``OpenBaoConnector``.
+    """
+    from meho_backplane.connectors.resolver import resolve_connector
+
+    target, addr = vault_e2e
+    expected = _EXPECTED_PRODUCT[addr]
+    fingerprint = await VaultConnector().fingerprint(None)
+    assert fingerprint.product == expected
+    assert fingerprint.vendor == ("openbao" if expected == "openbao" else "hashicorp")
+    assert fingerprint.version == target.fingerprint.version
+    assert resolve_connector(target) is (
+        OpenBaoConnector if expected == "openbao" else VaultConnector
+    )
 
 
 @pytest.mark.asyncio
@@ -2153,6 +2215,99 @@ async def test_userpass_generated_password_is_only_in_kv_and_works_once(
     again = root.secrets.kv.v2.read_secret_version(path="labs/gen-user", mount_point="secret")
     assert again["data"]["metadata"]["version"] == 1
     assert again["data"]["data"]["password"] == stored
+
+
+@pytest.mark.asyncio
+async def test_kv_generate_stores_a_value_that_meets_the_rules_and_shows_it_nowhere(
+    vault_e2e: tuple[_VaultTarget, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``vault.kv.generate``: the value is in KV only, a repeat changes nothing, rotate adds one.
+
+    The value is not in the result, the audit row, the approval preview or
+    any log line (structlog events and standard logging records).
+    """
+    caplog.set_level(logging.DEBUG)
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="labs/generated", secret={"username": "svc-user"}, mount_point=_KV_MOUNT
+    )
+    params = {
+        "path": "labs/generated",
+        "length": 20,
+        "min_special": 1,
+        "special_chars": "!#-_",
+        "max_repeat": 2,
+    }
+
+    with capture_logs() as first_logs:
+        first = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-1")
+    assert first.status == "ok", first.error
+    assert first.result == {
+        "mount": _KV_MOUNT,
+        "path": "labs/generated",
+        "field": "password",
+        "version": 2,
+        "generated": True,
+    }
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/generated", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    value = stored["password"]
+    assert stored["username"] == "svc-user"
+    assert len(value) == 20
+    assert any(c in "!#-_" for c in value)
+    assert all(not (a == b == c) for a, b, c in zip(value, value[1:], value[2:], strict=False))
+    assert value not in json.dumps(first.result)
+    row = await _assert_audited(
+        "vault.kv.generate", operator_sub="op-kvgen-1", expected_op_class="credential_mint"
+    )
+    assert value not in json.dumps(row.payload, default=str)
+    assert first_logs, "the run logged nothing, so the log check would prove nothing"
+    assert value not in repr(first_logs)
+
+    # The approval preview, built the way the approval step builds it.
+    card = await live_card(
+        _make_operator(sub="op-kvgen-1"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.generate",
+        target=target,
+        params=params,
+    )
+    assert card is not None
+    assert card["preview"]["path"] == "labs/generated"
+    assert value not in json.dumps(card, default=str)
+
+    # A second run changes nothing: same version, same value.
+    with capture_logs() as second_logs:
+        second = await _dispatch_approved(target, "vault.kv.generate", params, "op-kvgen-2")
+    assert second.status == "ok", second.error
+    assert second.result["generated"] is False
+    assert second.result["version"] == 2
+    again = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    assert again["data"]["metadata"]["version"] == 2
+    assert again["data"]["data"]["password"] == value
+
+    # rotate writes a new version with a new value and keeps the other field.
+    with capture_logs() as rotate_logs:
+        rotated = await _dispatch_approved(
+            target, "vault.kv.generate", {**params, "rotate": True}, "op-kvgen-3"
+        )
+    assert rotated.status == "ok", rotated.error
+    assert rotated.result["version"] == 3
+    assert rotated.result["generated"] is True
+    latest = root.secrets.kv.v2.read_secret_version(path="labs/generated", mount_point=_KV_MOUNT)
+    new_value = latest["data"]["data"]["password"]
+    assert new_value != value
+    assert latest["data"]["data"]["username"] == "svc-user"
+    assert value not in repr(second_logs)
+    assert new_value not in repr(rotate_logs)
+    assert new_value not in json.dumps(rotated.result)
+    for record in caplog.records:
+        line = record.getMessage() + repr(record.__dict__)
+        assert value not in line
+        assert new_value not in line
 
 
 @pytest.mark.asyncio

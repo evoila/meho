@@ -613,6 +613,13 @@ config:
   # settings.py. Comma-separated exemptions: CIDR ranges (`10.0.0.0/8`),
   # bare IPs (`192.168.7.10`), and/or hostname literals
   # (`vcenter.lab.internal`); whitespace around commas is ignored.
+  # A host name or IP entry may end in a port (`vcenter.lab.internal:8443`,
+  # `[fd00::5]:8443`): it then admits that host on that port only, while
+  # a plain entry admits every port.
+  # Port entries apply to target registration and to target connections
+  # (HTTP, Postgres, MSSQL, MongoDB, SSH). They do not cover corpus
+  # sources, secret hand-off or Kubernetes connections: for those, use a
+  # plain entry.
   #
   # Default `""` keeps the guard fully on (default-deny) — a genuine
   # no-op render. MEHO is on-prem: registering appliances on private
@@ -649,9 +656,9 @@ config:
   # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
   # single-operator answer — enabling it posture-wide re-opens, for every
   # op, the single-account request+grant hole the guard closes. The
-  # endorsed single-operator posture is an **agent-requester** (park the
-  # write under a scheduled agent run whose distinct subject clears the
-  # gate with no flag). Even under break-glass the self-approval is
+  # endorsed single-operator posture is the **MEHO-Admins** group:
+  # its members approve their own changes on purpose, with a click in the
+  # web interface. Even under break-glass the self-approval is
   # forensically visible: it writes a decision audit row (requester ==
   # approver), emits a WARNING `approval_self_approval_break_glass` log,
   # and flips `GET /ready` → `features.approval_queue.effective_posture`
@@ -705,6 +712,16 @@ config:
   # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
   # one-time code step off. The sign-in must still be recent.
   approvalOneTimeCodeAcrValues: ""
+  # -- Does an approve on the command line or REST need the approval level
+  # (`acr` `meho-approve`) that only the approval sign-in flow gives
+  # (#6281)? Rendered into `APPROVAL_SIGN_IN_LEVEL`. `"auto"` (the
+  # default): refuses a sign-in without the level while MEHO's check of
+  # the approval sign-in (`approvals.sign_in` in `/api/v1/health`) is
+  # `ok` or could not read the realm; only logs it while the check shows
+  # the realm does not give the level. `"off"`: no level check. `"observe"`:
+  # approves as before and logs `approval_sign_in_level_missing`.
+  # `"required"`: always refuses a sign-in without the level.
+  approvalSignInLevel: "auto"
   # -- Switches for what the agent sees. Each is off (`"false"`) by default
   # and stays off until model tests show it helps.
   # `teamKnowledgeRecall` is rendered into `TEAM_KNOWLEDGE_RECALL`. When
@@ -716,10 +733,40 @@ config:
   # a new knowledge entry is not written while similar entries exist; the
   # writer gets the list instead. See `docs/codebase/kb.md`.
   kbSimilarCheck: "false"
+  # -- `kbSearchWordHint` is rendered into `KB_SEARCH_WORD_HINT`. When
+  # `"true"`, `search_knowledge` tells the agent to search with a few key
+  # words, and its answer has `word_match` (`some` or `none`). Off until a
+  # measurement shows it helps. See `docs/codebase/kb.md`.
+  kbSearchWordHint: "false"
+  # -- `kbWikiFilteredSearch` is rendered into `KB_WIKI_FILTERED_SEARCH`.
+  # When `"true"`, a product or version filter on `search_knowledge` can
+  # still search the wiki. Off until a measurement shows it helps. See
+  # `docs/codebase/kb.md`.
+  kbWikiFilteredSearch: "false"
+  # -- `kbWikiInterleave` is rendered into `KB_WIKI_INTERLEAVE`. When
+  # `"true"`, `search_knowledge` mixes wiki hits into the knowledge hits
+  # in turns. Off until a measurement shows it helps. See
+  # `docs/codebase/kb.md`.
+  kbWikiInterleave: "false"
+  # -- `fileRefParams` is rendered into `FILE_REF_PARAMS`. When `"true"`,
+  # the operation parameters that wait behind this switch show to agents
+  # and people and are accepted. See `docs/codebase/mcp.md`.
+  fileRefParams: "false"
   # -- `mcpShortToolTexts` is rendered into `MCP_SHORT_TOOL_TEXTS`. When
   # `"true"`, the biggest tools on the default MCP tool list send a short
-  # text. The inputs they accept stay the same. See `docs/codebase/mcp.md`.
+  # text, and no tool sends an output schema. The inputs they accept stay
+  # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
+  # -- `mcpProfileConnectorLists` is rendered into
+  # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
+  # `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use
+  # only the connectors of that profile. See `docs/codebase/mcp.md`.
+  mcpProfileConnectorLists: "false"
+  # -- `mcpConnectorProfiles` is rendered into `MCP_CONNECTOR_PROFILES`: the
+  # extra MCP tool profiles as one JSON object, for example
+  # `{"k8s": {"tools": "investigate", "connectors": ["kubernetes"]}}`. Empty
+  # means none. A bad value stops the start. See `docs/codebase/mcp.md`.
+  mcpConnectorProfiles: ""
   # -- `mcpClientPerToolKind` is rendered into `MCP_CLIENT_PER_TOOL_KIND`.
   # When `"true"`, Claude Code and Claude Desktop sign in with their own
   # login client (`meho-mcp-code`, `meho-mcp-desktop`). MEHO lists a client
@@ -734,12 +781,23 @@ config:
   # before. See `docs/codebase/policy-classification.md`.
   # `policy.engineShadow` is rendered into `POLICY_ENGINE_SHADOW`. When
   # `"true"`, the policy evaluator works out its own answer next to
-  # today's checks and logs every difference. It decides nothing. When
+  # today's checks and logs every difference. It also writes the rule it
+  # matched on audit rows and approval requests, and a preview shows the
+  # rule and who may approve. It decides nothing. When
   # `"false"` (the default), it does not run. See
   # `docs/codebase/policy-evaluator.md`.
+  # `policy.approverRouting` is rendered into `POLICY_APPROVER_ROUTING`.
+  # When `"true"`, a waiting request stores the login group kinds that may
+  # approve it, from the policy file's `routing` section, and MEHO checks
+  # them at the click. The `bindings` of the tenant's policy file give login
+  # groups, matched by full path or group attribute, a group kind and
+  # categories. When `"false"` (the default), MEHO reads no binding and
+  # today's rule decides who may approve. See `docs/codebase/approvals.md`
+  # and `docs/codebase/policy-bindings.md`.
   policy:
     classification: "false"
     engineShadow: "false"
+    approverRouting: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and
@@ -748,12 +806,14 @@ config:
   kbSharedTenantIds: ""
   # -- The weekly knowledge upkeep job. It merges duplicate entries,
   # retires expired ones and writes one report per tenant.
-  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`;
-  # `"false"` does not start the job. `knowledgeUpkeepIntervalSeconds` is
+  # `knowledgeUpkeepEnabled` is rendered into `KNOWLEDGE_UPKEEP_ENABLED`.
+  # Off by default (`"false"`): the job changes which entries knowledge
+  # search returns, so an operator turns it on with `"true"`.
+  # `knowledgeUpkeepIntervalSeconds` is
   # rendered into `KNOWLEDGE_UPKEEP_INTERVAL_SECONDS`: how often it runs,
   # from 60 to 604800 seconds (one week, the default). See
   # `docs/codebase/kb.md`.
-  knowledgeUpkeepEnabled: "true"
+  knowledgeUpkeepEnabled: "false"
   knowledgeUpkeepIntervalSeconds: 604800
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
@@ -1046,8 +1106,8 @@ gsm:
   # and the SA-direct Phase-1 path runs unchanged.
   #
   # A per-operator-WIF install must also decide how *background* dispatch
-  # (sensor evaluations, scheduled topology refreshes, runbook verify
-  # dispatch — no calling operator, so no JWT to federate) gets an
+  # (sensor evaluations, scheduled topology refreshes — no calling
+  # operator, so no JWT to federate) gets an
   # identity: either an ambient pod identity (GKE Workload Identity), or
   # the `checkRunner` service principal below. Neither ⇒ credentialed
   # Sensors cannot evaluate. Connector `probe()` / `fingerprint()` are not
@@ -1550,13 +1610,12 @@ coreKeycloak:
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
   # -- The first tenant's short name (lowercase letters, digits, dashes).
-  # The five role groups carry it in the `meho_tenant` attribute.
+  # The role groups carry it in the `meho_tenant` attribute.
   tenantName: main
   # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
-  # keep). The bootstrap Job makes five groups for each one:
-  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
-  # `-Approvers`. Empty by default: a site with one tenant needs nothing
-  # here. Putting people in these groups waits for a second person's
+  # keep). The bootstrap Job makes three groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators` and `-Admins`. Empty by default: a
+  # site with one tenant needs nothing here. Putting people in these groups waits for a second person's
   # approval when done through MEHO.
   tenants: []
   ingress:
@@ -1569,15 +1628,17 @@ coreKeycloak:
     # `client_id` and `client_secret`). Empty = the install makes
     # `<release>-core-keycloak-bootstrap`.
     bootstrap: ""
-  # The two people the install makes at the first start (the realm stage of
-  # the bootstrap Job, docs/codebase/core-bootstrap.md). Their temporary
-  # passwords are in `<release>-core-first-login`; Keycloak asks for a new
+  # The one person the install makes at the first start (the realm stage of
+  # the bootstrap Job, docs/codebase/core-bootstrap.md). Its temporary
+  # password is in `<release>-core-first-login`; Keycloak asks for a new
   # password at the first login. A change here after the first install has
-  # no effect: the Secret and the users already exist.
+  # no effect: the Secret and the user already exist.
   firstLogin:
-    # -- User name of the first admin (in MEHO-Admins, with platform_admin).
+    # -- User name of the one Admin login (in MEHO-Admins and
+    # MEHO-Platform-Admins, with platform_admin).
     adminUsername: admin
-    # -- User name of the second person, who can approve (MEHO-SA-Operators).
+    # -- Not used. MEHO ignores this value: the install makes only one Admin
+    # login. The key stays so that an existing values file still works.
     approverUsername: approver
     # -- User name of the console admin: a user of realm `master` who
     # administers realm `meho` in the Keycloak admin console (every role of
@@ -1910,7 +1971,7 @@ retrieval:
 # Kubernetes Secrets *by name* (e.g. `postgres.credentialsSecret`) and
 # leaves the sync mechanism to the consumer's GitOps repo. This matches
 # Goal #11's cross-repo convention where
-# `evoila-bosnia/claude-rdc-hetzner-dc` owns the ExternalSecret manifests.
+# the consumer's own GitOps repository owns the ExternalSecret manifests.
 #
 # Flipping `enabled: true` makes the chart render ExternalSecret CRs for
 # `postgres.credentialsSecret` and (when `eso.keycloak.enabled: true`) the
@@ -2011,6 +2072,20 @@ networkPolicy:
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
+  # -- Let the backplane reach its own console address (`ingress.host`).
+  # The first-start `certificate` check opens a TLS connection to it. A
+  # NetworkPolicy is checked after a host port or a Service sends the
+  # connection on to the ingress controller Pod, so the rule names those
+  # Pods (in `ingressControllerNamespace`) and their HTTPS port, not the
+  # address. Empty `podLabels` (the default): no rule. A separate key and
+  # not an `extraEgress` entry, because a later values file that sets
+  # `extraEgress` replaces the whole list. Install form 2 sets it for
+  # RKE2's Traefik in `values-single-node.yaml`.
+  ingressControllerEgress:
+    # -- Labels of the ingress controller Pods.
+    podLabels: {}
+    # -- The Pod port of the HTTPS entry point (Traefik: 8443).
+    port: 8443
   # -- PostgreSQL egress CIDR. Required and pattern-validated by the schema
   # only when `networkPolicy.enabled: true` (the default); when disabled the
   # template skips the NetworkPolicy resource and this field may be left blank.

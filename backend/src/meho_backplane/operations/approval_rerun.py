@@ -23,10 +23,11 @@ The rules, checked in this order:
    always come from the request, so the caller cannot change them.
 4. One run at a time. The claim is one conditional ``UPDATE`` that clears
    ``resume_result`` and adds one to ``rerun_count``, only while the stored
-   result is a failure and ``rerun_count`` is still the value the caller
-   read. Two re-runs sent at the same time: one wins, the other is refused,
-   also when the first one already ran and failed again before the second
-   claims. ``resumed_at`` stays the one-way latch of the first run. The
+   result is a failure that is not ``uncertain`` and ``rerun_count`` is
+   still the value the caller read. Two re-runs sent at the same time: one
+   wins, the other is refused, also when the first one already ran and
+   failed again before the second claims. ``resumed_at`` stays the one-way
+   latch of the first run. The
    same ``UPDATE`` sets ``rerun_started_at``, the start of the latest run,
    which the "outcome unknown" list counts its minutes from (#5026).
 
@@ -35,6 +36,10 @@ and the attempt, in the same transaction as the claim. A refused re-run
 writes one too. The run itself writes its usual run row, which also carries
 the attempt. The new result replaces ``resume_result``, so ``/result`` and
 the approval views show the latest attempt.
+
+A request of a step of a multi-step operation (``resume_parent`` set) never
+runs again: a re-run would send the steps after the approved step again. The
+requester starts a new run of the operation.
 
 Credential writes keep their params only in one-time encrypted custody, which
 the first run deletes. A re-run of one must send the params again; they must
@@ -74,8 +79,15 @@ from meho_backplane.operations.approval_queue import (
     rehydrate_resume_target,
 )
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
+from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import is_secret_reveal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
+from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
+    UNCERTAIN_OUTCOME,
+    connection_lost_after_send,
+    with_uncertain_outcome,
+)
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -111,7 +123,7 @@ class RerunRefusal(StrEnum):
     TARGET_CHANGED = "target_changed"
     PREVIEW_CHANGED = "preview_changed"
     OBJECT_CHANGED = "object_changed"
-    INPUT_NOT_KEPT = "input_not_kept"
+    MULTI_STEP_RUN = "multi_step_run"
 
 
 _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
@@ -127,8 +139,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
     RerunRefusal.OBJECT_CHANGED: (
         "the object of the call is not the one on the approval card, or could not be read"
     ),
-    RerunRefusal.INPUT_NOT_KEPT: (
-        "MEHO did not keep the input of this multi-step credential write after its first run"
+    RerunRefusal.MULTI_STEP_RUN: (
+        "it is a step of a multi-step operation, and MEHO does not run such a request "
+        "again, so that no step is sent twice; start a new run of the operation"
     ),
 }
 
@@ -152,6 +165,7 @@ class RerunNotAllowedError(ApprovalError):
         super().__init__(
             f"approval request {request_id} cannot run again: its state is {state!r}. "
             "Only an approved request whose last run failed can run again"
+            + (f". {LOGIN_ENDED_ADVICE}" if state == "uncertain" else "")
         )
         self.request_id = request_id
         self.state = state
@@ -207,18 +221,21 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
         return RerunRefusal.WORK_REF_CHANGED
     if not params_hash_matches(params, request.params_hash):
         return RerunRefusal.PARAMS_CHANGED
-    if request.resume_parent is not None and "params" not in request.resume_parent:
-        return RerunRefusal.INPUT_NOT_KEPT
     return None
 
 
 async def _object_changed(
     operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
 ) -> bool:
-    """The object of the call, or the login or group a change of rights is for, moved."""
+    """The object of the call, or the login or group a change of rights is for, moved.
+
+    Also true when the object is no longer as the approval card showed it.
+    """
     if await object_changed_since_request(operator, request, target, params) is not None:
         return True
-    return await grant_changed_since_request(operator, request, target, params) is not None
+    if await grant_changed_since_request(operator, request, target, params) is not None:
+        return True
+    return await state_changed_since_request(operator, request, target, params) is not None
 
 
 def _target_refusal(denied: OperationResult) -> RerunRefusal:
@@ -291,6 +308,7 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
     from meho_backplane.db.engine import get_sessionmaker
 
     result_status = ApprovalRequest.resume_result["status"].as_string()
+    execution_outcome = ApprovalRequest.resume_result[("extras", "execution_outcome")].as_string()
     async with get_sessionmaker()() as session:
         claimed = await session.execute(
             update(ApprovalRequest)
@@ -300,6 +318,7 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
                 ApprovalRequest.rerun_count == request.rerun_count,
                 ApprovalRequest.resume_result.is_not(None),
                 func.coalesce(result_status, "") != "ok",
+                func.coalesce(execution_outcome, "") != UNCERTAIN_OUTCOME,
             )
             .values(
                 resume_result=null(),
@@ -345,6 +364,14 @@ async def _check_rerun(
             request,
             RerunNotAllowedError(request.id, state),
             code=f"state_{state}",
+            status=_CONFLICT_STATUS_CODE,
+        )
+    if request.resume_parent is not None:
+        raise await _refuse(
+            operator,
+            request,
+            RerunNeedsNewApprovalError(request.id, RerunRefusal.MULTI_STEP_RUN),
+            code=RerunRefusal.MULTI_STEP_RUN.value,
             status=_CONFLICT_STATUS_CODE,
         )
     effective, reveal_secret = _stored_call(request, params)
@@ -433,17 +460,18 @@ async def rerun_failed_request(
             reveal_secret=reveal_secret,
         )
     except Exception as exc:
-        # Store a failed result, so the request can be run again later
-        # instead of staying "started" for good.
-        await persist_resume_result(
-            request.id,
-            OperationResult(
-                status="error",
-                op_id=request.op_id,
-                error=f"rerun_failed: the run stopped with {type(exc).__name__}",
-                duration_ms=0.0,
-            ),
-            parked_op_id=request.op_id,
+        # Store a result, so the request does not stay "started" for good. A
+        # timeout or a lost connection may have reached the target: that is
+        # uncertain and never runs again. Any other error is a failure that
+        # can run again later. An approved request counts as a change.
+        stopped = OperationResult(
+            status="error",
+            op_id=request.op_id,
+            error=f"rerun_failed: the run stopped with {type(exc).__name__}",
+            duration_ms=0.0,
         )
+        if connection_lost_after_send(exc):
+            stopped = with_uncertain_outcome(stopped)
+        await persist_resume_result(request.id, stopped, parked_op_id=request.op_id)
         raise
     return RerunOutcome(attempt=attempt, result=cast(OperationResult, result))

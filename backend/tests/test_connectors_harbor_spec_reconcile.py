@@ -40,8 +40,8 @@ constant (``_ROBOTS_PATH`` dispatches under two methods — list ``GET`` and
 create ``POST``) and a guard test pins the constant-name set; the method
 claims come from the dispatch seams: the nine typed reads and the
 ``project_summary`` / ``quota_list`` / ``artifact_vulnerabilities`` reads are
-``GET``, ``robot_create`` is a ``POST``, and ``robot_delete`` reads the robot with a
-``GET`` and then sends a ``DELETE``.
+``GET``, ``project_create`` and ``robot_create`` are a ``POST``, and ``robot_delete`` reads
+the robot with a ``GET`` and then sends a ``DELETE``.
 
 All 14 reconciled op_ids were served on the first armed run; no path repoints
 and no evidenced exclusions were needed (the connector's fingerprint /
@@ -81,12 +81,12 @@ _SWAGGER2_METHODS = frozenset({"get", "put", "post", "delete", "options", "head"
 _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_SYSTEMINFO_PATH": ("GET",),
     "_HEALTH_PATH": ("GET",),
-    "_PROJECTS_PATH": ("GET",),
+    "_PROJECTS_PATH": ("GET", "POST"),
     "_PROJECT_PATH": ("GET",),
     "_PROJECT_SUMMARY_PATH": ("GET",),
     "_PROJECT_REPOSITORIES_PATH": ("GET",),
     "_REPOSITORY_PATH": ("GET",),
-    "_ARTIFACTS_PATH": ("GET",),
+    "_ARTIFACTS_PATH": ("GET", "POST"),
     "_ARTIFACT_PATH": ("GET",),
     "_ARTIFACT_VULNERABILITIES_PATH": ("GET",),
     "_ROBOTS_PATH": ("GET", "POST"),
@@ -151,6 +151,8 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/api/v2.0/robots",
         "GET:/api/v2.0/robots/{robot_id}",
         "GET:/api/v2.0/systeminfo",
+        "POST:/api/v2.0/projects",
+        "POST:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts",
         "POST:/api/v2.0/robots",
     ]
 

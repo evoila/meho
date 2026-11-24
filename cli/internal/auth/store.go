@@ -75,6 +75,11 @@ type StoredToken struct {
 	// the zero value, which sorts as "oldest" — so a freshly-written,
 	// timestamped entry always wins over a legacy un-timestamped one.
 	SavedAt time.Time `json:"saved_at,omitempty"`
+	// SessionID is a random id made at `meho login`. The CLI sends it in
+	// the Meho-Session-Id header on every request, so the backplane can
+	// record it as the session of each audit row. A token refresh keeps
+	// it; the next login makes a new one.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // TokenStore is the storage backend for credentials persisted across

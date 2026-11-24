@@ -4,7 +4,9 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -64,7 +66,17 @@ func runShow(cmd *cobra.Command, sessionID string, jsonOut bool, backplaneOverri
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 	}
 	if jsonOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+		// Print the server's JSON, not the decoded struct: a field the
+		// server leaves out (mcp_sessions with AUDIT_SESSION_LINKS off)
+		// stays out instead of turning into null.
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, resp.Body, "", "  "); err != nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("backplane returned a session that is not valid JSON"), jsonOut)
+		}
+		pretty.WriteByte('\n')
+		_, err := cmd.OutOrStdout().Write(pretty.Bytes())
+		return err
 	}
 	printDetail(cmd, resp.JSON200)
 	return nil
@@ -78,12 +90,12 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 		}
 		return t.UTC().Format(time.RFC3339)
 	}
-	fmt.Fprintf(out, "session:      %s\n", s.SessionId)
-	fmt.Fprintf(out, "project:      %s\n", s.Project)
-	fmt.Fprintf(out, "app:          %s %s\n", s.App, orNone(s.AppVersion))
-	fmt.Fprintf(out, "uploaded by:  %s\n", s.UploadedBySub)
-	fmt.Fprintf(out, "state:        %s\n", s.State)
-	fmt.Fprintf(out, "outcome:      %s\n", orNone(s.Outcome))
+	fmt.Fprintf(out, "session:      %s\n", output.SafeText(s.SessionId))
+	fmt.Fprintf(out, "project:      %s\n", output.SafeText(s.Project))
+	fmt.Fprintf(out, "app:          %s %s\n", output.SafeText(s.App), output.SafeText(orNone(s.AppVersion)))
+	fmt.Fprintf(out, "uploaded by:  %s\n", output.SafeText(s.UploadedBySub))
+	fmt.Fprintf(out, "state:        %s\n", output.SafeText(string(s.State)))
+	fmt.Fprintf(out, "outcome:      %s\n", output.SafeText(orNone(s.Outcome)))
 	fmt.Fprintf(out, "started:      %s\n", when(s.StartedAt))
 	fmt.Fprintf(out, "ended:        %s\n", when(s.EndedAt))
 	fmt.Fprintf(out, "last upload:  %s\n", s.LastSeenAt.UTC().Format(time.RFC3339))
@@ -96,7 +108,7 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 	fmt.Fprintf(out, "\nfiles (%d):\n", len(paths))
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	for _, p := range paths {
-		fmt.Fprintf(tw, "  %s\t%d bytes\tsha256 %s\n", p, s.Files[p].Size, s.Files[p].Sha256)
+		fmt.Fprintf(tw, "  %s\t%d bytes\tsha256 %s\n", output.SafeText(p), s.Files[p].Size, output.SafeText(s.Files[p].Sha256))
 	}
 	_ = tw.Flush()
 
@@ -109,6 +121,17 @@ func printDetail(cmd *cobra.Command, s *api.SessionDetail) {
 		}
 		fmt.Fprintf(tw, "  #%d\t%s\t%d bytes\t%d replaced\t%s\n",
 			u.Seq, u.UploadedAt.UTC().Format(time.RFC3339), u.ArchiveBytes, u.Redactions, mark)
+	}
+	_ = tw.Flush()
+
+	// The MCP sessions of the session's calls. Their audit rows link here.
+	if s.McpSessions == nil || len(*s.McpSessions) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\nmcp sessions (%d):\n", len(*s.McpSessions))
+	tw = tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, link := range *s.McpSessions {
+		fmt.Fprintf(tw, "  %s\twork ref %s\n", link.McpSessionId.String(), output.SafeText(orNone(link.WorkRef)))
 	}
 	_ = tw.Flush()
 }

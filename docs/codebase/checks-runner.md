@@ -129,12 +129,11 @@ tick interval)` — each confirming re-check waits its backoff plus up to
 one tick of grid quantization (the same fire-time contract shape #2245
 states for the scheduler's 30 s grid).
 
-**Satellite asymmetry:** the commit gate lives in
-`record_sensor_result`, so satellite-gateway batch-posted results are
-confirmation-counted identically — but the accelerated re-fire is
-runner-local (`next_fire_at` is the central runner's clock; a satellite
-re-checks at its own posting cadence, so remote confirmation is paced
-by that cadence instead of `retry_backoff_seconds`).
+**Remote runners:** results from a remote (satellite) runner do not go
+through `record_sensor_result`. They are stored in `runner_check_results`
+and nothing reads them yet: they do not change a check's state, do not
+count toward confirmation, and do not reach dashboards, mails or the
+investigator. This is not built yet.
 
 ### Safe reads only
 
@@ -159,6 +158,11 @@ non-`safe` operation for approval. See `sensor.md`, step 4 of
   threshold is this × the tick interval (60 s by default). Scales with
   the tick grid; the minimum of 2 keeps the threshold above the ordinary
   sleep-then-tick gap.
+- `SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3, 1 to 1000) — after
+  this many evaluations in a row with a refused login, the runner pauses
+  the sensor (`status_reason='auth_failed:ConnectorAuthError'`). Only an
+  evaluation whose call to the target succeeded sets the count back to
+  0; a timeout or another failed call leaves it as it is.
 - `CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` with
   `VAULT_ADDR` set — then `VAULT_CHECK_RUNNER_ROLE` must name a Vault
   role other than `VAULT_OIDC_ROLE`, or the runner does not start

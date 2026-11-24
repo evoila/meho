@@ -13,7 +13,7 @@ operations one run may use and approve it once.
 2. **A person approves it in MEHO**, on REST or with
    `meho approvals runs approve <id>`. The CLI shows the list and asks for
    `yes` first. The same group rule as for one request holds: a list with a
-   `dangerous` operation needs a MEHO-SA-Operator or a tenant admin.
+   `dangerous` operation needs a tenant admin.
 3. **The add-on reads the result.** It polls
    `GET /api/v1/service-principals/run-approvals/{id}` until the status is
    `approved` (or `revoked`).
@@ -38,8 +38,10 @@ status. MEHO records the decision; there is no second-person step.
   never deleted. The partial unique index `run_approval_open_run_idx`
   lets one run hold at most one open row (see below).
 - `Tenant.run_approval_target_kinds_enabled` (migration `0143`, default
-  `false`): the tenant setting for target kinds. It is set with the
-  settings file (`policies.run_approval_target_kinds`).
+  `false`): the tenant setting for target kinds
+  (`policies.run_approval_target_kinds`). Only the settings file sets it;
+  turning it on applies only in the web console, which has no settings
+  page yet.
 - `operations/run_approval_schemas.py`: `RunApprovalEntry`,
   `RunApprovalCreate`, `RunApprovalRevoke`, `RunApprovalRead`
   (`status`: `pending`, `approved`, `revoked`, `ended`, `expired`).
@@ -47,6 +49,8 @@ status. MEHO records the decision; there is no second-person step.
   approve, revoke, end).
 - `operations/run_approval_gate.py`: `consult_and_record_run_approval`,
   the call-time check.
+- `operations/run_approval_notes.py`: `with_wait_notes`, the
+  `entries_that_wait` notes of an answer.
 - `api/v1/run_approvals.py`: the REST routes.
 - `cli/internal/cmd/approvals/runs.go`: `meho approvals runs list|show|approve|revoke`.
 
@@ -87,12 +91,14 @@ When none covers the call, it calls `consult_and_record_run_approval`:
 
 - It reads the run reference from `work_ref_var` (bound from
   `Meho-Work-Ref`). No run reference: no cover.
-- It never covers an operation with a delete sign (the same rule as the
-  standing grants, `service_grants.delete_grant_reason`: the
+- It never covers an operation that `service_grants.never_covered_reason`
+  names: one that reads, writes or makes a credential (see below), one a connector marks
+  for per-call approval, one that connects to an address the caller
+  gives, one classified to always wait, or one with a delete sign (the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
-  delete name or pattern), an operation that connects to an address the
-  caller gives, or an operation that runs a command as root on the host.
-  Those wait for a person on each call.
+  delete name or pattern). The standing grant check uses the same
+  function. On top of it, a run approval never covers an operation that
+  runs a command as root on the host. Those wait for a person on each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same
   run reference, approved, not revoked, not ended, before `expires_at`.
   The key is the `sub`, never a client name.
@@ -157,17 +163,105 @@ a standing grant covers such an operation:
 - At call time the gate never lets a run approval or a standing grant clear
   a marked operation.
 
-Marked today: `msad.group.add-member` and `msad.group.remove-member`. A group
-membership gives rights in the domain.
+Marked today:
+
+- `msad.group.add-member` and `msad.group.remove-member`. A group
+  membership gives rights in the domain.
+- `secret.move`. A move writes a secret into a store or into a file on a
+  host, so a person checks each place and owner.
+- Every operation registered as a change of rights
+  (`register_grant_op`, `register_rights_change_op` in
+  `operations/grant_approval.py`). The register functions set the mark
+  themselves. Examples: `policy.classify` and the Keycloak writes that
+  change what a token says or who has a role.
+
+## Never covered: an operation that reads, writes or makes a credential
+
+A call that reads, writes or makes a credential always waits for a
+person. No standing grant, no agent grant and no run approval covers it.
+The classes are `credential_read` (for example `k8s.secret.read_to_ref`
+or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
+`credential_mint` (for example `vault.token.create`). The class comes from
+the class stored on the row of an ingested operation, or from the op id (a
+connector's `declare_op_classes`, or the core lists of
+`broadcast/events.py`). An operation a connector marks with
+`declare_credential_capable` counts too (today `k8s.exec` and
+`proxmox.api.write`), and so does a `k8s.apply` whose manifest holds a
+Secret or cannot be read. The rule is the one of the standing grants
+(`service_grants.credential_grant_reason`,
+[service-principal-grants.md](service-principal-grants.md#credential-calls)):
+
+- At call time `_never_covered` in `run_approval_gate.py` refuses it, and
+  logs `run_approval_refused_credential` with the reason "A standing
+  grant, an agent grant or a run approval never covers 'OP': it reads,
+  writes or makes a credential, so a person approves each call." The call
+  gets the same answer as with no run approval. The shadow evaluator
+  (`policy/floors.py::run_approval_may_clear`) gives the same answer.
+- When such a service call waits, its reason ends with "the operation
+  reads, writes or makes a credential, so no standing grant, no agent
+  grant and no run approval covers it; a person approves each call"
+  (`_validate.CREDENTIAL_WAIT_NOTE`). The `approval.request` audit row of
+  the wait keeps the reason of the policy gate in `payload.wait_reason`.
+- This also holds for a row that a person approved before the upgrade
+  that brought the rule: the gate reads the class at call time, not from
+  the row.
+- `RunApprovalService.request` refuses such an entry (`_entry_refusal`):
+  by op id before the lookup, and by the stored class after it. The
+  answer is "entries[N]: " plus the reason and "Leave it out."
+- A request made before this rule can still list such an entry. The
+  answer of show and approve has `entries_that_wait`: one note per such
+  entry whose calls wait (`service_grants.credential_call_waits`), with
+  its position (`entry`), `connector_id`, `op_id` and the reason "reads,
+  writes or makes a credential. A run approval never covers it: each call
+  waits for a person" (`operations/run_approval_notes.py`). For
+  `vault.kv.read` the reason is "reads a credential. A run approval never
+  covers it: each call with reveal_secret waits for a person". A read
+  that returns no secret value gets no note. Request answers have an empty
+  list. The list, revoke and end routes leave the field `null`, because
+  they look up no operation.
+  `meho approvals runs show` and `approve` print the reason under the
+  entry.
+
+## Approver routing
+
+With the `POLICY_APPROVER_ROUTING` switch on, each entry of the list is
+routed like a single request ([approvals.md](approvals.md), "Approver
+routing"). When a person approves the list, `_check_routed_entry` works
+out the login group kinds that may approve each entry, from the policy
+file's `routing` section, the entry's risk level and connector in this
+tenant, and its category when the lookup gave one. A person whose group
+kind is not among them gets 403 `approval_group_required` with the entry
+and one sentence that names who may approve. A change of rights is not
+routed. A run approval stores no kinds: they are worked out at the
+approve. With the switch off, nothing changes.
+
+## The people behind the service login
+
+`RunApprovalService.approve` looks up the people behind the service login
+that asked (`_check_people_behind`): who paired or owns its add-on and who
+gave one of its standing grants in force. MEHO finds the add-on pairing by
+the login id, and by the client id it stored on the list when the add-on
+asked (`run_approval.principal_client_id`). The lookup runs at approve time,
+so a list that waited across an upgrade follows the rule too.
+
+- A person behind the login may approve the list only when they may approve
+  their own change (`Operator.may_self_approve`). Else `403`
+  `own_change: ...`.
+- MEHO knows nobody behind the login: only an admin may approve. Else `403`
+  `requester_not_known: ...`.
+- An entry that is a change of rights: never the requester and never a
+  person behind it (`rights_change_required`).
+
+See [The people behind a request](approvals.md#the-people-behind-a-request).
 
 ## REST
 
 | Verb | Path | Who |
 |---|---|---|
-| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request |
+| `POST` | `/api/v1/service-principals/run-approvals` | a service principal; others get 403 `service_principal_required`. 422 for a delete entry, an entry that runs a command as root on the host, a target kind the tenant does not allow, a bad expiry; 409 when the run already has a live request. 422 also for an entry that reads, writes or makes a credential |
 | `GET` | `/api/v1/service-principals/run-approvals` | approvals access (`operator` role or `approver`); filters `principal_sub`, `status` |
 | `GET` | `.../{id}` | approvals access; 404 across tenants |
-| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a MEHO-SA-Operator or a tenant admin, the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
+| `POST` | `.../{id}/approve` | a person with approvals access and a fresh approval sign-in, like approving one request: a machine token gets 403 `human_principal_required`, a stored login token gets 401 with the RFC 9470 challenge. 409 when not pending; 403 `role_floor_required` when an entry needs a higher role; 403 `approval_group_required` when an entry's operation is `dangerous` (or `destructive`) and the person is not a tenant admin (MEHO-Admins), the same group rule as approving one request ([decision](../decisions/approval-groups-and-self-approval.md)); 422 when MEHO cannot find an entry's operation in the tenant, because its risk level is not known |
 | `POST` | `.../{id}/revoke` | a person with approvals access. Body `{"reason": ...}` (optional). Works on a pending request too (turns it down) |
 | `POST` | `.../{id}/end` | the principal that asked; 404 for anyone else |
 
@@ -184,6 +278,11 @@ There is no MCP tool. Approving is a person's decision (v0.1-spec §7).
 ## Tests
 
 `tests/test_run_approvals.py` (call time, dispatch, revoke, end, expiry,
-destructive, root commands, tenants, target kinds), `tests/test_api_v1_run_approvals.py`
-(REST rules), `tests/migrations/test_migration_0143_add_run_approval.py`,
+destructive, root commands, tenants, target kinds),
+`tests/test_run_approval_credential_reads.py` (every registered credential
+read, from the registry; the gate and the shadow evaluator agree; the
+notes of show and approve), `tests/test_credential_calls_always_wait.py`
+(every registered credential read, write and mint, from the registry;
+refusals at create time), `tests/test_api_v1_run_approvals.py`
+(REST rules), `tests/test_run_approvals_routing.py` (approver routing), `tests/migrations/test_migration_0143_add_run_approval.py`,
 `cli/internal/cmd/approvals/runs_test.go`.

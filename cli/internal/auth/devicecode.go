@@ -5,6 +5,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -335,6 +336,15 @@ var (
 	lastCheckMargin = 2 * time.Second
 )
 
+// pollNow, pollSleep and pollDeadline are the clock, the wait and the
+// code's deadline of the polling loop. Tests replace them with a clock
+// they control, so no test has to wait in real time.
+var (
+	pollNow      = time.Now
+	pollSleep    = sleepCtx
+	pollDeadline = context.WithDeadline
+)
+
 // errDeviceCodeExpired is returned when the code's lifetime ran out
 // before the IdP approved it — either because the IdP said so
 // (expired_token) or because our own last check before the end was
@@ -371,7 +381,7 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 	pollCtx := ctx
 	if !da.Expiry.IsZero() {
 		var cancel context.CancelFunc
-		pollCtx, cancel = context.WithDeadline(ctx, da.Expiry)
+		pollCtx, cancel = pollDeadline(ctx, da.Expiry)
 		defer cancel()
 	}
 	// codeEnded reports whether the code's own deadline, and not the
@@ -387,11 +397,11 @@ func pollDeviceToken(ctx context.Context, httpClient *http.Client, tokenURL, cli
 
 	first := true
 	for {
-		delay, last, ok := nextCheck(time.Now(), wait, first, da.Expiry)
+		delay, last, ok := nextCheck(pollNow(), wait, first, da.Expiry)
 		if !ok {
 			return nil, errDeviceCodeExpired
 		}
-		if err := sleepCtx(pollCtx, delay); err != nil {
+		if err := pollSleep(pollCtx, delay); err != nil {
 			if codeEnded() {
 				return nil, errDeviceCodeExpired
 			}
@@ -680,6 +690,7 @@ func ConvertOAuthToken(tok *oauth2.Token, backplaneURL, issuer, clientID string)
 		RefreshToken: tok.RefreshToken,
 		TokenType:    tok.TokenType,
 		Expiry:       tok.Expiry,
+		SessionID:    NewSessionID(),
 	}
 	// id_token rides in the oauth2.Token Extra() map — it's not a
 	// first-class field because the OAuth 2.0 spec doesn't define it
@@ -743,4 +754,16 @@ func IsInvalidScope(err error) bool {
 		Error string `json:"error"`
 	}
 	return json.Unmarshal(retr.Body, &payload) == nil && payload.Error == "invalid_scope"
+}
+
+// NewSessionID returns a random version-4 UUID in its text form. Login
+// calls it once; the value is the session id of that login.
+func NewSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("meho: no random bytes for the session id: " + err.Error())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

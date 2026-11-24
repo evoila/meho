@@ -51,19 +51,44 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.db.models import AuditEventClass
 from meho_backplane.flight_recorder import TraceSpanView, TraceView
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = [
     "AuditClassCounts",
     "AuditClassCountsRequest",
     "AuditEntry",
+    "AuditEntryDetail",
     "AuditQueryRequest",
     "AuditQueryResult",
     "AuditReplayResult",
     "AuditTraceResult",
+    "AuditTraceSearchResult",
     "ReplayNode",
     "TraceSpanView",
     "TraceView",
 ]
+
+
+def _is_none(value: object) -> bool:
+    return value is None
+
+
+class AuditEntryDetail(AuditEntry):
+    """The 200 body of ``GET /api/v1/audit/show/{audit_id}``: one row, and its stored session.
+
+    Only this route has ``stored_session_id`` (#4904). The list, query and
+    replay answers keep the plain :class:`AuditEntry`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stored_session_id: str | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description="The stored agent session this row belongs to, for "
+        "`meho sessions show <id>`. Sent only with the switch AUDIT_SESSION_LINKS "
+        "on, to a person who may read sessions, for a row with a stored session.",
+    )
 
 
 class _AuditFilterFields(BaseModel):
@@ -87,7 +112,13 @@ class _AuditFilterFields(BaseModel):
     audit_id: uuid.UUID | None = None
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
-    work_ref: str | None = Field(default=None, max_length=256)
+    work_ref: WorkRefFilter | None = Field(default=None, description=WORK_REF_FILTER_DESCRIPTION)
+    # ``true``: only the short rows, stored when the database refused the
+    # full row. ``false``: the other rows. Not set: no filter (#6452).
+    full_row_lost: bool | None = None
+    # ``true``: only the rows where the writer replaced a character or a
+    # number so the table could store it. ``false``: the other rows (#6452).
+    text_changed: bool | None = None
 
     def to_filters(self) -> AuditQueryFilters:
         """Return the substrate filters, with ``since`` / ``until`` parsed.
@@ -209,6 +240,17 @@ class AuditReplayResult(BaseModel):
     row_count: int
     excluded_null_session_count: int
     loose_row_count: int
+
+
+class AuditTraceSearchResult(BaseModel):
+    """200 body for ``GET /api/v1/audit/traces`` (#6452).
+
+    The stored traces that match the request id, caller and time window,
+    newest first. A trace is listed even when its audit row was never
+    stored.
+    """
+
+    items: list[TraceView]
 
 
 class AuditTraceResult(BaseModel):

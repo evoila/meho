@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.schemas import SECRET_FIELD_MAP_MAX_ENTRIES
 
 __all__ = [
     "TARGETS_REGISTER_PARAMETER_SCHEMA",
@@ -74,8 +75,10 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Dialable host or IP. Screened by the SSRF guard: a "
                 "non-public destination (private / loopback / link-local / "
                 "metadata / CGNAT) is rejected unless the operator "
-                "allowlist exempts it."
+                "allowlist exempts it. An address MEHO connects to, so every "
+                "call waits for a person's approval."
             ),
+            "x-meho-caller-address": True,
         },
         "aliases": {
             "type": "array",
@@ -103,6 +106,7 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional fully-qualified domain name. Screened by the same SSRF guard as `host`."
             ),
+            "x-meho-caller-address": True,
         },
         "secret_ref": {
             "type": ["string", "null"],
@@ -157,7 +161,10 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "extras": {
             "type": "object",
-            "description": "Optional free-form connector-specific metadata.",
+            "description": (
+                "Optional free-form connector-specific metadata. A connector can "
+                "read rules from it, so the approval card shows every key and value."
+            ),
         },
         "notes": {
             "type": ["string", "null"],
@@ -169,6 +176,23 @@ TARGETS_REGISTER_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional connector-implementation override, validated "
                 "against the impls registered for `product`."
+            ),
+        },
+        "secret_field_map": {
+            "type": "object",
+            "maxProperties": SECRET_FIELD_MAP_MAX_ENTRIES,
+            "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 200},
+            "description": (
+                "Optional `{connector_field: secret_field}` map, for a secret "
+                "whose field names differ from the ones the connector reads. "
+                "Field names only, never values."
+            ),
+        },
+        "flight_recorder_capture": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Optional capture setting for this target: `true` on, `false` "
+                "off, `null` or omitted follows the instance setting."
             ),
         },
     },
@@ -218,6 +242,15 @@ TARGETS_REGISTER_RESPONSE_SCHEMA: dict[str, Any] = {
                 "What to do next. A new target is not probed yet: run "
                 "`targets.probe` with its name to detect the product and "
                 "version."
+            ),
+        },
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when a setting is allowed but risky, for example a "
+                "Keycloak target that manages the realm MEHO itself signs in with. "
+                "Tell the person about each line."
             ),
         },
     },

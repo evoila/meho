@@ -50,12 +50,12 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Memory{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Operator + tenant + target memories across the 5 scopes.
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-sm opacity-70" aria-live="polite">
+      <span class="text-sm text-muted" aria-live="polite">
         {{ entry_count }} memor{{ "y" if entry_count == 1 else "ies" }}
       </span>
       {# T2 #878: "+" button opens the HTMX-loaded create modal. The

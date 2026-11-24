@@ -26,6 +26,11 @@ copyright: Copyright &copy; 2026 evoila Group — Apache 2.0
 
 strict: true
 
+# Adds the rows of docs/upgrade-rows/ to the upgrade table and checks the
+# tables (docs/codebase/how-code-is-organised.md, "Upgrade rows").
+hooks:
+  - scripts/ci/upgrade_rows.py
+
 theme:
   name: material
   palette:
@@ -64,12 +69,14 @@ nav:
       - "Form 2: Linux server": install/form-2-linux-server.md
       - "Form 3: Your Kubernetes": install/form-3-your-kubernetes.md
       - Install MEHO on VKS by hand: install/form-3-vks.md
+      - Install MEHO on OpenShift by hand: install/form-3-openshift.md
       - The setup page and the settings file: install/setup-page.md
       - The first-start checks: install/first-start-checks.md
       - Your first day: install/first-day.md
       - Set up login: install/login-setup.md
       - Tools for your laptop: install/laptop-tools.md
       - Back up, restore and update: install/backup-restore-update.md
+      - Move the login setup to another install: install/move-login-setup.md
       - Common problems: install/common-problems.md
       - Ways to install MEHO: install/ways-to-install.md
       - "The install trail: full detail and your own parts": install/index.md
@@ -107,6 +114,7 @@ nav:
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
       - MEHO on your phone and laptop: guides/phone-and-laptop.md
+      - "Your tools: sign out one tool": guides/your-tools.md
       - Memory and knowledge: guides/memory-and-knowledge.md
       - Agent sessions: guides/agent-sessions.md
       - Audit forensics: guides/audit-forensics.md
@@ -125,6 +133,8 @@ nav:
   - Reference:
       - reference/index.md
       - What's new: reference/whats-new.md
+      # Written by hand, not generated.
+      - Words we use: reference/words.md
       # Generated from the connector registry + MCP tool registry by
       # backend/scripts/generate_reference_docs.py; freshness is enforced
       # by backend/tests/test_reference_docs_drift.py.

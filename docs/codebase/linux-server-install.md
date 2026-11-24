@@ -38,10 +38,10 @@ of the design:
 5. **Write the two one-time files.** The first-login passwords and the
    unseal key go from two Kubernetes Secrets into two files that only root
    can read.
-6. **Install the `meho` command, write the console CA and the install
-   record, and read the first-start list.** The result names the console
-   address, the CA file, the paths of the two one-time files, and the
-   first-start list (#4042) with its lines.
+6. **Install the `meho` command, and write the console CA and the install
+   record.** The result names the console address, the CA file, the paths
+   of the two one-time files, and where to read the first-start list after
+   the first login.
 
 `--from-disk --hostname <fqdn>` runs only the steps that need the host name:
 RKE2's settings, the start of RKE2, and steps 4 to 6. Before the start it
@@ -63,7 +63,8 @@ The download itself, `meho-linux-<version>-amd64.tar`, is built by
 [linux-server-download.md](linux-server-download.md).
 
 The install, `--from-disk` and the update all end with the console CA and
-the first-start list (see [Step 6](#step-6-the-meho-command-the-console-ca-the-install-record-and-the-first-start-list)).
+the line that names where to read the first-start list (see
+[Step 6](#step-6-the-meho-command-the-console-ca-and-the-install-record)).
 
 ## Key files
 
@@ -78,7 +79,7 @@ the first-start list (see [Step 6](#step-6-the-meho-command-the-console-ca-the-i
 | `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group with the record of the parts the install created, the kernel settings), and `cis_state`. `meho-host` sources it too. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. For the update: the restart, and the wait for the new run of `rke2-server`. |
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
-| `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the console CA file, the install record, the first-start list, the result lines. |
+| `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the console CA file, the install record, the result lines (with where to read the first-start list). |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
 | `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network`, `log-server` (only on the appliance) and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
@@ -118,10 +119,13 @@ them (see [The update](#the-update)). The other checks follow under
 "Step 1".
 
 The place answers are checked before any step runs, as wrong usage (exit
-code 2): `--first-tenant-id` must be a UUID, `--admin-user` and
-`--approver-user` take letters, digits and `. _ - @`, are put in lower
-case first (Keycloak keeps user names in lower case) and must then
-differ. So the values go into the Helm values and the install record as
+code 2): `--first-tenant-id` must be a UUID, `--admin-user` takes letters,
+digits and `. _ - @` and is put in lower case first (Keycloak keeps user
+names in lower case). There is no `--approver-user`: the install makes
+one Admin login. A record or a values file of an older install that has
+an `approver_user` or `approverUsername` key still works: the update
+ignores the key and writes both files again without it, and it leaves the
+login that exists in Keycloak as it is. So the values go into the Helm values and the install record as
 they are, with no escaping.
 
 **Why DNS needs care.** On Ubuntu, `systemd-resolved` answers from
@@ -184,10 +188,47 @@ the first tenant's id and the two user names. Without `--first-tenant-id`,
 the id comes from an existing `values-place.yaml`, so a second run keeps the
 id Keycloak already uses; on a fresh machine it is a new UUID read once from
 `/proc/sys/kernel/random/uuid`. The chart reaches its built-in parts by pod
-label (#4047), so the file holds no network-policy range. Older installs
-wrote the pod range there as `networkPolicy.postgresCIDR` and `vaultCIDR`;
-the update writes the file again from the answers in `install.json`, which
-removes them. The file holds no secret.
+label (#4047), so the file holds no network-policy range for them. Older
+installs wrote the pod range there as `networkPolicy.postgresCIDR` and
+`vaultCIDR`; the update writes the file again from the answers in
+`install.json`, which removes them. The file holds no secret.
+
+The file also holds the outgoing rule of the MEHO pod, as
+`networkPolicy.extraEgress` (#6612, `render_egress_values`). The chart's
+NetworkPolicy lets the pod reach only the built-in parts and DNS. Without
+this rule, MEHO on form 2 reaches none of the systems it manages and not
+the AI service. The rule lets the pod reach **every address outside the
+built-in Kubernetes, on every port**: an `ipBlock` of `0.0.0.0/0` with
+`except` for the pod range (`--cluster-cidr`), the service range
+(`--service-cidr`) and each IPv4 address of this machine as a `/32`
+(`machine_addresses`). So the pod reaches no other pod through this rule,
+and none of RKE2's own ports on this machine (the Kubernetes API, the
+kubelet, etcd). An address inside the two ranges, such as the one of
+RKE2's `flannel.1` interface, is closed by its range already and is left
+out. Kubernetes says an `ipBlock` should name addresses outside the
+cluster; the `except` list keeps the cluster out.
+
+The pod reaches its own console address through a second rule, which the
+chart adds from `values-single-node.yaml`
+(`networkPolicy.ingressControllerEgress`, #6618; see
+[Network policies and Traefik](#network-policies-and-traefik)). The
+`ipBlock` rule cannot do it: a connection to this machine's address on
+port 443 reaches the Traefik pod, inside the pod range, before Calico
+checks the rules.
+
+`values-single-node.yaml` also mounts the optional ConfigMap
+`meho-console-trust` into the `meho` pod and sets `CONSOLE_CA_FILE` to its
+file (#6698). The install writes no ConfigMap, so with the install's own
+CA the first-start list trusts only the system trust bundle, and its
+`certificate` line stays red. `meho-host certificate` writes the
+ConfigMap with the customer's CA and restarts the pod
+([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
+
+The rule comes from the answers of the install, so the update writes it
+again with the ranges in `install.json`. When no address of this machine
+can be read, the rule is written without the `/32` entries, and a
+`[WARN]` line says that the ports of this machine are not closed to MEHO.
+The decision and the lab test are on #6612.
 
 `install_core` runs the download's Helm:
 
@@ -222,7 +263,7 @@ own messages are dropped, so a failure shows only the script's line.
 
 | Path | Mode | Content |
 | --- | --- | --- |
-| `/var/lib/meho/first-login-passwords` | 0600 | one `key=value` line per key of `meho-core-first-login`: `admin_username`, `admin_password`, `approver_username`, `approver_password` |
+| `/var/lib/meho/first-login-passwords` | 0600 | one `key=value` line per key of `meho-core-first-login`: `admin_username`, `admin_password` (and `approver_username` and `approver_password` on a host whose Secret already has them) |
 | `/var/lib/meho/unseal-key` | 0600 | the `key` of `meho-core-vault-unseal`, one line |
 
 The first-login Secret must exist; the script stops otherwise. The unseal
@@ -232,7 +273,7 @@ writes no key file and goes on. The OpenBao setup Job (#4044) makes this
 Secret on every fresh install, but `install.sh` still treats a missing one
 as a warning, not a `[FAIL]` (`lib/core.sh`).
 
-### Step 6: the `meho` command, the console CA, the install record and the first-start list
+### Step 6: the `meho` command, the console CA and the install record
 
 `install_cli` copies the download's `bin/meho` to `/usr/local/bin/meho`
 (mode 0755).
@@ -249,6 +290,8 @@ with Kubernetes tools.
 
 - Every run writes the file again: the install, `--from-disk` and the
   update. So it follows a certificate that changed in between.
+  `meho-host certificate` (#4738) writes it too, with the customer's CA
+  ([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
 - A Secret without a CA certificate (the read fails, or the value has no
   `-----BEGIN CERTIFICATE-----` line) removes the file and gives a
   `[WARN]`. A file from an earlier run could name a CA that the console no
@@ -275,7 +318,6 @@ because the update writes RKE2's settings again from the stored answers.
     "public_address": "",
     "first_tenant_id": "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
     "admin_user": "admin",
-    "approver_user": "approver",
     "cluster_cidr": "10.42.0.0/16",
     "service_cidr": "10.43.0.0/16",
     "join_address": "",
@@ -284,31 +326,16 @@ because the update writes RKE2's settings again from the stored answers.
 }
 ```
 
-`read_first_start_list` runs last, after the install record. It runs
-`meho status --first-start --backplane https://<hostname>` with the
-installed `meho` command, so it reads the list through the console address,
-the way a person does (#4042). The command trusts the console CA through
-`SSL_CERT_FILE`. On Linux, Go's `crypto/x509` reads that file in place of
-the system's CA file; the system's CA folders still count. Without the CA
-file the variable is not set, and the CA store of the machine is the
-anchor. The exit code of the command decides the result:
-
-| Exit code | State | What install.sh does |
-| --- | --- | --- |
-| 0 | green | `[ok] the first-start list is green`, and the lines in the result |
-| 6 | red | a `[WARN]` that a red line does not stop the install, and the lines in the result |
-| any other | not read | a `[WARN]` with the first line of the command's error output, and the console page `/ui/first-start` for after the first login; no lines in the result |
-
-None of them fails the install. The exit code of `install.sh` says whether
-MEHO is installed, and the list says what to fix on the site (design,
-section 5, step 5). With the install's own certificate, the `certificate`
-line is red, because the MEHO pod does not trust that CA. Behind address
-translation (`--public-address`) the machine may not reach its own name;
-the list is then not read.
+The install does not read the first-start list. MEHO shows the list only
+to a signed-in person who is a tenant admin or a platform admin
+([first-start.md](first-start.md)), and the install has no login. So the
+last line of the result names where to read it after the first login: the
+console page `/ui/first-start`, or `meho login` and then
+`meho status --first-start`. The install never runs the `meho` command.
 
 `print_result` prints the console address `https://<hostname>/ui/`, the CA
 file when it exists, the paths of the two one-time files with what to do
-with them, and the state of the first-start list with its lines:
+with them, and where to read the first-start list:
 
 ```text
 install.sh: MEHO 0.36.0 is installed on meho.example.com.
@@ -316,9 +343,7 @@ install.sh: MEHO 0.36.0 is installed on meho.example.com.
   Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
-  First-start list:      a red line; each red line says what to fix
-    GREEN   dns           ...
-    RED     certificate   ...
+  First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 ```
 
 ### `--from-disk`
@@ -381,7 +406,7 @@ counts as empty.
 The options of a first install stop an update with "An update keeps the
 install's answers", even with the same value: `--hostname`,
 `--public-address`, `--admin-network`, `--first-tenant-id`, `--admin-user`,
-`--approver-user`, `--cluster-cidr`, `--service-cidr`, `--join-address` and
+`--cluster-cidr`, `--service-cidr`, `--join-address` and
 `--join-token-file`. The SSH range changes only with
 `meho-host admin-network`. For the same reason the DNS check of an update
 names only the DNS record in its fix: when the record points elsewhere,
@@ -397,7 +422,7 @@ the install (`check_dns <name> <public address> 1`).
 | 3. install the OS packages of the appliance | only with `--os-packages` (below) |
 | 4. update RKE2 | RKE2's settings and the pod security file again from the stored answers, the MEHO image archive, the storage manifest and the Traefik setting again, RKE2's installer again (it replaces RKE2's own image archive), the CIS host steps again, then `systemctl restart --no-block rke2-server.service` and the wait |
 | 5. update the MEHO core | `values-place.yaml` again from the stored answers, then the same `helm upgrade --install` as the install |
-| 6. the commands, the record and the list | the new `meho` and `meho-host`, the console CA again, `install.json` with the new versions and the date of the update, then the first-start list |
+| 6. the commands, the record and the list | the new `meho` and `meho-host`, the console CA again, `install.json` with the new versions and the date of the update, then the line that names where to read the first-start list |
 
 Without `--os-packages` the steps after step 2 move up by one, so the
 headers always count from 1 without a gap.
@@ -545,7 +570,10 @@ kernel, the script prints a note to restart the machine after the update.
 `values-single-node.yaml` turns the built-in parts on (`corePostgres`,
 `coreKeycloak`, `coreVault`), sets `ingress.className: traefik`,
 `networkPolicy.ingressControllerNamespace: kube-system` (RKE2's Traefik
-runs there) and `ingress.tls.secretName: meho-core-tls`, the self-signed
+runs there), `networkPolicy.ingressControllerEgress.podLabels`
+(`app.kubernetes.io/name: rke2-traefik`, so MEHO can reach its own
+console address, see [Network policies and Traefik](#network-policies-and-traefik))
+and `ingress.tls.secretName: meho-core-tls`, the self-signed
 certificate the install makes. Every storage class stays at the chart's
 default, empty, so the volumes use the default class. The chart points
 MEHO at the built-in parts itself (#4047), so the file names no database
@@ -956,6 +984,15 @@ reach MEHO (`networkPolicy.ingressControllerNamespace: kube-system` in
 `values-single-node.yaml`). No RKE2 policy is in `meho` or
 `local-path-storage`.
 
+The other way round, the chart's own policy limits what the `meho` pod
+may reach. The first-start `certificate` check connects to the console
+address on port 443. From a pod, that connection also goes through the
+host port to the Traefik pod on port 8443, and Calico checks the
+`meho` policy against that pod and port. So `values-single-node.yaml`
+sets `networkPolicy.ingressControllerEgress.podLabels` to the Traefik
+label, and the chart adds a rule to the Traefik pods in `kube-system` on
+port 8443 (#6612). Without it the check says "could not connect".
+
 ### For later Tasks
 
 `cis_state` (read-only) prints `on`, or `off: <reason>`, and returns 0 or
@@ -1146,6 +1183,12 @@ Tasks add in this folder are checked by the same job.
 
 ## Known issues
 
+- **The outgoing rule knows the addresses of this machine at the last run
+  of `install.sh`.** An address the machine gets later is not in the
+  `except` list until the next update, so the MEHO pod can reach the ports
+  of this machine on that address until then. The rules cover IPv4 only.
+  A second node that joins later (`--join-address`) is not in the list
+  either.
 - **The update is not proven on a real machine yet.** The tests here prove
   the order of the steps and what stays, against stub commands. The
   release test (#4742) runs the update from the previous version on a lab
@@ -1161,9 +1204,6 @@ Tasks add in this folder are checked by the same job.
 - **Two builds of `main` of the same day** compare by their commit id as
   text, so an update between them may be refused as "older". Releases and
   builds of different days compare correctly.
-- **`meho-host certificate` (#4738) does not write the console CA file.**
-  It changes the TLS Secret, and the file follows at the next run of
-  `install.sh`. Until then the file names the old CA.
 - **The Helm time limit is 15 minutes per operation:** the wait for the
   pods, and each hook Job, so the whole install may take longer. The
   week-4 install (#4741) shows whether a 4-processor machine needs more.

@@ -33,23 +33,44 @@ the same frames and a ``Last-Event-Id`` from one resumes on the other.
 Automatic activity is not on Broadcast; the dashboard and connector
 cards read recent operations from the audit log instead, and the
 approvals bell reads the approvals badge.
+
+When the stream ends
+====================
+
+The stream ends when the session ends. :func:`session_liveness` runs the
+same check as :func:`~meho_backplane.ui.auth.middleware.require_ui_operator`
+again (a fresh session row, the token check, the tenant and the role),
+at most every ``ui_session_read_revalidation_seconds``, before a frame,
+a heartbeat or a wait. A signed-out, revoked or expired session, or a
+lost role, ends the stream. The browser's ``EventSource`` then opens a
+new one with ``Last-Event-Id``; the session middleware sends a session
+that ended to the login page.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+import math
+import time
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from meho_backplane.api.v1.feed import (
+    StreamLiveness,
     announcement_feed_frames,
     feed_response,
     resolve_feed_start,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.archive_reader import AnnouncementFilter
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.auth.session_ref import session_ref
 
-__all__ = ["build_stream_router", "session_reader"]
+__all__ = ["build_stream_router", "session_liveness", "session_reader"]
+
+_log = structlog.get_logger(__name__)
 
 #: Module-level :class:`fastapi.Depends` closure (ruff B008).
 #: The ``operator`` floor of the REST broadcast and feed reads: a ``read_only``
@@ -72,6 +93,36 @@ def session_reader(session_ctx: UISessionContext) -> Operator:
     )
 
 
+def session_liveness(request: Request, session_ctx: UISessionContext) -> StreamLiveness:
+    """The end of a console stream: the session fails the operator check.
+
+    The route's ``require_ui_operator`` check just passed. Later checks
+    run :func:`require_ui_operator` again, at most every
+    ``ui_session_read_revalidation_seconds`` (``0``: before every frame).
+    """
+    interval = float(get_settings().ui_session_read_revalidation_seconds)
+    last_ok = time.monotonic()
+
+    async def still_valid() -> bool:
+        nonlocal last_ok
+        now = time.monotonic()
+        if now - last_ok < interval:
+            return True
+        try:
+            await require_ui_operator(request, session_ctx)
+        except HTTPException as exc:
+            _log.info(
+                "ui_broadcast_stream_session_ended",
+                session_ref=session_ref(session_ctx.session_id),
+                status_code=exc.status_code,
+            )
+            return False
+        last_ok = now
+        return True
+
+    return StreamLiveness(ends_at=math.inf, still_valid=still_valid)
+
+
 def build_stream_router() -> APIRouter:
     """Construct the broadcast SSE-bridge :class:`APIRouter`.
 
@@ -83,7 +134,6 @@ def build_stream_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        op_class: str | None = Query(default=None, max_length=64),
         principal: str | None = Query(default=None, max_length=256),
         target: str | None = Query(default=None, max_length=256),
         since: str | None = Query(
@@ -95,8 +145,16 @@ def build_stream_router() -> APIRouter:
         """``GET /ui/broadcast/stream`` -- stream the session tenant's announcements."""
         reader = session_reader(session_ctx)
         start = resolve_feed_start(reader, request.headers.get("Last-Event-Id"), since)
-        flt = AnnouncementFilter(op_class=op_class, principal=principal, target=target)
-        return feed_response(announcement_feed_frames(reader, start=start, flt=flt, surface="ui"))
+        flt = AnnouncementFilter(principal=principal, target=target)
+        return feed_response(
+            announcement_feed_frames(
+                reader,
+                start=start,
+                flt=flt,
+                surface="ui",
+                liveness=session_liveness(request, session_ctx),
+            )
+        )
 
     router.add_api_route(
         "/ui/broadcast/stream",

@@ -13,6 +13,7 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/startinggrants"
 )
 
 // newEditCmd returns the `meho agent edit` command.
@@ -21,12 +22,15 @@ import (
 //	  [--identity-ref R] [--model-tier T] [--system-prompt P]
 //	  [--turn-budget N] [--toolset @file] [--output-schema @file]
 //	  [--enabled|--disabled] [--json] [--backplane <url>]
+//	  [--grants none|read-everything|read-targets [--target <name> ...]]
 //
 // Role: tenant_admin. Only the flags the operator actually set are sent
 // in the PATCH body (mirroring the backend's exclude_unset semantics),
 // so a single-field edit leaves the rest untouched. `name` itself is
 // not renamable. A 404 (`agent_not_found`) covers absence /
-// cross-tenant.
+// cross-tenant. A new --identity-ref that names an agent with no grant
+// needs --grants while the server's AGENT_GRANT_REQUIRED is not off, the
+// same as `meho agent create`.
 func newEditCmd() *cobra.Command {
 	var (
 		identityRef       string
@@ -37,6 +41,7 @@ func newEditCmd() *cobra.Command {
 		outputSchema      string
 		enabled           bool
 		disabled          bool
+		grants            startinggrants.Flags
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -50,7 +55,16 @@ func newEditCmd() *cobra.Command {
 			"--enabled / --disabled toggle the parked state (pass at most " +
 			"one). --toolset and --output-schema accept inline JSON, " +
 			"@<path>, or @-; each must be a JSON object. A 404 means the " +
-			"name doesn't exist in your tenant.",
+			"name doesn't exist in your tenant.\n\n" +
+			"--grants picks the first grants of the agent a new " +
+			"--identity-ref names; it needs --identity-ref. MEHO needs the " +
+			"pick when that agent has no grant yet. The CLI never picks for " +
+			"you: when MEHO needs a pick and --grants is missing, it prints " +
+			"the three choices and changes nothing. With --grants, the CLI " +
+			"shows the agent's grants after the edit (--json adds them as " +
+			"\"grants\"). Without --grants, it shows the agent's live " +
+			"grants when it has some: then no pick is needed (--json has " +
+			"them as \"live_grants\").",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -65,6 +79,7 @@ func newEditCmd() *cobra.Command {
 				OutputSchemaArg:   outputSchema,
 				Enabled:           enabled,
 				Disabled:          disabled,
+				Grants:            grants,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 				identityRefSet:    cmd.Flags().Changed("identity-ref"),
@@ -88,6 +103,7 @@ func newEditCmd() *cobra.Command {
 		"new output schema as a JSON object: inline JSON, @<path>, or @-")
 	cmd.Flags().BoolVar(&enabled, "enabled", false, "enable the definition")
 	cmd.Flags().BoolVar(&disabled, "disabled", false, "disable (park) the definition")
+	startinggrants.AddFlags(cmd, &grants)
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw AgentDefinitionRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -105,6 +121,7 @@ type editOptions struct {
 	OutputSchemaArg   string
 	Enabled           bool
 	Disabled          bool
+	Grants            startinggrants.Flags
 	JSONOut           bool
 	BackplaneOverride string
 
@@ -127,10 +144,18 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("pass at most one of --enabled / --disabled"), opts.JSONOut)
 	}
+	pick, err := opts.Grants.Body()
+	if err == nil && pick != nil && !opts.identityRefSet {
+		err = fmt.Errorf("--grants needs --identity-ref: it picks the first grants of the agent that --identity-ref names")
+	}
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), output.Usage(err.Error()), opts.JSONOut)
+	}
 	body, anySet, err := buildEditBody(cmd, opts)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
+	body.StartingGrants = pick
 	if !anySet {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("edit requires at least one field flag to change"), opts.JSONOut)
@@ -145,15 +170,12 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if resp.StatusCode() != http.StatusOK {
+		if pickErr := startinggrants.EditRequestError(resp.StatusCode(), resp.Body); pickErr != nil {
+			return output.RenderError(cmd.ErrOrStderr(), pickErr, opts.JSONOut)
+		}
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	entry := resp.JSON200
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "updated agent definition %q\n", entry.Name)
-	printDefinitionSummary(cmd.OutOrStdout(), entry)
-	return nil
+	return printSaved(cmd, backplaneURL, "updated", resp.JSON200, pick != nil, opts.JSONOut)
 }
 
 // buildEditBody assembles the PATCH request body from only the flags

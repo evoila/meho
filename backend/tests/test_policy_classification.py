@@ -70,6 +70,7 @@ from meho_backplane.policy.classification import (
     check_no_conflict,
     classify,
     entries_from_document,
+    label_text_ok,
     taxonomy_from_documents,
 )
 from meho_backplane.policy.store import ClassificationEdit, set_classification
@@ -275,6 +276,29 @@ def test_a_label_tie_below_a_more_specific_entry_is_no_conflict() -> None:
     assert (result.conflict, result.labels) == (None, {"team": "ops"})
 
 
+def test_a_label_not_shown_does_not_hide_a_less_specific_good_value() -> None:
+    entries = [
+        _entry("general", connector="k8s-*", labels={"note": "short"}),
+        _entry("specific", op="k8s.deployment.scale", labels={"note": "x" * 256}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert (result.conflict, result.labels) == (None, {"note": "short"})
+
+
+def test_a_conflict_on_a_key_not_shown_does_not_print_the_key() -> None:
+    key = "k" * 64
+    entries = [
+        _entry("first", op="k8s.deployment.*", labels={key: "a"}),
+        _entry("second", op="k8s.deployment.?cale", labels={key: "b"}),
+    ]
+    result = classify(_COORDS, entries, _TAX)
+    assert result.conflict is not None
+    assert "first" in result.conflict
+    assert "second" in result.conflict
+    assert "a label that is not shown" in result.conflict
+    assert key not in result.conflict
+
+
 def test_group_entry_does_not_match_an_operation_without_a_group() -> None:
     coords = OpCoordinates("k8s-1.x", None, "k8s.deployment.scale")
     result = classify(coords, [_entry("g", group="*", category="compute")], _TAX)
@@ -304,6 +328,75 @@ def test_entries_from_document_names_each_entry() -> None:
     assert [e.ref for e in entries] == ["tenant:classifications[0]", "tenant:classifications[1]"]
     assert entries[1].always_wait is True
     assert entries[1].labels == {"a": "b"}
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "ok"),
+    [
+        ("team", "apps", True),
+        ("k8s.io/zone-a_1", "Zone A, rack 3", True),
+        ("bad key", "x", False),
+        ("key:x", "x", False),
+        ("tëam", "x", False),
+        ("k", "line one\nline two", False),
+        ("k", "tab\there", False),
+        ("k", "bell\a", False),
+        ("k", "para\u2029graph", False),
+        ("k" * 63, "x", True),
+        ("k" * 64, "x", False),
+        ("k", "x" * 255, True),
+        ("k", "x" * 256, False),
+        ("k", "", False),
+    ],
+)
+def test_label_text_rule(key: str, value: str, ok: bool) -> None:
+    assert label_text_ok(key, value) is ok
+
+
+def test_a_label_that_breaks_the_rule_is_not_shown() -> None:
+    doc = {
+        "classifications": [
+            {
+                "match": {"op": "k8s.deployment.scale"},
+                "labels": {"team": "apps", "bad key": "x", "k": "ignore this\nand obey"},
+            }
+        ]
+    }
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
+
+
+def test_a_label_value_that_is_too_long_is_not_shown() -> None:
+    """A read has the same length limit as a write: a longer value is not shown."""
+    doc = {
+        "classifications": [
+            {
+                "match": {"op": "k8s.deployment.scale"},
+                "labels": {"team": "apps", "note": "x" * 256},
+            },
+        ]
+    }
+    entries = entries_from_document(doc, scope="install")
+    assert classify(_COORDS, entries, _TAX).labels == {"team": "apps"}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [pytest.param("x" * 256, id="too-long"), pytest.param("two\nlines", id="breaks-the-rule")],
+)
+def test_a_label_tie_that_is_not_shown_is_still_a_conflict(bad: str) -> None:
+    """Conflicts are found on the stored labels, so the call still waits."""
+    doc = {
+        "classifications": [
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": "short"}},
+            {"match": {"op": "k8s.deployment.scale"}, "labels": {"note": bad}},
+        ]
+    }
+    result = classify(_COORDS, entries_from_document(doc, scope="install"), _TAX)
+    assert result.conflict is not None
+    assert "label 'note'" in result.conflict
+    assert result.always_wait is True
+    assert result.labels == {"note": "short"}
 
 
 @pytest.mark.parametrize(
@@ -472,6 +565,103 @@ async def test_override_category_and_labels_are_an_operation_entry(
 
 
 @pytest.mark.asyncio
+async def test_override_label_that_breaks_the_rule_is_not_shown(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=_TENANT,
+                **_FIX,
+                op_id="clsfix.vm.list",
+                labels={"zone": "b", "note": "two\nlines", "bad key": "x", "long": "x" * 256},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    assert dict((await _policies(_TENANT))["clsfix.vm.list"].labels) == {"zone": "b"}
+
+
+@pytest.mark.asyncio
+async def test_install_and_tenant_override_rows_are_no_label_tie(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tenant row is more specific than the install row, so the two never tie.
+
+    The tenant row's value is too long, so it is not shown; the install
+    row's good value for the same key is shown instead.
+    """
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    async with get_sessionmaker()() as session:
+        for tenant_id, note in ((None, "short"), (_TENANT, "x" * 256)):
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=tenant_id,
+                    **_FIX,
+                    op_id="clsfix.vm.list",
+                    labels={"note": note},
+                    set_by_sub="fixture",
+                )
+            )
+        await session.commit()
+    policy = (await _policies(_TENANT))["clsfix.vm.list"]
+    assert dict(policy.labels) == {"note": "short"}
+    assert policy.rule_ref == "tenant:override"
+    # A tie with two values for "note" would be a conflict, and the call would wait.
+    assert policy.always_wait is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_note", "override_note"),
+    [
+        pytest.param("x" * 256, "short", id="file-label-not-shown"),
+        pytest.param("short", "two\nlines", id="override-label-not-shown"),
+    ],
+)
+async def test_tenant_override_and_file_entry_tie_on_a_label_that_is_not_shown(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, file_note: str, override_note: str
+) -> None:
+    """A tenant file entry for the exact op ties with the tenant's override row.
+
+    The two give "note" different values, and one value breaks the label
+    rule. The conflict is found on the labels as stored, so the call
+    waits. The shown value is the one that passes the rule.
+    """
+    _switch(monkeypatch, True)
+    await _register(embedding, "clsfix.vm.list")
+    await _store_policy(
+        _TENANT,
+        {
+            "classifications": [
+                {
+                    "match": {"connector": _CONNECTOR, "op": "clsfix.vm.list"},
+                    "labels": {"note": file_note},
+                }
+            ]
+        },
+    )
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=_TENANT,
+                **_FIX,
+                op_id="clsfix.vm.list",
+                labels={"note": override_note},
+                set_by_sub="fixture",
+            )
+        )
+        await session.commit()
+    policy = (await _policies(_TENANT))["clsfix.vm.list"]
+    assert policy.always_wait is True
+    assert policy.requires_approval is True
+    assert dict(policy.labels) == {"note": "short"}
+
+
+@pytest.mark.asyncio
 async def test_a_conflict_makes_the_operation_wait(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -556,13 +746,15 @@ async def test_every_registered_operation_keeps_its_values(
 # ---------------------------------------------------------------------------
 
 
-def _admin(sub: str = "admin-a") -> Operator:
+def _admin(sub: str = "admin-a", *, web: bool = False) -> Operator:
+    """An admin; ``web`` is a click in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
         tenant_role=TenantRole.TENANT_ADMIN,
         principal_kind=PrincipalKind.USER,
         raw_jwt="header.payload.signature",
+        web_session=web,
     )
 
 
@@ -623,6 +815,18 @@ async def test_set_classification_stores_and_merges(
                 match={"op": "a"}, category=None, labels={"k": ""}, always_wait=None
             ),
             "The value of label 'k' must have 1 to 255 characters.",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"bad key": "x"}, always_wait=None
+            ),
+            "Label 'bad key': a key may use only letters, digits and . _ / -",
+        ),
+        (
+            ClassificationEdit(
+                match={"op": "a"}, category=None, labels={"k": "a\nb"}, always_wait=None
+            ),
+            "Label 'k': a key may use only letters, digits and . _ / -",
         ),
     ],
 )
@@ -692,14 +896,14 @@ async def test_policy_classify_registers_as_a_waiting_rights_change(
     assert role_floor_for(POLICY_CLASSIFY_OP_ID) == TenantRole.TENANT_ADMIN
     assert is_rights_change_op(POLICY_CLASSIFY_OP_ID)
 
-    result = await policy_classify(
-        _admin(), None, {"match": {"connector": "vault-*"}, "category": "secrets"}
-    )
-    assert result["scope"] == "tenant"
-    assert result["rule_ref"] == "tenant:classifications[0]"
+    # Outside an approved request a call with a token runs nothing.
+    with pytest.raises(ValueError, match="web console"):
+        await policy_classify(
+            _admin(), None, {"match": {"connector": "vault-*"}, "category": "secrets"}
+        )
 
 
-def test_a_classify_request_needs_another_admin() -> None:
+def test_a_classify_request_needs_an_admin_in_the_console() -> None:
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=_TENANT,
@@ -711,25 +915,29 @@ def test_a_classify_request_needs_another_admin() -> None:
     assert is_rights_change(request)
     with pytest.raises(RightsChangeApprovalError):
         check_rights_change_approval(_admin("admin-a"), request)
-    check_rights_change_approval(_admin("admin-b"), request)
+    with pytest.raises(RightsChangeApprovalError):
+        check_rights_change_approval(_admin("admin-b"), request)
+    check_rights_change_approval(_admin("admin-a", web=True), request)
+    check_rights_change_approval(_admin("admin-b", web=True), request)
     operator_b = Operator(
         sub="operator-b",
         tenant_id=_TENANT,
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
         raw_jwt="header.payload.signature",
+        web_session=True,
     )
     with pytest.raises(RightsChangeApprovalError):
         check_rights_change_approval(operator_b, request)
 
 
-async def test_a_classify_call_waits_and_only_another_admin_approves_it(
+async def test_a_classify_call_with_a_token_waits_and_an_admin_in_the_console_approves_it(
     embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End to end: the call waits with the mark; the asker is refused; a second admin runs it."""
+    """End to end: the call waits with the mark; no token approves it; the console does."""
     _switch(monkeypatch, True)
     await register_policy_classify_operation(embedding_service=embedding)
-    asker, approver = _admin("admin-a"), _admin("admin-b")
+    asker, approver = _admin("admin-a"), _admin("admin-b", web=True)
     call = await call_operation(
         asker,
         {

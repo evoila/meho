@@ -22,22 +22,29 @@
 (function () {
   "use strict";
 
+  // Bump the version when a cached shell file changes in a way an
+  // offline user must see. The browser installs a new worker only when
+  // this file's bytes change, and the offline page is only ever served
+  // from the cache, so without a bump an installed app keeps the old
+  // offline page. v2: the offline page follows the computer's light or
+  // dark setting (#6823); v1 held the light-only page.
   var CACHE_PREFIX = "meho-shell-";
-  var CACHE_NAME = CACHE_PREFIX + "v1";
+  var CACHE_NAME = CACHE_PREFIX + "v2";
   var OFFLINE_URL = "/ui/static/src/pwa/offline.html";
   var SHELL_URLS = [
     OFFLINE_URL,
     "/ui/static/src/pwa/manifest.webmanifest",
     "/ui/static/dist/tailwind.css",
-    "/ui/static/src/app/theme.js",
+    "/ui/static/brand/evoila-daisyui.css",
+    "/ui/static/brand/evoila-fonts.css",
     "/ui/static/src/brand/favicon.svg",
     "/ui/static/src/brand/icon-192.png",
     "/ui/static/src/brand/icon-512.png",
     "/ui/static/src/brand/icon-maskable-512.png",
     "/ui/static/src/brand/apple-touch-icon.png",
-    "/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2",
-    "/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2",
-    "/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2",
+    "/ui/static/fonts/rubik-latin-var.woff2",
+    "/ui/static/fonts/lato-latin-400.woff2",
+    "/ui/static/fonts/ibm-plex-mono-latin-400.woff2",
   ];
 
   // True only for a file of the app shell. The one check that decides

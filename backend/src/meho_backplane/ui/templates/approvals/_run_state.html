@@ -47,13 +47,13 @@
     </span>
     {% if run.outcome and run.outcome.refused_message %}
       <h3 class="text-lg font-semibold">Approved, but MEHO did not run it</h3>
-      <p class="text-sm text-base-content/60" data-testid="approval-run-refused" data-error-code="{{ run.outcome.error_code }}">
+      <p class="text-sm text-subtle" data-testid="approval-run-refused" data-error-code="{{ run.outcome.error_code }}">
         The request for <span class="font-mono">{{ request.op_id }}</span> was refused.
         {{ run.outcome.refused_message }}
       </p>
     {% else %}
       <h3 class="text-lg font-semibold">Approved, but the run failed</h3>
-      <p class="text-sm text-base-content/60">
+      <p class="text-sm text-subtle">
         The operation for <span class="font-mono">{{ request.op_id }}</span>
         was approved and ran, but it did not succeed.
       </p>
@@ -61,19 +61,19 @@
     {% if run.outcome %}
       <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
         {% if run.outcome.result_status %}
-          <dt class="opacity-70">Result status</dt>
+          <dt class="text-muted">Result status</dt>
           <dd class="font-mono">{{ run.outcome.result_status }}</dd>
         {% endif %}
         {% if run.outcome.error_code %}
-          <dt class="opacity-70">Error code</dt>
+          <dt class="text-muted">Error code</dt>
           <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
         {% endif %}
         {% if run.outcome.guidance %}
-          <dt class="opacity-70">Next step</dt>
+          <dt class="text-muted">Next step</dt>
           <dd class="[overflow-wrap:anywhere]" data-testid="approval-guidance">{{ run.outcome.guidance }}</dd>
         {% endif %}
         {% if run.outcome.audit_href %}
-          <dt class="opacity-70">Audit</dt>
+          <dt class="text-muted">Audit</dt>
           <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
         {% endif %}
       </dl>
@@ -85,7 +85,7 @@
       {{ icon("ban", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved, but the outcome is unknown</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-uncertain">
+    <p class="text-sm text-subtle" data-testid="approval-run-uncertain">
       The operation for <span class="font-mono">{{ request.op_id }}</span> was approved.
       MEHO does not know if the change happened. Do not run it again.
       Check the target first.
@@ -93,11 +93,11 @@
     {% if run.outcome %}
       <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
         {% if run.outcome.error_code %}
-          <dt class="opacity-70">Error code</dt>
+          <dt class="text-muted">Error code</dt>
           <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
         {% endif %}
         {% if run.outcome.audit_href %}
-          <dt class="opacity-70">Audit</dt>
+          <dt class="text-muted">Audit</dt>
           <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
         {% endif %}
       </dl>
@@ -109,7 +109,7 @@
       {{ icon("ban", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved, but the run ended without a result</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-ended-no-result">
+    <p class="text-sm text-subtle" data-testid="approval-run-ended-no-result">
       The run of <span class="font-mono">{{ request.op_id }}</span> ended, but
       MEHO stored no result. MEHO does not know if the change happened.
       Do not run it again. Check the target first.
@@ -120,7 +120,7 @@
       <span class="loading loading-spinner loading-md" aria-hidden="true"></span>
     </span>
     <h3 class="text-lg font-semibold">Approved. The operation is running.</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-running">
+    <p class="text-sm text-subtle" data-testid="approval-run-running">
       <span class="font-mono">{{ request.op_id }}</span> runs in the background.
       You can close this window. Closing does not stop the operation.
       The approvals list shows how it ends, and a notice tells you when it ends.
@@ -133,7 +133,7 @@
       {{ icon("clock", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved, the run is still going</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-started">
+    <p class="text-sm text-subtle" data-testid="approval-run-started">
       Another caller runs
       <span class="font-mono">{{ request.op_id }}</span>. The result shows on
       this request in the approvals history when the run ends.
@@ -146,7 +146,7 @@
       {{ icon("ban", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved, but MEHO has no result</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-started-no-result">
+    <p class="text-sm text-subtle" data-testid="approval-run-started-no-result">
       The run of <span class="font-mono">{{ request.op_id }}</span> started
       long ago and stored no result. MEHO does not know if the change
       happened. Do not run it again. Check the target first.
@@ -158,7 +158,7 @@
       {{ icon("check", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved. The person who asked can now get the value.</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-waiting-for-requester">
+    <p class="text-sm text-subtle" data-testid="approval-run-waiting-for-requester">
       <span class="font-mono">{{ request.op_id }}</span> did not run.
       It runs once, when the person who asked fetches the value, within a
       short time. You do not see the value.
@@ -168,17 +168,29 @@
       {{ icon("clock", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Approved, the run has not started yet</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-not-started">
+    <p class="text-sm text-subtle" data-testid="approval-run-not-started">
       The operation for <span class="font-mono">{{ request.op_id }}</span>
       was approved. The result shows on this request in the approvals
       history when it has run.
+    </p>
+  {% elif run and run.outcome and run.outcome.exit_code is not none and run.outcome.exit_code != 0 %}
+    {#- The run is ok (MEHO ran it), but the script ended with a non-zero
+        exit code: the script failed. Never a plain success card. -#}
+    <span class="grid size-12 place-items-center rounded-full bg-warning/15 text-warning">
+      {{ icon("ban", class="size-6") }}
+    </span>
+    <h3 class="text-lg font-semibold">Approved. The script ran, but it failed (exit {{ run.outcome.exit_code }}).</h3>
+    <p class="text-sm text-subtle" data-testid="approval-run-exit-code" data-exit-code="{{ run.outcome.exit_code }}">
+      MEHO ran <span class="font-mono">{{ request.op_id }}</span>, and the
+      script ended with exit code {{ run.outcome.exit_code }}. The request
+      sender can read the script output with <span class="font-mono">meho approvals result</span>.
     </p>
   {% else %}
     <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
       {{ icon("check", class="size-6") }}
     </span>
     <h3 class="text-lg font-semibold">Request approved</h3>
-    <p class="text-sm text-base-content/60" data-testid="approval-run-executed">
+    <p class="text-sm text-subtle" data-testid="approval-run-executed">
       The operation for <span class="font-mono">{{ request.op_id }}</span>
       was approved and ran OK.
     </p>

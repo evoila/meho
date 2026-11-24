@@ -59,7 +59,7 @@ def _row(op_id: str, principal_sub: str = "agent-7") -> ApprovalRequest:
         connector_id="vsphere-1.x",
         params_hash="0" * 64,
         params={},
-        proposed_effect={"op_id": op_id},
+        proposed_effect={"op_id": op_id, "safety_level": "caution"},
         status=ApprovalRequestStatus.PENDING.value,
         created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
     )

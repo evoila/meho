@@ -14,7 +14,7 @@ front of it. To use your Keycloak in place of the built-in one
 
 | On your side (your Keycloak) | On MEHO's side (realm `meho`) |
 |---|---|
-| Your people and your user directory | The five MEHO groups |
+| Your people and your user directory | The three MEHO role groups |
 | Passwords, MFA, login checks | Tenant and role, from the MEHO group |
 | Which of your groups may use MEHO | The tokens that MEHO accepts |
 
@@ -29,7 +29,7 @@ explains the same values in more detail.
 
 **Before you start:**
 
-- The realm is set up and the five MEHO groups exist. See
+- The realm is set up and the MEHO role groups exist. See
   [Company login](index.md).
 - You are an admin in your Keycloak.
 - You know the address of your MEHO, for example
@@ -85,9 +85,7 @@ for example:
 |---|---|
 | `meho-readers` | `MEHO-Readers` |
 | `meho-operators` | `MEHO-Operators` |
-| `meho-sa-operators` | `MEHO-SA-Operators` |
 | `meho-admins` | `MEHO-Admins` |
-| `meho-approvers` | `MEHO-Approvers` |
 
 Put each person who may use MEHO in **one** of them. People in none of
 them cannot use MEHO.
@@ -129,9 +127,7 @@ coreKeycloak:
     groupMap:                         # your group -> MEHO group
       meho-readers: MEHO-Readers
       meho-operators: MEHO-Operators
-      meho-sa-operators: MEHO-SA-Operators
       meho-admins: MEHO-Admins
-      meho-approvers: MEHO-Approvers
     autoRedirect: false               # true later: go straight to your Keycloak
 ```
 
@@ -192,9 +188,14 @@ rows in the realm `meho`.
 ## 5. Check the approval sign-in (required)
 
 `meho approvals approve` signs in through its own login flow in realm
-`meho`: `meho approval sign-in`, bound to the client `meho-cli-approve`.
-The flow asks for the password, and for the one-time code when the person
-has set one up. It has no other step. Every install needs this flow and
+`meho`: `meho approval sign-in level`, bound to the client
+`meho-cli-approve`. The flow asks for the password, and for the one-time
+code when the person has set one up. It has no other step. It gives the
+sign-in the approval level `meho-approve` (level 2 of the realm's sign-in
+levels); a sign-in through your company login does not get it. With the
+default `APPROVAL_SIGN_IN_LEVEL=auto`, MEHO requires the level as soon as
+its check of the approval sign-in is `ok`
+([The approval level](../keycloak-realm.md#the-approval-level)). Every install needs this flow and
 its binding.
 
 - **MEHO's built-in Keycloak in front of yours (this page):** the install

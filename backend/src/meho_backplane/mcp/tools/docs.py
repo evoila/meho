@@ -121,6 +121,7 @@ from meho_backplane.docs_search import (
     UnknownCollectionError,
     build_docs_scope,
     citation_link_payload,
+    exact_read_scope,
     parse_collection_scope,
     read_docs,
     resolve_entitled_ready_collection,
@@ -395,8 +396,8 @@ def _search_chunk_payload(chunk: DocsChunk) -> dict[str, Any]:
     """Serialise a ``search_docs`` hit, wrapping its content in the envelope.
 
     Mirrors the kb/memory read-boundary guard, extending it to the sole
-    re-served-text surface that skipped it (evoila-bosnia/meho-internal#304,
-    on top of #154): a corpus chunk's ``content`` is federated external text
+    re-served-text surface that skipped it (on top of #154): a corpus chunk's
+    ``content`` is federated external text
     re-served into an LLM context, so it is wrapped in the positional
     ``<<UNTRUSTED_AGENT_TEXT`` envelope. The reading agent then attributes
     the chunk text to its untrusted federated provenance rather than
@@ -840,6 +841,7 @@ async def _read_docs_handler(
             before=before,
             after=after,
             cursor=cursor,
+            exact_scope=exact_read_scope(scope, arguments.get("product"), arguments.get("version")),
         )
     except DocsReadNotFoundError as exc:
         raise McpInvalidParamsError(f"read_docs: {DOCS_SOURCE_NOT_FOUND}") from exc

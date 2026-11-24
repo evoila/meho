@@ -41,6 +41,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import (
     approval_result_state,
     claim_resume,
@@ -554,3 +555,214 @@ async def test_request_without_params_fails_with_a_reason_and_can_run_again(
     )
     assert outcome.result.status == "ok"
     assert fake_dispatch.calls[0]["params"] == _PLAIN_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# k8s.apply: the manifest of a Secret
+# ---------------------------------------------------------------------------
+
+_K8S_OP_ID = "k8s.apply"
+_K8S_CONNECTOR_ID = "kubernetes-1.x"
+_SECRET_VALUE = "made-up-secret-value-91"
+_SECRET_MANIFEST_PARAMS: dict[str, Any] = {
+    "manifest": (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata: {name: web-settings, namespace: apps}\n"
+        "data: {mode: fast}\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata: {name: db-login, namespace: apps}\n"
+        f"data: {{token: {_SECRET_VALUE}}}\n"
+        f"stringData: {{login: {_SECRET_VALUE}}}\n"
+    ),
+    "dry_run": "none",
+}
+_CONFIG_MAP_PARAMS: dict[str, Any] = {
+    "manifest": (
+        "apiVersion: v1\n"
+        "kind: ConfigMap\n"
+        "metadata: {name: web-settings, namespace: apps}\n"
+        "data: {mode: fast}\n"
+    ),
+}
+
+
+@pytest.fixture
+def k8s_rules() -> None:
+    """The rules the Kubernetes connector declares for its operations."""
+    import meho_backplane.connectors.kubernetes.op_classes  # noqa: F401
+
+
+async def _park_apply(params: dict[str, Any], **kwargs: Any) -> uuid.UUID:
+    return await _park(params, connector_id=_K8S_CONNECTOR_ID, op_id=_K8S_OP_ID, **kwargs)
+
+
+async def _row_text(request_id: uuid.UUID) -> str:
+    """The params and the parent call stored on the row, as one text."""
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+        return json.dumps({"params": row.params, "resume_parent": row.resume_parent})
+
+
+async def _handoff_rows(request_id: uuid.UUID) -> int:
+    async with get_sessionmaker()() as s:
+        rows = await s.scalars(
+            select(ApprovalExecutionPayload).where(
+                ApprovalExecutionPayload.request_id == request_id
+            )
+        )
+        return len(list(rows))
+
+
+async def _assert_no_secret_value(request_id: uuid.UUID) -> None:
+    assert await _stored_params(request_id) is None
+    assert _SECRET_VALUE not in await _row_text(request_id)
+
+
+@pytest.mark.asyncio
+async def test_waiting_apply_of_a_secret_keeps_its_manifest_only_in_the_encrypted_handoff(
+    k8s_rules: None,
+) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    row = await _load(request_id)
+    assert row.execution_handle is not None
+    assert await _handoff_rows(request_id) == 1
+    await _assert_no_secret_value(request_id)
+
+
+@pytest.mark.asyncio
+async def test_approved_apply_of_a_secret_that_never_runs_keeps_no_secret_value(
+    k8s_rules: None,
+) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+
+    await _assert_no_secret_value(request_id)
+
+
+@pytest.mark.asyncio
+async def test_apply_of_a_secret_runs_with_the_manifest_and_keeps_no_value(
+    k8s_rules: None, fake_dispatch: _FakeDispatch
+) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert fake_dispatch.calls[0]["params"] == _SECRET_MANIFEST_PARAMS
+    await _assert_no_secret_value(request_id)
+    assert await _handoff_rows(request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_rejected_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    async with get_sessionmaker()() as s:
+        await reject_request(s, request_id, operator=_reviewer(), reason="wrong manifest")
+        await s.commit()
+
+    await _assert_no_secret_value(request_id)
+    assert await _handoff_rows(request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS)
+
+    async with get_sessionmaker()() as s:
+        await withdraw_request(s, request_id, operator=_requester(), reason="plan changed")
+        await s.commit()
+
+    await _assert_no_secret_value(request_id)
+    assert await _handoff_rows(request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_apply_of_a_secret_keeps_no_secret_value(k8s_rules: None) -> None:
+    request_id = await _park_apply(
+        _SECRET_MANIFEST_PARAMS, expires_at=datetime.now(UTC) - timedelta(minutes=1)
+    )
+
+    async with get_sessionmaker()() as s:
+        expired = await expire_stale_requests(s, operator=expiry_operator(_TENANT_ID))
+        await s.commit()
+
+    assert [r.id for r in expired] == [request_id]
+    await _assert_no_secret_value(request_id)
+    assert await _handoff_rows(request_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_rerun_of_an_apply_of_a_secret_needs_the_params_again(
+    k8s_rules: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDispatch(status="error")
+    monkeypatch.setattr(dispatcher_module, "dispatch", fake)
+    request_id = await _park_apply(_SECRET_MANIFEST_PARAMS, approved=True)
+    first = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+    assert first.status == "error"
+
+    with pytest.raises(RerunParamsRequiredError):
+        await rerun_failed_request(operator=_requester(), request_id=request_id)
+    assert len(fake.calls) == 1, "nothing ran without the manifest"
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_applies_a_secret_keeps_the_parent_call_only_in_the_handoff(
+    k8s_rules: None,
+) -> None:
+    parent = {"op_id": "example.deploy", "params": {"bundle": _SECRET_MANIFEST_PARAMS}}
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=_requester(),
+            connector_id=_K8S_CONNECTOR_ID,
+            op_id=_K8S_OP_ID,
+            target=None,
+            params=_SECRET_MANIFEST_PARAMS,
+            params_hash=compute_params_hash(_SECRET_MANIFEST_PARAMS),
+            resume_parent=parent,
+        )
+        await s.commit()
+        request_id = request.id
+
+    row = await _load(request_id)
+    assert row.resume_parent == {"op_id": "example.deploy"}
+    await _assert_no_secret_value(request_id)
+
+
+@pytest.mark.asyncio
+async def test_an_older_row_that_holds_the_manifest_hides_it_at_the_claim(
+    k8s_rules: None,
+) -> None:
+    request_id = await _park_apply(_CONFIG_MAP_PARAMS, approved=True)
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+        row.params = dict(_SECRET_MANIFEST_PARAMS)
+        await s.commit()
+
+    assert await claim_resume(request_id) is True
+
+    params = await _stored_params(request_id)
+    assert params == {"manifest": _MARKER, "dry_run": "none"}
+
+
+@pytest.mark.asyncio
+async def test_apply_of_other_kinds_keeps_its_manifest(
+    k8s_rules: None, fake_dispatch: _FakeDispatch
+) -> None:
+    request_id = await _park_apply(_CONFIG_MAP_PARAMS, approved=True)
+
+    result = await resume_dispatch_after_approval(
+        operator=_requester(), request=await _load(request_id)
+    )
+
+    assert result.status == "ok"
+    assert await _stored_params(request_id) == _CONFIG_MAP_PARAMS

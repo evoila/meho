@@ -88,7 +88,7 @@ _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _OP_OPERATOR = "op-operator"
 _OP_READ_ONLY = "op-read-only"
-_TARGET_NAME = "rdc-keycloak"
+_TARGET_NAME = "example-keycloak"
 
 #: A live client secret planted in the dispatch double's envelope. The
 #: client-detail render must NEVER echo this (the connector redacts secrets
@@ -331,9 +331,9 @@ def _index_envelopes() -> dict[str, dict[str, Any]]:
             "keycloak.realm.get",
             {
                 "realm": {
-                    "realm": "evba",
+                    "realm": "example-realm",
                     "enabled": True,
-                    "displayName": "EVBA Realm",
+                    "displayName": "Example Realm",
                     "accessTokenLifespan": 300,
                 }
             },
@@ -397,7 +397,7 @@ def test_keycloak_ui_index_renders_three_surfaces_with_pinned_connector_id(
     assert "data-keycloak-clients" in body
     assert "data-keycloak-scopes" in body
     # Projected fields from each surface.
-    assert "evba" in body  # realm name
+    assert "example-realm" in body  # realm name
     assert "meho-web" in body  # client clientId
     assert "profile" in body  # client scope name
     # The pinned connector id was used on every dispatch; the bare slug was
@@ -765,7 +765,7 @@ def test_keycloak_ui_user_create_awaiting_approval_deep_links_to_approvals(
             data={
                 "target": _TARGET_NAME,
                 "representation": '{"username": "operator-a", "enabled": true}',
-                "password_secret_ref": "rdc/keycloak/operator-a",
+                "password_secret_ref": "example/keycloak/operator-a",
             },
             **_csrf_kwargs(session_id),
         )
@@ -815,14 +815,14 @@ def test_keycloak_ui_user_create_password_is_vault_ref_never_inline(
             data={
                 "target": _TARGET_NAME,
                 "representation": '{"username": "operator-a"}',
-                "password_secret_ref": "rdc/keycloak/operator-a",
+                "password_secret_ref": "example/keycloak/operator-a",
             },
             **_csrf_kwargs(session_id),
         )
     assert response.status_code == 200, response.text
     assert len(received) == 1
     params = received[0]["params"]
-    assert params["password_secret_ref"] == "rdc/keycloak/operator-a"
+    assert params["password_secret_ref"] == "example/keycloak/operator-a"
     assert "password" not in params
     assert "value" not in params
     # The representation carries no credentials block / plaintext secret.
@@ -933,7 +933,7 @@ def test_keycloak_ui_user_create_non_admin_post_is_403(
             data={
                 "target": _TARGET_NAME,
                 "representation": '{"username": "operator-a"}',
-                "password_secret_ref": "rdc/keycloak/operator-a",
+                "password_secret_ref": "example/keycloak/operator-a",
             },
             **_csrf_kwargs(session_id),
         )
@@ -956,7 +956,7 @@ def test_keycloak_ui_reset_password_non_admin_post_is_403(
     with mock:
         response = client.post(
             f"/ui/keycloak/users/{user_uuid}/reset-password",
-            data={"target": _TARGET_NAME, "password_secret_ref": "rdc/keycloak/operator-a"},
+            data={"target": _TARGET_NAME, "password_secret_ref": "example/keycloak/operator-a"},
             **_csrf_kwargs(session_id),
         )
     assert response.status_code == 403, response.text
@@ -1013,7 +1013,7 @@ def test_keycloak_ui_reset_password_vault_ref_awaiting_approval(
         assert "data-keycloak-safety>safety: dangerous" in modal.text
         response = client.post(
             f"/ui/keycloak/users/{user_uuid}/reset-password",
-            data={"target": _TARGET_NAME, "password_secret_ref": "rdc/keycloak/operator-a"},
+            data={"target": _TARGET_NAME, "password_secret_ref": "example/keycloak/operator-a"},
             **_csrf_kwargs(session_id),
         )
     assert response.status_code == 200, response.text
@@ -1021,7 +1021,7 @@ def test_keycloak_ui_reset_password_vault_ref_awaiting_approval(
     assert len(received) == 1
     params = received[0]["params"]
     assert params["id"] == user_uuid
-    assert params["password_secret_ref"] == "rdc/keycloak/operator-a"
+    assert params["password_secret_ref"] == "example/keycloak/operator-a"
     assert "password" not in params
     assert "value" not in params
 

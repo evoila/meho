@@ -115,8 +115,8 @@ def _mint_token(
     private_key: Any,
     *,
     sub: str = "op-42",
-    name: str | None = "Damir Topić",
-    email: str | None = "damir@example.com",
+    name: str | None = "Operator A",
+    email: str | None = "operator-a@example.com",
     issuer: str = _ISSUER,
     audience: str = _AUDIENCE,
     expires_in: int = 3600,
@@ -236,8 +236,7 @@ def test_unparseable_bearer_token_returns_malformed_jws() -> None:
     """A non-JWT bearer surfaces the structural-break code ``malformed_jws``.
 
     Reproduces the consumer's v0.6.0 dogfood signal
-    (`rdc-hetzner-dc/meho-signals/auth-invalid-token-opaque-error.yaml`,
-    G0.13-T1 #1131): the probe ``curl -H "Authorization: Bearer
+    (G0.13-T1 #1131): the probe ``curl -H "Authorization: Bearer
     not-a-real-jwt" .../api/v1/health`` previously returned bare
     ``{"detail":"invalid_token"}`` because authlib's
     :class:`DecodeError` (raised on the segment-count check before
@@ -814,6 +813,7 @@ import logging  # noqa: E402
 
 import pydantic  # noqa: E402
 import structlog  # noqa: E402
+from structlog.tracebacks import ExceptionDictTransformer  # noqa: E402
 
 from meho_backplane.auth.operator import TenantRole  # noqa: E402
 
@@ -841,7 +841,8 @@ def _configure_log_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

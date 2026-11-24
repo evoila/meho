@@ -57,7 +57,8 @@ func failNet(r *doctorReport, name string, err error, host string) {
 
 // runAuthenticatedChecks resolves the backplane, checks the token, and
 // runs the MCP handshake. It stops at the first failed step, because
-// every later step depends on it.
+// every later step depends on it. Last, it checks the Keycloak targets
+// for a managed realm.
 func runAuthenticatedChecks(ctx context.Context, r *doctorReport, backplaneURL string, deps doctorDeps) {
 	if deps.layerTimeout > 0 {
 		var cancel context.CancelFunc
@@ -93,6 +94,7 @@ func runAuthenticatedChecks(ctx context.Context, r *doctorReport, backplaneURL s
 		return
 	}
 	runMCPHandshake(ctx, r, backplaneURL+"/mcp", client, host)
+	addKeycloakRealmCheck(ctx, r, client)
 }
 
 func checkDNS(ctx context.Context, r *doctorReport, host string, deps doctorDeps) bool {
@@ -207,6 +209,7 @@ func (s *mcpSession) post(ctx context.Context, body map[string]any) (*http.Respo
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+s.bearer())
 	api.SetWorkRefHeader(req)
+	api.SetCommandHeader(req)
 	api.SetTenantHeader(req)
 	if s.protocol != "" {
 		req.Header.Set("MCP-Protocol-Version", s.protocol)
@@ -356,6 +359,8 @@ func runMCPHandshake(ctx context.Context, r *doctorReport, mcpURL string, client
 	}
 	addSurfaceCheck(r, health, listed)
 	addApprovalSignInCheck(r, health)
+	addApprovalLevelCheck(r, health)
+	addSecondAdminCheck(r, health)
 }
 
 func callMehoStatus(ctx context.Context, s *mcpSession) (*api.HealthResponse, error) {

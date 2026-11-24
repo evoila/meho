@@ -37,7 +37,6 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.session import (
     KeycloakPasswordCredentials,
     RealmConfig,
-    quote_segment,
     resolve_realm_config,
 )
 
@@ -120,7 +119,8 @@ class FoundObject:
     ``rep`` is the object's current representation, or ``None`` when it does
     not exist. ``object_id`` is its internal id (``None`` when a name matched
     nothing). ``name`` is the human name to report: the stored one when the
-    object exists, else the name the caller passed.
+    object exists, else the name the caller passed. For a user it is only the
+    stored username (``None`` when the user does not exist).
     """
 
     realms: RealmConfig
@@ -210,13 +210,21 @@ async def find_user(
     params: dict[str, Any],
 ) -> FoundObject:
     """Find the user by ``id`` (preferred) or by exact ``username``."""
+    # Imported late: ``ops_write_user_identity`` imports this module.
+    from meho_backplane.connectors.keycloak.ops_write_user_identity import user_matches_username
+
     realms = resolve_realm_config(target)
     realm = realms.managed_realm
     user_id = _opt_str(params.get("id"))
     username = _opt_str(params.get("username"))
     if user_id is not None:
-        path = fill_path(_USER_PATH, {"realm": realm, "user-id": quote_segment(user_id)})
+        path = fill_path(_USER_PATH, {"realm": realm, "user-id": user_id})
         rep = await get_or_none(connector, target, path, operator)
+        if rep is not None and not user_matches_username(params, rep):
+            raise ValueError(
+                f"{USER_DELETE_OP}: 'id' and 'username' belong to different users. "
+                "Nothing was changed. Send the request with one user."
+            )
     elif username is not None:
         rows = await connector._get_admin_list(
             target,
@@ -241,10 +249,11 @@ async def find_user(
         )
     else:
         raise ValueError(f"{USER_DELETE_OP} requires either 'id' (UUID) or 'username'")
+    # Only the stored username: a name the caller sent is never shown as the user's.
     return FoundObject(
         realms=realms,
         object_id=str_field(rep, "id") or user_id,
-        name=str_field(rep, "username") or username,
+        name=str_field(rep, "username"),
         rep=rep,
     )
 
@@ -261,7 +270,7 @@ async def find_client(
     uuid = _opt_str(params.get("id"))
     client_id = _opt_str(params.get("client_id"))
     if uuid is not None:
-        path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": quote_segment(uuid)})
+        path = fill_path(_CLIENT_PATH, {"realm": realm, "client-uuid": uuid})
         rep = await get_or_none(connector, target, path, operator)
     elif client_id is not None:
         rows = await connector._get_admin_list(
@@ -336,7 +345,7 @@ async def find_group(
         group_id = str_field(match, "id")
     rep = None
     if group_id is not None:
-        path = fill_path(_GROUP_PATH, {"realm": realm, "group-id": quote_segment(group_id)})
+        path = fill_path(_GROUP_PATH, {"realm": realm, "group-id": group_id})
         rep = await get_or_none(connector, target, path, operator)
     return FoundObject(
         realms=realms,
@@ -381,18 +390,32 @@ async def check_user_guards(
     operator: Operator,
     target: KeycloakTargetLike,
     found: FoundObject,
+    *,
+    op_id: str = USER_DELETE_OP,
+    action: str = "deleting it",
 ) -> None:
-    """Refuse the user this target logs in with."""
+    """Refuse the user this target logs in with.
+
+    The target's login name can be the user's username or, when the realm
+    lets users log in with their email, the user's email. Both are compared,
+    so a user is refused when either matches.
+
+    *op_id* and *action* only shape the message. The other user writes that
+    can lock the target out use the same check (``ops_user_login_guard``).
+    """
     username = found.name or ""
     _client_id, login_users = await _target_login_identity(
         connector, operator, target, found.realms
     )
-    if username.casefold() in login_users:
+    names = {username.casefold()}
+    email = str_field(found.rep, "email")
+    if email is not None:
+        names.add(email.casefold())
+    if not names.isdisjoint(login_users):
         raise KeycloakDeleteRefusedError(
-            USER_DELETE_OP,
+            op_id,
             "target_login_user",
-            f"{username!r} is the user this MEHO target logs in with; deleting it "
-            "breaks the target.",
+            f"{username!r} is the user this MEHO target logs in with; {action} breaks the target.",
         )
 
 

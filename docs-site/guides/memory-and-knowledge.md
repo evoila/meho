@@ -377,7 +377,9 @@ decide approvals in the tenant) or a tenant admin. MEHO refuses it from
 anyone else, also from the person who wrote the entry. A page imported
 from your wiki keeps the status a reviewer set there.
 The weekly upkeep never confirms a candidate. A candidate runs out after
-six months unless someone confirms it.
+six months unless someone confirms it. The weekly upkeep marks such a
+candidate retired. The upkeep is off by default, so this happens only
+after you turn it on (see below).
 
 ### Instance settings
 
@@ -387,7 +389,7 @@ instance:
 | Value | Default | What it does |
 |---|---|---|
 | `config.kbSharedTenantIds` | `""` (nothing shared) | Tenant ids, comma-separated, whose entries marked `shared` every tenant can read. Only the owner tenant can change them. |
-| `config.knowledgeUpkeepEnabled` | `"true"` | Runs the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (`meho audit query`, principal `system:knowledge-upkeep`). |
+| `config.knowledgeUpkeepEnabled` | `"false"` | Set it to `"true"` to run the weekly upkeep: it merges duplicate entries, retires expired ones and writes one report per tenant (`meho audit query`, principal `system:knowledge-upkeep`). It is off by default because it changes which entries a knowledge search returns. |
 | `config.knowledgeUpkeepIntervalSeconds` | `604800` (one week) | How often the upkeep runs, from `60` to `604800` seconds. |
 
 ### What changes for the tenant

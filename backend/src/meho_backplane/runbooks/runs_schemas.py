@@ -59,6 +59,13 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from meho_backplane.work_ref import (
+    WORK_REF_FIELD_DESCRIPTION,
+    WORK_REF_FILTER_DESCRIPTION,
+    WorkRef,
+    WorkRefFilter,
+)
+
 __all__ = [
     "AbortRunRequest",
     "AbortRunResponse",
@@ -260,7 +267,7 @@ class StartRunRequest(BaseModel):
     template_slug: str
     target: str
     params: dict[str, object] = Field(default_factory=dict)
-    work_ref: str | None = None
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
 
 
 class CurrentStepResponse(BaseModel):
@@ -419,7 +426,7 @@ class ListRunsFilter(BaseModel):
     (matching the storage-level ``CheckConstraint`` on
     ``runbook_runs.state``); :attr:`template_slug` to a single
     template (across all versions); :attr:`work_ref` to a single
-    external change ticket (exact match, across all templates) -- "show
+    external change ticket (whole id, see the work_ref field, across all templates) -- "show
     me every run started under ``gh:evoila/meho#9``" (work_ref I3-T1
     #1661).
     """
@@ -429,7 +436,7 @@ class ListRunsFilter(BaseModel):
     assignee: str | None = None
     status: Literal["in_progress", "completed", "abandoned"] | None = None
     template_slug: str | None = None
-    work_ref: str | None = None
+    work_ref: WorkRefFilter | None = Field(default=None, description=WORK_REF_FILTER_DESCRIPTION)
 
 
 class RunSummary(BaseModel):

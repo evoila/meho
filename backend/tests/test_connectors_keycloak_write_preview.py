@@ -149,11 +149,11 @@ async def test_user_create_preview_realm_from_target() -> None:
     ctx = _ctx(
         "keycloak.user.create",
         {"representation": {"username": "alice"}},
-        managed_realm="evba",
+        managed_realm="example",
     )
     effect = await build_proposed_effect(ctx)
     assert effect is not None
-    assert effect["preview"]["realm"] == "evba"
+    assert effect["preview"]["realm"] == "example"
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +215,78 @@ async def test_realm_create_preview_redacts_nested_secret_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_realm_create_preview_shows_password_policy_and_hides_the_rest() -> None:
+    """The password rules text is shown; every other hidden value stays hidden."""
+    secrets = {
+        "password": "made-up-1",
+        "secret": "made-up-2",
+        "credentials": [{"type": "password", "value": "made-up-3"}],
+        "smtpServer": {"host": "smtp.test", "password": "made-up-4"},
+        "attributes": {"snmpAuthKey": "made-up-5", "clientSecret": "made-up-6"},
+        "passwordPolicyKey": "made-up-7",
+    }
+    policy = "length(8) and digits(1)"
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {"representation": {"realm": "meho", "passwordPolicy": policy, **secrets}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    shown = effect["preview"]["representation"]
+    assert shown["passwordPolicy"] == policy
+    assert shown["password"] == REDACTED
+    assert shown["secret"] == REDACTED
+    assert shown["credentials"] == REDACTED
+    assert shown["smtpServer"] == {"host": "smtp.test", "password": REDACTED}
+    assert shown["attributes"] == {"snmpAuthKey": REDACTED, "clientSecret": REDACTED}
+    assert shown["passwordPolicyKey"] == REDACTED
+    _no_secret_anywhere(effect, *[f"made-up-{n}" for n in range(1, 8)])
+
+
+@pytest.mark.asyncio
+async def test_realm_create_preview_shows_only_the_top_level_password_policy() -> None:
+    """A ``passwordPolicy`` inside the realm (here an identity provider config) stays hidden."""
+    policy = "length(8) and digits(1)"
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {
+            "representation": {
+                "realm": "meho",
+                "passwordPolicy": policy,
+                "identityProviders": [
+                    {"alias": "corp-idp", "config": {"passwordPolicy": "made-up-8"}},
+                ],
+            }
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    shown = effect["preview"]["representation"]
+    assert shown["passwordPolicy"] == policy
+    assert shown["identityProviders"] == [
+        {"alias": "corp-idp", "config": {"passwordPolicy": REDACTED}}
+    ]
+    _no_secret_anywhere(effect, "made-up-8")
+
+
+@pytest.mark.asyncio
+async def test_realm_create_preview_checks_the_password_policy_text_for_secrets() -> None:
+    """The shown policy text goes through the value-shape pass, as on the update card."""
+    token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiJtYWRlLXVwLXN1YmplY3QiLCJuYW1lIjoibWFkZS11cCJ9"
+        ".bWFkZS11cC1zaWduYXR1cmUtdmFsdWUtMDkzNQ"
+    )
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {"representation": {"realm": "meho", "passwordPolicy": token}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    _no_secret_anywhere(effect, token)
+
+
+@pytest.mark.asyncio
 async def test_realm_create_preview_redacts_generic_credential_keys() -> None:
     """`password`-class keys land anywhere in the additionalProperties body.
 
@@ -270,7 +342,9 @@ async def test_role_mapping_assign_preview_shows_granted_roles() -> None:
     assert effect["op_class"] == "write"
     preview = effect["preview"]
     assert preview["resource"] == "role_mapping"
-    assert preview["username"] == "svc-meho"
+    # The user cannot be read here, so the sent name is not shown as the user's name.
+    assert "username" not in preview
+    assert preview["requested_username"] == "svc-meho"
     # Blank role names are dropped; real ones are surfaced verbatim.
     assert preview["granted_roles"] == ["realm-admin", "manage-users"]
 
@@ -287,7 +361,8 @@ async def test_role_mapping_assign_preview_by_uuid() -> None:
     assert effect is not None
     preview = effect["preview"]
     assert preview["id"] == user_uuid
-    assert preview["username"] is None
+    assert "username" not in preview
+    assert "requested_username" not in preview
     assert preview["granted_roles"] == ["operator"]
 
 

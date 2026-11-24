@@ -194,9 +194,15 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "VCF SDDC Manager",
-        "sddc-rest-9.0, sddc-vcf5-5.0",
+        "sddc-rest-9.1, sddc-rest-9.0, sddc-vcf5-5.0",
         "5.x, 9.x",
         "Reads workload domains, clusters and hosts, and runs VCF lifecycle tasks.",
+    ),
+    (
+        "VCF Operations for Networks",
+        "vrni-rest-9.0, vrni-rest-6.14",
+        "6.14, 9.x",
+        "Reads network flows, applications and problems, and the infrastructure it sees.",
     ),
     (
         "VCF Installer and Cloud Builder",
@@ -207,31 +213,31 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     (
         "VCF fleet management and Aria Suite Lifecycle",
         "fleet-lcm-9.0, fleet-rest-9.0",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Installs, updates and scales the VCF management components.",
     ),
     (
         "VCF Automation and Aria Automation",
         "vcfa-rest-9.0, vcfa-vra8-8.0",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Reads and manages projects, catalog items, templates and deployments.",
     ),
     (
         "VCF Operations and Aria Operations",
         "vrops-rest-9.0, vrops-vrops8-8.0",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Reads resources, alerts, metrics and health.",
     ),
     (
         "VCF Operations for logs and Aria Operations for Logs",
         "vrli-rest-9.0, vrli-vrli8-8.0",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Searches logs and reads log alerts.",
     ),
     (
         "VCF Operations orchestrator",
         "vro-rest-9.0",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Reads workflows and their runs, and starts or cancels a workflow run.",
     ),
     (
@@ -249,7 +255,7 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     (
         "VMware HCX",
         "hcx-rest-9.0",
-        "4.7 to 9.x",
+        "4.11 to 9.x",
         "Reads site pairings, service meshes and migrations, and changes service meshes.",
     ),
     (
@@ -267,7 +273,7 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
     (
         "VMware Aria Automation Config (Salt)",
         "salt-raas-8.18",
-        "8.x, 9.x",
+        "8.18 to 9.x",
         "Reads minions and jobs, accepts minion keys and starts jobs.",
     ),
     (
@@ -312,6 +318,12 @@ _ENTERPRISE_PACK: tuple[tuple[str, str, str, str], ...] = (
         "falcon-rest-2026.11",
         "cloud service",
         "Reads hosts and detections, and cuts a host off the network or gives it back.",
+    ),
+    (
+        "Dell NetWorker",
+        "networker-rest-19.x",
+        "19.x",
+        "Reads backup jobs, clients and workflows, and starts or stops backups, with approval.",
     ),
 )
 
@@ -358,6 +370,14 @@ def _enterprise_pack_rows(record: LiveTestRecord) -> list[str]:
             f"| {_md_escape(summary)} |"
         )
     return rows
+
+
+#: The sentence on Kubernetes API files under the connector index intro.
+_KUBERNETES_FILE_NOTE = (
+    "MEHO refuses a Kubernetes API file whose paths do not start with "
+    "`/api/v1` or `/apis/<group>/<version>`: use the standard API file "
+    "that the cluster serves."
+)
 
 
 def render_connector_index() -> str:
@@ -414,7 +434,7 @@ def render_connector_index() -> str:
         "transport where no usable spec exists. The **Kind** column is "
         "populated only where MEHO's published connector-spec catalog states "
         "it, and is blank otherwise — it is a property of how a connector's "
-        "operations are sourced, not something this table infers.",
+        "operations are sourced, not something this table infers. " + _KUBERNETES_FILE_NOTE,
         "",
         "| Connector | Product | What it does | Built for | Tested live on | Kind | Docs |",
         "| --- | --- | --- | --- | --- | --- | --- |",
@@ -430,8 +450,8 @@ def render_connector_index() -> str:
         "## evoila's enterprise pack",
         "",
         "evoila's enterprise pack is a commercial add-on. It adds the VMware "
-        "and VCF connectors, and connectors for Fortinet and CrowdStrike "
-        "products, as a signed package on top of the public image. "
+        "and VCF connectors, and connectors for Fortinet, CrowdStrike "
+        "and Dell NetWorker products, as a signed package on top of the public image. "
         "Their setup guides and operation lists come with the pack. To get "
         "the pack, contact evoila.",
         "",

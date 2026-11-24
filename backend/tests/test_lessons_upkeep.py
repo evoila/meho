@@ -38,7 +38,7 @@ from meho_backplane.lessons.upkeep import (
 )
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 from tests._kb_embedding_stub import fake_embedding_service
 from tests._lessons_helpers import seed_dispatch, seed_retrieval, seed_tenant
 
@@ -111,6 +111,50 @@ async def test_without_a_confirmed_copy_the_oldest_is_kept() -> None:
     await run_upkeep(now=NOW)
     assert (await _status("a-second"))["replaced_by"] == "z-first"
     assert "status" not in await _status("z-first")
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_copy_of_another_creator_is_listed_and_not_replaced() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "agent-note", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(
+        TENANT, "admin-note", "Open port 22.", {"status": "candidate"}, actor_sub="person-admin"
+    )
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("admin-note"))["status"] == "candidate"
+    assert "status" not in await _status("agent-note")
+    report = reports[TENANT]
+    assert report.merged == []
+    assert report.merge_for_review_count == 1
+    assert [(m.slug, m.same_as) for m in report.merge_for_review] == [("admin-note", "agent-note")]
+
+
+@pytest.mark.asyncio
+async def test_two_copies_of_one_creator_still_merge() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "first", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(TENANT, "second", "Open port 22.", actor_sub="agent:bot")
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("second"))["replaced_by"] == "first"
+    assert reports[TENANT].merge_for_review == []
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_kept_entry_still_replaces_a_copy_of_another_creator() -> None:
+    service = KbService()
+    await service.create_entry(TENANT, "agent-copy", "Open port 22.", actor_sub="agent:bot")
+    await service.create_entry(
+        TENANT, "reviewed", "Open port 22.", {"status": "confirmed"}, actor_sub="person-admin"
+    )
+
+    reports = await run_upkeep(now=NOW)
+
+    assert (await _status("agent-copy"))["replaced_by"] == "reviewed"
+    assert reports[TENANT].merge_for_review == []
 
 
 @pytest.mark.asyncio
@@ -347,13 +391,16 @@ async def test_a_tick_writes_one_report_per_tenant_and_a_total() -> None:
     assert by_tenant[UPKEEP_SYSTEM_TENANT_ID]["retired_count"] == 1
 
 
-def test_settings_default_weekly_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = get_settings()
-    assert settings.knowledge_upkeep_enabled is True
-    assert settings.knowledge_upkeep_interval_seconds == 604800
-    monkeypatch.setenv("KNOWLEDGE_UPKEEP_ENABLED", "false")
+def test_settings_default_off_weekly_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KNOWLEDGE_UPKEEP_ENABLED", raising=False)
     get_settings.cache_clear()
-    assert get_settings().knowledge_upkeep_enabled is False
+    settings = get_settings()
+    assert settings.knowledge_upkeep_enabled is False
+    assert Settings.model_fields["knowledge_upkeep_enabled"].default is False
+    assert settings.knowledge_upkeep_interval_seconds == 604800
+    monkeypatch.setenv("KNOWLEDGE_UPKEEP_ENABLED", "true")
+    get_settings.cache_clear()
+    assert get_settings().knowledge_upkeep_enabled is True
     for bad in ("59", "604801"):
         monkeypatch.setenv("KNOWLEDGE_UPKEEP_INTERVAL_SECONDS", bad)
         get_settings.cache_clear()

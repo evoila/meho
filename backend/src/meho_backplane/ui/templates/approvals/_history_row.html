@@ -36,6 +36,8 @@
                          badge modifier) (#3543)
     poll_seconds      -- int: how often a running row asks again
 -#}
+
+{% from "_components.html" import badge %}
 {% from "_references.html" import subject %}
 {%- set live = req.live -%}
 {%- set run_state = live.result_state if live else req.result_state -%}
@@ -53,7 +55,7 @@
   <div class="min-w-0 space-y-1">
     <div class="flex flex-wrap items-center gap-2">
       {% if req.get("waiting_for_me") %}
-        <span class="badge badge-sm badge-primary">Waiting for you</span>
+        {{ badge("Waiting for you", variant="primary") }}
       {% endif %}
       <span
         class="badge badge-sm {{ status_pill_class.get(req.status, 'badge-ghost') }}"
@@ -95,7 +97,7 @@
         <span class="badge badge-sm badge-info shrink-0" data-approval-chain-step="{{ req.chain.step }}">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
       {% endif %}
     </div>
-    <p class="text-xs text-base-content/55 [overflow-wrap:anywhere] sm:truncate">
+    <p class="text-xs text-subtle [overflow-wrap:anywhere] sm:truncate">
       <span>{{ req.connector_id }}</span>
       <span aria-hidden="true">&middot;</span>
       <span>requested by {{ subject(req.requester) }}</span>
@@ -119,7 +121,9 @@
       {% else %}
         {% if req.reviewer %}
           <span aria-hidden="true">&middot;</span>
-          <span>by {{ subject(req.reviewer) }}</span>
+          {# An expired request keeps the person who approved it; MEHO
+             ended it, not that person. #}
+          <span>{% if req.status == "expired" %}approved by{% else %}by{% endif %} {{ subject(req.reviewer) }}</span>
         {% endif %}
         {% if req.decided_at %}
           <span aria-hidden="true">&middot;</span>

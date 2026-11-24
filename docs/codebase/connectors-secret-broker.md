@@ -103,6 +103,20 @@ boundary redaction:
     opens no HTTP client of its own. The value is `strip_credential_value`-d
     before the PUT. This is the broker's second kind, so a cross-kind
     `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
+    The sink refuses the user its Keycloak target signs in with, when the
+    ref's realm is the realm the target signs in to: a new password would
+    lock MEHO out. `secret.move` asks the sink before the request waits for
+    approval (park check `refuse_sink_before_approval` in
+    `move_preview.py`, which calls the sink's `refuse_before_approval`),
+    and `write_secret` checks again before the PUT. It is the same check as
+    `keycloak.user.reset_password` (`ops_user_login_guard.py`). In MEHO's
+    own login realm the sink also refuses a login MEHO itself uses, the
+    last active platform admin, and the account that asks
+    (`ops_user_meho_access_guard.py`, see "Writes that could take MEHO's
+    own access away" in `connectors-keycloak.md`). There `write_secret`
+    holds the lock of the login realm from the count until the PUT is
+    done (`ops_meho_access_lock.py`). In another realm the park check
+    calls no Keycloak.
   - **`KeycloakClientSecretSourceEndpoint`** (source, #3619). **Source-only**:
     unlike a user password, a confidential client's secret IS served by
     the Admin REST API (`GET .../clients/{uuid}/client-secret` →
@@ -130,6 +144,150 @@ boundary redaction:
   — the two steps that move a secret to another MEHO instance. See the
   next section.
 
+## Vault target refs and the merge option
+
+Kind `vault-target` (`vault_target_endpoint.py`) is the Vault kind that
+acts through a registered Vault target. Ref: `<target>/<path>#<field>`,
+for example `vault-target:vault-prod/secret/app/db#password`.
+
+- The adapter finds the target by name in the caller's tenant, and logs
+  in to Vault under that target's role (`extras["vault_role"]`). A target
+  that is not a Vault target, or a Vault target without its own
+  `vault_role`, is refused before any Vault login.
+- The tenant path rule of the `vault:` kind also applies to `vault-target:`
+  refs: a source or sink path outside the caller's tenant path is refused
+  before any Vault login.
+- The caller needs rights on the named target. MEHO checks the caller's
+  policy for `vault.kv.read` (source), `vault.kv.put` (sink) or
+  `vault.kv.patch` (sink with `merge`) on that target, with
+  `operations/secondary_target_policy.py`. A `deny` refuses. When the move
+  would wait for approval, the permission check
+  (`vault_target_move_preflight`) refuses it at once instead, so no person
+  is asked to approve a move that cannot run. When a reviewer runs an
+  approved move, the requester's policy is checked again.
+- The move checks the sink path and both `vault-target` sides before it
+  reads the source.
+- Source and sink each name their own target. They can use different
+  roles in one move. The plain `vault:` kind is unchanged and always uses
+  the operator's own Vault role.
+- `merge: true` on `secret.move` is a sink option, off by default. The sink
+  reads the secret, changes only the named field, and writes it back with
+  check-and-set on the version it read (`cas=0` when the secret does not
+  exist yet). If someone else changed the secret in between, Vault
+  refuses the write and the move fails. MEHO then reads the version again
+  and tells the caller which case it is: the secret changed
+  (`SecretMergeChangedError`, run the move again) or Vault refused for
+  another reason, for example a Vault policy that allows the read but
+  not the write (`SecretMergeRefusedError`; its message also says when
+  MEHO could not read the version again). Both messages are fixed MEHO
+  sentences, with no Vault text and no value. If the latest version is
+  deleted or destroyed, the move fails and writes nothing
+  (`SecretMergeDeletedVersionError`). Without `merge`, a Vault sink
+  replaces the whole secret. A sink kind without merge support makes the
+  move fail before the source is read.
+- The approval preview names both sides and the merge flag. A
+  `vault-target` side shows the name as typed (`target`), the target it
+  points to (`target_id`, `target_name`), that target's Vault role
+  (`vault_role`) and its Vault login mount (`vault_mount`: the target's
+  `extras.vault_mount`, or the deployment's `VAULT_OIDC_MOUNT_PATH`). No
+  value is in the preview or in the audit row. The agent's own
+  `preview_operation` shows only the refs (`kind`, `ref` and, for a
+  `vault-target` side, `target`) and makes no lookup.
+- The sink shows whether its secret exists (`secret_exists`) and, with
+  `merge`, whether the field exists (`field_exists`). MEHO reads this
+  when the request is made, not when the move runs. The lookup uses only
+  the write right on the sink: the same tenant path rule, MEHO policy
+  check and Vault login as the write, and only when both `vault-target`
+  sides pass their checks. It needs no other right. The answer holds
+  only `"yes"`, `"no"` or `"not known"`; the read data is dropped at
+  once. Only a Vault sink can say yes or no. Every other sink kind, and
+  a failed lookup, says `"not known"`.
+- The approved run holds a Vault sink to a `"no"` on the approval
+  (`_approved_sink_expectation` in `vault_endpoint.py`):
+  - `secret_exists: "no"`, without `merge`: the write uses `cas=0`, so
+    Vault refuses it if the secret exists by then.
+  - `secret_exists: "no"`, with `merge`: a secret found by the run's read
+    refuses the write; the write uses `cas=0`, so a secret made after
+    that read is refused too.
+  - `field_exists: "no"` (with `merge`): the field found by the run's
+    read refuses the write; the check-and-set on the read version covers
+    the time up to the write.
+  - Each refusal is `SecretSinkChangedError`: the sink changed since the
+    approval, nothing was written, send a new request. The fields of a
+    sink secret that exists by then stay as they are.
+  - `"yes"` and `"not known"` bind nothing: the run writes as an ordinary
+    move does (without `merge` it replaces the secret; with `merge` it
+    keeps the other fields, guarded by check-and-set).
+  - The check is atomic: only a Vault sink says yes or no, and Vault
+    refuses the guarded write itself (check-and-set). No sink kind
+    without check-and-set gives an answer that binds the run.
+- The approved run of a move compares the target it finds for each
+  `vault-target` side with the approval (`approved_preview("secret.move")`,
+  checked in `check_access`): `target_id`, `vault_role` and `vault_mount`.
+  Another target, another Vault role or login mount, or an approval
+  without one of them, refuses the run with `VaultTargetChangedError`
+  before any Vault login. So the run acts on the targets the approver
+  saw, with the role and the mount the approver saw, even when a name or
+  alias points to another target by then. A name that finds no target
+  (or more than one) refuses the run with `VaultTargetNotFoundError`,
+  before any Vault login; nothing is read or written. An approval made
+  before MEHO showed target ids is refused too; the requester sends a new
+  request.
+- The approval binds every side that names a MEHO target. For a `linux:`
+  sink the card shows the name as typed (`target`), the Linux target it
+  points to (`target_id`, `target_name`), its `host` and its SSH `port`
+  (22 when the target names none). The approved run compares the id, the
+  host and the port with the target it finds (`check_target` of the
+  `linux:` store, in `connectors/linux/secret_sink_target.py`). Another
+  target, a new host or port on the same target, or a card without one of
+  them, refuses the run with `LinuxTargetChangedError`: "Nothing was read
+  or written. Send a new request". The check runs before the sudo password
+  lookup, before the source is read and before any SSH call. A `vault:`
+  side names no MEHO target.
+- For each `keycloak:` side (a user password sink or a client secret
+  source) the card shows the Keycloak target the name points to
+  (`target_id`, `target_name`), how MEHO connects to it (`host`, `port`,
+  `scheme` and the TLS check `tls`) and the reference of its admin login
+  (`secret_ref`). The `port` is the one MEHO dials: the target's own port,
+  or 443 for https and 80 for http. `tls` says whether MEHO checks the
+  certificate, and names a pinned CA (by a short SHA-256 digest) and a TLS
+  server name when the target sets them. The server name shows also when
+  MEHO does not check the certificate, because MEHO still sends it in the
+  TLS handshake. The approved run compares the
+  id, these connection fields and the secret reference with the target it
+  finds (`connectors/keycloak/secret_move_target.py`, called where the
+  Keycloak store finds its target). Another target, a new host, port,
+  scheme, TLS setting or secret reference on the same target, or a card
+  without one of them, refuses the run with `KeycloakTargetChangedError`:
+  "Nothing was read or written. Send a new request". The check runs before
+  any Keycloak login; for a sink it also runs before the source is read.
+  `preview_operation`, `meho_approvals_get` and `meho_approvals_list`
+  leave these fields out; only the card a person reads shows them.
+- A move with a `keycloak:` side is a change of rights, like
+  `keycloak.user.reset_password`: it sets a Keycloak user's password or
+  reads a client secret. The request carries the rights-change mark
+  (`register_rights_change_check("secret.move", has_keycloak_side)` in
+  `move_preview.py`). It always waits, also for an admin in the web
+  console. Only an admin (a tenant admin or a platform admin) approves it,
+  with a click in the web console; the admin may be the requester. A move
+  between two
+  Vault places (or to a `linux:` place) is not a change of rights.
+- Before the `linux:` store uses SSH, it drops the SSH logins this server
+  keeps for the target when a person changed the target since this server
+  last saw it (`forget_target_if_changed`). It drops them too the first
+  time this server sees the target. So the script goes to the host and
+  port the row holds now, also when another server made the change.
+- What a caller reads about a `linux:` side is behind the switch
+  `SECRET_MOVE_LINUX_TARGET_CARD` (off by default). Off,
+  `preview_operation` shows only `kind` and `ref` for a `linux:` side, and
+  `meho_approvals_get` and `meho_approvals_list` leave out `target`,
+  `target_id`, `target_name`, `host` and `port`. On, they show them. The
+  card a person reads in the console and the check of the approved run do
+  not depend on the switch.
+- `secret.handoff.export` refuses a `vault-target:` source (its params
+  check and its handler). Move the secret to a `vault:` place first.
+- `meho secret move --merge` sends `merge: true`.
+
 ## Move a secret to another MEHO instance (handoff)
 
 `secret.move` works inside one MEHO: both sides use this instance's own
@@ -149,8 +307,11 @@ do that, and nobody sees the value:
    handoff_token, handoff_ttl_seconds}`.
 2. **On B: `secret.handoff.import`.** Params: `handoff_token`, `store`
    (the name of a target on B, product `vault`, whose host is A's Vault
-   or OpenBao), `to` (`<kind>:<ref>` sink on B), optional
+   or OpenBao), `to` (a `vault:` place on B), optional
    `expect_fingerprint`, `reason`. The handler:
+   - refuses a `to` of any other kind, for example `linux:`, before it
+     uses the handoff. Only `secret.move` writes to a `linux:` place, and
+     a person approves each move;
    - builds the sink and runs its write check first
      (`VaultKvSecretEndpoint.check_write_allowed`, the tenant check), so
      a wrong sink path does not use up the handoff;
@@ -259,14 +420,242 @@ meho secret move \
 - `--to` writes it into the `client_secret` field of the KV-v2 secret at
   `tenants/<tenant-id>/launcher-app` (under the deployment's default
   `secret` mount, inside the operator's tenant subtree).
-- The op is `requires_approval=True`, so the move parks at
-  `awaiting_approval` and a human approves it before it runs. The response
+- The op is `requires_approval=True`, so the move waits for approval
+  before it runs. A `keycloak:` side makes it a change of rights, so an
+  admin approves it with a click in the web console. The response
   is only `{status: "moved", value_fingerprint, length}` — the value never
   appears in the CLI/MCP output, a log event, or the audit row.
 
 The same move over MCP is `call_operation(connector_id="secret-broker-1.x",
 op_id="secret.move", params={"from": "keycloak:…#secret", "to": "vault:…#client_secret",
 "reason": "…"})`.
+
+## Ops example — a machine login for an agent seat
+
+An operator makes a machine login for an agent seat only through MEHO. A
+machine login is a Keycloak client that signs in without a person. An
+agent seat is a machine where an AI agent works with its own MEHO login.
+Nobody sees the client secret: not the operator, not the agent, not the
+result, not the audit row.
+
+The recipe is three governed calls. Each one waits for approval. Run them
+in order.
+
+**1. Create the client** with `keycloak.client.create` on the Keycloak
+target. Use this `representation`. Replace the three placeholders: the
+client id, the tenant id, and the MEHO audience (the audience your MEHO
+checks, `KEYCLOAK_AUDIENCE`). `tenant_role` is the tenant role the seat
+gets. Keep it `operator`. Never use `tenant_admin`.
+
+Step 1 creates a new login with tenant rights. An admin approves it in the
+web console before it runs.
+
+<!-- recipe:keycloak-client-representation -->
+```json
+{
+  "clientId": "<client-id>",
+  "enabled": true,
+  "publicClient": false,
+  "serviceAccountsEnabled": true,
+  "standardFlowEnabled": false,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "defaultClientScopes": ["basic", "roles", "web-origins", "acr"],
+  "protocolMappers": [
+    {
+      "name": "audience-mapper",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "config": {
+        "included.custom.audience": "<audience>",
+        "id.token.claim": "false",
+        "access.token.claim": "true"
+      }
+    },
+    {
+      "name": "tenant-id-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_id",
+        "claim.value": "<tenant-id>",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "tenant-role-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "tenant_role",
+        "claim.value": "operator",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    },
+    {
+      "name": "principal-kind-claim",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-hardcoded-claim-mapper",
+      "config": {
+        "claim.name": "principal_kind",
+        "claim.value": "service",
+        "jsonType.label": "String",
+        "access.token.claim": "true",
+        "id.token.claim": "false",
+        "userinfo.token.claim": "false"
+      }
+    }
+  ]
+}
+```
+
+The `defaultClientScopes` line is what puts `sub` into the token. The
+answer holds the client id and its internal id, never the secret.
+
+**2. Move the secret into Vault or OpenBao** (`secret.move`):
+
+```
+meho secret move \
+  --from 'keycloak:<keycloak-target>/<realm>/clients/<client-id>#secret' \
+  --to   'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --reason 'store the seat login secret'
+```
+
+**3. Optional: put the secret in a file on the seat's host** (`secret.move`
+to a `linux:` ref):
+
+```
+meho secret move \
+  --from 'vault:tenants/<tenant-id>/<seat-name>#client_secret' \
+  --to   'linux:<host-target>/home/<owner>/.config/meho/client-secret#<owner>' \
+  --reason 'place the seat login secret for the agent'
+```
+
+The file gets mode 0600 and the owner you name. A file that already exists
+at the path is replaced. The path must be inside the owner's home, and the
+owner is never `root`. See "The `linux:` store" below.
+
+The audit rows and the approval previews of the three calls show only the
+client id, the target names, and the paths. For a `linux:` move the approval
+card shows the path, the owner, the target, its host and its port, never
+the content. The person who approves
+reads both: the path says where the secret goes, the owner says who can read
+it.
+
+A person approves each `secret.move`. No standing grant and no run approval
+covers it, because a move writes a secret into a store or onto a host.
+
+**Safe to run twice.** A second run changes nothing that matters. The client
+create answers `conflict` and leaves the client as it is. The two moves
+write the same value again. This holds as long as nobody rotated the
+secret in between. The recipe does not rotate a secret.
+
+## The `linux:` store (a file on a Linux host)
+
+`linux` is a **write-only** store (a sink). It puts a secret into a file on
+a host that a `linux-ssh` target reaches. Reading from a `linux:` ref
+fails with an error that names no value.
+
+```
+linux:<target>/<absolute path>#<owner>
+```
+
+- `<target>` is a `linux-ssh` target name (or alias). MEHO refuses a target
+  of another kind before it reads any credential or opens SSH.
+- `<absolute path>` is the file. One slash or two after the target both work.
+- `<owner>` is the Linux user who will own the file. A user name only:
+  lower-case letters, digits, `_` and `-`. A normal user: never `root`,
+  never a user with user id 0, and never a system user (a user id below the
+  host's first normal user id), and never a user with a user id above the
+  host's last normal user id.
+- A ref has no spaces, because the `secret.move` parameter schema refuses
+  them.
+
+What MEHO does on the host:
+
+- The only allowed place is the home directory of `<owner>`. A short list of
+  allowed places can be complete; a list of refused places never is.
+- It writes the value in one atomic step: a temp file, then a rename. The
+  owner does every step (`runuser -u <owner>`): the folders, the temp file
+  and the rename. Root only checks; it never writes the file and never
+  makes a folder. So root never follows a link that the owner could have
+  made.
+- The owner walks from the home to the file one folder at a time, and checks
+  the real folder after each step. A link in any folder of the path below the
+  home stops the write with the reason `link`. A link could lead into a
+  refused place or out of the home. The temp file and the rename happen in
+  the folder the owner already stands in, so a link made after the check
+  cannot move the write. A link in place of the file itself is replaced,
+  never followed.
+- The file gets mode 0600. A missing parent directory is made with mode
+  0700.
+- Before it opens any SSH connection, MEHO refuses:
+  - a relative path, `..`, a backslash, and any character that is not
+    printable (for example a tab, ESC or a right-to-left mark);
+  - a place that is never a home: `/etc`, `/run`, `/usr` (also
+    `/usr/local`), `/var/lib`, `/opt`, `/srv`, `/proc`, `/sys`, `/dev`,
+    `/boot`, `/bin`, `/sbin`, `/lib*` and `/tmp`. A normal user's home under
+    `/var` (for example `/var/home/app`) is allowed;
+  - a place inside a home that the system runs or reads for logins
+    (`_SYSTEM_RUNS` in the code): a `.ssh` folder anywhere in the path, the
+    folders `.config/systemd`, `.config/autostart`, `.config/fish`,
+    `.config/environment.d`, `.config/plasma-workspace` and
+    `.local/share/systemd`, `.config/nvim`, `.config/git/config`,
+    `.local/bin`, `bin`, `.local/share/bash-completion`, `.oh-my-zsh` and
+    any `site-packages` folder under `.local/lib`, and the file names `authorized_keys`,
+    `authorized_keys2`, `.bashrc`, `.bash_profile`, `.bash_login`,
+    `.bash_logout`, `.bash_aliases`, `.profile`, `.zshrc`, `.zshenv`,
+    `.zprofile`, `.zlogin`, `.zlogout`, `.cshrc`, `.tcshrc`, `.login`,
+    `.logout`, `.kshrc`, `.mkshrc`, `.xprofile`, `.xinitrc`, `.xsession`,
+    `.xsessionrc`, `.pam_environment`, `.forward`, `.procmailrc`,
+    `.mailfilter`, `.qmail`, `.rhosts`, `.shosts`, `.k5login`, `.gitconfig`, `.vimrc`, `.inputrc`,
+    `.tmux.conf`, `.bash_completion`. The list is not complete. Files where
+    a tool keeps its own login (`.netrc`, `.kube/config`,
+    `.docker/config.json`, `.npmrc`) stay allowed. Names are
+    compared in lower case, so `.BashRC` is refused too.
+- `secret.move` runs the same checks before the call can wait for approval.
+  A refused place makes no approval card: the call fails with
+  `invalid_params`.
+- Both scripts on the host first check that `realpath -m` works. When it
+  does not, they stop with the reason `realpath` and write nothing.
+- MEHO then asks the host for the owner's home (`getent passwd`). This short
+  script carries no secret. It stops with:
+  - the reason `root-owner` for an owner with user id 0;
+  - the reason `system-owner` for an owner whose user id is below the
+    host's first normal user id (`UID_MIN` in `/etc/login.defs`; 1000 when
+    the file gives none). A system user's home is often a folder that others
+    read or share, for example a web root or a mail spool, so a secret
+    written there would not stay with one user;
+  - the reason `system-owner` also for an owner whose user id is above the
+    host's last normal user id (`UID_MAX` in `/etc/login.defs`; 60000 when
+    the file gives none), for example `nobody`. A user from a directory service (for example SSSD,
+    FreeIPA or Active Directory) often has a much larger user id, so it is
+    refused with `system-owner` too. To allow such users, an admin of the
+    host raises `UID_MAX` in `/etc/login.defs`;
+  - the reason `no-home` when the home does not exist.
+
+  When the path is not inside the home, MEHO stops before it sends the
+  secret. So a normal user's home in any place works, for example
+  `/data/app`.
+- The script that writes the file checks the owner and the home again, with
+  the path as the caller wrote it. It uses the same reasons.
+- The value travels only inside the SSH channel (standard input), through
+  the same sudo helper as `linux.file.write`. During the write the helper
+  keeps the script in a temp file of mode 0600 on the host, and removes the
+  file when the script ends. It is never in the remote
+  command line, a log line, or an error text. An error names only a short
+  reason such as `place` or `owner`.
+
+Code: `backend/src/meho_backplane/connectors/linux/secret_endpoint.py`.
+Tests: `backend/tests/test_secret_broker_linux_sink.py`; the machine login
+itself is tested against a real Keycloak in
+`backend/tests/integration/test_service_principal_recipe.py`.
 
 ## Control flow
 
@@ -326,7 +715,8 @@ the posture and relies on the existing gate). The policy refinement
   (`move_preview.py`, registered via `register_preview_builder("secret.move", …)`)
   populates `ApprovalRequest.proposed_effect` with a ref-only summary —
   the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`,
-  never the value. `secret.move` classifies `"other"` (so the
+  never the value. A `vault-target` side and the sink add the fields of
+  the section "Vault target refs and the merge option". `secret.move` classifies `"other"` (so the
   credential-class preview suppression does not fire) and carries no
   value in its params, so the summary is value-free by construction.
 - **Time-boxed scope.** The grant is the existing `AgentPermission`
@@ -358,8 +748,8 @@ the posture and relies on the existing gate). The policy refinement
 - The handoff import does not support a store target with a pinned CA
   (`tls_ca_pin`) yet; it refuses such a target with a plain error.
 - vault-kv (source+sink) and keycloak (user-password sink #1578 +
-  client-secret source #3619, dual-dispatched under the one kind) are the
-  registered adapter kinds; further kinds are separate tasks reusing the
+  client-secret source #3619, dual-dispatched under the one kind) and linux
+  (a file on a host, sink only) are the registered adapter kinds; further kinds are separate tasks reusing the
   `SecretEndpoint` contract.
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar

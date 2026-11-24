@@ -90,6 +90,132 @@ across every cut:
   backstop a PR cannot edit. The full enforcement map is in
   [`docs/codebase/devops.md` § Untrusted pull-request isolation](codebase/devops.md).
 
+## Appliance release files
+
+The appliance build (`appliance-build.yml`, run by hand with a release tag)
+makes two files and a checksum list for a release:
+
+- `meho-appliance-X.Y.Z.ova`: the appliance.
+- `meho-appliance-X.Y.Z-os-packages.tar`: the OS updates for an update of
+  the appliance, a signed flat apt repository. `deploy/appliance/os-packages.sh`
+  makes it. `install.sh --os-packages` checks its signature with the key
+  file `/etc/apt/keyrings/meho-os-packages.gpg`.
+- `SHA256SUMS` lists both files. `SHA256SUMS.cosign.bundle` is its cosign
+  signature, keyless, as for `SHA256SUMS-linux`. The signature names
+  `appliance-build.yml` and the ref the workflow ran on.
+
+The files go to Google Cloud Storage, one folder per release:
+`gs://<bucket>/X.Y.Z/`. The OVA is too big for a GitHub release file.
+
+**Who.** One release owner and one backup person start and approve the
+publish run. The backup acts only when the release owner is away. This
+public repository names no people: the team keeps the two names outside
+the repository, and both are required reviewers of the
+environment `release` (below).
+
+**When and how to start the publish run.** After the tag is pushed and
+`linux-download.yml` has put the form-2 download on the GitHub release,
+the release owner starts `appliance-build.yml` by hand:
+
+- "Use workflow from": the tag `vX.Y.Z` itself, not a branch;
+- input `tag`: `vX.Y.Z`;
+- input `publish`: on.
+
+The workflow has two jobs:
+
+1. `build` runs on the lab's runner with read rights only. It builds the
+   OVA and keeps it, its checksum and the OS update packages as workflow
+   artifacts.
+2. `publish` runs on a GitHub-hosted runner. It checks the OVA checksum,
+   makes and signs the OS-package file, writes `SHA256SUMS`, signs it with
+   cosign and checks the signature, signs in to Google Cloud and uploads
+   the files. Only this job may get a GitHub sign-in token.
+
+A release run is a run with `publish` on that started from the tag. Only a
+release run uses the GitHub environment `release`, so the job waits until
+the release owner approves it. Any other run (for example from a branch)
+signs `SHA256SUMS` with cosign and checks it, but never reads the signing
+key and never uploads.
+
+**The environment `release`.** Set it up once in the repository settings:
+
+- deployment rule: tags `v*` only;
+- required reviewer: the release owner (and the backup person);
+- the secret `MEHO_OS_PACKAGES_SIGNING_KEY`: the signing key, an armored
+  secret key without a passphrase. It is an environment secret, not a
+  repository secret, so no other run can read it.
+- the secrets `MEHO_RELEASE_GCP_WIF_PROVIDER` and
+  `MEHO_RELEASE_GCP_SERVICE_ACCOUNT` for the Google Cloud sign-in (see
+  below).
+
+Both the tag rule and the required reviewers are needed. The workflow
+cannot set or enforce them; only the repository settings can.
+
+- Without the tag rule, a run from a branch can use the environment and
+  read the signing key.
+- Without a required reviewer, anyone with write access can start a
+  release run from an existing tag.
+
+So the first step of a release run, "Check the settings of the
+environment release", reads the environment through the GitHub API. It
+stops the run, before the key is read, when the environment has no
+required reviewer, or when its deployment rule is not "tags `v*` only".
+
+**Signing the OS-package file.** A release run (`MEHO_RELEASE=1`) reads the
+key only from `MEHO_OS_PACKAGES_SIGNING_KEY`, never from a file. It stops
+with a plain message when the secret is empty. It stops when the key's
+user id holds `TEST KEY`: the test key of the tests can never sign a
+release. It also stops when the key's fingerprint is not the repository
+variable `MEHO_OS_PACKAGES_KEY_FINGERPRINT` (40 hex digits), so no key
+other than the real one can sign.
+
+**Google Cloud sign-in.** The publish job signs in with workload identity
+federation (`google-github-actions/auth`): GitHub's sign-in token, no
+stored key file. Two secrets of the environment `release` name them:
+`MEHO_RELEASE_GCP_WIF_PROVIDER` (the workload identity provider) and
+`MEHO_RELEASE_GCP_SERVICE_ACCOUNT` (the service account). They are
+secrets, not variables: the job log is public and shows the inputs of
+each step, and GitHub hides only secrets there. The service account may
+only create and read objects in the release bucket (for example the role
+"Storage Object Creator" plus "Storage Object Viewer" on that bucket
+only), nothing else.
+
+Set the condition of the workload identity provider to this repository
+and the environment `release`, for example:
+
+```text
+assertion.repository == 'evoila/meho' && assertion.environment == 'release'
+```
+
+Without this condition, any workflow run of this repository could sign in
+as the upload account.
+
+**The upload step.** `deploy/appliance/upload-release.sh` copies the OVA,
+the OS-package file, `SHA256SUMS` and its bundle to the folder of the
+version. The bucket name is the repository variable `MEHO_RELEASE_BUCKET`.
+When it is empty, or the bucket does not exist, the step stops with a
+plain message. Any other `gcloud` error stops it too. The step never
+creates a bucket, never changes who can read it and never overwrites a
+file. A second run of the same release with the same content does nothing.
+A second run with other content stops.
+
+**Check the signature** of a published release:
+
+```bash
+cosign verify-blob \
+  --certificate-identity "https://github.com/evoila/meho/.github/workflows/appliance-build.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle SHA256SUMS.cosign.bundle \
+  SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+**The release owner sets up** the signing key (made once, with a backup
+copy in the team password manager, never on a laptop) and its fingerprint
+variable, the environment `release`, the bucket and its public read
+access, and the workload identity provider and service account. No key,
+no bucket name and no account name is in the repository.
+
 ## Versioning
 
 [SemVer](https://semver.org). The version lives **only in the git tag** —
@@ -152,28 +278,33 @@ How users get the new version is in the
   workflow (`image.yml` / `cli-release.yml` / `chart.yml`) fires on the
   `v*` tag with **no** other gate, so the tag publishes whatever `main`
   is at — a red `main` ships a broken or incomplete image, chart, and
-  CLI. Confirm the **tagged commit's** `main` CI run is green before
-  step 4:
+  CLI. A push to `main` starts no CI run. The proof of green for the
+  tagged commit is the **merge-queue run** of that merge commit. Confirm
+  it before step 4, and also look at the latest nightly run on `main`:
 
   ```bash
-  gh run list --repo evoila/meho --branch main --limit 5 \
-    --json headSha,conclusion,status,name,url
+  gh run list --repo evoila/meho --commit <merge-commit-sha> \
+    --event merge_group --json headSha,conclusion,status,name,url
+  gh run list --repo evoila/meho --workflow ci.yml --event schedule \
+    --branch main --limit 3 --json headSha,conclusion,status,url
   ```
+
+  An empty list is not green. A commit that was merged outside the
+  merge queue (see "Merging an advisory fix" below) has no merge-queue
+  run. For such a commit, the proof is the first green nightly CI run
+  on `main` that contains the commit. Do not tag before that run is
+  green.
 
 - [ ] **"cancelled" ≠ "green".** A cancelled CI run is *inconclusive*,
-  not a pass. Merge-storm concurrency cancellation (a later push
-  cancels an in-flight run on the same ref) is the common cause, and a
-  cancelled run reads green-ish in a glance — it is not. (A hung
+  not a pass, even though it reads green-ish in a glance. (A hung
   `python-coverage` job is *no longer* a cause: since #2800 a pytest
   hang trips the step-level timeout and degrades to an absorbed job
-  failure with run conclusion `success`, so a `cancelled` main run
-  means a genuine cancel.) If the latest
-  `main` run for the tagged commit is `cancelled`, **re-run it and wait
-  for a real `success`** before tagging:
-
-  ```bash
-  gh run rerun <run-id> --repo evoila/meho   # then re-check conclusion
-  ```
+  failure with run conclusion `success`, so a `cancelled` run
+  means a genuine cancel.) Do not re-run a cancelled merge-queue run:
+  after the merge the queue branch is gone, and the watchdog job
+  cancels the re-run. When the merge-queue run of the tagged commit is
+  `cancelled` or missing, the proof is the next green nightly run on
+  `main` that contains the commit. Wait for it before tagging.
 
 - [ ] **Security-advisory reconciliation (every rc and GA tag).** Every
   `### Security` entry in `CHANGELOG.md` must have a row in the advisory
@@ -202,12 +333,15 @@ How users get the new version is in the
   The steps are in decision record 0010
   (`docs/decisions/0010-who-approves-pull-requests.md` in the private
   maintainer repo). Every other pull
-  request keeps the normal path.
+  request keeps the normal path. Such a merge gets no merge-queue run,
+  and a push to `main` starts no CI run. So after the merge, wait for
+  the next green nightly CI run on `main` that contains the fix before
+  you push the release tag.
 
 - [ ] **The appliance's CIS exception list is approved (every release
   that ships the appliance OVA).** `deploy/appliance/cis/exceptions.md`
   lists each CIS rule that still fails on the appliance, with one
-  sentence on why. Damir Topic approves the whole list once per release,
+  sentence on why. The release owner approves the whole list once per release,
   with the release's security sheet, as a comment on the release-cutting
   PR. What changed since the last release:
 
@@ -310,11 +444,17 @@ merge to `main`.
 - [ ] **Upgrade-notes discipline.** When the release carries an
       upgrade-relevant change (a chart field operators may have hand-patched,
       a new default-on guard, a schema-breaking value, a forward-only
-      migration with an operator caveat), append a row to the
-      version-specific upgrade-notes table in
-      [`deploying.md`](deploying.md) in this same PR. This is the discipline
+      migration with an operator caveat), add a row file
+      under [`upgrade-rows/`](upgrade-rows/README.md) in this same PR (it
+      shows in the version-specific upgrade-notes table of the docs site). This is the discipline
       that #2393's `startupProbe` (the Helm-4 SSA field-conflict caveat)
       would have triggered.
+- [ ] **Upgrade rows into `deploying.md`.** In the release-cutting PR, after
+      the CHANGELOG roll, check that the row folders under `docs/upgrade-rows/`
+      carry the version you release (rename a folder if not). Then run
+      `python3 scripts/ci/upgrade_rows.py --write` and commit
+      `docs/deploying.md`. The script adds the new rows to the end of its
+      table. A test fails while a row of a released version is missing there.
 
 Before merging, run the **release-body path-freshness gate**. The same
 recurring class of defect that motivated #928 at PR time (snapshot
@@ -601,7 +741,7 @@ Walk the gates in the order an operator hits them:
   default fail-closed posture, `"single_operator_break_glass"` when
   the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
   escape (see `docs/codebase/approvals.md` — the endorsed
-  single-operator answer is an agent-requester, not the flag).
+  single-operator answer is the MEHO-Admins group, not the flag).
 
 - [ ] **Approval custody** (required wherever a credential-write
   operation may wait for approval). Set
@@ -837,7 +977,7 @@ git fetch origin main
 RC_SHA=$(git rev-parse origin/main)   # the candidate; do not recompute it later
 RC_PREV=$(git describe --tags --abbrev=0 "$RC_SHA")   # previous tag of any kind, relative to the candidate (not to your checkout)
 git log -1 --format='%H %s' "$RC_SHA"
-gh run list --repo evoila/meho --commit "$RC_SHA" --branch main   # the CI run you are verifying
+gh run list --repo evoila/meho --commit "$RC_SHA" --event merge_group   # the CI run you are verifying
 ```
 
 If `main` moves while you work through R3, you have two honest
@@ -847,7 +987,7 @@ checks below — that is the moving-branch race the final-release
 procedure avoids by selecting its merge commit explicitly.
 
 Run step 1 as written (Tasks closed; **real** `success` on the
-`$RC_SHA` `main` CI run; cancelled ≠ green). Then:
+merge-queue run of `$RC_SHA` (`--event merge_group`), plus the nightly run; cancelled ≠ green). Then:
 
 - [ ] **Contract gates green on the candidate commit.** Gate 4 of
   #2661 — "contract snapshots + compat gates green across the rc
@@ -1078,8 +1218,9 @@ Steps 2–7 as written, with `PREV` = the last **final** tag (R1
   is checked.
 - [ ] `docs-site/reference/whats-new.md`: one `## [v1.0.0]` section
   for the series (step 2.4).
-- [ ] `deploying.md` upgrade-notes row for v1.0.0 (step 3), covering
-  every upgrade-relevant change since `PREV`.
+- [ ] Upgrade row files for v1.0.0 (step 3), covering every
+  upgrade-relevant change since `PREV`, written into `deploying.md` by
+  `upgrade_rows.py --write`.
 - [ ] Tag `v1.0.0` on `REL_SHA` per step 4. Verify per step 5 — the
   Release is **not** marked pre-release; `meho version` → `v1.0.0`;
   chart `1.0.0`; docs republish `1.0` in place, and this final tag
@@ -1121,8 +1262,9 @@ are left. Each is a follow-up task.
 ## Checklist
 
 ```
-[ ] 1. Tasks merged; main CI GREEN on the tagged commit (cancelled ≠ green —
-       re-run + wait for success); version picked
+[ ] 1. Tasks merged; merge-queue CI GREEN on the tagged commit, nightly green (cancelled ≠ green —
+       do not re-run a queue run, wait for the next green nightly run on `main`
+       that contains the commit); version picked
 [ ] 1a. Advisory ledger reconciled: `### Security` headings == ledger rows;
         GHSA count recorded; at a GA tag zero "Owed — decision pending"
         rows (docs/security/advisory-ledger.md; SECURITY.md disclosure steps)
@@ -1136,8 +1278,8 @@ are left. Each is a follow-up task.
        (scripts/ci/check_tested_live_claims.py)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
-       upgrade-relevant change → deploying.md version-specific notes row
-       appended; release-cutting PR merged to main
+       upgrade-relevant change → row files, written into deploying.md by
+       upgrade_rows.py --write; release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published; form-2 download + SHA256SUMS-linux
@@ -1197,8 +1339,9 @@ are left. Each is a follow-up task.
   made a red `main` read as "cancelled" rather than "failed", and a
   cancelled run was treated as good enough to tag. A cancelled run is
   inconclusive, not a pass. Step 1 now makes both gates explicit:
-  confirm the tagged commit's `main` run is a real `success`, and
-  re-run any `cancelled` run before trusting it.
+  confirm the tagged commit's merge-queue run is a real `success`. For a
+  `cancelled` or missing run, wait for the next green nightly run on `main`
+  that contains the commit. Do not re-run the queue run.
 
 ## v0.7 follow-ups (deprecation removals)
 

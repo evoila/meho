@@ -136,6 +136,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal
 
 import structlog
+from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.audit_cutover import (
@@ -157,8 +158,15 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import (
+    client_command_var,
+    client_session_id_var,
+    decode_work_ref_header,
+    parse_command_header,
+    work_ref_var,
+)
 from meho_backplane.request_usage.collector import open_request_usage
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
@@ -185,6 +193,20 @@ _RESPONSE_BODY: Final[str] = "http.response.body"
 #: is untouched by this header; only the ``CallOperationBody.work_ref``
 #: field (a real body field) moves the documented schema.
 _WORK_REF_HEADER: Final[bytes] = b"meho-work-ref"
+
+#: Lower-cased name of the request header in which the ``meho`` CLI sends the
+#: id of its login session. Bound onto
+#: :data:`~meho_backplane.operations._audit.client_session_id_var` for the whole
+#: request, so the operation rows of a CLI dispatch carry it as
+#: ``audit_log.agent_session_id``. Like ``Meho-Work-Ref`` it is read off the
+#: raw scope and is not part of the OpenAPI schema.
+_SESSION_ID_HEADER: Final[bytes] = b"meho-session-id"
+
+#: Lower-cased name of the request header in which the ``meho`` CLI sends the
+#: path of the running command (``vmware vm list``). Bound onto
+#: :data:`~meho_backplane.operations._audit.client_command_var` for the whole
+#: request. Like ``Meho-Session-Id`` it is not part of the OpenAPI schema.
+_COMMAND_HEADER: Final[bytes] = b"meho-command"
 
 #: Lower-cased response-header name carrying the id of the request's
 #: audit record (#4976). See "Audit receipt header" in the module docstring.
@@ -457,6 +479,7 @@ async def _write_audit_row(
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             actor_sub=resolve_actor_sub(),
+            agent_session_id=client_session_id_var.get(),
             tenant_id=tenant_id,
             target_id=target_id,
             method=method,
@@ -632,15 +655,41 @@ def _extract_work_ref(scope: Scope) -> str | None:
     :func:`meho_backplane.middleware._extract_request_id` reads
     ``X-Request-Id``. Header names are case-insensitive per RFC 9110
     §5.1, so the comparison lower-cases the wire name; the value is
-    decoded ``latin-1`` (the byte range ASGI guarantees for header
-    values) and stripped. An absent header, or a present-but-empty
-    value, both return ``None`` so the audit row's ``work_ref`` lands
-    NULL -- the correct quiet path for a call carrying no ticket.
+    decoded as UTF-8 (latin-1 when it is not valid UTF-8) and stripped
+    by :func:`decode_work_ref_header`, so a non-ASCII ticket id lands as
+    the client sent it. An absent header returns ``None`` so the audit
+    row's ``work_ref`` lands NULL -- the quiet path for a call carrying no
+    ticket. A present header that is empty or blank breaks the rule and
+    raises :class:`~meho_backplane.work_ref.WorkRefError`, like any other
+    bad value.
     """
     for name, value in scope.get("headers", ()):
         if name.lower() == _WORK_REF_HEADER:
-            decoded = value.decode("latin-1").strip()
-            return decoded or None
+            return decode_work_ref_header(value)
+    return None
+
+
+def _extract_session_id(scope: Scope) -> uuid.UUID | None:
+    """Return the inbound ``Meho-Session-Id`` header as a UUID, or ``None``.
+
+    An absent header, or a value that is not a UUID, gives ``None``: the
+    request is then audited without a client session id, as for any other
+    caller.
+    """
+    for name, value in scope.get("headers", ()):
+        if name.lower() == _SESSION_ID_HEADER:
+            try:
+                return uuid.UUID(value.decode("ascii").strip())
+            except (ValueError, UnicodeDecodeError):
+                return None
+    return None
+
+
+def _extract_command(scope: Scope) -> str | None:
+    """Return the inbound ``Meho-Command`` header as a command path, or ``None``."""
+    for name, value in scope.get("headers", ()):
+        if name.lower() == _COMMAND_HEADER:
+            return parse_command_header(value)
     return None
 
 
@@ -851,9 +900,31 @@ class AuditMiddleware:
         # carry the header too. A ``work_ref`` tool argument still wins:
         # ``call_operation`` binds it over this value for its dispatch.
         work_ref_token = None
-        work_ref_header = _extract_work_ref(scope)
+        try:
+            work_ref_header = _extract_work_ref(scope)
+        except WorkRefError as exc:
+            # A ticket id that breaks the rule is refused before anything
+            # else happens with the request: no policy check, no call, no
+            # row. The message names the rule. The log line names the rule
+            # code, the request id and the URL path, never the value, so an
+            # operator can find the client that sends a bad header.
+            method, path, request_id = _resolve_request_metadata(scope)
+            structlog.get_logger().warning(
+                "work_ref_header_refused",
+                request_id=str(request_id) if request_id is not None else None,
+                method=method,
+                path=path,
+                rule=exc.rule,
+            )
+            await JSONResponse(
+                {"detail": f"Meho-Work-Ref header: {exc}"},
+                status_code=400,
+            )(scope, receive, send)
+            return
         if work_ref_header is not None:
             work_ref_token = work_ref_var.set(work_ref_header)
+        session_token = client_session_id_var.set(_extract_session_id(scope))
+        command_token = client_command_var.set(_extract_command(scope))
         try:
             # G0.5-T5 (#250): MCP requests are audited at per-operation
             # granularity by the MCP handlers themselves, not at the
@@ -868,6 +939,8 @@ class AuditMiddleware:
                 return
             await self._run_and_finalize(scope, receive, send, start)
         finally:
+            client_command_var.reset(command_token)
+            client_session_id_var.reset(session_token)
             if work_ref_token is not None:
                 work_ref_var.reset(work_ref_token)
 

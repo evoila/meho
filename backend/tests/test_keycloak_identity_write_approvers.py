@@ -13,7 +13,11 @@ check the approval rules:
 
 * a reviewer (an operator, or a read-only person with the approver flag)
   cannot approve another person's request;
-* a MEHO-SA-Operator or a tenant admin can;
+* in MEHO's own login realm only a platform admin can; outside it a tenant
+  admin can too; a MEHO-SA-Operator who is not an admin cannot,
+  because all five are changes of rights
+  (``connectors/keycloak/rights_changes.py``), which only an admin
+  approves, in the web console;
 * the single-operator self-approval switch does not let the requester
   approve their own request.
 """
@@ -32,7 +36,8 @@ from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalGroupForbiddenError,
-    SelfApprovalForbiddenError,
+    ApprovalRoleFloorError,
+    RightsChangeApprovalError,
     approve_request,
     create_pending_request,
 )
@@ -50,7 +55,7 @@ _IDENTITY_WRITES = (
     "keycloak.protocol_mapper.create",
 )
 _LEVELS = {op.op_id: op.safety_level for op in WRITE_OPS}
-_PARAMS: dict[str, Any] = {"representation": {"username": "new-user"}}
+_PARAMS: dict[str, Any] = {"id": "user-1", "representation": {"username": "new-user"}}
 _REQUESTER = "person-requester"
 _OTHER = "person-other"
 
@@ -61,7 +66,9 @@ def _person(
     role: TenantRole = TenantRole.OPERATOR,
     sa_operator: bool = False,
     approver: bool = False,
+    platform_admin: bool = False,
 ) -> Operator:
+    """A person in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         raw_jwt="<test-raw-jwt>",
@@ -69,12 +76,19 @@ def _person(
         tenant_role=role,
         approver=approver,
         self_approver=sa_operator,
+        platform_admin=platform_admin,
+        web_session=True,
     )
 
 
-async def _park(op_id: str) -> uuid.UUID:
-    """Park *op_id* by the requester, with the level its registration declares."""
-    effect = {"op_id": op_id, "safety_level": _LEVELS[op_id]}
+async def _park(op_id: str, *, platform_admin: bool = False, login_realm: bool = True) -> uuid.UUID:
+    """Park *op_id* by the requester, with the level its registration declares.
+
+    The card says whether the write is in MEHO's own login realm and,
+    unless *platform_admin*, that it gives no platform admin rights.
+    """
+    grant = {"user_id": "user-1", "login_realm": login_realm, "platform_admin": platform_admin}
+    effect = {"op_id": op_id, "safety_level": _LEVELS[op_id], "preview": {"grant": grant}}
     async with get_sessionmaker()() as session:
         request = await create_pending_request(
             session,
@@ -118,7 +132,7 @@ def test_identity_writes_register_as_dangerous(op_id: str) -> None:
 async def test_a_reviewer_cannot_approve_an_identity_write(op_id: str, reviewer: Operator) -> None:
     request_id = await _park(op_id)
 
-    with pytest.raises(ApprovalGroupForbiddenError):
+    with pytest.raises((ApprovalGroupForbiddenError, RightsChangeApprovalError)):
         await _approve(request_id, reviewer)
 
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
@@ -126,19 +140,56 @@ async def test_a_reviewer_cannot_approve_an_identity_write(op_id: str, reviewer:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
-@pytest.mark.parametrize(
-    "approver",
-    [_person(_OTHER, sa_operator=True), _person(_OTHER, role=TenantRole.TENANT_ADMIN)],
-    ids=["sa-operator", "tenant-admin"],
-)
-async def test_an_sa_operator_or_tenant_admin_approves_an_identity_write(
-    op_id: str, approver: Operator
+async def test_in_the_login_realm_only_a_platform_admin_approves_an_identity_write(
+    op_id: str,
 ) -> None:
     request_id = await _park(op_id)
 
-    await _approve(request_id, approver)
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+    platform_admin = _person(_OTHER, role=TenantRole.TENANT_ADMIN, platform_admin=True)
+    await _approve(request_id, platform_admin)
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
+async def test_outside_the_login_realm_a_tenant_admin_approves_an_identity_write(
+    op_id: str,
+) -> None:
+    request_id = await _park(op_id, login_realm=False)
+
+    await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
 
     assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
+async def test_a_tenant_admin_cannot_approve_one_that_gives_platform_admin_rights(
+    op_id: str,
+) -> None:
+    request_id = await _park(op_id, platform_admin=True)
+
+    with pytest.raises(ApprovalRoleFloorError):
+        await _approve(request_id, _person(_OTHER, role=TenantRole.TENANT_ADMIN))
+
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _IDENTITY_WRITES)
+async def test_an_sa_operator_who_is_not_an_admin_cannot_approve_a_change_of_rights(
+    op_id: str,
+) -> None:
+    request_id = await _park(op_id)
+
+    with pytest.raises(RightsChangeApprovalError):
+        await _approve(request_id, _person(_OTHER, sa_operator=True))
+
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -150,8 +201,6 @@ async def test_the_self_approval_switch_does_not_cover_an_identity_write(
     get_settings.cache_clear()
     request_id = await _park(op_id)
 
-    with pytest.raises(SelfApprovalForbiddenError) as exc:
+    with pytest.raises(RightsChangeApprovalError):
         await _approve(request_id, _person(_REQUESTER))
-
-    assert exc.value.high_risk is True
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value

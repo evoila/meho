@@ -166,7 +166,8 @@ async def _register_handler(
         operator,
         "meho_agent_principals_register",
         "A person registers an agent principal in the operator console, or with the "
-        "CLI: `meho agent-principal register <name>`.",
+        "CLI: `meho agent-principal register <name> --grants none` (or "
+        "`--grants read-everything`, or `--grants read-targets --target <target>`).",
     )
     name = _require_name(arguments)
     owner_sub: str | None = arguments.get("owner_sub") or None

@@ -78,6 +78,7 @@ per-operator Vault tenant-scope exemption in
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -89,11 +90,16 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.approval_sign_in_flow import (
     ApprovalSignInStatus,
     read_approval_sign_in,
+    read_web_approval_sign_in,
+    sign_in_level_for_status,
+    sign_in_level_warning,
+    web_sign_in_level_warning,
 )
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.tenant_admins import admin_count
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 from meho_backplane.connectors._shared.credential_backend import (
@@ -355,7 +361,22 @@ class ApprovalsStatus(BaseModel):
     :func:`meho_backplane.features.build_features_block`; they are state
     words only, never a key value. ``sign_in`` is the state of the
     approval client's own login flow in Keycloak (#6280,
-    :mod:`meho_backplane.auth.approval_sign_in_flow`).
+    :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+    is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+    ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
+    what MEHO does now with an approval sign-in that lacks the approval
+    level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
+    only while ``sign_in`` shows for sure that the realm does not give the
+    level, and ``required`` when it is ``ok`` or its read failed).
+    ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
+    console's approval client (#6282): ``auto`` reads each client's
+    binding, so the two can differ. ``sign_in_level_warning`` is a short
+    sentence whenever the level is not required in practice for either
+    client or a read failed, else ``None``.
+    ``rights_change_admins`` is how many admins of the caller's tenant could
+    approve a change of rights (#6641,
+    :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
+    count them. With one admin, a change of rights cannot be approved.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -364,6 +385,12 @@ class ApprovalsStatus(BaseModel):
     effective_posture: str
     delegated_decision_posture: str
     sign_in: ApprovalSignInStatus | None = None
+    sign_in_level: str | None = None
+    sign_in_level_in_force: str | None = None
+    web_sign_in: ApprovalSignInStatus | None = None
+    web_sign_in_level_in_force: str | None = None
+    sign_in_level_warning: str | None = None
+    rights_change_admins: int | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -660,12 +687,12 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 #: Module-level dependency singleton (sibling-router convention, and
 #: what keeps ruff B008 happy): resolves the OPERATOR rank once at
 #: import time so a typo'd role fails at boot, not per-request.
-_operator_role_check = require_role(TenantRole.OPERATOR)
-
 #: The lowest role that runs the credential-backend check. It is the role
 #: :func:`authenticated_health` requires, so REST and the ``meho_status``
 #: MCP tool agree on who runs it.
 _FEDERATION_CHECK_ROLE: TenantRole = TenantRole.OPERATOR
+
+_operator_role_check = require_role(_FEDERATION_CHECK_ROLE)
 
 #: The ``vault`` answer for a caller below :data:`_FEDERATION_CHECK_ROLE`.
 _FEDERATION_NOT_CHECKED_FOR_ROLE = VaultStatus(
@@ -996,11 +1023,13 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
     ``/ready`` uses. Only state words and setting *names* leave this
     function; the block itself never carries a key value.
     """
-    block = build_features_block(get_settings())
+    settings = get_settings()
+    block = build_features_block(settings)
     approvals = ApprovalsStatus(
         custody=block["approval_custody"]["custody"],
         effective_posture=block["approval_queue"]["effective_posture"],
         delegated_decision_posture=block["approval_queue"]["delegated_decision_posture"],
+        sign_in_level=settings.approval_sign_in_level,
     )
     features = [
         FeatureStatus(
@@ -1011,6 +1040,30 @@ def _approvals_and_features() -> tuple[ApprovalsStatus, list[FeatureStatus]]:
         for name, entry in block.items()
     ]
     return approvals, features
+
+
+def _with_sign_in(
+    approvals: ApprovalsStatus, sign_in: ApprovalSignInStatus, web_sign_in: ApprovalSignInStatus
+) -> ApprovalsStatus:
+    """Add the state of both approval clients and what it means for the level (#6281, #6282)."""
+    mode = approvals.sign_in_level or "auto"
+    warnings = [
+        w
+        for w in (
+            sign_in_level_warning(mode, sign_in),
+            web_sign_in_level_warning(mode, web_sign_in),
+        )
+        if w
+    ]
+    return approvals.model_copy(
+        update={
+            "sign_in": sign_in,
+            "sign_in_level_in_force": sign_in_level_for_status(mode, sign_in),
+            "web_sign_in": web_sign_in,
+            "web_sign_in_level_in_force": sign_in_level_for_status(mode, web_sign_in),
+            "sign_in_level_warning": " ".join(warnings) or None,
+        }
+    )
 
 
 async def build_health_response(operator: Operator) -> HealthResponse:
@@ -1037,7 +1090,13 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     vault_status = await _federation_status_for(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
-    approvals = approvals.model_copy(update={"sign_in": await read_approval_sign_in()})
+    sign_in, web_sign_in = await asyncio.gather(
+        read_approval_sign_in(), read_web_approval_sign_in()
+    )
+    approvals = _with_sign_in(approvals, sign_in, web_sign_in)
+    approvals = approvals.model_copy(
+        update={"rights_change_admins": await admin_count(operator.tenant_id)}
+    )
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,

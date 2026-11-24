@@ -5,9 +5,10 @@ runs** on durable triggers — a cron expression, a one-off instant, or an
 event — with no operator at the keyboard. An operator (or agent author)
 creates a trigger row; a background loop scans for what is due and
 launches the bound agent definition when its time comes. This is what
-runs your nightly reconciliation, your scheduled remediation, and the
-autonomous writes behind the [agent-requester approval
-pattern](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+runs your nightly reconciliation, your scheduled remediation, and other
+writes that run on a schedule. A write of a scheduled run still waits
+for approval like any other (see
+[Approvals and break-glass](approvals-and-break-glass.md)).
 
 The hard part of unattended execution is not the timer — it is *credentials*:
 a scheduled run days later still needs a live identity to reach Vault.
@@ -264,9 +265,12 @@ meho sensor create \
 
 **2. Make a small agent that can only read.** First give it a login. Then
 create it, and give it two grants: deny everything, then allow the pod list.
+`--grants none` picks no starting grant, because the two grants come last.
+MEHO asks for this pick when the switch `AGENT_GRANT_REQUIRED` is `observe`
+or `on` (see [Hosted agents](hosted-agents.md#starting-grants-pick-them-when-you-create-the-agent)).
 
 ```bash
-meho agent-principal register pod-reader
+meho agent-principal register pod-reader --grants none
 
 cat > pod-reader-toolset.json <<'JSON'
 {
@@ -280,7 +284,8 @@ meho agent create pod-reader \
   --model-tier standard \
   --turn-budget 20 \
   --system-prompt "You are pod-reader. You only read. You never change anything. A Sensor started you. Use the connector k8s-1.x. Find the operation with search_operations, then run it with call_operation. If the answer is a link to a stored result, read all rows with result_query. Say in short plain sentences which pods are not running." \
-  --toolset @pod-reader-toolset.json
+  --toolset @pod-reader-toolset.json \
+  --grants none
 
 meho agent grant create --principal agent:pod-reader --op '*' --verdict deny
 meho agent grant create --principal agent:pod-reader \
@@ -369,7 +374,7 @@ this page is its agent-run twin.
 | `403 insufficient_role` on `scheduler create` / `cancel` | Creating and cancelling triggers need **tenant_admin**; listing is operator. | Use a tenant_admin session to author triggers. |
 | `scheduler create` answers 422 | MEHO checks the trigger when you create it: a cron expression that does not parse, an unknown `--timezone`, or missing `--inputs` on a `cron` / `one_off` trigger. No trigger is made. | Fix the 5-field expression, the IANA timezone or the inputs, and create it again. |
 | A Sensor trigger never starts the agent | `CHECKS_AGENT_EVENTS` is off, or the trigger's filter does not match. | Turn the switch on (see [Start an agent when a Sensor or Dashboard changes](#start-an-agent-when-a-sensor-or-dashboard-changes)). Check the filter with `meho scheduler list --json`. |
-| A scheduled write is stuck `awaiting_approval` | Working as designed — every agent write above `safe` waits for a person, under the agent's subject. | Approve it as yourself; because the requester is the agent, it is not your own change. A `dangerous` or `destructive` write needs a MEHO-SA-Operator or an admin ([approvals](approvals-and-break-glass.md)). |
+| A scheduled write is stuck `awaiting_approval` | Working as designed — every agent write above `safe` waits for a person, under the agent's subject. | Approve it as yourself; because the requester is the agent, it is not your own change. A `dangerous` or `destructive` write needs an admin ([approvals](approvals-and-break-glass.md)). |
 | A run interrupted mid-flight (scheduler restart) shows as failed | The default `--in-flight-policy=fail_into_audit` records a killed-mid-run trigger as a failure rather than silently resuming it. | Set `--in-flight-policy=resume` at create time if you want interrupted runs picked back up on restart. |
 
 **Next:** [Event ingestion](event-ingestion.md).

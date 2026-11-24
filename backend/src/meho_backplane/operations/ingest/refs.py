@@ -269,6 +269,8 @@ def _unescape_pointer_segment(segment: str) -> str:
 def collect_component_schema_closure(
     schema: Any,
     component_schemas: dict[str, Any],
+    *,
+    skip_unresolved: bool = False,
 ) -> dict[str, Any]:
     """Return the transitive ``#/components/schemas/*`` closure *schema* needs.
 
@@ -289,6 +291,9 @@ def collect_component_schema_closure(
     for :func:`find_unresolvable_local_refs` to police against the final
     stored document.
 
+    With *skip_unresolved*, such a ref is left out of the closure instead,
+    and every component that does resolve is still bundled.
+
     Raises:
         InvalidSchemaError: A ref drills into a component subpath, or
             names a component absent from *component_schemas* — same
@@ -304,11 +309,13 @@ def collect_component_schema_closure(
     while pending:
         ref = pending.pop()
         segment = ref[len(_SCHEMA_COMPONENT_REF_PREFIX) :]
+        name = _unescape_pointer_segment(segment)
+        if skip_unresolved and ("/" in segment or name not in component_schemas):
+            continue
         if "/" in segment:
             raise InvalidSchemaError(
                 f"$ref drill-down into component subpaths is not supported (got {ref!r})"
             )
-        name = _unescape_pointer_segment(segment)
         if name in closure:
             continue
         if name not in component_schemas:

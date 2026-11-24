@@ -34,10 +34,12 @@
   would 403 the start POST (``value_mismatch``). On the typed-error
   re-render the token is re-minted + cookie refreshed so the retry matches.
 -#}
+
+{% from "_components.html" import button %}
 <dialog id="runbook-run-start-modal" class="modal">
   <div class="modal-box max-w-2xl">
     <h3 class="font-semibold text-lg" id="runbook-run-start-modal-title">Start a run</h3>
-    <p class="text-sm opacity-70 mt-1">
+    <p class="text-sm text-muted mt-1">
       Begin a run on a published runbook template. You are assigned as the
       run's operator.
     </p>
@@ -70,7 +72,7 @@
           list="runbook-run-published-slugs"
           required
           maxlength="256"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="e.g. drain-node"
           autocomplete="off"
           aria-describedby="runbook-run-start-slug-hint"
@@ -83,7 +85,7 @@
             <option value="{{ slug }}"></option>
           {% endfor %}
         </datalist>
-        <span id="runbook-run-start-slug-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-slug-hint" class="text-xs text-subtle">
           {% if published_slugs %}
             Pick a published template or type its slug.
           {% else %}
@@ -99,12 +101,12 @@
           name="target"
           required
           maxlength="512"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="the run's subject -- host, cluster, cert thumbprint"
           autocomplete="off"
           aria-describedby="runbook-run-start-target-hint"
         />
-        <span id="runbook-run-start-target-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-target-hint" class="text-xs text-subtle">
           Substituted into the steps as <code>${run.target}</code>.
         </span>
       </label>
@@ -135,33 +137,32 @@
           }
         }"
       >
-        <span class="text-sm font-medium">Params <span class="opacity-60">(optional, JSON object)</span></span>
+        <span class="text-sm font-medium">Params <span class="text-subtle">(optional, JSON object)</span></span>
         <textarea
           name="params"
           maxlength="16384"
-          class="textarea textarea-bordered min-h-[8rem] w-full font-mono text-sm"
+          class="textarea min-h-[8rem] w-full font-mono text-sm"
           placeholder='{"namespace": "prod", "replicas": 3}'
           aria-describedby="runbook-run-start-params-hint"
           x-on:blur="formatParams($event.target)"
         ></textarea>
-        <span id="runbook-run-start-params-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-params-hint" class="text-xs text-subtle">
           A JSON object of <code>${run.params.X}</code> substitutions. Leave
           blank for none.
         </span>
       </label>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Work ref <span class="opacity-60">(optional)</span></span>
+        <span class="text-sm font-medium">Work ref <span class="text-subtle">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
-          maxlength="512"
-          class="input input-bordered input-sm font-mono w-full"
+          class="input input-sm font-mono w-full"
           placeholder="gh:evoila/meho#9, a Jira key, a CR id"
           autocomplete="off"
           aria-describedby="runbook-run-start-work-ref-hint"
         />
-        <span id="runbook-run-start-work-ref-hint" class="text-xs opacity-60">
+        <span id="runbook-run-start-work-ref-hint" class="text-xs text-subtle">
           The external change ticket this run executes under. Pinned on the
           run and every step's audit row.
         </span>
@@ -175,9 +176,7 @@
         >
           Cancel
         </button>
-        <button type="submit" class="btn btn-sm btn-primary">
-          Start run
-        </button>
+        {{ button("Start run", variant="primary", type="submit") }}
       </div>
     </form>
   </div>

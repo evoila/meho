@@ -24,6 +24,13 @@ Sensors of the file. A member that is not in the file leaves the Dashboard
 but is not deleted. So the same file imported twice changes nothing the
 second time. With ``dry_run`` the import says what it would do and writes
 nothing.
+
+An update that changes what a Sensor runs (its connector, operation, target,
+params or check) follows the same identity rule as a Sensor edit
+(:func:`~meho_backplane.checks.sensor_edit.identity_after_change`): when the
+Sensor runs as another person, not the importer and not ``__sensor__``, its
+``identity_sub`` becomes ``__sensor__``. The result names the before and
+after value for that Sensor, and the route writes them into the audit row.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from meho_backplane.checks.dashboard_repository import create_dashboard, members
 from meho_backplane.checks.dashboard_schemas import NotifyMinState
 from meho_backplane.checks.repository import create_sensor
 from meho_backplane.checks.schemas import SensorCreate
+from meho_backplane.checks.sensor_edit import identity_after_change
 from meho_backplane.checks.service import (
     SensorRequiresSafeOperationError,
     _is_unique_violation,
@@ -328,14 +336,17 @@ def _update_sensor(row: Sensor, body: SensorCreate, now: datetime) -> None:
     """Write the file's settings onto *row* and make the Sensor due at once.
 
     Same as a Sensor edit: the waiting state change measured with the old
-    settings is dropped, and a Sensor the runner paused is active again.
+    settings is dropped, and a Sensor the runner paused for a broken cadence
+    is active again. A Sensor an operator paused, or the runner paused after
+    refused logins, stays paused until it is resumed.
     """
     for field, value in _wanted_sensor(body).items():
         setattr(row, field, value)
     row.pending_state = None
     row.pending_count = 0
-    row.status = SensorStatus.ACTIVE.value
-    row.status_reason = None
+    if (row.status_reason or "").startswith("invalid_cadence"):
+        row.status = SensorStatus.ACTIVE.value
+        row.status_reason = None
     row.next_fire_at = now
 
 
@@ -389,10 +400,21 @@ async def _sync_sensors(
         ids[body.name] = row.id
         changed = _changed(_current_sensor(row), _wanted_sensor(body))
         action: ImportAction = "update" if changed else "unchanged"
-        report.append(ImportedSensor(name=body.name, action=action, changed_fields=changed))
+        identity_sub = identity_after_change(row.identity_sub, created_by_sub, changed)
+        reset = identity_sub != row.identity_sub
+        report.append(
+            ImportedSensor(
+                name=body.name,
+                action=action,
+                changed_fields=changed,
+                identity_sub_before=row.identity_sub if reset else None,
+                identity_sub_after=identity_sub if reset else None,
+            )
+        )
         if write and changed:
             await _lock_and_require_operation(session, tenant_id, body)
             _update_sensor(row, body, now)
+            row.identity_sub = identity_sub
     return report, ids
 
 

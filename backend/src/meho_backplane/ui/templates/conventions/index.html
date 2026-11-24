@@ -31,12 +31,12 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="flex items-center gap-2 text-2xl font-semibold">Conventions{% include "_maturity_badge.html" %}</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Operator-authored rules packed into every agent session preamble.
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="text-sm opacity-70" aria-live="polite">
+      <span class="text-sm text-muted" aria-live="polite">
         {{ entry_count }} convention{{ "" if entry_count == 1 else "s" }}
       </span>
       {# Author affordance -- server-hidden from non-admins. The write

@@ -37,7 +37,7 @@ The default agent surface. No elevation required.
 | `meho_runbook_next` | beta | — | Advance one step in an in-progress runbook run. |
 | `meho_runbook_show_template` | beta | — | Read the full body of a runbook template, including step contents. |
 | `meho_runbook_start` | beta | — | Start a new runbook run. |
-| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) and MEHO's dependency status: Vault (reachable + KV read OK?), the database's revision and the one this build expects, the /ready checks (name, ok, detail), the approval settings (approval key state, whether a second person must approve), the gated features and the settings they still need, this session's OAuth scopes, the working-surface tools it should see versus the ones it lists, and the server's time in UTC (server_time; use it when you must write down the time). |
+| `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) and MEHO's dependency status: Vault (reachable + KV read OK?; for a read_only caller it is not checked, with checked=false and a detail that says the operator role is needed), the database's revision and the one this build expects, the /ready checks (name, ok, detail), the approval settings (approval key state, whether a second person must approve), the gated features and the settings they still need, this session's OAuth scopes, the working-surface tools it should see versus the ones it lists, and the server's time in UTC (server_time; use it when you must write down the time). |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
 | `query_topology` | beta | — | Read the topology graph: what depends on what, in your tenant. |
 | `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
@@ -106,7 +106,9 @@ Connector lifecycle, principals and grants, scheduler, sensors, topology mutatio
 | `meho_sensor_create` | beta | — | Create one sensor under the operator's tenant. |
 | `meho_sensor_delete` | beta | — | Hard-delete one sensor by id. |
 | `meho_sensor_list` | beta | — | List sensors for the operator's tenant. |
+| `meho_sensor_pause` | beta | — | Pause one sensor. |
 | `meho_sensor_results` | beta | — | Per-tick evidence trend query for one sensor. |
+| `meho_sensor_resume` | beta | — | Resume a paused sensor. |
 | `meho_targets_register` | ga | — | Register a new target in the operator's tenant (tenant_admin only). |
 | `meho_targets_update` | ga | — | Change fields of one target in the operator's tenant (tenant_admin only). |
 | `meho_topology_annotate` | beta | — | Assert a curated `graph_edge` that auto-discovery cannot infer (tenant_admin only). |

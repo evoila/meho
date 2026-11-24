@@ -67,7 +67,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    target_entry_keys,
+    target_secret_cache_key,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
@@ -97,7 +100,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["HarborConnector"]
+__all__ = ["HarborConnector", "robot_access_actions"]
 
 _log = structlog.get_logger(__name__)
 
@@ -148,6 +151,20 @@ def _parse_harbor_version(harbor_version: str) -> tuple[str | None, str | None]:
 #: ``vnd.scanner.adapter.vuln.report.harbor+json; version=1.0`` (first-match
 #: wins); pinning the current type alone keeps the projected field names
 #: stable instead of depending on which format Harbor falls back to.
+def robot_access_actions(params: dict[str, Any]) -> list[str]:
+    """The repository actions ``harbor.robot.create`` grants, in Harbor order.
+
+    Reads the optional ``access`` param (default push and pull). The handler
+    and the approval card preview both use it, so the card shows what the
+    handler sends.
+    """
+    requested = set(params.get("access", ("push", "pull")))
+    actions = [a for a in ("push", "pull") if a in requested]
+    if not actions or requested - {"push", "pull"}:
+        raise ValueError("access must be a non-empty list of 'push' and 'pull'")
+    return actions
+
+
 _VULN_REPORT_MIME = "application/vnd.security.vulnerability.report; version=1.1"
 
 
@@ -227,7 +244,7 @@ class HarborConnector(HttpConnector):
         credentials_loader: HarborCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._creds_cache: dict[tuple[str, str, str], dict[str, str]] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
         self._creds_lock = asyncio.Lock()
@@ -310,7 +327,7 @@ class HarborConnector(HttpConnector):
         the loader. A caller who has read keeps cold load → cache →
         reuse.
         """
-        cache_key = target_cache_key(target)
+        cache_key = target_secret_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
             if cached is not None and self._readers.has_read(target, operator):
@@ -470,7 +487,7 @@ class HarborConnector(HttpConnector):
         operator: Operator,
         target: HarborTargetLike,
         params: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | OperationResult:
         """Create a project-scoped robot account via Harbor 2.x.
 
         Op-id: ``harbor.robot.create``. Classified ``credential_mint``:
@@ -482,7 +499,8 @@ class HarborConnector(HttpConnector):
         with the same name, which Harbor rejects with 409 anyway, but
         the tenacity decorator must not trigger).
 
-        The handler grants push + pull access on the named project via the
+        The handler grants the access in ``params["access"]`` (``push`` and/or
+        ``pull``; default both) on the named project via the
         Harbor v2 robot API (``POST /api/v2.0/robots`` with ``level=project``).
         System-level access (omit ``level`` + ``namespace``) is out of scope.
 
@@ -506,13 +524,20 @@ class HarborConnector(HttpConnector):
             Resolved Harbor target (must satisfy :class:`HarborTargetLike`).
         params
             Schema-validated: ``name`` (str), ``project`` (str),
-            ``duration`` (int, -1 for never-expire).
+            ``duration`` (int, -1 for never-expire); optional ``access``
+            (list of ``push`` / ``pull``, default both) and optional
+            ``vault_target`` (``vault:<path>#<field>``).
 
         Returns
         -------
-        dict[str, Any]
+        dict[str, Any] | OperationResult
             ``{id: int, name: str, secret: str}`` — the secret is the
             minted credential, returned ONLY on creation by Harbor.
+            With ``vault_target`` the secret is written to Vault and the
+            answer holds a fingerprint and the length instead
+            (:mod:`~meho_backplane.connectors.harbor.ops_robot_vault`).
+            When that write fails, an error result says whether the new
+            robot was deleted.
 
         Raises
         ------
@@ -522,9 +547,16 @@ class HarborConnector(HttpConnector):
             catches all exceptions and wraps them as ``connector_error``
             OperationResults.
         """
+        from meho_backplane.connectors.harbor.ops_robot_vault import (
+            parse_vault_target,
+            store_new_robot_secret,
+        )
+
         name = str(params["name"])
         project = str(params["project"])
         duration = int(params["duration"])
+        actions = robot_access_actions(params)
+        vault_dest = parse_vault_target(operator, params)
 
         body: dict[str, Any] = {
             "name": name,
@@ -535,19 +567,44 @@ class HarborConnector(HttpConnector):
                 {
                     "kind": "project",
                     "namespace": project,
-                    "access": [
-                        {"resource": "repository", "action": "push"},
-                        {"resource": "repository", "action": "pull"},
-                    ],
+                    "access": [{"resource": "repository", "action": action} for action in actions],
                 }
             ],
         }
         result = await self._post_json(target, _ROBOTS_PATH, operator=operator, json=body)
+        if vault_dest is not None:
+            return await store_new_robot_secret(self, operator, target, params, vault_dest, result)
         return {
             "id": result["id"],
             "name": result["name"],
             "secret": result["secret"],
         }
+
+    async def artifact_copy(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``harbor.artifact.copy`` shim: copy an image inside Harbor, a held image is a no-op."""
+        from meho_backplane.connectors.harbor.ops_artifact_copy import (
+            harbor_artifact_copy_impl,
+        )
+
+        return await harbor_artifact_copy_impl(self, operator, target, params)
+
+    async def project_create(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``harbor.project.create`` shim: create a project, a taken name is a no-op."""
+        from meho_backplane.connectors.harbor.ops_project_create import (
+            harbor_project_create_impl,
+        )
+
+        return await harbor_project_create_impl(self, operator, target, params)
 
     async def robot_delete(
         self,
@@ -963,7 +1020,8 @@ class HarborConnector(HttpConnector):
         serialised against an in-flight load.
         """
         async with self._creds_lock:
-            self._creds_cache.pop(target_cache_key(target), None)
+            for key in target_entry_keys(self._creds_cache, target):
+                del self._creds_cache[key]
             self._readers.forget(target)
 
     async def aclose(self) -> None:

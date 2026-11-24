@@ -135,8 +135,13 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     management-plane flow classifier ``pfsense.mgmt_flow.summary``) +
     ``USER_WRITE_OPS`` (``pfsense.user.disable`` / ``pfsense.user.enable``,
     #3937) + ``DIAG_OPS`` (the read ``pfsense.diag.ping``, #3965) + ``OPENVPN_OPS`` (the reads
-    ``pfsense.openvpn.clients`` / ``pfsense.openvpn.log``, #4093).
-    Twenty-six ops total.
+    ``pfsense.openvpn.clients`` / ``pfsense.openvpn.log``, #4093) +
+    ``OPENVPN_CSC_OPS`` (``pfsense.openvpn.address.next_free`` and
+    ``pfsense.openvpn.csc.sync``) + ``OPENVPN_USER_OPS``
+    (``pfsense.openvpn.user.create`` / ``pfsense.openvpn.user.delete``, #3993) +
+    ``OPENVPN_RULE_OPS`` (``pfsense.openvpn.rule.sync``, #3993) +
+    ``CONFIG_HISTORY_OPS`` (``pfsense.config.history``, #4989).
+    Thirty-two ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -150,12 +155,16 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     their parsers. Mirrors
     :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
     """
+    from meho_backplane.connectors.pfsense.ops_config_history_meta import CONFIG_HISTORY_OPS
     from meho_backplane.connectors.pfsense.ops_config_reads import CONFIG_READ_OPS
     from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
     from meho_backplane.connectors.pfsense.ops_diag import DIAG_OPS
     from meho_backplane.connectors.pfsense.ops_filter_rule import FILTER_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
+    from meho_backplane.connectors.pfsense.ops_openvpn_csc import OPENVPN_CSC_OPS
     from meho_backplane.connectors.pfsense.ops_openvpn_meta import OPENVPN_OPS
+    from meho_backplane.connectors.pfsense.ops_openvpn_rule import OPENVPN_RULE_OPS
+    from meho_backplane.connectors.pfsense.ops_openvpn_user import OPENVPN_USER_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
     from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
@@ -164,6 +173,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         _PFSENSE_ABOUT_OP,
         *READ_OPS,
         *CONFIG_READ_OPS,
+        *CONFIG_HISTORY_OPS,
         *WRITE_OPS,
         *DELETE_OPS,
         *FILTER_RULE_OPS,
@@ -171,6 +181,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *USER_WRITE_OPS,
         *DIAG_OPS,
         *OPENVPN_OPS,
+        *OPENVPN_CSC_OPS,
+        *OPENVPN_USER_OPS,
+        *OPENVPN_RULE_OPS,
     )
 
 
@@ -185,7 +198,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``);
 #: #3313 adds the teardown-inverse deletes (``pfsense.route.static.delete``,
 #: ``pfsense.gateway.delete``, ``pfsense.alias.member.remove``)
-#: #252 (meho-internal) adds the management-plane flow classifier
+#: #252 adds the management-plane flow classifier
 #: (``pfsense.mgmt_flow.summary``) via the ``ops_mgmt_flow`` module;
 #: #3954 adds the allow-listed config reads (``pfsense.user.list``,
 #: ``pfsense.route.static.list``) via the ``ops_config_reads`` module;

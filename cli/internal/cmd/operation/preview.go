@@ -127,13 +127,18 @@ func newPreviewCmd() *cobra.Command {
 			"op with no single literal HTTP request to preview comes back " +
 			"`status=\"unavailable\"` (a destructive or approval-gated " +
 			"typed/composite op is the exception — it previews a param-bound " +
-			"request tuple). An approval-gated op that writes a credential " +
-			"(for example `vault.kv.put`) is not previewable and stays " +
+			"request tuple). An approval-gated typed/composite op that writes a " +
+			"credential and is not destructive (for example `vault.kv.put`) " +
+			"is not previewable and stays " +
 			"`status=\"unavailable\"`, so its secret params never surface. " +
 			"With the backplane switch `PREVIEW_TYPED_WRITES` on (off by " +
 			"default), every typed/composite write previews, also one that " +
-			"waits for approval only for some callers, and a credential write " +
-			"with its own safe preview shows only that plan, never the params.\n\n" +
+			"waits for approval only for some callers. The exception is a " +
+			"typed/composite credential write that is not destructive and has " +
+			"no safe preview of its own: it stays `status=\"unavailable\"` and " +
+			"gives no hash. A typed/composite credential write with its own safe " +
+			"preview gives a hash and never the params; it shows its plan only " +
+			"when that preview builds one.\n\n" +
 			"When the real call would be refused because the target's version " +
 			"is outside what the connector's catalog supports, and no other " +
 			"catalog of the same connector serves it, the preview is refused " +
@@ -296,14 +301,14 @@ func postPreview(
 // envelope instead.
 func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (source_kind=%s)\n",
-		connectorID, opID, r.Status, r.SourceKind)
+		connectorID, opID, output.SafeText(r.Status), output.SafeText(r.SourceKind))
 	if line := policyLine(r); line != "" {
-		fmt.Fprintln(w, line)
+		fmt.Fprintln(w, output.SafeText(line))
 	}
 	if r.Status != "ok" {
 		// status == "error" / "unavailable": surface the reason + extras.
 		if r.Error != nil && *r.Error != "" {
-			fmt.Fprintf(w, "meho: preview %s: %s\n", r.Status, *r.Error)
+			fmt.Fprintf(w, "meho: preview %s: %s\n", output.SafeText(r.Status), output.SafeLines(*r.Error))
 		}
 		if len(r.Extras) > 0 && string(r.Extras) != "null" {
 			fmt.Fprintln(w, "extras:")
@@ -311,8 +316,8 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 		}
 		return
 	}
-	fmt.Fprintf(w, "  method:        %s\n", r.Method)
-	fmt.Fprintf(w, "  resolved_path: %s\n", r.ResolvedPath)
+	fmt.Fprintf(w, "  method:        %s\n", output.SafeText(r.Method))
+	fmt.Fprintf(w, "  resolved_path: %s\n", output.SafeText(r.ResolvedPath))
 	if len(r.Query) > 0 && string(r.Query) != "null" {
 		fmt.Fprintln(w, "  query:")
 		printPrettyOrRaw(w, r.Query)
@@ -327,15 +332,15 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	} else if r.PlanShown != nil && !*r.PlanShown {
 		fmt.Fprintln(w, "  plan: not shown in this preview")
 		if r.PlanNote != "" {
-			fmt.Fprintf(w, "    %s\n", r.PlanNote)
+			fmt.Fprintf(w, "    %s\n", output.SafeText(r.PlanNote))
 		}
 	}
 	// The hash is the load-bearing output — print it prominently, last,
 	// with the exact flag to thread it into a governed call.
-	fmt.Fprintf(w, "\npreview_hash: %s\n", r.PreviewHash)
+	fmt.Fprintf(w, "\npreview_hash: %s\n", output.SafeText(r.PreviewHash))
 	fmt.Fprintf(w,
 		"  → pass to a governed dispatch: meho operation call %s %s --preview-hash %s [--target … --params …]\n",
-		connectorID, opID, r.PreviewHash)
+		connectorID, opID, output.SafeText(r.PreviewHash))
 }
 
 // policyLine is the one plain line that says the risk level and what MEHO
@@ -385,8 +390,8 @@ func waitsForApproval(safetyLevel string) string {
 func printPrettyOrRaw(w io.Writer, raw json.RawMessage) {
 	pretty, err := prettyJSON(raw)
 	if err == nil {
-		fmt.Fprintln(w, pretty)
+		fmt.Fprintln(w, output.SafeLines(pretty))
 	} else {
-		fmt.Fprintln(w, string(raw))
+		fmt.Fprintln(w, output.SafeLines(string(raw)))
 	}
 }

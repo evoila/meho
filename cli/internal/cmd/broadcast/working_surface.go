@@ -4,9 +4,7 @@
 package broadcast
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,8 +36,8 @@ func newRecentCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Principal, "principal", "", "exact principal filter")
 	cmd.Flags().StringVar(&opts.Target, "target", "", "exact target filter")
 	cmd.Flags().StringVar(&opts.ActorSub, "actor-sub", "", "exact delegated-agent filter")
-	cmd.Flags().StringVar(&opts.WorkRef, workref.FilterFlag, "", "exact work-reference filter")
-	cmd.Flags().BoolVar(&opts.ActiveOnly, "active-only", false, "exclude expired TTL claims")
+	cmd.Flags().StringVar(&opts.WorkRef, workref.FilterFlag, "", "filter by ticket id (whole id; white space at the ends is ignored)")
+	cmd.Flags().BoolVar(&opts.ActiveOnly, "active-only", false, "keep only active claims (not completed, TTL not run out)")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 100, "maximum events (1-1000)")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "emit JSON")
 	cmd.Flags().StringVar(&opts.BackplaneOverride, "backplane", "", "backplane URL")
@@ -297,54 +295,6 @@ type watchOptions struct {
 	JSONOut                                       bool
 }
 
-func runBroadcastWatch(cmd *cobra.Command, opts watchOptions) error {
-	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
-	}
-	client, err := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
-	if err != nil {
-		return err
-	}
-	feedURL, err := buildBroadcastFeedURL(backplaneURL, opts)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
-	}
-	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, feedURL, nil)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(fmt.Sprintf("build feed request: %v", err)), opts.JSONOut)
-	}
-	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
-	req.Header.Set("Accept", "text/event-stream")
-	api.SetWorkRefHeader(req)
-	api.SetTenantHeader(req)
-	resp, err := client.HTTPClient().Do(req)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)), opts.JSONOut)
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close() //nolint:errcheck
-		if err := client.Refresh(cmd.Context()); err != nil {
-			return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
-		}
-		req.Header.Set("Authorization", "Bearer "+client.AccessToken())
-		resp, err = client.HTTPClient().Do(req)
-		if err != nil {
-			return output.RenderError(
-				cmd.ErrOrStderr(),
-				output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
-				opts.JSONOut,
-			)
-		}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return routeRequestError(cmd, backplaneURL, &httpResponseError{statusCode: resp.StatusCode, body: body}, opts.JSONOut)
-	}
-	return renderBroadcastSSE(resp.Body, cmd.OutOrStdout(), opts.JSONOut)
-}
-
 func buildBroadcastFeedURL(backplaneURL string, opts watchOptions) (string, error) {
 	u, err := url.Parse(backplaneURL)
 	if err != nil {
@@ -363,37 +313,4 @@ func buildBroadcastFeedURL(backplaneURL string, opts watchOptions) (string, erro
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
-}
-
-func renderBroadcastSSE(r io.Reader, w io.Writer, jsonOut bool) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var data []string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			if len(data) > 0 {
-				raw := strings.Join(data, "\n")
-				if jsonOut {
-					if _, err := fmt.Fprintln(w, raw); err != nil {
-						return err
-					}
-				} else {
-					var event map[string]interface{}
-					if err := json.Unmarshal([]byte(raw), &event); err != nil {
-						return err
-					}
-					if _, err := fmt.Fprintf(w, "%v\n", event); err != nil {
-						return err
-					}
-				}
-				data = nil
-			}
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
-		}
-	}
-	return scanner.Err()
 }

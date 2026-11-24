@@ -58,6 +58,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._rest_write_helpers import settings_import_at_once
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _insert_target,
@@ -275,7 +276,7 @@ async def test_export_shape_and_no_secrets(client: TestClient) -> None:
     assert doc["apiVersion"] == "meho.evoila.com/v1"
     assert doc["kind"] == "Settings"
     assert set(doc["metadata"]) == {"exportedAt", "exportedFrom"}
-    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0163"
+    assert doc["metadata"]["exportedFrom"]["migrationHead"] == "0185"
     (tenant,) = doc["spec"]["tenants"]
     assert tenant["id"] == str(_TENANT)
     assert tenant["policies"] == {
@@ -325,7 +326,8 @@ async def test_round_trip_spec_is_byte_identical(client: TestClient) -> None:
         first = _export(client, token)
         await _wipe_tenant_settings()
 
-        applied = _import(client, token, first)
+        with settings_import_at_once(app):
+            applied = _import(client, token, first)
         assert applied.status_code == 200, applied.text
         body = applied.json()
         assert body["ok"] is True, body
@@ -350,7 +352,8 @@ async def test_apply_records_revision_and_second_import_is_a_no_op(client: TestC
         tenant["targets"].append({"name": "nsx-01", "product": "nsx", "host": "10.1.0.3"})
         changed = yaml.safe_dump(doc, sort_keys=False)
 
-        first = _import(client, token, changed)
+        with settings_import_at_once(app):
+            first = _import(client, token, changed)
         assert first.status_code == 200, first.text
         assert first.json()["applied"] is True
 
@@ -520,27 +523,11 @@ def test_tenant_id_may_be_left_out_in_a_one_tenant_file(client: TestClient) -> N
 
 
 @pytest.mark.asyncio
-async def test_import_turns_on_run_approval_target_kinds(client: TestClient) -> None:
-    """The settings file turns on target kinds in run approvals (#4126)."""
-    content = (
-        "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
-        "spec:\n  tenants:\n    - policies: {run_approval_target_kinds: true}\n"
-    )
-    key = make_rsa_keypair("kid-run-approval-kinds")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = _import(client, _token(key), content)
-    assert resp.status_code == 200, resp.text
-    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
-    assert tenant.run_approval_target_kinds_enabled is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("value", "stored"), [("team-wiki", "team-wiki"), ('""', None)])
 async def test_import_sets_the_knowledge_wiki_collection(
     client: TestClient, value: str, stored: str | None
 ) -> None:
-    """The settings file names the docs collection of the team wiki (#5976)."""
+    """The settings file names the docs collection of the tenant's wiki."""
     content = (
         "apiVersion: meho.evoila.com/v1\nkind: Settings\n"
         f"spec:\n  tenants:\n    - policies: {{knowledge_wiki_collection: {value}}}\n"
@@ -775,7 +762,8 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
 
         # Restore onto a fresh install: the map comes back.
         await _wipe_tenant_settings()
-        restored = _import(client, token, first)
+        with settings_import_at_once(app):
+            restored = _import(client, token, first)
         assert restored.status_code == 200, restored.text
         assert restored.json()["applied"] is True
         assert _spec_yaml(_export(client, token)) == _spec_yaml(first)
@@ -785,7 +773,8 @@ async def test_secret_field_map_round_trips_and_replaces(client: TestClient) -> 
             name="mapped", product="ssh", host="10.0.0.1", secret_field_map={"password": "pass"}
         )
         preview = _import(client, token, changed, preview=True).json()
-        applied = _import(client, token, changed)
+        with settings_import_at_once(app):
+            applied = _import(client, token, changed)
         history = client.get("/api/v1/settings/history", headers=_auth(token)).json()
 
     (change,) = preview["diff"]["targets"]["changed"]
@@ -860,7 +849,8 @@ async def test_replacing_a_large_field_map_stays_within_the_limit(client: TestCl
         token = _token(key)
         preview = _import(client, token, content, preview=True)
         refused = _import(client, token, too_many)
-        applied = _import(client, token, content)
+        with settings_import_at_once(app):
+            applied = _import(client, token, content)
 
     assert preview.status_code == 200, preview.text
     assert preview.json()["mistakes"] == []

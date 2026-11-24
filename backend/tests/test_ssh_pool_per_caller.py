@@ -15,9 +15,10 @@ with the runner's own token and Vault role (``check_runner_dispatch``). So
 the runner stand-in here carries a person's ``sub``, and the Vault stand-in
 tells the runner apart by that marker, not by the ``sub``.
 
-A runbook verification runs under the assigned person's ``sub`` with no
-token (``raw_jwt=""``). The real Vault backend refuses such a read before
-any network call; the stand-in here does the same.
+A caller can carry a person's ``sub`` with no token (``raw_jwt=""``). A
+runbook check step does not: it runs with the token of the caller who
+advances the run. The real Vault backend refuses a read with no token
+before any network call; the stand-in here does the same.
 """
 
 from __future__ import annotations
@@ -83,12 +84,8 @@ def _check_runner(sub: str) -> Operator:
     )
 
 
-def _runbook_verification(sub: str) -> Operator:
-    """The identity a runbook verification dispatches with.
-
-    Shaped like ``runbooks.run_service._build_operator_for_dispatch``: the
-    ``sub`` of the assigned person and no token at all.
-    """
+def _no_token_caller(sub: str) -> Operator:
+    """A caller with the ``sub`` of a person and no token at all."""
     return Operator(
         sub=sub,
         name=sub,
@@ -250,27 +247,27 @@ async def test_sensor_of_a_person_never_reuses_their_login(harness: Any) -> None
 
 
 @pytest.mark.asyncio
-async def test_runbook_verification_without_token_never_reuses_a_login(harness: Any) -> None:
-    """A runbook verification runs under the assigned person's ``sub`` with no token.
+async def test_caller_without_token_never_reuses_a_login(harness: Any) -> None:
+    """A caller with a person's ``sub`` and no token never gets the person's connection.
 
-    After the person opened a connection, the verification with the same
-    ``sub`` must still run its own Vault read, be refused for the missing
+    After the person opened a connection, a caller with the same ``sub``
+    and no token must still run its own Vault read, be refused for the missing
     token, and get no connection. A connection of the person's Sensor is
     out of its reach too.
     """
     conn = LinuxSshConnector()
     target = _Target()
-    alice, verification_as_alice = _person("alice"), _runbook_verification("alice")
+    alice, no_token_alice = _person("alice"), _no_token_caller("alice")
 
     await _run(conn, target, alice)
     assert len(harness.logins) == 1
 
     with pytest.raises(OperatorTokenRequiredError):
-        await _run(conn, target, verification_as_alice)
+        await _run(conn, target, no_token_alice)
 
     assert harness.vault_reads == ["alice", "no-token:alice"]
     assert len(harness.logins) == 1
-    assert _pool_key(target, verification_as_alice) != _pool_key(target, alice)
+    assert _pool_key(target, no_token_alice) != _pool_key(target, alice)
     assert list(conn._connections) == [_pool_key(target, alice)]
     assert not harness.logins[0].closed
 
@@ -279,7 +276,7 @@ async def test_runbook_verification_without_token_never_reuses_a_login(harness: 
     assert len(harness.logins) == 2
 
     with pytest.raises(OperatorTokenRequiredError):
-        await _run(conn, target, verification_as_alice)
+        await _run(conn, target, no_token_alice)
 
     assert harness.vault_reads == ["alice", "no-token:alice", "runner:alice", "no-token:alice"]
     assert len(harness.logins) == 2
@@ -353,3 +350,53 @@ async def test_aclose_closes_every_caller_login(harness: Any) -> None:
 
     assert all(login.closed for login in harness.logins)
     assert conn._connections == {}
+
+
+@pytest.mark.asyncio
+async def test_a_caller_uses_only_the_login_made_from_the_secret_its_target_names() -> None:
+    """A login opened with an old secret reference is not used for the new one.
+
+    A call that loaded the target before its change opens a login with the
+    old secret reference, after the drop of the target's logins. The same
+    caller's next call with the changed target reads the new secret and
+    logs in with it.
+    """
+    secrets = {
+        "tenants/test/old": {**_SECRET, "username": "old-login"},
+        "tenants/test/new": {**_SECRET, "username": "new-login"},
+    }
+    reads: list[str] = []
+    logins: list[_FakeLogin] = []
+
+    async def read_secret(target: Any, operator: Operator, **_kwargs: Any) -> dict[str, Any]:
+        del operator
+        reads.append(target.secret_ref)
+        return dict(secrets[target.secret_ref])
+
+    async def connect(*_args: Any, **kwargs: Any) -> _FakeLogin:
+        login = _FakeLogin(kwargs["username"])
+        logins.append(login)
+        return login
+
+    conn = LinuxSshConnector()
+    old = _Target(secret_ref="tenants/test/old")
+    new = _Target(secret_ref="tenants/test/new", id=old.id)
+    alice = _person("alice")
+    with (
+        patch("meho_backplane.connectors.adapters.ssh.load_vault_secret_data", read_secret),
+        patch("asyncssh.connect", connect),
+    ):
+        await conn.invalidate_credentials(new)  # type: ignore[arg-type]
+        await _run(conn, old, alice)
+        await _run(conn, new, alice)
+        await _run(conn, new, alice)
+        await _run(conn, old, alice)
+
+    assert reads == ["tenants/test/old", "tenants/test/new"]
+    assert [login.sub for login in logins] == ["old-login", "new-login"]
+    assert conn._connections[_pool_key(new, alice)][0] is logins[1]
+    assert conn._connections[_pool_key(old, alice)][0] is logins[0]
+
+    await conn.invalidate_credentials(new)  # type: ignore[arg-type]
+    assert conn._connections == {}
+    assert all(login.closed for login in logins)

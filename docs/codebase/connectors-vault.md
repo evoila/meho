@@ -92,6 +92,21 @@ than silently misrouting a login. The setting only **selects** a role; the
 fail-closed isolation boundary is each role's policy + `bound_claims`,
 provisioned consumer-side.
 
+The **shared-role list** is `settings.vault_oidc_role_tenants` — a
+comma-separated list of tenant UUIDs (env `VAULT_OIDC_ROLE_TENANTS`, empty by
+default). Empty means every tenant with no map entry gets `vault_oidc_role`.
+When set, only a tenant in the list gets `vault_oidc_role`. A tenant in
+neither the list nor `VAULT_OIDC_ROLE_BY_TENANT` gets a `VaultRoleDeniedError`
+that names the tenant and tells the admin to add it to
+`VAULT_OIDC_ROLE_BY_TENANT`; no Vault call is made. The list also covers the
+check-runner login (Sensors and event intake) when `VAULT_CHECK_RUNNER_ROLE` is
+empty: that login uses `vault_oidc_role`, so a runner of a tenant in neither
+the list nor the map gets the same refusal. The per-target role, a set
+check-runner role and the map entries are not affected. A value of only commas
+fails the pod start. A tenant id that is
+not a UUID fails the pod start. Leave it empty on the chart's built-in Vault,
+where one role serves every tenant.
+
 Guarantees:
 
 - **Backward-compatible.** A target naming no role (and every non-vault
@@ -128,6 +143,38 @@ target registration) is documented in
   the shared `auth.vault` seams. `execute` is a thin shim that
   delegates to the G0.6 dispatcher (parameter validation, policy gate,
   audit, broadcast, JSONFlux) so pre-G0.6 callers keep working.
+  `fingerprint` also tells HashiCorp Vault from OpenBao, which share
+  this connector and the same API. An OpenBao health answer has no
+  `enterprise` key (every HashiCorp answer has one) and its version is
+  2.0 or higher. Then the fingerprint says vendor and product
+  `openbao`; otherwise `hashicorp` and `vault`.
+- **`OpenBaoConnector`** (`connector.py`) — a small subclass of
+  `VaultConnector` for OpenBao. `product="vault"`, `version="2.x"`,
+  `impl_id="vault-openbao"`. It exists because one class holds one
+  version range, and OpenBao 2.x uses the same numbers as HashiCorp
+  Vault 2.x. The two ranges:
+
+  | Product | Class | Range |
+  |---|---|---|
+  | HashiCorp Vault | `VaultConnector` | `>=1.18,<2.0` |
+  | OpenBao | `OpenBaoConnector` | `>=2.0,<3.0` |
+
+  Both register under the product `vault`, so a target with product
+  `vault` is served by the class whose range holds its probed version.
+  `OpenBaoConnector` also sets `fingerprint_products = {"openbao"}`: it
+  serves only a target whose probe found OpenBao. So a HashiCorp Vault
+  2.x target gets `no_connector`, and so does a 2.x target that was
+  never probed (probe it first). The operations are registered once,
+  under `vault-1.x`, and run on either class. A Sensor on `vault-1.x`
+  fits an OpenBao target too: the Sensor check accepts a connector when
+  the resolver picks a subclass of it for the target. `VaultConnector` sets `strict_version_range`, so a
+  known version outside both ranges (Vault below 1.18, HashiCorp Vault
+  2.x, anything 3.0 or higher) gets a `no_connector` answer that names
+  the ranges. A target with no known version still resolves to
+  `VaultConnector`, and a probe skips the range check. A version that
+  an operator typed by hand as `1.x` or `1` is read as `1.0`, which is
+  below 1.18, so that target gets `no_connector`. Set the full version
+  (for example `1.18.4`) or clear the field so the probe fills it in.
 - **Operator-aware JWT (G0.8-T3 #629)** — the operator's bearer token
   is request-scoped state on the `Operator` the dispatcher threads to
   handlers whose signature names an `operator` parameter
@@ -658,8 +705,9 @@ target registration) is documented in
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 | `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
+| `vault.kv.generate` | `read_secret_version` + `create_or_update_secret` | caution | `credential_mint` |
 
-All nine register into operation group `kv`.
+All ten register into operation group `kv`.
 
 **What `vault.kv.read` returns.** The answer keeps the key names under
 `data` and the `version`. Every value is hidden as
@@ -677,6 +725,39 @@ once, within 15 minutes of the approval, and MEHO stores no value
 `vault.kv.list` and `vault.kv.compare` return no secret value, so they
 stay `safe` and run at once. See
 [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals).
+
+**Make a password (`vault.kv.generate`, `ops_kv_generate.py`).** Makes a
+random password that meets a product's rules and stores it in one KV field.
+Other operations then use it by reference (path and field). Its class is
+`credential_mint` (`_CREDENTIAL_MINT_OPS` in `broadcast/events.py`): it
+makes a credential, so each call waits for a person, and no standing grant,
+agent grant or run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+
+- Params: `mount`, `path`, `field` (default `password`), `length` (default
+  24), `min_upper`, `min_lower`, `min_digits` (default 1 each), `min_special`
+  (default 0), `special_chars` (default `!@#$%^&*-_=+`; an empty string means
+  none), `max_repeat` (the longest run of one character) and `rotate`.
+- `PasswordRules` checks that the rules can be met (the minimums fit in the
+  length, `min_special` needs special characters, and with one allowed
+  special character the specials fit between the other characters under
+  `max_repeat`). A bad rule set is refused before any Vault call. The value
+  comes from Python `secrets`. It is built one character at a time: a
+  character that would make a run longer than `max_repeat` is left out of
+  the next pick, so every rule set that passes the check works at once,
+  without retries.
+- The read and the write are shared with the userpass password source
+  (`userpass_password.py`): the write uses `cas`, so a second writer is not
+  overwritten, and it keeps the other fields at the path.
+- Safe to run twice: a field that holds text is left alone
+  (`generated: false`). A field that holds a value that is not text (a
+  number, a list, an object) is also left alone: the op fails with an error
+  and writes nothing. An empty field counts as missing. `rotate: true`
+  writes a new version in every case.
+- The result is `{mount, path, field, version, generated}`. The params hold
+  no value, so the op class is plain `write`. The approval preview shows the
+  path, the field and the rules, never a value. The Vault rights it needs
+  are `read`, `create` and `update` on `<mount>/data/<path>`.
 
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
 many secrets under one folder with one approval. Before it, each secret
@@ -931,7 +1012,7 @@ broadcast is the consistent, safe direction (same rationale as the
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
 (`caution`), `vault.kv.delete` (`dangerous`), `vault.kv.metadata.delete`
-(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`) — register `requires_approval=True` (G3.15-T1
+(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`), `vault.kv.generate` (`caution`) — register `requires_approval=True` (G3.15-T1
 #1409). The flag became meaningful
 once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)
@@ -1191,7 +1272,7 @@ underlying mistake would otherwise produce.
 The unit suites mock hvac through `tests/_vault_fakes.py` (the
 `_build_client` seam). The real-Vault layer lives in
 `backend/tests/integration/test_connectors_vault_dev_e2e.py`: it boots
-a `hashicorp/vault:1.18` server in dev mode via testcontainers'
+a `hashicorp/vault:1.18` server and an OpenBao 2.x server (`openbao/openbao` from Docker Hub, set with `MEHO_TEST_OPENBAO_IMAGE`) in dev mode via testcontainers'
 `DockerContainer`, seeds the surfaces every op touches, then
 dispatches every registered `vault.kv.*` / `vault.sys.*` /
 `vault.auth.*` op through the real `dispatch()` against the live Vault
@@ -1205,7 +1286,11 @@ and a real Postgres audit store (reusing the integration conftest's
   overridable via `MEHO_TEST_VAULT_IMAGE` (same env-knob shape as
   `MEHO_TEST_PGVECTOR_IMAGE`); `ci.yml` sets it to the Harbor proxy
   mirror. Docker-socket-absent sandbox skips cleanly — the gate
-  matches `tests/integration/conftest.py`.
+  matches `tests/integration/conftest.py`. The OpenBao container runs
+  `server -dev` with the same flags on the command line. The module
+  fixture has two parameters, so every test runs once on each server,
+  and `test_fingerprint_and_range_against_dev_server` checks the
+  detected product and the class the resolver picks.
 - **Seed.** Dev mode mounts KV-v2 at `secret/`. The fixture writes a
   plain secret, a twice-written secret (so `vault.kv.versions` sees
   `current_version == 2`), and a `bulk/` folder with > 50 child keys

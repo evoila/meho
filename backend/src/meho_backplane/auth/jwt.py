@@ -93,6 +93,7 @@ from meho_backplane.auth.current_tenant import (
     reject_duplicate_tenants,
     select_current_tenant,
 )
+from meho_backplane.auth.mcp_profile_claim import read_mcp_profile_claim, refuse_profile_token
 from meho_backplane.auth.operator import (
     MACHINE_PRINCIPAL_KINDS,
     Operator,
@@ -101,6 +102,7 @@ from meho_backplane.auth.operator import (
     TenantMembership,
     TenantRole,
     group_grant,
+    old_group_of,
 )
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
@@ -1403,48 +1405,43 @@ def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     return _realm_access_has_platform_admin_role(claims, role_name)
 
 
-def _extract_approver(claims: Any, settings: Settings) -> bool:
-    """Extract the approve-only ``approver`` capability flag from *claims* (#3243).
+#: The old default group that MEHO reads as Readers.
+_OLD_APPROVERS_GROUP: str = "MEHO-Approvers"
 
-    The ``approver`` claim is **optional** and **fail-closed**: a token
-    that carries no claim — every pre-existing token, and every principal
-    whose Keycloak client does not emit it — resolves to ``False``. The
-    flag is orthogonal to
-    :class:`~meho_backplane.auth.operator.TenantRole`; it grants the
-    approvals plane (list / show / approve / reject / decide) **without**
-    granting ``call_operation`` dispatch, so a dedicated approver
-    principal can be provisioned as ``read_only`` role + ``approver=true``
-    and clear a four-eyes gate while remaining unable to dispatch ops
-    (:func:`~meho_backplane.auth.rbac.require_approvals_access`).
 
-    Accepted shapes mirror :func:`_extract_platform_admin`: a JSON boolean
-    ``true`` / ``false`` (the canonical Keycloak boolean protocol-mapper
-    output) or the strings ``"true"`` / ``"false"`` (case-insensitive) for
-    realms whose mapper emits the claim as a string. Only an explicit
-    truthy value grants the flag; every other shape (absent, ``null``, a
-    number, an object, an unrecognised string) fails closed to ``False`` —
-    a malformed claim must never *grant* the approvals capability. A
-    present-but-malformed value is logged under ``malformed_approver_claim``.
+def _old_group(
+    claims: Any,
+    settings: Settings,
+    principal_kind: PrincipalKind,
+    tenants: tuple[TenantMembership, ...],
+) -> RoleGroup | None:
+    """The old login group (SA-Operators or Approvers) of the start tenant, or ``None``.
 
-    The claim name is configurable via ``JWT_APPROVER_CLAIM_NAME`` (default
-    ``approver``) so realms that surface the flag under a different
-    attribute are accommodated without a code change.
+    It gives no right. A routing entry that names an old kind matches only
+    its members.
+
+    * A machine login: ``None``.
+    * A token with a tenant list: the group of the first entry, when it is
+      an old kind. A list that MEHO could not read gives ``None``.
+    * A token without a tenant list: the ``groups`` claim. The group
+      ``JWT_SELF_APPROVER_GROUP`` (default ``MEHO-SA-Operators``) gives
+      ``SA-Operators``, ``MEHO-Approvers`` gives ``Approvers``. A leading
+      ``/`` and upper or lower case do not count; a sub-group does not
+      match. A ``groups`` claim that is not a list of texts gives ``None``.
     """
-    claim_name = settings.jwt_approver_claim_name
-    raw = claims.get(claim_name)
-    if raw is None:
-        return False
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
-        return raw.strip().lower() == "true"
-    log = structlog.get_logger(__name__)
-    log.warning(
-        "malformed_approver_claim",
-        claim_name=claim_name,
-        reason="not_a_boolean",
-    )
-    return False
+    if principal_kind in MACHINE_PRINCIPAL_KINDS:
+        return None
+    if settings.jwt_tenants_claim_name in claims:
+        return old_group_of(tenants[0].group) if tenants else None
+    raw = claims.get(_GROUPS_CLAIM_NAME)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return None
+    names = {_group_key(item) for item in raw}
+    if _group_key(settings.jwt_self_approver_group) in names:
+        return RoleGroup.SA_OPERATORS
+    if _group_key(_OLD_APPROVERS_GROUP) in names:
+        return RoleGroup.APPROVERS
+    return None
 
 
 #: The claim that marks a login that may only import knowledge (#5728).
@@ -1560,57 +1557,32 @@ def _extract_self_approver(
     tenant_id: UUID,
     tenants: tuple[TenantMembership, ...],
 ) -> bool:
-    """Read whether the person is in the SA-Operators group of *tenant_id* (#3327).
+    """Read whether the login group of *tenant_id* gives self-approval.
 
-    SA-Operators may approve their own changes (#3325). The flag is off
-    by default and fails closed: anything unclear gives ``False``.
+    No default group gives it: ``MEHO-SA-Operators`` is read as
+    Operators. An Admin approves their own change through the
+    ``tenant_admin`` role (:attr:`Operator.may_self_approve`). The flag
+    is off by default and fails closed: anything unclear gives ``False``.
 
-    * A machine login (agent, service, runner) always gets ``False``,
-      even when its token carries the group. Agents never approve.
+    * A machine login (agent, service, runner) always gets ``False``.
     * The token has a ``meho_tenants`` claim (``JWT_TENANTS_CLAIM_NAME``):
-      only the list counts. *tenant_id* is the tenant the Operator starts
-      in (the first entry, :func:`_start_tenant`). The flag is on when
-      the list has exactly one entry for it and that entry's group gives
-      ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
-      An entry of another tenant never counts. The whole claim must be
-      good: a claim that is not a list, has any bad entry (also one of
-      another tenant), or has no good entry for *tenant_id*, gives
-      ``False``. :func:`_extract_tenants` keeps the good entries of such
-      a list for :attr:`Operator.tenants`; this flag does not. When the
-      request then names another tenant of the list,
+      only the list counts. The flag is on when the list has exactly one
+      entry for *tenant_id* and that entry's group gives ``self_approval``
+      (:func:`~meho_backplane.auth.operator.group_grant`). A claim with
+      any bad entry gives ``False``. When the request names another tenant of the list,
       :func:`~meho_backplane.auth.current_tenant.with_membership` reads
       the flag again from that tenant's entry, under the same rule.
-    * The token has no ``meho_tenants`` claim (a site with one tenant
-      and the older mappers): the flag is on when the ``groups`` claim
-      names the group ``JWT_SELF_APPROVER_GROUP`` (default
-      ``MEHO-SA-Operators``). A leading ``/`` and upper or lower case do
-      not count, the same as in the one-group check. A ``groups`` claim that is not
-      a list, or has an entry that is not a string, gives ``False`` and
-      logs ``malformed_groups_claim``.
+    * The token has no ``meho_tenants`` claim: the ``groups`` claim does
+      not set the flag; ``JWT_SELF_APPROVER_GROUP`` is not read.
 
-    Both claims come from the shipped login setup
-    (``docs/decisions/login-role-groups.md``): the ``groups-claim`` mapper
-    and the ``meho-tenants`` mapper. The flag is only ever read from the
-    signed token, never from a request field or header.
+    The flag is only ever read from the signed token, never from a
+    request field or header.
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return False
     if settings.jwt_tenants_claim_name in claims:
         return _self_approver_from_tenants(claims, settings, tenants, tenant_id)
-    raw = claims.get(_GROUPS_CLAIM_NAME)
-    if raw is None:
-        return False
-    log = structlog.get_logger(__name__)
-    if not isinstance(raw, list):
-        log.warning("malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="not_a_list")
-        return False
-    if not all(isinstance(item, str) for item in raw):
-        log.warning(
-            "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
-        )
-        return False
-    names = {_group_key(item) for item in raw}
-    return _group_key(settings.jwt_self_approver_group) in names
+    return False
 
 
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
@@ -1669,6 +1641,18 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
         acr if isinstance(acr, str) and acr else None,
         sid if isinstance(sid, str) and sid else None,
     )
+
+
+def _extract_exp(claims: Any) -> int | None:
+    """Read the ``exp`` claim as whole seconds; ``None`` when it is not a number.
+
+    The decode step already requires ``exp`` and checks it. A bool is not
+    a time, even though Python counts it as an ``int``.
+    """
+    raw = claims.get("exp")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return int(raw)
 
 
 def _extract_azp(claims: Any) -> str | None:
@@ -1736,7 +1720,9 @@ def _start_tenant(
     first entry is the start value; the flat claims are not used.
     :func:`~meho_backplane.auth.current_tenant.select_current_tenant` then
     picks the tenant the request names. A token without a list: today's
-    one-group check and the flat claims.
+    one-group check and the flat ``tenant_id`` and ``tenant_role`` claims.
+    MEHO does not read the ``approver`` claim in any token form: it gives
+    no right, so the flag is off.
     """
     if tenants:
         reject_duplicate_tenants(tenants)
@@ -1746,7 +1732,7 @@ def _start_tenant(
     return (
         _extract_tenant_id(claims, settings),
         _extract_tenant_role(claims, settings),
-        _extract_approver(claims, settings),
+        False,
     )
 
 
@@ -1873,12 +1859,15 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,
+            old_group=_old_group(claims, settings, principal_kind, tenants),
             tenants_claim_malformed=tenants_claim_malformed,
             auth_time=auth_time,
+            token_exp=_extract_exp(claims),
             acr=acr,
             sid=sid,
             azp=_extract_azp(claims),
             agent_role_capped=tenant_role is not token_role,
+            mcp_profile_claim=read_mcp_profile_claim(claims),  # 403 when bad (#6099)
         )
     except pydantic.ValidationError as exc:
         # Field names only: the input values may hold personal data.
@@ -1897,6 +1886,7 @@ async def verify_jwt_for_audience(
     expected_audience: str,
     requested_tenant: str | None = None,
     allow_unchosen: bool = False,
+    allow_mcp_profile: bool = False,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1948,6 +1938,16 @@ async def verify_jwt_for_audience(
     picks the tenant the request works in and may raise 400
     ``tenant_not_chosen`` or 403 ``tenant_not_member`` /
     ``tenant_not_found``. *allow_unchosen* is for the status answers only.
+
+    Bindings (``POLICY_APPROVER_ROUTING``): after the tenant is chosen,
+    :func:`~meho_backplane.policy.bindings.bind_current_tenant` matches the
+    login's groups against the bindings of that tenant. Two group kinds
+    give 401 ``multiple_bound_kinds``. With the switch off it does nothing.
+
+    Profile tokens (#6099): a token with the ``mcp_profile`` claim gets 403
+    ``mcp_profile_scope_violation`` unless *allow_mcp_profile* is set. Only
+    the MCP route sets it. So a new entrance refuses such a token unless it
+    allows it on purpose (:mod:`meho_backplane.auth.mcp_profile_claim`).
     """
     if not expected_audience or not expected_audience.strip():
         raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
@@ -1959,7 +1959,18 @@ async def verify_jwt_for_audience(
         expected_audience=expected_audience,
     )
     operator = _operator_from_claims(claims, token, settings)
-    return await select_current_tenant(operator, requested_tenant, allow_unchosen=allow_unchosen)
+    if not allow_mcp_profile:
+        refuse_profile_token(operator)
+    operator = await select_current_tenant(
+        operator, requested_tenant, allow_unchosen=allow_unchosen
+    )
+    # Imported here: the policy package imports ``meho_backplane.auth``.
+    from meho_backplane.policy.bindings import BoundKindConflictError, bind_current_tenant
+
+    try:
+        return await bind_current_tenant(operator, claims)
+    except BoundKindConflictError as exc:
+        raise _http_401(str(exc)) from exc
 
 
 def header_value(value: object) -> str | None:

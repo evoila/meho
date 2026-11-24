@@ -825,8 +825,8 @@ def _non_agent_park_reason(
     * Everyone else: :func:`_person_park_reason` (#3980).
     * A call that would run at once but that a connector marks for a
       person's approval on each call waits (:data:`PER_CALL_WAIT_NOTE`), for
-      a service and for a person. An admin's change of rights in the web
-      console still runs at once (:func:`_console_rights_verdict`).
+      a service and for a person's call with a token. A person's call in the
+      web interface keeps the rules of the web interface.
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -846,7 +846,8 @@ def _non_agent_park_reason(
         if is_service
         else _person_park_reason(operator, descriptor)
     )
-    if waits is None and descriptor_needs_per_call_approval(descriptor):
+    in_web = operator.web_session and is_human_principal(operator)
+    if waits is None and not in_web and descriptor_needs_per_call_approval(descriptor):
         return PER_CALL_WAIT_NOTE
     return waits
 

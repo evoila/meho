@@ -60,10 +60,10 @@ The order is fixed.
    - A call made with a token (a person's token, an agent, a runner) runs
      at once only when it is `safe`.
    - A call that a connector marks for per-call approval waits for a
-     person, also when it is `safe`. This holds for every caller. An
-     admin's change of rights in the web console still runs at once. The
-     read scope of a service login still denies such a call on a target
-     outside the scope.
+     person, also when it is `safe`. This holds for every caller except a
+     person in the web console, who keeps the rules of the web console.
+     The read scope of a service login still denies such a call on a
+     target outside the scope.
    - No standing grant and no run approval clears a call that shows a
      secret, connects to an address the caller gives, is marked for
      per-call approval, or that a classification makes always wait.

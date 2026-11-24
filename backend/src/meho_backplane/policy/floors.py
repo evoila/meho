@@ -22,8 +22,9 @@ The floors come from the code, never from a file. They are:
   writes or makes a credential waits for a person, also at level
   ``safe``, whatever its grants say.
 * **Per-call mark.** A call that a connector marks so that a person
-  approves each call waits, also at level ``safe``, for every caller. An
-  admin's change of rights in the web console still runs at once.
+  approves each call waits, also at level ``safe``, for every caller but a
+  person in the web console. That person keeps the rules of the web
+  console.
 * **No grant.** Some calls wait for a person every time: no standing grant
   and no run approval clears them. These are an operation that reads,
   writes or makes a credential, one that connects to an address the caller gives, one marked
@@ -119,7 +120,9 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 ),
             )
         )
-    if "per_call_approval" in asked.op_class:
+    if "per_call_approval" in asked.op_class and not (
+        asker.kind == "person" and asker.via == "web"
+    ):
         hits.append(
             FloorHit(
                 "wait",

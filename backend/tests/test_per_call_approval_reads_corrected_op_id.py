@@ -275,9 +275,11 @@ def _person(*, web: bool = False, role: TenantRole = TenantRole.OPERATOR) -> Ope
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("web", [False, True], ids=["token", "web"])
-async def test_a_person_call_of_a_safe_old_row_waits_and_a_plain_safe_row_runs(web: bool) -> None:
-    operator = _person(web=web)
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+async def test_a_person_token_call_of_a_safe_old_row_waits_and_a_plain_safe_row_runs(
+    role: TenantRole,
+) -> None:
+    operator = _person(role=role)
     plain = _row(_PLAIN_ID, "GET", "/groups", safety_level="safe")
     verdict, reason = await policy_gate(
         operator=operator, descriptor=plain, target=None, connector_id=_CONNECTOR
@@ -296,6 +298,21 @@ async def test_a_person_call_of_a_safe_old_row_waits_and_a_plain_safe_row_runs(w
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("safety_level", ["safe", "caution"])
+async def test_a_person_web_call_of_an_old_row_keeps_the_web_rules(safety_level: str) -> None:
+    operator = _person(web=True)
+    old = _old_row(safety_level=safety_level)
+    verdict, reason = await policy_gate(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert verdict is PermissionVerdict.AUTO_EXECUTE, reason
+    shadow = await evaluate_call(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert shadow.verdict is Verdict.RUN
+
+
+@pytest.mark.asyncio
 async def test_an_admin_change_of_rights_in_the_web_console_still_runs_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,7 +320,7 @@ async def test_an_admin_change_of_rights_in_the_web_console_still_runs_at_once(
     monkeypatch.setattr(_validate, "console_check", AsyncMock(return_value=ConsoleCheck()))
     verdict, reason = await policy_gate(
         operator=_person(web=True, role=TenantRole.TENANT_ADMIN),
-        descriptor=_old_row(safety_level="safe"),
+        descriptor=_old_row(safety_level="dangerous"),
         target=None,
         connector_id=_CONNECTOR,
         decide_only=True,

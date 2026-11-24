@@ -464,7 +464,8 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     """The stricter of the caller and the hosted agent, in today's order (#4237).
 
     A deny of the agent decides. When the agent waits, only an agent caller
-    can still make it stricter. Otherwise the caller's verdict counts when
+    can still make it stricter, and the read scope of a service caller
+    holds, the same as for its own call. Otherwise the caller's verdict counts when
     it is as strict as the agent's.
     """
     agent_id = asker.acting_agent or ""
@@ -473,7 +474,19 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     agent.rule = replace(
         agent.rule, text=f"agent {agent_id} acting for {asker.sub}: {agent.rule.text}"
     )
-    if agent.verdict is Verdict.DENY or (agent.verdict is Verdict.WAIT and asker.kind != "agent"):
+    if agent.verdict is Verdict.DENY:
+        return agent
+    if agent.verdict is Verdict.WAIT and asker.kind != "agent":
+        caller_asker = replace(asker, acting_agent=None)
+        if (
+            asker.kind == "service"
+            and found.read_scope_denial is not None
+            and _runs_but_for_per_call_mark(caller_asker, asked, call_floors(caller_asker, asked))
+        ):
+            agent.set(
+                Verdict.DENY,
+                RuleRef(source="read_scope", rule_id="read_scope", text=found.read_scope_denial),
+            )
         return agent
     caller = _for_caller(replace(asker, acting_agent=None), asked, found, found.agent_grant)
     caller.steps = [*agent.steps, *caller.steps]

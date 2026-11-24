@@ -16,18 +16,25 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 
 from meho_backplane import op_classes
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    OperationPolicyOverride,
+    PermissionVerdict,
+)
 from meho_backplane.operations import (
     _validate,
     dispatch,
+    grant_approval,
     register_typed_operation,
     reset_dispatcher_caches,
     service_read_scopes,
@@ -39,9 +46,11 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     enforce_subop_policy,
     per_call_step_waits_after_approval,
+    run_governed_subop,
 )
 from meho_backplane.operations.ingest import spec_corrections
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+from meho_backplane.operations.op_policy import effective_policy
 from meho_backplane.operations.rights_change_console import CONSOLE_RUN_REASON, ConsoleCheck
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import _entry_refusal
@@ -49,6 +58,7 @@ from meho_backplane.operations.service_grants import (
     descriptor_needs_per_call_approval,
     never_covered_reason,
     per_call_approval_grant_reason,
+    per_call_mark_turned_off,
 )
 from meho_backplane.policy.evaluate import Verdict
 from meho_backplane.policy.shadow import _op_class, evaluate_call
@@ -299,9 +309,30 @@ async def test_a_person_token_call_of_a_safe_old_row_waits_and_a_plain_safe_row_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("safety_level", ["safe", "caution"])
-async def test_a_person_web_call_of_an_old_row_keeps_the_web_rules(safety_level: str) -> None:
+async def test_a_person_web_call_of_an_old_row_waits_without_an_approval_off_edit(
+    safety_level: str,
+) -> None:
     operator = _person(web=True)
     old = _old_row(safety_level=safety_level)
+    verdict, reason = await policy_gate(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
+    assert reason == PER_CALL_WAIT_NOTE
+    shadow = await evaluate_call(
+        operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert shadow.verdict is Verdict.WAIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("safety_level", ["safe", "caution"])
+async def test_a_person_web_call_of_an_old_row_runs_after_an_approval_off_edit(
+    safety_level: str,
+) -> None:
+    operator = _person(web=True)
+    old = _old_row(safety_level=safety_level)
+    old.policy_approval_off = True
     verdict, reason = await policy_gate(
         operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
     )
@@ -310,6 +341,44 @@ async def test_a_person_web_call_of_an_old_row_keeps_the_web_rules(safety_level:
         operator=operator, descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
     )
     assert shadow.verdict is Verdict.RUN
+    verdict, reason = await policy_gate(
+        operator=_person(), descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
+
+
+@pytest.mark.asyncio
+async def test_an_approval_off_edit_does_not_count_when_the_corrected_op_id_changes_rights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_NEW_ID})
+    old = _old_row()
+    old.policy_approval_off = True
+    assert not per_call_mark_turned_off(old)
+    verdict, reason = await policy_gate(
+        operator=_person(web=True),
+        descriptor=old,
+        target=None,
+        connector_id=_CONNECTOR,
+        decide_only=True,
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
+    shadow = await evaluate_call(
+        operator=_person(web=True),
+        descriptor=old,
+        target=None,
+        connector_id=_CONNECTOR,
+        decide_only=True,
+    )
+    assert shadow.verdict is Verdict.WAIT
+
+
+def test_an_override_that_turns_approval_off_marks_the_policy() -> None:
+    off = OperationPolicyOverride(requires_approval=False)
+    on = OperationPolicyOverride(requires_approval=True)
+    assert effective_policy("caution", True, [off]).approval_off
+    assert not effective_policy("caution", True, [on]).approval_off
+    assert not effective_policy("caution", True, []).approval_off
 
 
 @pytest.mark.asyncio
@@ -357,6 +426,93 @@ async def test_a_marked_read_outside_the_read_scope_is_denied_and_waits_inside_i
         operator=_service(), descriptor=old, target=None, connector_id=_CONNECTOR, decide_only=True
     )
     assert shadow.verdict is shadow_verdict
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_scope", "verdict", "shadow_verdict"),
+    [
+        (False, PermissionVerdict.DENY, Verdict.DENY),
+        (True, PermissionVerdict.NEEDS_APPROVAL, Verdict.WAIT),
+    ],
+    ids=["outside-scope", "inside-scope"],
+)
+async def test_a_hosted_run_of_a_service_login_keeps_its_read_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    in_scope: bool,
+    verdict: PermissionVerdict,
+    shadow_verdict: Verdict,
+) -> None:
+    denial = None if in_scope else "read_scope_denied: the target is outside the read scope"
+    monkeypatch.setattr(service_read_scopes, "read_scope_denial", AsyncMock(return_value=denial))
+    old = _old_row(safety_level="safe")
+    with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: f"agent:{_AGENT}"}):
+        got, reason = await policy_gate(
+            operator=_service(),
+            descriptor=old,
+            target=None,
+            connector_id=_CONNECTOR,
+            decide_only=True,
+        )
+        shadow = await evaluate_call(
+            operator=_service(),
+            descriptor=old,
+            target=None,
+            connector_id=_CONNECTOR,
+            decide_only=True,
+        )
+    assert got is verdict, reason
+    assert reason is not None
+    assert reason.startswith("read_scope_denied") is not in_scope
+    assert shadow.verdict is shadow_verdict
+
+
+_STEP_VERSION = "2.0"
+_STEP_CONNECTOR = f"{_IMPL}-{_STEP_VERSION}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "method", "path", "status", "calls"),
+    [
+        (_OLD_ID, "POST", "/groups/{gid}/members", "awaiting_approval", []),
+        (_PLAIN_ID, "GET", "/groups", None, ["ran"]),
+    ],
+    ids=["old-op-id", "plain"],
+)
+async def test_an_approved_run_does_not_cover_a_direct_step_with_the_old_op_id(
+    op_id: str, method: str, path: str, status: str | None, calls: list[str]
+) -> None:
+    stored = _row(op_id, method, path, safety_level="safe")
+    stored.version = _STEP_VERSION
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(stored)
+    ran: list[str] = []
+
+    async def _call() -> dict[str, bool]:
+        ran.append("ran")
+        return {"ran": True}
+
+    token = approved_run_var.set(True)
+    try:
+        step = await run_governed_subop(
+            operator=_service(),
+            connector_id=_STEP_CONNECTOR,
+            op_id=op_id,
+            safety_level="safe",
+            requires_approval=False,
+            target=None,
+            params={},
+            call=_call,
+        )
+    finally:
+        approved_run_var.reset(token)
+    assert ran == calls
+    if status is None:
+        assert step.stopped is None
+    else:
+        assert step.stopped is not None
+        assert step.stopped.status == status, step.stopped.error
 
 
 def test_the_approval_of_a_run_does_not_cover_a_marked_step() -> None:

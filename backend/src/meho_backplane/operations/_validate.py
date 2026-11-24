@@ -1302,11 +1302,11 @@ async def _direct_run_verdict(
     The caller's verdict is skipped when it cannot change the outcome. A
     hosted-agent deny is already the strictest verdict. When the hosted
     agent needs approval, only an agent-kind caller can still make it
-    stricter (a deny grant); a human or service caller never gets deny
-    for a call that parks (:func:`_non_agent_verdict` denies only a read
-    that would run at once, #4992), and working out its verdict could
-    record a standing grant as used for a call that then waits for
-    approval.
+    stricter (a deny grant). A service caller's read scope still holds
+    then (:func:`_hosted_read_scope_denial`). Otherwise a human or service
+    caller never gets deny for a call that parks, and working out its
+    verdict could record a standing grant as used for a call that then
+    waits for approval.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -1321,6 +1321,9 @@ async def _direct_run_verdict(
         agent_verdict is PermissionVerdict.NEEDS_APPROVAL
         and operator.principal_kind is not PrincipalKind.AGENT
     ):
+        denial = await _hosted_read_scope_denial(operator, descriptor, target)
+        if denial is not None:
+            return PermissionVerdict.DENY, denial
         return agent_result
     verdict, reason = await _caller_verdict(
         operator=operator,
@@ -1334,6 +1337,24 @@ async def _direct_run_verdict(
     if _more_restrictive(verdict, agent_verdict) is verdict:
         return verdict, reason
     return agent_result
+
+
+async def _hosted_read_scope_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target: Any
+) -> str | None:
+    """The read-scope refusal of a service login whose hosted agent waits, or ``None``.
+
+    The same rule as for the service login's own call
+    (:func:`_non_agent_verdict`): the read scope holds for a call that the
+    login would run at once, or that waits only because a connector marks it
+    for a person on each call. Nothing is written.
+    """
+    if operator.principal_kind is not PrincipalKind.SERVICE:
+        return None
+    reason = _non_agent_park_reason(operator, descriptor, is_service=True, decide_only=True)
+    if reason not in (None, PER_CALL_WAIT_NOTE):
+        return None
+    return await _service_read_scope_denial(operator=operator, descriptor=descriptor, target=target)
 
 
 async def _agent_verdict(

@@ -165,12 +165,14 @@ a standing grant covers such an operation:
 - The check also reads the op id that the connector's ingest correction gives
   the stored row (`descriptor_needs_per_call_approval`), so a row stored
   with another op id for the same call waits too. Such a call waits also at
-  risk level `safe`, for an agent, a service login and a person with a
-  token. A person's call in the web console keeps the rules of the web
-  console.
+  risk level `safe`, for every caller. A person's call in the web console
+  keeps the rules of the web console only after the platform admin's
+  approval-off edit described below.
 - The approval of a multi-step operation does not cover a marked step or
   child call: it waits for its own approval
-  (`per_call_step_waits_after_approval` in `operations/composite.py`).
+  (`per_call_step_waits_after_approval` in `operations/composite.py`). A
+  step has no method and path of its own, so `apply_step_policy` gives it
+  those of its stored row (`correction_route`) for the ingest correction.
 
 A platform admin can turn approval off for some of these operations, for example the MSAD group membership changes, for the whole install or for one tenant's own copy. Both the console and the REST API or CLI need a written reason; the REST API and the CLI also need a fresh sign-in. The edit is written to the audit log. After it, a person in the web console runs a `caution` operation at once. A `dangerous` operation still waits because of its risk level. A standing grant or a run approval still does not cover the operation. MEHO refuses the edit for an operation registered as a change of rights (`approval_off_rights_change`, see the last item of the list below) and for a destructive operation. An operation that writes or makes a credential keeps its approval: the edit does not end its wait.
 

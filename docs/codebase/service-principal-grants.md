@@ -110,12 +110,14 @@ at ingest. A row stored with another op id is marked too. A correction
 that fails counts the call as marked. Grant create, run approval create,
 the call-time check and the policy shadow report use it. At call time a
 marked call always waits for a person, also at risk level `safe`: the call
-of an agent, a service login and a person with a token (`PER_CALL_WAIT_NOTE`
-in `operations/_validate.py`, the floor `per_call_approval_waits` in
-`policy/floors.py`). A person's call in the web console keeps the rules of
-the web console. A service login whose read scope does not cover the target
-gets `read_scope_denied` for such a call, not a wait. The approval of a
-multi-step operation does not cover a marked step or child call.
+of every caller (`PER_CALL_WAIT_NOTE` in `operations/_validate.py`, the
+floor `per_call_approval_waits` in `policy/floors.py`). A person's call in
+the web console keeps the rules of the web console only after the
+approval-off edit below (`per_call_mark_turned_off`; the edit does not count
+when the corrected op id is a change of rights). A service login whose read
+scope does not cover the target gets `read_scope_denied` for such a call,
+not a wait, also in a hosted agent run that the login started. The approval
+of a multi-step operation does not cover a marked step or child call.
 A platform admin can turn approval off for some of these operations, for
 example `msad.group.add-member`, for the whole install or for one tenant's own
 copy. Both the console and the REST API or CLI need a written reason; the REST

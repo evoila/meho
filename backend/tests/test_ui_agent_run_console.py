@@ -381,10 +381,17 @@ def test_run_console_renders_form_and_budget() -> None:
     # collapsed inline and its controls rendered narrow.
     assert "form-control" not in body
     assert "label-text" not in body
+    # `input-bordered` and `textarea-bordered` went the same way in v5 --
+    # `.input` and `.textarea` carry the border themselves, and both
+    # modifiers compile to zero rules. They were pinned here only as part
+    # of a longer class string; what this guards is the width, so the
+    # string is matched without them (#1167 clears them per touched file).
+    assert "textarea min-h-28 font-mono text-sm w-full" in body
+    assert "input input-sm font-mono w-full" in body
+    assert "textarea-bordered" not in body
+    assert "input-bordered" not in body
     # Controls fill their wrapper; work_ref stays capped narrower than
     # the prompt.
-    assert "textarea textarea-bordered min-h-28 font-mono text-sm w-full" in body
-    assert "input input-bordered input-sm font-mono w-full" in body
     assert "flex flex-col gap-1 max-w-md" in body
 
 

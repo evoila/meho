@@ -2204,11 +2204,50 @@ async def test_cross_origin_redirect_warning_logs_location_host_only(
         assert mark not in rendered
 
 
-@pytest.mark.parametrize("location", ["/PATHMARK?q=QUERYMARK", "https://[::1/PATHMARK?q=QUERYMARK"])
+@pytest.mark.parametrize(
+    "location",
+    [
+        "/PATHMARK?q=QUERYMARK",
+        "https://[::1/PATHMARK?q=QUERYMARK",
+        "https://xn--a.example.com/PATHMARK?q=QUERYMARK",
+    ],
+)
 def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
     from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
 
     assert host_for_log(location) == UNPARSEABLE_ADDRESS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://[::1/PATHMARK?q=QUERYMARK",
+        "https://xn--a.example.com/PATHMARK?q=QUERYMARK",
+    ],
+)
+async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) -> None:
+    """A Location that httpx cannot read is not followed and is logged as one fixed mark."""
+    from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": location})
+
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com", transport=httpx.MockTransport(handler)
+    ) as client:
+        with capture_logs() as captured:
+            resp = await client.get("/guestFile")
+
+    assert resp.status_code == 302
+    warning = next(
+        e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
+    )
+    assert warning["from_url"] == "vc.example.com"
+    assert warning["location"] == UNPARSEABLE_ADDRESS
+    rendered = repr(captured)
+    for mark in ("PATHMARK", "QUERYMARK"):
+        assert mark not in rendered
 
 
 @pytest.mark.asyncio

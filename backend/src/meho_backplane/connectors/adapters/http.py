@@ -822,6 +822,18 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             response.stream = _StopSafeCloseStream(response.stream)
         return response
 
+    def _build_redirect_request(  # type: ignore[override]
+        self, request: httpx.Request, response: httpx.Response
+    ) -> httpx.Request | None:
+        # httpx builds the next request inside ``send`` and raises (closing the
+        # answer) when it cannot read the Location address. Give ``None``
+        # instead, so :meth:`_send_same_origin` returns the 3xx unfollowed and
+        # logs the fixed mark. This client never lets httpx follow a redirect.
+        try:
+            return super()._build_redirect_request(request, response)
+        except (httpx.RemoteProtocolError, UnicodeError):
+            return None
+
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:

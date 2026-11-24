@@ -1752,7 +1752,11 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   than a realm object is an error (`KeycloakUnexpectedResponseError`), not
   proof that the realm is gone.
 - **Approval card.** `blast_radius.object` carries `{kind, resource, realm,
-  present, enabled, users, clients, groups}`. The counts come from
+  present, id, enabled, users, clients, groups}`. `id` is Keycloak's id of
+  the realm. Before an approved call runs, MEHO builds the card again and
+  compares the id (`approval_object_check.py`). A realm that was deleted and
+  made again under the same name has a new id, so the run is refused with
+  `object_changed_since_approval` and nothing is deleted. The counts come from
   `GET .../users/count`, `GET .../groups/count` (all groups, not only the
   top level) and the length of `GET .../clients`. The client read must
   answer with a JSON array. Any other body is an error
@@ -2248,6 +2252,14 @@ deletes only the managed realm of its target. `check_realm_guards` still
 refuses `master`, the target's admin realm and MEHO's own login realm. Its
 approval card names the realm, with the user, client and group counts.
 Every other op takes no realm value and always acts on the managed realm.
+`keycloak.realm.get` and `keycloak.realm.update` also check the realm that
+Keycloak answers with (`check_answered_realm` in `realm_params.py`): its
+`realm` must be exactly the managed realm, with the same case and accents.
+Another name, no name, or an answer that is not an object is an error, so
+`realm.get` returns no realm data and `realm.update` sends no write. A
+`keycloak.realm.create` that names no realm makes the managed realm, so its
+approval check judges it by that name, like a create that names it
+(`ops_write_login_realm_rule.py`).
 The secret broker refs follow the same fence: `managed_realm_problem`
 (`secret_endpoint.py`) refuses a `keycloak:` ref whose `<realm>` is not the
 managed realm of its target. `check_secret_move_realms`
@@ -2263,7 +2275,12 @@ applied to `KeycloakConnector`) wraps each op handler. With the switch
 `KEYCLOAK_ANSWER_REALM` on (`Settings.keycloak_answer_realm`, off by
 default), a dict answer gets the field `managed_realm` first, set to the
 realm the call acted on. A read answer and a write answer show the same
-field. With the switch off, no answer has the field. The field changes what
+field. With the switch off, no answer has the field. Each Keycloak op is
+registered with `managed_realm` in its `result_scalars` hint
+(`with_realm_scalar`), so the summary of a reduced list keeps the field
+whole, also when a long realm name is over the size limit of the other
+plain values. With the switch off the answer has no such field, and the
+hint keeps nothing. The field changes what
 an AI agent reads, so it stays off until it is measured. The `meho keycloak`
 commands print it as `managed realm:` when the answer has it.
 The approval card of a Keycloak write shows the realm in its opening

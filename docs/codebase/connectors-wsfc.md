@@ -103,10 +103,16 @@ non-parked offline/online on a throwaway role uses the same approval path
 (a human still decides).
 
 **When `wsfc.groups.move` waits for approval.** The op is `caution` and has no
-approval flag of its own. The general rule of #5764 (see "Op surface") decides:
-a call with a token, from the CLI, MCP or an agent waits for approval. A person
-in the web console runs it at once. So the tier and the gate agree: the tier says
-how risky the op is, and the rule says who may run it without approval.
+approval flag of its own. With the default settings, a call runs at once in two
+cases only: a person with the Operator role or higher sends it in the web
+console, or a service login sends it and a standing grant or a run approval
+covers the call. Every other call waits for approval. Examples: a call with a
+person's token from the CLI, MCP or REST, and every agent call (an agent grant
+does not change this). When `AGENT_GRANT_REQUIRED` is `on`, an agent with no
+matching grant is refused. An operator can make the op stricter: raise its risk
+level or require approval. Then the web console call waits too. No setting
+lowers the risk level. So no setting lets a person's token call or an agent call
+run at once.
 
 ## Key types
 

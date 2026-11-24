@@ -814,7 +814,9 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   the sweeper watches a runner that has only Sensors. The next accepted
   result batch clears the marker and normal results follow.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
-  `not_in_list`, `too_large`, `future_time`, `no_time`, `old`.
+  `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
+  result is added after its transaction commits, so a result that rolls
+  back and is sent again counts once.
 - **Clean-up.** While the switch is on, raw rows older than
   `RUNNER_CHECK_RESULTS_RETENTION_DAYS` (7) are deleted by the evidence prune
   tick (`checks/evidence_retention.py`). With the switch off it deletes none.

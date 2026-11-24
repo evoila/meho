@@ -422,8 +422,12 @@ async def _count_one(
     too_large: bool,
     received_at: datetime,
     evaluated_at: datetime,
-) -> CountedSensor | None:
-    """Count one newly stored result, or return ``None`` when it does not count.
+) -> tuple[str, CountedSensor | None]:
+    """Count one newly stored result; return its outcome for the counter and the Sensor.
+
+    The Sensor is ``None`` when the result does not count. The caller adds the
+    outcome to ``runner_check_results_total`` once the transaction commits, so
+    a result whose transaction fails and is sent again is counted once.
 
     *sensor* is the Sensor of this runner that *item* names
     (:func:`_runner_sensor`), read after the runner's lock was taken.
@@ -431,37 +435,34 @@ async def _count_one(
     after the Sensor's last counted time when it is not later.
     """
     if sensor is None:
-        _count("not_in_list")
         _log.warning(
             "runner_result_not_in_list",
             runner=runner_name,
             check_ref=item.check_ref,
             result_uid=item.result_uid,
         )
-        return None
+        return "not_in_list", None
     if item.produced_at is None:
         # Without a runner time MEHO cannot tell a new result from a replay.
-        _count("no_time")
         _log.warning(
             "runner_result_without_time",
             runner=runner_name,
             check_ref=item.check_ref,
             result_uid=item.result_uid,
         )
-        return None
+        return "no_time", None
     produced_at = _as_utc(item.produced_at)
     if sensor.runner_produced_at is not None and produced_at <= _as_utc(sensor.runner_produced_at):
-        _count("old")
-        return None
+        return "old", None
     outcome = _outcome_for(sensor, item, too_large=too_large, received_at=received_at)
-    _count("too_large" if too_large else "counted")
     sensor.runner_produced_at = produced_at
     evaluated_at = _evaluation_time(sensor, evaluated_at)
     counted = await _record(session, sensor, outcome, evaluated_at)
     notice = await _count_auth(session, sensor, item, evaluated_at)
     if notice is not None:
         counted = replace(counted, park_notice=notice)
-    return await _claim(session, tenant_id=tenant_id, counted=counted, now=evaluated_at)
+    claimed = await _claim(session, tenant_id=tenant_id, counted=counted, now=evaluated_at)
+    return ("too_large" if too_large else "counted"), claimed
 
 
 async def ingest_and_count(
@@ -475,14 +476,15 @@ async def ingest_and_count(
 
     Each result gets its own transaction: lock the runner's assignment row,
     take the time of the count, clean the result, store it, count it, claim
-    its Dashboard edge, commit. Then :func:`after_commit` runs for it. When a
-    result fails, the ones before it stay stored and counted, and a re-post
-    of the batch skips them as duplicates.
+    its Dashboard edge, commit. Then the counter rises and :func:`after_commit`
+    runs for it. When a result fails, the ones before it stay stored and
+    counted, and a re-post of the batch skips them as duplicates.
     """
     sessionmaker = get_sessionmaker()
     accepted = 0
     for item in screened.results:
         counted: CountedSensor | None = None
+        label: str | None = None
         async with sessionmaker() as session:
             await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
             # Taken under the lock: a batch that waited for it never counts a
@@ -497,7 +499,7 @@ async def ingest_and_count(
             )
             if stored:
                 accepted += 1
-                counted = await _count_one(
+                label, counted = await _count_one(
                     session,
                     tenant_id=tenant_id,
                     runner_name=runner_name,
@@ -508,6 +510,8 @@ async def ingest_and_count(
                     evaluated_at=evaluated_at,
                 )
             await session.commit()
+        if label is not None:
+            _count(label)
         if counted is not None:
             await after_commit(tenant_id, [counted])
     return accepted, len(screened.results) - accepted

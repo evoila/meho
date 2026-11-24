@@ -397,7 +397,7 @@ async def test_a_result_read_after_a_newer_one_committed_is_dropped(switch_on: N
             result={"count": 50},
             produced_at=now - timedelta(seconds=1),
         )
-        counted = await runner_checks._count_one(
+        label, counted = await runner_checks._count_one(
             first,
             tenant_id=_TENANT,
             runner_name="runner-a",
@@ -409,7 +409,7 @@ async def test_a_result_read_after_a_newer_one_committed_is_dropped(switch_on: N
             received_at=now,
             evaluated_at=now,
         )
-    assert counted is None
+    assert (label, counted) == ("old", None)
     assert (await _sensor(sensor_id)).last_state == "ok"
 
 

@@ -73,6 +73,7 @@ from .test_runner_checks_count import (
     _ASSERTION,
     _CONNECTOR_ID,
     _KEY,
+    _outcome,
     _post,
     _result,
     _seed_dashboard,
@@ -281,6 +282,7 @@ async def test_a_failed_claim_on_the_second_dashboard_keeps_the_result_for_the_r
 
     monkeypatch.setattr(inv, "_claim_dashboard_in_session", second_claim_fails)
     result = _result(sensor_id, payload={"count": 50})
+    counted_before = _outcome("counted")
 
     with pytest.raises(RuntimeError, match="claim failed"):
         _post(client, _RUNNER_A_ID, "runner-a", result)

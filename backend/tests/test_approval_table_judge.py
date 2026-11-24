@@ -140,6 +140,11 @@ def test_an_entry_without_a_reason_is_refused(tmp_path: Path) -> None:
         _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], _entry("lowered_level", reason=""))
 
 
+def test_an_entry_with_a_blank_quoted_reason_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="has no reason"):
+        _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], _entry("lowered_level", reason='"   "'))
+
+
 def test_an_unknown_risk_level_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="unknown risk level"):
         _judge(tmp_path, [_row()], [_row(risk_level="mild")])

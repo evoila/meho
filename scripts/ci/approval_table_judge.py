@@ -98,7 +98,7 @@ def judge(
         old = read_approved(base_approved_path)
     approved = [e for e in read_approved(approved_path) if e not in old]
     for entry in approved:
-        if not entry.get("reason"):
+        if not entry.get("reason", "").strip():
             sys.exit(f"approved entry {entry} has no reason")
     found = differences(load(base_path), load(head_path))
     used = set()

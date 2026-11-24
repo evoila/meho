@@ -158,9 +158,13 @@ Two honest limits:
   `status: "unavailable"`, so its secret params never surface.
   With the backplane switch `PREVIEW_TYPED_WRITES` on (off by default),
   every typed or composite write previews, also one that waits for
-  approval only for some callers. A typed or composite credential write with
-  its own safe preview (for example `keycloak.user.reset_password`) then shows only
-  that plan and never copies the params.
+  approval only for some callers. The exception is a typed or composite
+  credential write that is not destructive and has no safe preview of its
+  own: it stays `status: "unavailable"` and gives no `preview_hash`. A
+  typed or composite credential write with its own safe preview (for
+  example `keycloak.user.reset_password`) gives a `preview_hash` and never
+  copies the params. It shows the plan only when that preview builds one;
+  otherwise `plan_shown` is `false`.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 

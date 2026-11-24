@@ -133,8 +133,12 @@ func newPreviewCmd() *cobra.Command {
 			"`status=\"unavailable\"`, so its secret params never surface. " +
 			"With the backplane switch `PREVIEW_TYPED_WRITES` on (off by " +
 			"default), every typed/composite write previews, also one that " +
-			"waits for approval only for some callers, and a typed/composite credential " +
-			"write with its own safe preview shows only that plan, never the params.\n\n" +
+			"waits for approval only for some callers. The exception is a " +
+			"typed/composite credential write that is not destructive and has " +
+			"no safe preview of its own: it stays `status=\"unavailable\"` and " +
+			"gives no hash. A typed/composite credential write with its own safe " +
+			"preview gives a hash and never the params; it shows its plan only " +
+			"when that preview builds one.\n\n" +
 			"When the real call would be refused because the target's version " +
 			"is outside what the connector's catalog supports, and no other " +
 			"catalog of the same connector serves it, the preview is refused " +

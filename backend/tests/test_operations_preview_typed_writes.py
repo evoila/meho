@@ -279,6 +279,32 @@ async def test_destructive_credential_write_with_builder_shows_the_plan_never_th
     assert _SECRET not in str(envelope)
 
 
+@pytest.mark.asyncio
+async def test_credential_write_whose_builder_declines_gives_the_hash_without_a_plan(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    async def _declining_builder(ctx: Any) -> None:
+        return None
+
+    await _register(
+        stub_embedding_service,
+        "keycloak.user.reset_password",
+        safety_level="dangerous",
+        requires_approval=True,
+    )
+    _PREVIEW_BUILDERS["keycloak.user.reset_password"] = _declining_builder
+    params = {"username": "alice", "realm": "lab", "password_secret_ref": "secret/a"}
+
+    envelope = await _preview("keycloak.user.reset_password", {**params, "password": _SECRET})
+
+    assert envelope["status"] == "ok"
+    assert isinstance(envelope["preview_hash"], str)
+    assert envelope["redacted_body"] is None
+    assert envelope["plan_shown"] is False
+    assert "proposed_effect" not in envelope
+    assert _SECRET not in str(envelope)
+
+
 def _switch(monkeypatch: pytest.MonkeyPatch, name: str, on: bool) -> None:
     monkeypatch.setenv(name, "true" if on else "false")
     get_settings.cache_clear()
@@ -422,8 +448,9 @@ def test_short_text_says_how_each_kind_of_credential_write_previews(
     assert "cannot be previewed" not in description
     assert "each secret input" not in description
     typed_rule = (
-        "A typed one with its own safe preview shows its plan and a `preview_hash`, never the "
-        "params. Without one, a destructive one shows the redacted params and a "
+        "A typed one with its own safe preview shows a `preview_hash`, never the params, and "
+        "its plan when that preview builds one (if not, `plan_shown` is false). Without one, "
+        "a destructive one shows the redacted params and a "
         '`preview_hash`; any other stays `status="unavailable"`.'
         if switch_on
         else 'A typed one stays `status="unavailable"`, unless it is destructive: then it shows '
@@ -449,3 +476,8 @@ def test_full_text_names_the_destructive_credential_write(
         "(for example `vault.kv.put`) is NOT previewable"
     )
     assert rule in description
+    plan_rule = (
+        "It shows `proposed_effect` only when that preview builds a plan; otherwise "
+        "`plan_shown` is false."
+    )
+    assert (plan_rule in description) is switch_on

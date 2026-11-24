@@ -49,8 +49,10 @@ TYPED_WRITE_TEXT_SWAPS: Final[tuple[tuple[str, str], ...]] = (
         "destructive (for example `vault.kv.put`) is NOT previewable and stays "
         '`status="unavailable"`, so its secret params never surface. ',
         "A typed/composite credential write (for example `keycloak.user.reset_password`) with "
-        'its own safe preview returns `status="ok"` with `proposed_effect` and '
-        "no params copy: a secret value never shows. A typed/composite credential "
+        'its own safe preview returns `status="ok"` with a `preview_hash` and '
+        "no params copy: a secret value never shows. It shows `proposed_effect` only "
+        "when that preview builds a plan; otherwise `plan_shown` is false. A "
+        "typed/composite credential "
         'write with no safe preview of its own stays `status="unavailable"`, unless '
         'it is destructive. A read-only typed op stays `status="unavailable"`. ',
     ),
@@ -63,8 +65,9 @@ PREVIEW_OPERATION_TYPED_WRITES_SHORT: Final = ShortText(
     ).replace(
         'A typed one stays `status="unavailable"`, unless it is destructive: '
         "then it shows the redacted params and a `preview_hash`.",
-        "A typed one with its own safe preview shows its plan and a "
-        "`preview_hash`, never the params. Without one, a destructive one shows "
+        "A typed one with its own safe preview shows a `preview_hash`, never "
+        "the params, and its plan when that preview builds one (if not, "
+        "`plan_shown` is false). Without one, a destructive one shows "
         "the redacted params and a `preview_hash`; any other stays "
         '`status="unavailable"`.',
     ),

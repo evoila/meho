@@ -135,7 +135,9 @@ Not in the list, on purpose:
 ### Who uses the SSH connection pool
 
 The pool lives on `SshConnector` (`connectors/adapters/ssh.py`). Its key
-is the target, the kind of caller, and the caller's `sub`. These use it:
+is the target, the kind of caller, the caller's `sub`, and the target's
+`secret_ref`, host and port. So a connection is handed back only to a call
+with the same login and address it was opened with. These use it:
 
 - **The nine connectors that subclass `SshConnector`**: `bind9`, `hyperv`,
   `linux`, `msad`, `pfsense`, `rke2`, `windows_dns`, `winsrv`, `wsfc`.

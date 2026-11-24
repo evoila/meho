@@ -47,7 +47,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Agent runs</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Every agent invocation in this tenant, newest first. Filter by
         lifecycle status or change ticket (work_ref); click a run to inspect
         its status, turns, model, and output.
@@ -87,7 +87,7 @@
           name="work_ref"
           value="{{ work_ref_filter }}"
           class="input input-bordered input-sm"
-          placeholder="exact match"
+          placeholder="whole ticket id"
           maxlength="256"
           aria-label="Filter by work_ref"
         />

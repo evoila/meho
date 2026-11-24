@@ -137,6 +137,8 @@ __all__ = [
     "ConnectorNotFoundError",
     "ConnectorScopeCandidate",
     "ConnectorUser",
+    "ImplIdEndsInDigitsError",
+    "InvalidOpClassError",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
@@ -239,6 +241,16 @@ class InvalidSchemaError(ValueError):
     when a path's parameter list isn't a list, or when the spec uses
     a structurally unsupported shape (component-path drill-down
     refs, for example).
+    """
+
+
+class InvalidOpClassError(InvalidSchemaError):
+    """A connector's safety floor set an op class that is not allowed.
+
+    Only the classes in
+    :data:`~meho_backplane.operations.ingest.safety_floors.FLOOR_OP_CLASSES`
+    (``credential_read`` and ``write``) may be set. The message names the
+    operation and the allowed classes.
     """
 
 
@@ -914,6 +926,30 @@ class VersionMismatchError(ValueError):
         if suggestion is not None:
             base = f"{base}; {suggestion}"
         super().__init__(base)
+
+
+class ImplIdEndsInDigitsError(ValueError):
+    """The ``impl_id`` ends in a dash and digits, so its connector_id splits wrongly.
+
+    The connector_id is ``<impl_id>-<version>``. MEHO splits it back at the
+    first dash that is followed by a digit
+    (:func:`~meho_backplane.operations.ingest.parser.parse_connector_id`). An
+    ``impl_id`` such as ``networker-rest-1912`` has such a dash, so its
+    digits would be read as the start of the version. Raised by
+    :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`
+    before any spec fetch or DB write (#4728).
+    """
+
+    def __init__(self, *, product: str, version: str, impl_id: str) -> None:
+        self.product = product
+        self.version = version
+        self.impl_id = impl_id
+        super().__init__(
+            f"impl_id={impl_id!r} has a dash followed by a digit, so MEHO would read "
+            f"the end of it as the start of the version. Use a name where no "
+            f"dash is followed by a digit (for example 'networker-rest'), and "
+            f"give the version with --version."
+        )
 
 
 class ProductImplIdMismatch(ValueError):  # noqa: N818 -- the mismatch *is* the condition; "Error" reads redundant

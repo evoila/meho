@@ -35,7 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
-from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
+from meho_backplane.operations._audit import resolve_audit_session_id, work_ref_var
+from meho_backplane.operations.embed import build_embedding_text, encode_endpoint_text
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
     resolved_auto_shim_class,
@@ -75,6 +76,7 @@ __all__ = [
     "load_ops_outside_groups",
     "login_type_of",
     "operator_disabled_op_ids",
+    "refresh_op_embedding",
     "scope_has_groups",
     "scope_has_rows",
     "select_groups",
@@ -113,12 +115,9 @@ OP_CROSS_TENANT_INGEST: Final[str] = "meho_connector_ingest_cross_tenant"
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
 #: only on ingested ops whose ``method`` is one of these; every
 #: write-shaped verb (POST / PUT / PATCH / DELETE) stays default-deny.
-#: ``EndpointDescriptor`` carries no ``op_class`` column — the
-#: read/write taxonomy the MCP tool registry uses lives on
-#: :class:`~meho_backplane.mcp.registry.ToolDefinition`, not the
-#: descriptor row — so HTTP method is the per-row read-class signal
-#: for ingested operations (typed / composite ops have ``method``
-#: NULL and are never matched). Stored uppercase to compare against
+#: HTTP method is the per-row read-class signal for ingested operations
+#: (typed / composite ops have ``method`` NULL and are never matched).
+#: Stored uppercase to compare against
 #: the verbatim spec verbs the ingest parser writes.
 READ_HTTP_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 
@@ -579,7 +578,7 @@ async def write_audit_row(
     was supplied.
 
     ``agent_session_id`` comes from
-    :func:`~meho_backplane.operations._audit.resolve_agent_session_id`:
+    :func:`~meho_backplane.operations._audit.resolve_audit_session_id`:
     the agent run's session when the action runs inside an agent loop,
     else the MCP session the client sent. It is set here, on every
     service-level row, so a session search finds the action whether or
@@ -605,7 +604,7 @@ async def write_audit_row(
         status_code=200,
         request_id=None,
         duration_ms=Decimal("0"),
-        agent_session_id=resolve_agent_session_id(),
+        agent_session_id=resolve_audit_session_id(),
         work_ref=work_ref_var.get(),
         payload=payload,
     )
@@ -964,6 +963,29 @@ def validate_edit_op_args(
         )
 
 
+def _mark_admin_edited(op_row: EndpointDescriptor, field: str) -> None:
+    """Record that an admin set *field*, so typed registration keeps it (#5321)."""
+    marked = list(op_row.admin_edited_fields or [])
+    if field not in marked:
+        op_row.admin_edited_fields = [*marked, field]
+
+
+async def refresh_op_embedding(op_row: EndpointDescriptor) -> None:
+    """Rebuild the search vector of *op_row* from its current text (#5321).
+
+    An admin edit of ``custom_description`` changes the search text. The
+    next start compares the code text with the saved text, finds them equal
+    and keeps the vector, so the vector must match the new text right away.
+    """
+    text = build_embedding_text(
+        summary=op_row.summary or "",
+        description=op_row.description or "",
+        custom_description=op_row.custom_description,
+        tags=op_row.tags,
+    )
+    op_row.embedding = await encode_endpoint_text(text)
+
+
 def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
@@ -990,12 +1012,14 @@ def apply_op_overrides(
     if custom_description is not _UNSET:
         op_row.custom_description = custom_description
         fields_updated.append("custom_description")
+        _mark_admin_edited(op_row, "custom_description")
     if is_enabled is not None:
         op_row.is_enabled = is_enabled
         fields_updated.append("is_enabled")
     if llm_instructions is not None:
         op_row.llm_instructions = llm_instructions
         fields_updated.append("llm_instructions")
+        _mark_admin_edited(op_row, "llm_instructions")
     return fields_updated
 
 

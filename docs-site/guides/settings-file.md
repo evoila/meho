@@ -12,6 +12,9 @@ policies, the conventions and the targets. The settings file
 The file never holds a secret. Passwords and keys stay in your secret
 store.
 
+The categories and classifications of operations are in a separate file:
+see [The policy file](policy-file.md).
+
 !!! note "REST only"
 
     The command line and the web console do not have it yet. Today you
@@ -30,6 +33,31 @@ Every call needs a login. Without a token MEHO answers `401`.
 Only a person can preview or import a file. An agent, a service or a
 runner gets `403` with `human_principal_required`. So every change in
 the history names a real person.
+
+### Targets are changed in the web console
+
+A file that adds or changes a target is applied only by a person in the
+web console. This is the same rule as for the target API, where a call
+with a token waits for approval. When you send such a file with a token
+(the CLI, a script or an AI tool), MEHO saves nothing and answers `403`:
+
+```json
+{"detail": "A settings file that adds or changes targets is applied in the web console. A call with a token cannot write targets at once."}
+```
+
+- The preview still works with a token. It shows the target changes.
+- A file that changes no target still applies with a token. A target in
+  the file that is the same as the stored one is no change.
+- Two policies change only in the web console:
+  `run_approval_target_kinds` turned on and `announce_gate_enabled`
+  turned off. The web console cannot apply a settings file yet, so these
+  two changes cannot be made at all today. See
+  [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
+  The other policies and the conventions apply with a token.
+
+The web console does not have the settings file yet. Until it does, add
+or change each target with `meho targets` or the target API (with a
+token it waits for approval), then import the file.
 
 To call the API from a shell, get a token with the CLI. The value is a
 live login: do not log it or share it.
@@ -92,11 +120,39 @@ spec:
 - When a `tenant_admin` imports a file with only their own tenant, the
   tenant `id` may be left out.
 
+### Approval policies change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs:
+
+- `run_approval_target_kinds: true` lets one run approval cover a whole
+  target kind, not only one target.
+- `announce_gate_enabled: false` turns the announce gate off.
+
+These two changes apply only for a person in the web console. The web
+console cannot apply a settings file yet, so today these two changes
+cannot be made at all. When you send such a file with a token (the CLI, a
+script or an AI tool), MEHO answers `403`, names each policy, and saves
+nothing from the file, also not its other parts. This includes
+`policies: null` when the gate is on, because it turns the gate off.
+
+!!! warning "Turn the announce gate on only if you want to keep it on"
+    Turning the gate on applies with a token. Turning it off again
+    cannot be done until the web console can apply a settings file.
+
+- The preview works with a token. It shows the change in `diff` and
+  names it in `warnings`.
+- The other direction (`run_approval_target_kinds: false`,
+  `announce_gate_enabled: true`) applies with a token.
+- A value that is the same as the stored one is no change.
+- The other policies apply with a token.
+
 ### What is never in the file
 
 - Passwords, tokens and keys of any kind.
 - The settings MEHO reads from environment variables when it starts.
-- Who is in which Keycloak group, and the Keycloak realm setup.
+- Who is in which Keycloak group, and the Keycloak realm setup. To
+  move them to another install, see
+  [Move the login setup](../install/move-login-setup.md).
 - The settings of the machine or cluster: host names, IP addresses,
   certificates, storage and network setup.
 - Fields that MEHO manages itself, such as ids and timestamps.
@@ -183,6 +239,9 @@ What the import does:
   keeps that whole part as it is.
 - It runs the same checks as the preview. With any mistake it answers
   `422` with the preview's answer and saves nothing.
+- With a token, a file that adds or changes a target is refused with
+  `403` and nothing is saved (see
+  [Targets are changed in the web console](#targets-are-changed-in-the-web-console)).
 - It saves each item through the same rules as the normal API for
   targets and conventions. When one item fails, MEHO saves the others.
   The failed items are in `failed`, and `ok` is then `false`.
@@ -200,7 +259,8 @@ What the import does:
   appears twice in the same block.
 - Anything that looks like a secret: a private key, a token, or a
   field in a target's `extras` named like a password or a key, whatever
-  its value.
+  its value. The check uses the same list of secret names that MEHO
+  hides in results.
 - A mask such as `********` or `<keep>`. A mask never means "keep the
   stored value": leave the field out instead.
 - An `apiVersion` other than `meho.evoila.com/v1`.

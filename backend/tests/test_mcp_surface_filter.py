@@ -175,7 +175,9 @@ _OPERATOR_SURFACE: frozenset[str] = frozenset(
         "meho_sensor_create",
         "meho_sensor_delete",
         "meho_sensor_list",
+        "meho_sensor_pause",
         "meho_sensor_results",
+        "meho_sensor_resume",
         "meho_targets_register",
         "meho_targets_update",
         "meho_topology_annotate",
@@ -293,7 +295,7 @@ def test_addon_family_gate_admits_automation_when_family_active() -> None:
 
 
 def test_surface_dropped_from_wire_shape() -> None:
-    """``to_wire`` never leaks the MEHO-internal ``surface`` field."""
+    """``to_wire`` never exposes the internal ``surface`` field."""
     defn = ToolDefinition(
         feature=None,
         name="wire.probe",

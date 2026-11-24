@@ -58,6 +58,44 @@ Out of scope (honouring #1683's dispositions):
   `status="unavailable"` rather than fabricating one.
 - **Error-echo on the dispatch path** is deferred (see Known issues).
 
+### Typed writes, behind the `PREVIEW_TYPED_WRITES` switch (#5074)
+
+The backplane switch `PREVIEW_TYPED_WRITES` (an env var, off by default)
+widens the synthetic preview to more typed writes. It changes what an agent
+sees, so it stays off until a before-and-after measurement shows it helps.
+
+- **Off:** the same answers, the same `preview_hash` values and the same
+  tool texts as before the switch existed. The rules above hold.
+- **On:**
+  - A typed or composite op that is not a read previews, also when it does
+    not carry `requires_approval`. Example: `targets.register` runs at once
+    only from the web interface. A call with a token (CLI, MCP, an agent)
+    waits for approval. A `safe` typed op is a read and stays `unavailable`.
+  - A credential-class op with its own preview builder previews too.
+    Example: `keycloak.user.reset_password`. The preview shows only the
+    builder's plan as `proposed_effect`. `redacted_body` is `null`: the
+    params are never copied. `params_digest` (a keyed digest of every param
+    value) keeps `preview_hash` bound to the params.
+  - A credential-class op with no builder of its own stays `unavailable`.
+  - Destructive and approval-gated ops give the same answer and the same
+    hash as with the switch off.
+  - The `preview_operation` tool text says the new rule (full and short
+    text). The registered text is the "off" text, so the reference docs
+    show it.
+- **Params that make a call wait** (`declare_wait_when_set`) do not
+  change this rule. `preview_dispatch` decides whether the op previews
+  before it raises the descriptor for such params. So with the switch off,
+  `targets.register` with `flight_recorder_capture` stays `unavailable`.
+- **Approver and agent.** A preview builder gets `ctx.agent_preview=True`
+  when it runs for the agent's `preview_operation`, and `False` for the
+  approval request. A builder may show the approver more. Example: the
+  `changes` map of `targets.update` is always on the approval request,
+  and in the agent's preview only with the switch on.
+- **Code:** `_is_previewable` and `is_credential_builder_op` in
+  `operations/_request_preview.py`; the tool text in
+  `mcp/tools/_preview_typed_writes_text.py`. Tests:
+  `tests/test_operations_preview_typed_writes.py`.
+
 ## Key types
 
 - `meho_backplane.operations._branches.IngestedRequest` — a frozen
@@ -109,6 +147,10 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       error_code=target_connector_mismatch (same answer and order as
         │       /call: before the catalog choice and before the check before
         │       the wait for approval, no audit row, #5948)
+        ├─ the target's known version is outside its connector's
+        │       supported_version_range ? → status=error error_code=no_connector
+        │       (same answer and order as /call; the error names the range;
+        │       no audit row; operations/_target_version_range.py)
         ├─ choose_catalog_for_target → sibling fits ? → use the sibling (#3600)
         │       → refused ? → status=error error_code=unqualified_target_version
         │       (same reason and target fields as dispatch, no audit row, #4984;
@@ -121,6 +163,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ params_check_errors → a problem ? → status=error error_code=invalid_params
         │       (the op's own check from register_params_check; validator=params_check)
+        │       (params_errors: when only maxLength failed, the check runs too and
+        │       its problem replaces the length error on the same field)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
@@ -245,6 +289,16 @@ preview looked the same whether the call would run at once or wait for
 approval, and an operator in a lab only found out with a second command
 (`meho operation search --op-id`).
 
+**`policy_rule` and `approvers` (#6045).** Only with
+`POLICY_ENGINE_SHADOW` on (off by default), the governance fields also
+carry `policy_rule`, the rule the policy evaluator matched for the call's
+own gate (`{source, rule_id, text, decided: false}`, taken with
+`take_rule` right after the gate; `null` when the evaluator failed), and
+`approvers`, the login groups that may approve when `policy_verdict` is
+`needs-approval` (`policy/who_approves.py`), else `[]`, and `null` when
+the stored routing is not valid. Both are advisory and unhashed. With the switch off neither key is present, and
+the MCP `outputSchema` does not list them.
+
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
 route and MCP tool keep one uniform shape. Target failures
@@ -298,6 +352,23 @@ name: a bare `{"password": "…"}` field is not masked by the default
 policy unless its *value* matches a named pattern; a `{"upstream_auth":
 "Bearer eyJ…"}` value is. See `docs/codebase/redaction.md` for the
 named-pattern catalogue and policy resolution.
+
+**Credential write.** The preview of a call that `classify_op` names
+`credential_write` shows each secret input as the fixed mark
+`***REDACTED***`, in `redacted_body` and in `query`. It uses the same name
+rule and the same mark as the echo of a waiting call
+(`_scrub_secret_param_keys`, then the engine above). Each value under a
+name that the shared secret-name rule marks is the fixed mark. This also
+covers a text setting whose name holds a secret word, and the whole value
+of an object or a list under such a name. The method, the path and every
+other input stay as they are. `preview_hash` also covers a keyed
+digest (made with the server key) of the literal query and body. The digest
+is not in the answer. A changed hidden value gives a new hash, and the hash
+check refuses the old one. The dispatcher and the approval resume check
+compare with the `preview_hash` of a preview they build again. A preview
+sends no request, so the trace has no span of it. It writes no audit row
+and no broadcast event, and its log line holds no input value. A hosted
+agent run stores the answer it got, so it stores the mark too.
 
 **Synthetic preview.** The `redacted_body` of a governed-tier typed /
 composite op is the safe view `safe_params_view` builds
@@ -354,7 +425,8 @@ hash by building the preview again, so they stay in step.
   `count_known_ops`.
 - `operations._validate` — `validate_params`, `params_check_errors` (the
   op's own params check, registered with `register_params_check`; the
-  dispatcher runs the same check before its policy gate), `policy_gate`
+  dispatcher runs the same check before its policy gate), `params_errors`
+  (puts the two together), `policy_gate`
   (decide-only).
 - `operations._handler_resolve` — `get_or_create_connector_instance`.
 - `connectors.resolve_connector_or_label` — the same yes/no/ambiguous

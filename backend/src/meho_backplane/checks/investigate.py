@@ -92,7 +92,8 @@ Identity
 ========
 
 Topology reads and memory read/write run under a synthetic per-tenant
-:class:`~meho_backplane.auth.operator.Operator` (:func:`_investigator_operator`),
+:class:`~meho_backplane.auth.operator.Operator`
+(:func:`~meho_backplane.checks.findings.investigator_operator`),
 confined to the Sensor's own tenant -- no cross-tenant reach, no JWT forwarded,
 the #2505 runner precedent. The role is ``TENANT_ADMIN`` (not ``OPERATOR``)
 because the closed-loop noise-suppression policy is a **tenant-shared** memory
@@ -121,17 +122,11 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    SecretStr,
-    ValidationError,
-)
+from pydantic import SecretStr
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -146,20 +141,29 @@ from meho_backplane.agent.invocation import (
 )
 from meho_backplane.agent.run import BudgetExceededError
 from meho_backplane.auth.agent_token import AgentTokenError
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.checks.events import publish_dashboard_changed, target_name
+from meho_backplane.checks.findings import (
+    NOISE_SLUG_PREFIX,
+    ChecksFinding,
+    finding_notice,
+    investigator_operator,
+    parse_finding,
+    persist_finding,
+)
 from meho_backplane.checks.notify import (
     DashboardNotice,
-    FindingNotice,
     MemberChange,
     NotifyMember,
     schedule_dashboard_notification,
     schedule_finding_notification,
 )
 from meho_backplane.checks.rollup import (
+    _STALE_GRACE_SECONDS,
     MemberEvaluation,
     MemberState,
+    _as_utc,
     evaluate_member,
     fold,
 )
@@ -169,13 +173,22 @@ from meho_backplane.db.models import (
     AgentRunStatus,
     CheckDashboard,
     CheckDashboardSensor,
+    ScheduledTrigger,
+    ScheduledTriggerKind,
+    ScheduledTriggerStatus,
     Sensor,
+    SensorCadenceKind,
 )
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     resolve_agent_credentials,
+)
+from meho_backplane.scheduler.cron import (
+    InvalidCronExpressionError,
+    InvalidTimezoneError,
+    next_fire_after,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.query import find_dependencies
@@ -188,32 +201,16 @@ __all__ = [
     "run_investigation",
 ]
 
-#: Slug prefix for every noise-suppression policy entry this wiring writes to
-#: tenant memory (mirrors ``POLICY_SLUG_PREFIX`` in the r1 mould). The suppress
-#: decision reads the entry's *metadata* (``re_escalate == false`` -> suppress),
-#: decided before any model call -- never body prose.
-_NOISE_SLUG_PREFIX = "checks-noise-"
-
 #: ``work_ref`` prefix stamped onto every fired ``agent_run`` -- the
 #: change-ticket reference the runs list filters on and the in-flight dedupe
 #: keys on. Shape: ``checks:<dashboard-slug>:<group-key>``. Unlike a memory
 #: slug, ``work_ref`` is a free Text column so ``:`` separators are legal.
 _WORK_REF_PREFIX = "checks"
 
-#: ``metadata.source`` stamp on every policy entry this wiring writes, so a
-#: later audit / promote sweep tells investigator-written entries from operator
-#: hand-edits or other automation.
-_MEMORY_SOURCE = "checks-investigator"
-
 #: The topology node ``kind`` a registered target manifests as
 #: (:data:`~meho_backplane.db.models.WELL_KNOWN_NODE_KINDS`); the correlation
 #: anchor lookup pins ``resolve_node`` on ``(tenant_id, "target", name)``.
 _TARGET_NODE_KIND = "target"
-
-#: Synthetic subject for the investigator's per-tenant operator -- the
-#: ``_system_operator`` mould with a dedicated sub so audit rows attribute the
-#: topology / memory reads to the check-investigator, not a real user.
-_INVESTIGATOR_SUB = "__checks_investigator__"
 
 #: Fixed poll cadence for the bounded post-``run_scheduled`` wait when a run
 #: outlives the sync timeout (converts to async). A dumb constant, same posture
@@ -269,27 +266,6 @@ def _log() -> structlog.typing.FilteringBoundLogger:
     time (the discipline #2505's runner adopted).
     """
     return cast("structlog.typing.FilteringBoundLogger", structlog.get_logger(__name__))
-
-
-class ChecksFinding(BaseModel):
-    """Structured output of one investigation run.
-
-    Mirrors the r1 ``PolicyDecision`` minus its model-chosen ``alert_class``
-    (suppression here keys on the deterministic topology group key, decided
-    before any model call). Because
-    :meth:`~meho_backplane.agent.invocation.AgentInvoker.run_scheduled` does not
-    synthesise a persisted ``output_schema`` into a Pydantic ``output_type``, the
-    terminal run's answer arrives as free text projected to ``{"text": ...}``;
-    this wiring parses that text into a :class:`ChecksFinding` caller-side.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    verdict: str = Field(pattern=r"^(benign|acknowledged|actionable)$")
-    re_escalate: bool
-    summary: str = Field(min_length=1)
-    evidence: list[str] = Field(default_factory=list)
-    recommended_action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,19 +546,19 @@ async def _claim_dashboard_transition(
         ]
         claimed = False
         dashboard_edge = current != previous_memo
-        if dashboard_edge:
-            # Compare-and-swap: the memo tracks the freshly computed state so a
-            # still-non-green Dashboard fires exactly once (on the edge), and the
-            # rowcount is the atomic claim token that coalesces concurrent callers.
+        # #6008: no claim while a Dashboard waits for members; a new one's first ok is silent.
+        waiting = _is_waiting_first_state(previous_memo, current, evaluations, now)
+        silent_first = previous_memo is None and current == "ok"
+        if dashboard_edge and not waiting:
+            # Compare-and-swap: fires once per edge; rowcount is the atomic claim token.
             claimed = await _claim_rollup_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
         changes: list[MemberChange] = []
-        if claimed or not dashboard_edge:
-            # A caller that lost the Dashboard edge leaves the member memos
-            # to the winner, which read the same rows. Moving a memo here
-            # would silence that member for good: its change belongs to a
-            # Dashboard mail this caller does not own.
+        if (claimed or not dashboard_edge) and not waiting:
+            # A caller that lost the Dashboard edge leaves the member memos to
+            # the winner: its change belongs to a mail this caller does not own.
+            # During a wait (#6711) the member memos stay too.
             changes = await _claim_member_changes(session, evaluations)
             if returned_sensor_id is not None:
                 returned = _acknowledgement_ended(evaluations, returned_sensor_id, changes)
@@ -590,7 +566,7 @@ async def _claim_dashboard_transition(
                     changes.append(returned)
         transition: _ClaimedTransition | None = None
         member_notices: list[DashboardNotice] = []
-        if claimed:
+        if claimed and not silent_first:
             transition = _ClaimedTransition(
                 dashboard=dashboard_snapshot,
                 non_green=non_green,
@@ -607,6 +583,106 @@ async def _claim_dashboard_transition(
         await session.commit()
 
     return _DashboardClaims(transition=transition, member_notices=member_notices)
+
+
+def _is_waiting_first_state(
+    previous_memo: str | None,
+    current: str,
+    evaluations: list[_MemberRow],
+    now: datetime,
+) -> bool:
+    """True when the Dashboard is red only because members wait for a first result.
+
+    Holds when the fold is ``degraded`` / ``critical`` and every failing member
+    is only waiting for its first confirmed result (:func:`_awaits_first_result`).
+    No claim is made, so the stored state stays and every later evaluation in
+    the wait is judged the same way.
+
+    A new Dashboard (no memo) waits without a limit (#6008). A Dashboard that
+    already has a state (#6711, a member was added to it) waits only while no
+    waiting member's wait is over (:func:`_wait_is_over`). After that the
+    member alerts as ``degraded``, so a check that never runs, or never gets
+    a confirmed result, is still noticed.
+    """
+    if current not in ("degraded", "critical"):
+        return False
+    failing = [
+        (s, ev) for _, s, ev in evaluations if ev.effective_state in ("degraded", "critical")
+    ]
+    if not all(_awaits_first_result(s, ev) for s, ev in failing):
+        return False
+    if previous_memo is None:
+        return True
+    return not any(_wait_is_over(s, now) for s, _ in failing)
+
+
+#: The run time limit of one check run, the same value as the runner's
+#: ``_EVAL_TIMEOUT_SECONDS`` (the runner imports this module, so it cannot be
+#: imported here; a test keeps the two equal).
+_RUN_TIME_LIMIT_SECONDS = 30
+
+#: The latest first due time the wait for a new member counts from.
+_FIRST_DUE_CAP = timedelta(days=1)
+
+
+def _wait_is_over(sensor: Sensor, now: datetime) -> bool:
+    """True when a member may no longer wait for its first confirmed result.
+
+    The wait ends at the first of two times. One is "overdue": ``next_fire_at``
+    plus the rollup's grace, for a check that does not run. The other is a
+    fixed limit that a running check cannot move (the runner moves
+    ``next_fire_at`` before each run): the first due time after
+    ``created_at``, plus a full confirmation window, plus the grace. The
+    window has ``retry_times + 1`` steps. Each step is
+    ``retry_backoff_seconds`` plus the run time limit plus one runner tick,
+    so slow runs do not end the wait before a healthy result is confirmed.
+    """
+    grace = timedelta(seconds=_STALE_GRACE_SECONDS)
+    at = _as_utc(now)
+    if sensor.next_fire_at is not None and at > _as_utc(sensor.next_fire_at) + grace:
+        return True
+    step = (
+        sensor.retry_backoff_seconds
+        + _RUN_TIME_LIMIT_SECONDS
+        + get_settings().sensor_runner_tick_interval_seconds
+    )
+    window = timedelta(seconds=(sensor.retry_times + 1) * step)
+    return at > _first_due_at(sensor) + window + grace
+
+
+def _first_due_at(sensor: Sensor) -> datetime:
+    """The first due time of a Sensor after its ``created_at``, at most one day later.
+
+    The cap keeps a rare cron (for example once a year), or an edit to one,
+    from moving the end of the wait far out.
+    """
+    created = _as_utc(sensor.created_at)
+    cap = created + _FIRST_DUE_CAP
+    if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
+        try:
+            due = next_fire_after(sensor.cron_expr, created, sensor.timezone)
+        except (InvalidCronExpressionError, InvalidTimezoneError):
+            return created
+    else:
+        due = created + timedelta(seconds=sensor.interval_seconds or 0)
+    return min(due, cap)
+
+
+def _awaits_first_result(sensor: Sensor, evaluation: MemberEvaluation) -> bool:
+    """True when a member is ``unknown`` only because it has no confirmed result yet.
+
+    That is a Sensor that never ran, or one whose first results still wait for
+    confirmation (``pending_state`` set while ``last_state`` is still the
+    initial ``unknown``). A Sensor that ran and has no reading in waiting
+    reports a real ``unknown`` (a timeout or a run error) and counts as failing.
+    So does a Sensor that ever had a confirmed state (``state_since`` set): its
+    ``unknown`` is real, also while a confirmation window is open.
+    """
+    if evaluation.raw_state != "unknown" or sensor.state_since is not None:
+        return False
+    if sensor.last_evaluated_at is None:
+        return True
+    return sensor.last_state == "unknown" and sensor.pending_state is not None
 
 
 async def _claim_member_changes(
@@ -913,33 +989,6 @@ def _dashboard_notice(
     )
 
 
-def _finding_notice(
-    dashboard: _DashboardSnapshot,
-    finding: ChecksFinding,
-    *,
-    run_id: uuid.UUID,
-) -> FindingNotice:
-    """Project a persisted finding into the notifier's input (#2721).
-
-    ``recommended_action`` rides along only for an ``actionable`` verdict --
-    the same gate :func:`_render_finding_body` applies to the memory entry,
-    so the mail and the memory entry cannot disagree about whether there is
-    an action to take.
-    """
-    return FindingNotice(
-        dashboard_id=dashboard.dashboard_id,
-        dashboard_name=dashboard.name,
-        run_id=run_id,
-        verdict=finding.verdict,
-        summary=finding.summary,
-        evidence=tuple(finding.evidence),
-        recommended_action=(
-            finding.recommended_action if finding.verdict == "actionable" else None
-        ),
-        recipient=dashboard.notify_email,
-    )
-
-
 def is_worsening(previous: str, current: str) -> bool:
     """Return ``True`` iff *current* is a strictly worse non-green state.
 
@@ -1070,7 +1119,7 @@ async def run_investigation(
     diagnosis latency for budget-safety would require building the deferred
     atomic-reservation seam; see ``docs/codebase/checks-investigator.md``.
     """
-    operator = _investigator_operator(tenant_id)
+    operator = investigator_operator(tenant_id)
     groups = await _correlate(operator, members)
     # Serial by design (#2576) -- see the docstring: the pre-fire budget gate is
     # only correct because group N+1 observes group N's recorded spend.
@@ -1269,12 +1318,7 @@ async def _investigate_group(
                 tenant_id=str(tenant_id),
             )
             return
-        if await has_in_flight_run(tenant_id, work_ref):
-            _log().info(
-                "checks_investigation_skipped_in_flight",
-                work_ref=work_ref,
-                tenant_id=str(tenant_id),
-            )
+        if await _group_is_covered(tenant_id, work_ref):
             return
 
         definition = await _load_investigator_definition(
@@ -1355,7 +1399,7 @@ async def _record_finding(
     swallows every failure, so the send cannot affect the write-back either
     way (#2721).
     """
-    await _persist_finding(memory, operator, group_key, finding, run_id=run_id)
+    await persist_finding(memory, operator, group_key, finding, run_id=run_id)
     _log().info(
         "checks_investigation_recorded",
         run_id=str(run_id),
@@ -1364,7 +1408,15 @@ async def _record_finding(
         re_escalate=finding.re_escalate,
         tenant_id=str(tenant_id),
     )
-    schedule_finding_notification(_finding_notice(dashboard, finding, run_id=run_id))
+    schedule_finding_notification(
+        finding_notice(
+            finding,
+            dashboard_id=dashboard.dashboard_id,
+            dashboard_name=dashboard.name,
+            recipient=dashboard.notify_email,
+            run_id=run_id,
+        )
+    )
 
 
 async def _fire_investigation(
@@ -1436,7 +1488,7 @@ async def _is_suppressed(memory: MemoryService, operator: Operator, group_key: s
     red) or an ``re_escalate=true`` entry (still actionable) does not suppress.
     Decided on metadata, never body prose, so no LLM call is needed to decide.
     """
-    slug = f"{_NOISE_SLUG_PREFIX}{group_key}"
+    slug = f"{NOISE_SLUG_PREFIX}{group_key}"
     # Exact (scope, slug) lookup. A ``list_memories(slug_pattern=...)`` query is
     # a *substring* filter capped at a limit, so an exact suppression entry can
     # be pushed past the cap by unrelated slugs that merely contain this one --
@@ -1458,6 +1510,57 @@ def _is_falsey(value: object) -> bool:
     if value is False:
         return True
     return isinstance(value, str) and value.strip().lower() == "false"
+
+
+async def _group_is_covered(tenant_id: uuid.UUID, work_ref: str) -> bool:
+    """Return ``True`` when another run already covers this cause group.
+
+    Two reasons to skip the old path's own start, both logged: an unfinished
+    run for the same ``work_ref``, and (switch on) an active event trigger that
+    starts the investigator agent, so the trigger path does the work (#6183).
+    """
+    if await has_in_flight_run(tenant_id, work_ref):
+        _log().info(
+            "checks_investigation_skipped_in_flight",
+            work_ref=work_ref,
+            tenant_id=str(tenant_id),
+        )
+        return True
+    settings = get_settings()
+    if settings.checks_agent_events and await _trigger_owns_agent(
+        tenant_id, settings.checks_investigator_agent
+    ):
+        _log().info(
+            "checks_investigation_skipped_trigger_owns",
+            work_ref=work_ref,
+            agent=settings.checks_investigator_agent,
+            tenant_id=str(tenant_id),
+        )
+        return True
+    return False
+
+
+async def _trigger_owns_agent(tenant_id: uuid.UUID, name: str) -> bool:
+    """Return ``True`` iff an active event trigger starts the investigator agent (#6183).
+
+    Then the trigger path does the work, and this old path stands back so one
+    Dashboard change never starts the agent twice. Only a trigger on the agent
+    with this name counts: another agent with its own trigger is not affected.
+    """
+    async with get_sessionmaker()() as session:
+        stmt = (
+            select(ScheduledTrigger.id)
+            .join(AgentDefinition, AgentDefinition.id == ScheduledTrigger.agent_definition_id)
+            .where(
+                ScheduledTrigger.tenant_id == tenant_id,
+                ScheduledTrigger.kind == ScheduledTriggerKind.EVENT.value,
+                ScheduledTrigger.status == ScheduledTriggerStatus.ACTIVE.value,
+                AgentDefinition.tenant_id == tenant_id,
+                AgentDefinition.name == name,
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).first() is not None
 
 
 async def _load_investigator_definition(tenant_id: uuid.UUID, name: str) -> tuple[str, str] | None:
@@ -1626,7 +1729,7 @@ async def _await_finding(operator: Operator, outcome: AgentRunOutcome) -> Checks
             status=status.value,
         )
         return None
-    return _parse_finding(output, run_id=outcome.run_id)
+    return parse_finding(output, run_id=outcome.run_id)
 
 
 async def _poll_to_terminal(operator: Operator, run_id: uuid.UUID) -> AgentRunStatusView | None:
@@ -1645,108 +1748,6 @@ async def _poll_to_terminal(operator: Operator, run_id: uuid.UUID) -> AgentRunSt
             return view
     _log().warning("checks_investigation_poll_deadline", run_id=str(run_id))
     return None
-
-
-def _parse_finding(output: dict[str, object] | None, *, run_id: uuid.UUID) -> ChecksFinding | None:
-    """Parse a terminal run's output into a :class:`ChecksFinding`, or ``None``.
-
-    ``run_scheduled`` projects a free-text answer as ``{"text": <json>}`` (it
-    does not map a stored ``output_schema`` to an ``output_type``), so the JSON
-    lives in ``output["text"]``; a genuinely structured dict is accepted
-    directly. A non-JSON / schema-mismatched answer logs
-    ``checks_investigation_unparseable`` and skips the write.
-    """
-    if not isinstance(output, dict):
-        _log().warning("checks_investigation_unparseable", run_id=str(run_id), reason="no_output")
-        return None
-    text = output.get("text")
-    try:
-        if isinstance(text, str):
-            return ChecksFinding.model_validate_json(text)
-        return ChecksFinding.model_validate(output)
-    except ValidationError:
-        _log().warning("checks_investigation_unparseable", run_id=str(run_id))
-        return None
-
-
-async def _persist_finding(
-    memory: MemoryService,
-    operator: Operator,
-    group_key: str,
-    finding: ChecksFinding,
-    *,
-    run_id: uuid.UUID,
-) -> None:
-    """Write the finding back to tenant memory as the noise-suppression policy.
-
-    Idempotent on ``(scope, slug)`` -- ``MemoryService.remember`` upserts, so a
-    re-investigation of the same group overwrites rather than duplicates. The
-    metadata carries the load-bearing suppression fields (``re_escalate``) plus
-    provenance (``source``, ``verdict``, ``run_id``).
-    """
-    await memory.remember(
-        operator,
-        MemoryScope.TENANT,
-        _render_finding_body(finding),
-        slug=f"{_NOISE_SLUG_PREFIX}{group_key}",
-        metadata={
-            "source": _MEMORY_SOURCE,
-            "verdict": finding.verdict,
-            "re_escalate": finding.re_escalate,
-            "run_id": str(run_id),
-        },
-    )
-
-
-def _render_finding_body(finding: ChecksFinding) -> str:
-    """Render a :class:`ChecksFinding` into the memory body (r1 render mould).
-
-    Fixed sections so a future read parses deterministically: verdict +
-    ``re_escalate`` header, ``## Summary``, optional ``## Evidence`` (fenced so
-    BM25 ranks the literal fragments), and ``## Recommended action`` only when
-    the verdict is ``actionable`` -- diagnose-only advisory text, never executed.
-    """
-    parts: list[str] = [
-        f"verdict: {finding.verdict}",
-        f"re_escalate: {str(finding.re_escalate).lower()}",
-        "",
-        "## Summary",
-        "",
-        finding.summary.rstrip(),
-    ]
-    if finding.evidence:
-        parts.append("")
-        parts.append("## Evidence")
-        parts.append("")
-        parts.extend(f"- `{line}`" for line in finding.evidence)
-    if finding.verdict == "actionable" and finding.recommended_action:
-        parts.append("")
-        parts.append("## Recommended action")
-        parts.append("")
-        parts.append(finding.recommended_action.rstrip())
-    parts.append("")
-    return "\n".join(parts)
-
-
-def _investigator_operator(tenant_id: uuid.UUID) -> Operator:
-    """Build the synthetic per-tenant operator the investigation runs reads as.
-
-    ``raw_jwt`` is empty (no token forwarded downstream) and the scope is
-    exactly *tenant_id* -- no cross-tenant reach, the #2505 runner precedent.
-    Role is ``TENANT_ADMIN`` because the closed-loop noise-suppression write is a
-    ``TENANT``-scoped (tenant-shared) memory write, which the memory RBAC matrix
-    restricts to ``tenant_admin``. This operator only reads topology and
-    reads/writes memory; it never dispatches an op -- the agent run authenticates
-    independently as its own principal, so no execution path inherits this role.
-    """
-    return Operator(
-        sub=_INVESTIGATOR_SUB,
-        name=None,
-        email=None,
-        raw_jwt="",
-        tenant_id=tenant_id,
-        tenant_role=TenantRole.TENANT_ADMIN,
-    )
 
 
 async def _await_pending_investigations() -> None:

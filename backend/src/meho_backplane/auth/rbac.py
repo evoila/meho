@@ -197,9 +197,10 @@ def require_approvals_access(
     * carries the orthogonal ``approver`` capability
       (``operator.approver``), regardless of tenant role.
 
-    This **decouples the decide right from the dispatch right**. A
-    dedicated approver principal provisioned as ``read_only`` role +
-    ``approver=true`` clears this gate yet is denied
+    This **decouples the decide right from the dispatch right**. No role
+    gives the ``approver`` flag today; roles that customers define come
+    later. A principal with the ``read_only`` role and the flag would
+    clear this gate yet is denied
     ``POST /api/v1/operations/call`` — dispatch stays
     ``Depends(require_role(TenantRole.OPERATOR))`` and ``read_only`` ranks
     below ``operator`` — so it can clear a four-eyes gate without holding
@@ -291,7 +292,7 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
 #: governance verb over REST. Names the human path (operator console /
 #: ``meho`` CLI) the way the MCP transport's
 #: :data:`~meho_backplane.mcp.human_only.HUMAN_ONLY_MCP_TOOLS` messages do,
-#: so REST and MCP speak one policy (meho-internal#289). Carried on the 403
+#: so REST and MCP speak one policy. Carried on the 403
 #: ``detail`` behind the machine-readable ``human_principal_required:``
 #: prefix, mirroring the ``self_approval_forbidden: <hint>`` shape the
 #: approvals routes already return.
@@ -365,7 +366,7 @@ def require_human_principal(
     return operator
 
 
-def require_fresh_approval_sign_in(
+async def require_fresh_approval_sign_in(
     operator: Operator = Depends(verify_jwt_and_bind),
 ) -> ApprovalAuth:
     """FastAPI dependency: the token must come from a fresh approval sign-in (#3979, #5515).
@@ -376,4 +377,15 @@ def require_fresh_approval_sign_in(
     so a machine principal still gets its ``403`` first. Only for approve:
     a reject never runs anything and needs no fresh sign-in.
     """
-    return check_fresh_approval_sign_in(operator, get_settings())
+    # Imported here: the check reads Keycloak through the Keycloak connector
+    # package, and loading that package registers the connector.
+    from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
+
+    settings = get_settings()
+    level = await sign_in_level_in_force(settings)
+    return check_fresh_approval_sign_in(
+        operator,
+        settings,
+        level_in_force=level.in_force,
+        level_check_failed=level.check_failed,
+    )

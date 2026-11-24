@@ -72,6 +72,12 @@ BASE_USERS = "root:x:0:0:root:/root:/bin/bash\n"
 BASE_GROUPS = "root:x:0:\n"
 ETCD_USER = "etcd:x:998:998:etcd user:/nonexistent:/sbin/nologin\n"
 ETCD_GROUP = "etcd:x:998:\n"
+# The part of the install record that uninstall reads for the routes of the
+# old pod network, as lib/core.sh writes it.
+POD_RANGE_RECORD = (
+    '{\n  "options": {\n    "cluster_cidr": "10.42.0.0/16",\n'
+    '    "service_cidr": "10.43.0.0/16"\n  }\n}\n'
+)
 KERNEL_LINE = (
     f"Removing {SYSCTL_FILE} does not change the running kernel. A restart of this "
     "machine brings back the operating system's own kernel values."
@@ -111,8 +117,8 @@ CIS_FIX = (
     f"restart RKE2: systemctl restart rke2-server. If the cause is not clear, {SUPPORT_HINT}"
 )
 CERTIFICATE_FIX = (
-    "Fix: the console needs a certificate for the host name of this install, valid for more "
-    f"than 30 days. {SUPPORT_HINT}"
+    "Fix: install a certificate for the host name of this install that is valid for more than "
+    "30 days: sudo meho-host certificate --cert <chain.pem> --key <key.pem>"
 )
 # log-server: rsyslog's file, the CA file, and the two lines in the chain
 # output of the firewall file, in front of its counter.
@@ -175,6 +181,11 @@ class UsageTests(HostTestCase):
             "admin-network",
             "log-server <host>[:<port>] [--tls <ca.pem>]",
             "uninstall",
+            "certificate --cert <chain.pem> --key <key.pem>",
+            "keyholder on",
+            "keyholder off",
+            "unseal",
+            "Never give the key on the command line",
             "Exit codes:",
         ):
             self.assertIn(text, result.stdout)
@@ -585,7 +596,8 @@ class ConsoleCertificateLineTests(CheckTestCase):
         self.assertIn("kubectl --kubeconfig", calls)
         self.assertIn("-n meho get secret meho-core-tls -o go-template=", calls)
         self.assertIn(
-            "openssl verify -attime 1792756800 -partial_chain -no-CApath -no-CAstore -CAfile ",
+            "openssl verify -attime 1792756800 -purpose sslserver -partial_chain -no-CApath "
+            "-no-CAstore -CAfile ",
             calls,
         )
         self.assertNotIn("tls.key", calls)
@@ -652,6 +664,15 @@ class ConsoleCertificateLineTests(CheckTestCase):
                 console_certificate("other.example.com", start=-400, end=-5),
                 "it expired on 2026-10-18; it does not name meho.example.com, the host name of "
                 "this install",
+            ),
+            "only for client logins": (
+                console_certificate(usage="clientAuth"),
+                "it is not made for a TLS server: its key usage does not allow it",
+            ),
+            "only for client logins, and expired": (
+                console_certificate(start=-400, end=-5, usage="clientAuth"),
+                "it expired on 2026-10-18; it is not made for a TLS server: its key usage does not "
+                "allow it",
             ),
             "signed by another CA": (
                 (console_certificate()[0], console_certificate(ca="Another CA")[1]),
@@ -870,6 +891,111 @@ class SupportBundleTests(HostTestCase):
         self.assertEqual(
             [self.host.host_path(BUNDLE_PATH).name], [path.name for path in folder.iterdir()]
         )
+
+    def test_a_header_token_an_address_password_and_an_sql_password_are_removed(self) -> None:
+        # None of these values is in a Secret, so only the rules for
+        # these forms can remove them.
+        bearer = "eyJhbGciOiJSUzI1NiJ9.fake-bearer-4b7c"
+        basic = "ZmFrZTpiYXNpYy04ZDJl"
+        json_bearer = "fake-json-bearer-6a1f"
+        escaped_bearer = "fake-escaped-bearer-0c5d"
+        db_pass = "Fake-Db-Pass-2c9e"
+        at_pass = "fake-p@ss-7d3b"
+        redis_pass = "fake-redis-pass-1e8a"
+        sql_pass = "Fake-Sql-Pass-5f0d"
+        quoted_pass = "it''s-fake-8b4c"
+        lower_pass = "fake-lower-pass-3a6e"
+        json_sql_pass = "fake-json-sql-pass-9d2f"
+        json_quoted_pass = "fake-json-quoted-4e7a"
+        query_pass = "fake-query-pass-6b1c"
+        escaped_pass = "fake-escaped-pass-2d8e"
+        # The address is built from parts, so the secret scan of the repo
+        # does not read the made-up addresses below as real ones.
+        db_user = "postgresql://" + "meho"
+        secrets = (
+            bearer,
+            basic,
+            json_bearer,
+            escaped_bearer,
+            db_pass,
+            at_pass,
+            redis_pass,
+            sql_pass,
+            quoted_pass,
+            lower_pass,
+            json_sql_pass,
+            json_quoted_pass,
+            query_pass,
+            escaped_pass,
+        )
+        self.host.answer(
+            "kube_logs",
+            f"2026-10-23T11:00:00Z GET /api/v1/status Authorization: Bearer {bearer} 200\n"
+            f"2026-10-23T11:00:01Z authorization: basic {basic}\n"
+            f'{{"headers": {{"Authorization": "Bearer {json_bearer}"}}, "status": 401}}\n'
+            f'{{"body": "{{\\"Authorization\\": \\"Bearer {escaped_bearer}\\"}}"}}\n'
+            f"connect {db_user}:{db_pass}@meho-postgres:5432/meho\n"
+            f"connect {db_user}:{at_pass}@meho-postgres/meho\n"
+            f'{{"url": "redis://:{redis_pass}@meho-redis:6379", "ok": true}}\n'  # trufflehog:ignore
+            f"2026-10-23T11:00:04Z ALTER ROLE meho WITH PASSWORD '{sql_pass}' VALID UNTIL x\n"
+            f"2026-10-23T11:00:05Z alter role meho password '{quoted_pass}';\n"
+            f'2026-10-23T11:00:06Z CREATE ROLE app Password "{lower_pass}" LOGIN\n'
+            f'{{"event": "ALTER ROLE app PASSWORD \\"{json_sql_pass}\\";"}}\n'
+            f'{{"event": "CREATE ROLE b PASSWORD \\"x\\"\\"{json_quoted_pass}\\" LOGIN"}}\n'
+            f"connect {db_user}:{query_pass}@meho-postgres?application_name=worker@service#a@b\n"
+            "connect https://meho-postgres?application_name=worker@service\n"
+            f'{{"body": "{{\\"password\\": \\"{escaped_pass}\\", \\"user\\": \\"app\\"}}"}}\n'
+            "2026-10-23T11:00:07Z open http://meho-keycloak:8080/auth as admin\n",
+        )
+
+        log = self.bundle()["pods/meho.meho-keycloak-0.log"]
+
+        for value in secrets:
+            with self.subTest(value=value):
+                self.assertNotIn(value, log)
+        self.assertIn("GET /api/v1/status Authorization: Bearer [removed] 200", log)
+        self.assertIn("authorization: basic [removed]", log)
+        self.assertIn('{"headers": {"Authorization": "Bearer [removed]"}, "status": 401}', log)
+        self.assertIn('{"body": "{\\"Authorization\\": \\"Bearer [removed]\\"}"}', log)
+        self.assertIn(f"connect {db_user}:[removed]@meho-postgres:5432/meho", log)
+        self.assertIn(f"connect {db_user}:[removed]@meho-postgres/meho", log)
+        self.assertIn('{"url": "redis://:[removed]@meho-redis:6379", "ok": true}', log)
+        self.assertIn("ALTER ROLE meho WITH PASSWORD '[removed]' VALID UNTIL x", log)
+        self.assertIn("alter role meho password '[removed]';", log)
+        self.assertIn('CREATE ROLE app Password "[removed]" LOGIN', log)
+        self.assertIn('{"event": "ALTER ROLE app PASSWORD \\"[removed]\\";"}', log)
+        self.assertIn('{"event": "CREATE ROLE b PASSWORD \\"[removed]\\" LOGIN"}', log)
+        self.assertIn(
+            f"connect {db_user}:[removed]@meho-postgres?application_name=worker@service#a@b", log
+        )
+        self.assertIn("connect https://meho-postgres?application_name=worker@service", log)
+        self.assertIn('{"body": "{\\"password\\": \\"[removed]\\", \\"user\\": \\"app\\"}"}', log)
+        self.assertIn("open http://meho-keycloak:8080/auth as admin", log)
+
+    def test_a_password_with_an_escaped_quote_mark_is_removed_as_a_whole(self) -> None:
+        # None of these values is in a Secret. Each holds a quote mark, which
+        # JSON writes as \" (and as \\\" in JSON inside a JSON string).
+        plain = 'fake"plain-quote-1a2b'
+        nested = 'fake"suffix-8765'
+        tail = "fake-tail-3c9d\\"
+        env = 'fake\\"env-quote-5e6f'
+        lines = (
+            json.dumps({"password": plain, "user": "app"}),
+            json.dumps({"body": json.dumps({"password": nested, "user": "app"})}),
+            json.dumps({"body": json.dumps({"password": tail, "user": "app"})}),
+            f'DB_PASSWORD="{env}" next=stays',
+        )
+        self.host.answer("kube_logs", "\n".join(lines) + "\n")
+
+        log = self.bundle()["pods/meho.meho-keycloak-0.log"]
+
+        for value in ("plain-quote-1a2b", "suffix-8765", "fake-tail-3c9d", "env-quote-5e6f"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, log)
+        self.assertIn('{"password": "[removed]", "user": "app"}', log)
+        self.assertIn('{"body": "{\\"password\\": \\"[removed]\\", \\"user\\": \\"app\\"}"}', log)
+        self.assertEqual(2, log.count('\\"user\\": \\"app\\"'))
+        self.assertIn("DB_PASSWORD=[removed] next=stays", log)
 
     def test_the_bundle_is_written_when_rke2_is_down(self) -> None:
         self.host.answer("kubectl_rc", "1")
@@ -1706,6 +1832,103 @@ class UninstallTests(HostTestCase):
         self.assertTrue(self.host.host_path(SYSCTL_FILE).exists())
         self.assertTrue(self.host.host_path(ETCD_RECORD).exists())
         self.assertNotIn("userdel", self.host.calls())
+
+    def set_pod_range(self, routes: str) -> None:
+        """An install record with the pod range 10.42.0.0/16, and the routes
+        that 'ip -4 route show' lists."""
+        self.host.host_file("/etc/meho/install.json", POD_RANGE_RECORD)
+        self.host.answer("ip_route", routes)
+
+    def route_deletes(self) -> list[str]:
+        return [line for line in self.host.calls().splitlines() if " route del " in line]
+
+    def test_the_blackhole_routes_of_the_pod_range_go_and_other_routes_stay(self) -> None:
+        self.set_pod_range(
+            "default via 10.0.0.1 dev ens18 proto static\n"
+            "blackhole 10.42.0.0/24 proto 80\n"
+            "blackhole 10.42.7.9\n"
+            "10.42.1.0/24 via 10.0.0.1 dev ens18\n"
+            "blackhole 10.40.0.0/14\n"
+            "blackhole 192.0.2.0/24\n"
+        )
+
+        result = self.uninstall()
+
+        self.assertEqual(
+            ["ip -4 route del blackhole 10.42.0.0/24", "ip -4 route del blackhole 10.42.7.9"],
+            self.route_deletes(),
+        )
+        self.assertIn(
+            "[ok]   removed the blackhole routes 10.42.0.0/24, 10.42.7.9 of the pod range"
+            " 10.42.0.0/16, which RKE2's uninstall script leaves\n",
+            result.stdout,
+        )
+        calls = self.host.calls().splitlines()
+        self.assertLess(calls.index("rke2-uninstall.sh"), calls.index("ip -4 route show"))
+
+    def test_one_route_is_named_in_the_singular(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24 proto 80\n")
+
+        result = self.uninstall()
+
+        self.assertIn(
+            "[ok]   removed the blackhole route 10.42.0.0/24 of the pod range 10.42.0.0/16,",
+            result.stdout,
+        )
+
+    def test_without_a_route_of_the_pod_range_nothing_is_said(self) -> None:
+        self.set_pod_range("default via 10.0.0.1 dev ens18\nblackhole 192.0.2.0/24\n")
+
+        result = self.uninstall()
+
+        self.assertEqual([], self.route_deletes())
+        self.assertNotIn("blackhole", result.stdout + result.stderr)
+
+    def assert_no_route_is_read(self, record: str) -> None:
+        self.host.host_file("/etc/meho/install.json", record)
+        self.host.answer("ip_route", "blackhole 10.42.0.0/24\n")
+
+        self.uninstall()
+
+        self.assertNotIn("ip -4 route", self.host.calls())
+
+    def test_without_a_pod_range_in_the_record_no_route_is_read(self) -> None:
+        self.assert_no_route_is_read("{}\n")
+
+    def test_with_a_pod_range_without_a_prefix_no_route_is_read(self) -> None:
+        self.assert_no_route_is_read('{\n  "options": {\n    "cluster_cidr": "10.42.0.0"\n  }\n}\n')
+
+    def test_a_failed_route_delete_is_a_warning_and_uninstall_goes_on(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24\n")
+        self.host.answer("ip_route_del_rc", "2")
+
+        result = self.uninstall()
+
+        self.assertIn("RTNETLINK answers: Operation not permitted", result.stderr)
+        self.assertIn(
+            "[WARN] ip could not remove the route blackhole 10.42.0.0/24 of the pod range"
+            " 10.42.0.0/16. A new install refuses it. Read its message above, then run:"
+            " ip route del blackhole 10.42.0.0/24\n",
+            result.stderr,
+        )
+        self.assertNotIn("removed the blackhole", result.stdout)
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_a_failed_route_list_is_a_warning_and_uninstall_goes_on(self) -> None:
+        self.set_pod_range("blackhole 10.42.0.0/24\n")
+        self.host.answer("ip_route_rc", "1")
+
+        result = self.uninstall()
+
+        self.assertEqual([], self.route_deletes())
+        self.assertIn(
+            "[WARN] ip could not list the routes of this machine, so a blackhole route of the"
+            " pod range 10.42.0.0/16 may be left.",
+            result.stderr,
+        )
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
 
     def test_uninstall_takes_no_option(self) -> None:
         self.assert_usage_error(self.host.run("uninstall", "--yes"), "uninstall takes no option")

@@ -62,6 +62,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.approval_object_check import REASON_APPEARED, REASON_UNREADABLE
 from meho_backplane.operations.approval_queue import (
+    RightsChangeApprovalError,
     SelfApprovalForbiddenError,
     approve_request,
     resume_dispatch_after_approval,
@@ -71,6 +72,11 @@ from meho_backplane.operations.meta_tools import call_operation, preview_operati
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests._keycloak_access_guard_helpers import platform_admins_not_counted
+
+#: Writes in MEHO's login realm count the platform admins; these tests are about other checks.
+pytestmark = pytest.mark.usefixtures(platform_admins_not_counted.__name__)
+
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _TARGET_NAME = "kc-delete-e2e"
@@ -369,7 +375,7 @@ async def test_user_delete_already_gone_by_name(kc: KeycloakConnector) -> None:
     assert result["result"] == {
         "realm": _REALM,
         "id": None,
-        "username": "event-guest",
+        "requested_username": "event-guest",
         "deleted": False,
         "already_absent": True,
     }
@@ -444,6 +450,35 @@ async def test_user_delete_refuses_target_password_login_user(kc: KeycloakConnec
                 "keycloak.user.delete",
                 {"username": "break-glass-admin"},
                 target=_ADMIN_REALM_TARGET_NAME,
+            )
+    finally:
+        await connector.aclose()
+    assert result["status"] == "error", result
+    assert "(target_login_user)" in result["extras"]["exception_message"]
+    assert not del_route.called
+
+
+def _email_creds_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
+    async def _load() -> KeycloakAdminCredentials:
+        return KeycloakPasswordCredentials(
+            username="Break-Glass@Example.invalid", password="stub-password"
+        )
+
+    return _load()
+
+
+async def test_user_delete_refuses_target_email_login_user(kc: KeycloakConnector) -> None:
+    """The target logs in with the user's email, not its username."""
+    connector = _wire_connector(_email_creds_loader)
+    try:
+        with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+            _mount_token(mock)
+            mock.get(f"/admin/realms/{_ADMIN_REALM}/users/{_USER_UUID}").respond(
+                200, json={**_user("ops-admin"), "email": "break-glass@example.invalid"}
+            )
+            del_route = mock.delete(url__regex=r".*/users/.*").respond(204)
+            result = await _run(
+                "keycloak.user.delete", {"id": _USER_UUID}, target=_ADMIN_REALM_TARGET_NAME
             )
     finally:
         await connector.aclose()
@@ -798,15 +833,27 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
     args = _args("keycloak.user.delete", {"username": "event-guest"})
     requester = _operator("kc-delete-requester")
     # A MEHO-SA-Operator may approve another person's high-risk change (#3328).
-    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
+    approver = _operator("kc-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[_user()])
         mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}/groups").respond(
             200, json=[{"id": _GROUP_UUID, "name": "event-team", "path": "/event-team"}]
         )
-        mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(404)
-        del_route = mock.delete(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(204)
+        # The approved run reads the user on the card by its id; after the
+        # DELETE the read answers 404.
+        user_read = mock.get(f"/admin/realms/{_REALM}/users/{_USER_UUID}").respond(
+            200, json=_user()
+        )
+        del_route = mock.delete(f"/admin/realms/{_REALM}/users/{_USER_UUID}").mock(
+            side_effect=lambda _request: (user_read.respond(404), httpx.Response(204))[1]
+        )
 
         preview = await preview_operation(requester, args)
         assert preview["status"] == "ok", preview
@@ -825,11 +872,16 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
 
         # The requester cannot approve their own destructive request.
         async with get_sessionmaker()() as session:
-            with pytest.raises(SelfApprovalForbiddenError):
+            with pytest.raises((SelfApprovalForbiddenError, RightsChangeApprovalError)):
                 await approve_request(session, request_id, operator=requester, params=None)
 
         async with get_sessionmaker()() as session:
-            approved = await approve_request(session, request_id, operator=approver, params=None)
+            approved = await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         assert approved.status == "approved"
 
@@ -837,7 +889,7 @@ async def test_user_delete_waits_for_a_second_person_then_runs(kc: KeycloakConne
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "ok", resumed
     assert resumed.result == {
@@ -862,7 +914,13 @@ async def test_user_delete_is_refused_when_a_new_user_has_the_approved_name(
     """
     args = _args("keycloak.user.delete", {"username": "event-guest"})
     requester = _operator("kc-delete-requester")
-    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
+    approver = _operator("kc-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         search = mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[_user()])
@@ -886,13 +944,18 @@ async def test_user_delete_is_refused_when_a_new_user_has_the_approved_name(
         search.respond(200, json=[_user(uuid_=_OTHER_USER_UUID)])
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"
@@ -919,7 +982,13 @@ async def test_user_delete_is_refused_when_the_card_cannot_be_read_before_the_ru
     """
     args = _args("keycloak.user.delete", {"username": "event-guest"})
     requester = _operator("kc-delete-requester")
-    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
+    approver = _operator("kc-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         search = mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[_user()])
@@ -939,13 +1008,18 @@ async def test_user_delete_is_refused_when_the_card_cannot_be_read_before_the_ru
         groups.respond(500)
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"
@@ -965,7 +1039,13 @@ async def test_user_delete_is_refused_when_a_user_appears_under_an_absent_name(
     """
     args = _args("keycloak.user.delete", {"username": "event-guest"})
     requester = _operator("kc-delete-requester")
-    approver = _operator("kc-delete-approver").model_copy(update={"self_approver": True})
+    approver = _operator("kc-delete-approver").model_copy(
+        update={
+            "self_approver": True,
+            "tenant_role": TenantRole.TENANT_ADMIN,
+            "platform_admin": True,
+        }
+    )
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         search = mock.get(f"/admin/realms/{_REALM}/users").respond(200, json=[])
@@ -986,13 +1066,18 @@ async def test_user_delete_is_refused_when_a_user_appears_under_an_absent_name(
         search.respond(200, json=[_user(uuid_=_OTHER_USER_UUID)])
 
         async with get_sessionmaker()() as session:
-            await approve_request(session, request_id, operator=approver, params=None)
+            await approve_request(
+                session,
+                request_id,
+                operator=approver.model_copy(update={"web_session": True}),
+                params=None,
+            )
             await session.commit()
         async with get_sessionmaker()() as session:
             row = await session.get(ApprovalRequest, request_id)
             assert row is not None
             resumed = await resume_dispatch_after_approval(
-                operator=approver, request=row, params=None
+                operator=approver.model_copy(update={"web_session": True}), request=row, params=None
             )
     assert resumed.status == "denied", resumed
     assert resumed.extras["error_code"] == "object_changed_since_approval"

@@ -50,7 +50,8 @@ Filter coverage
   per-session replay query
   (:func:`~meho_backplane.audit_query.replay.replay_session`).
 * ``work_ref`` is a real column (work_ref I1-T1 #1655, migration ``0039``).
-  The filter narrows to ``audit_log.work_ref = :work_ref`` — exact match (an
+  The filter narrows to ``audit_log.work_ref IN (cleaned id, text as typed)``
+  (:func:`~meho_backplane.work_ref.work_ref_filter_values`; an
   opaque change-ticket reference such as ``"gh:evoila/meho#1"`` is an
   identifier, not a search term, so the predicate is deterministic equality
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
@@ -68,6 +69,10 @@ Filter coverage
   trace. ``True`` keeps the rows with a stored trace, ``False`` the other
   rows, ``None`` applies no filter. The unique index
   ``dispatch_trace_audit_id_idx`` makes the check cheap.
+* ``full_row_lost`` / ``text_changed`` (#6452) read keys that only the audit
+  writer sets in ``payload``: ``full_row_lost.error_class`` on a short row,
+  ``text_changed: true`` on a row where a character or a number was
+  replaced. ``True`` keeps the marked rows, ``False`` the other rows.
 * ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``,
   indexed by ``audit_log_parent_audit_id_idx``). The filter narrows to
   ``audit_log.parent_audit_id = :parent_audit_id`` — exact match, so it
@@ -85,10 +90,14 @@ from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
+from meho_backplane.operations.audit_row_safe import FULL_ROW_LOST, TEXT_CHANGED
+from meho_backplane.work_ref import work_ref_filter_values
 
+from .approval_payload import approval_payload_view
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
 
@@ -158,6 +167,7 @@ async def query_audit(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> AuditQueryResult:
     """Tenant-scoped paginated query over ``audit_log``.
 
@@ -171,6 +181,12 @@ async def query_audit(
     ``target_name=None`` rather than leaking the other tenant's target name.
     The LEFT JOIN to ``tenant`` fills ``tenant_name`` (#5238); every row is
     already in ``tenant_id``, so it only ever names the caller's own tenant.
+
+    ``owner_sub`` set (a service login, see
+    :func:`~meho_backplane.audit_query.owner_scope.own_rows_sub`): only the
+    rows with ``operator_sub == owner_sub`` match, before any other filter.
+    So no filter, also not ``has_trace``, tells anything about the rows of
+    another login.
     """
     stmt = (
         sa.select(
@@ -187,8 +203,13 @@ async def query_audit(
         )
         .outerjoin(Tenant, AuditLog.tenant_id == Tenant.id)
         .where(AuditLog.tenant_id == tenant_id)
+        # The list never shows the stored raw answer, and one row can hold
+        # many megabytes of it (#6818). ``raiseload`` makes a read of it by
+        # mistake fail, instead of running one more query per row.
+        .options(defer(AuditLog.raw_payload, raiseload=True))
     )
 
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, filters, tenant_id=tenant_id)
 
     stmt = stmt.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(
@@ -219,6 +240,7 @@ async def count_event_classes(
     tenant_id: uuid.UUID,
     session: AsyncSession,
     now: datetime | None = None,
+    owner_sub: str | None = None,
 ) -> EventClassCounts:
     """Count the rows that match *filters*, per event class (#3747).
 
@@ -232,6 +254,9 @@ async def count_event_classes(
     When ``filters.since`` is not set, only the last
     :data:`DEFAULT_COUNT_WINDOW` is counted. The returned ``since`` is the
     start of the window that was counted, so callers can show it.
+
+    ``owner_sub`` limits the count to the rows of one login, as in
+    :func:`query_audit`.
     """
     since = filters.since
     if since is None:
@@ -242,10 +267,18 @@ async def count_event_classes(
         .where(AuditLog.tenant_id == tenant_id)
         .group_by(AuditLog.event_class)
     )
+    stmt = _scope_to_owner(stmt, owner_sub)
     stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
     found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
     counts = {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
     return EventClassCounts(counts=counts, since=since)
+
+
+def _scope_to_owner(stmt: sa.Select[Any], owner_sub: str | None) -> sa.Select[Any]:
+    """Keep only the rows of *owner_sub*; no change when it is ``None``."""
+    if owner_sub is None:
+        return stmt
+    return stmt.where(AuditLog.operator_sub == owner_sub)
 
 
 # A flat chain of independent `if filters.X is not None` guards — one per
@@ -276,7 +309,7 @@ def _apply_filters(
         stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)
 
     if filters.work_ref is not None:
-        stmt = stmt.where(AuditLog.work_ref == filters.work_ref)
+        stmt = stmt.where(AuditLog.work_ref.in_(work_ref_filter_values(filters.work_ref)))
 
     if filters.event_class is not None:
         stmt = stmt.where(AuditLog.event_class == filters.event_class.value)
@@ -284,6 +317,14 @@ def _apply_filters(
     if filters.has_trace is not None:
         has_trace = _has_trace_predicate(tenant_id=tenant_id)
         stmt = stmt.where(has_trace if filters.has_trace else sa.not_(has_trace))
+
+    if filters.full_row_lost is not None:
+        lost = AuditLog.payload[(FULL_ROW_LOST, "error_class")].as_string().is_not(None)
+        stmt = stmt.where(lost if filters.full_row_lost else sa.not_(lost))
+
+    if filters.text_changed is not None:
+        changed = AuditLog.payload[TEXT_CHANGED].as_boolean().is_(True)
+        stmt = stmt.where(changed if filters.text_changed else sa.not_(changed))
 
     if filters.principal is not None:
         pattern = f"%{_escape_like_literal(filters.principal)}%"
@@ -434,7 +475,11 @@ def _build_audit_entry(
     BroadcastEvent observed on the SSE feed for the same ``audit_id``
     agree on the trio.
     """
-    payload = dict(row.payload) if row.payload else {}
+    # An approval row in the older form shows the person who acted as
+    # ``principal_sub`` and the requester as ``requester_sub``.
+    payload = approval_payload_view(
+        method=row.method, operator_sub=row.operator_sub, payload=row.payload or {}
+    )
 
     op_id_raw = payload.get("op_id")
     op_id = (
@@ -483,10 +528,13 @@ def _build_audit_entry(
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
+        policy_rule=row.policy_rule,
+        policy_version=row.policy_version,
         event_class=row.event_class,
         sandbox_mode=row.sandbox_mode,
         actor_sub=row.actor_sub,
         actor_name=_actor_name(row.actor_sub),
+        secret_read_as=row.secret_read_as,
         broadcast_event_id=None,
     )
 

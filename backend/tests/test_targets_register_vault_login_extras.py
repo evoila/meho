@@ -25,6 +25,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.targets.vault_login_extras import VAULT_LOGIN_ROLE_REQUIRES_PLATFORM_ADMIN
+from tests._register_runs_as_approved import person_register_runs_as_approved  # noqa: F401
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -33,7 +34,9 @@ from tests.mcp_test_fixtures import (
 )
 
 # MCP calls come with a token; these tests check executed writes (#3980).
-pytestmark = pytest.mark.usefixtures("person_token_writes_run_at_once")
+pytestmark = pytest.mark.usefixtures(
+    "person_token_writes_run_at_once", "person_register_runs_as_approved"
+)
 
 _ROLE_EXTRAS = {"vault_role": "narrow-role", "vault_mount": "jwt-other"}
 

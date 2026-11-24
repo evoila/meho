@@ -130,7 +130,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import (
+    effective_tenant_scope_template,
+    rendered_tenant_prefix,
+)
+from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
@@ -176,7 +180,7 @@ _MAX_MOUNT_LENGTH: Final[int] = 256
 _MAX_PATH_LENGTH: Final[int] = 1024
 
 #: Maximum target-name length accepted on the query string. A target name
-#: is a short slug (``rdc-vault``); the bound protects the form parse.
+#: is a short slug (``example-vault``); the bound protects the form parse.
 _MAX_TARGET_LENGTH: Final[int] = 256
 
 #: Module-level ``Depends`` closure -- built once (rather than inline) to
@@ -251,10 +255,10 @@ def _default_path(operator: Operator) -> str:
     its mount segment stripped, since the mount is a separate field), so a
     first browse lands inside the guard's namespace and never trips it.
 
-    When the guard is disabled (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) there
-    is no tenant partition to default into, so the path is left blank.
+    When the guard is disabled for the operator there is no tenant
+    partition to default into, so the path is left blank.
     """
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    template = effective_tenant_scope_template(operator)
     if not template:
         return ""
     rendered = rendered_tenant_prefix(operator, template=template).strip().strip("/")
@@ -417,7 +421,11 @@ async def _render_read(
     mount: str,
     path: str,
 ) -> HTMLResponse:
-    """Dispatch ``vault.kv.read`` in-process and render the secret reveal-gated."""
+    """Dispatch ``vault.kv.read`` in-process and render the secret reveal-gated.
+
+    A page that shows the value says ``Cache-Control: no-store``
+    (:mod:`meho_backplane.no_store`); a read that waits for approval does not.
+    """
     operator = await _resolve_operator(session)
     connector_id = await _vault_connector_id(operator)
     if connector_id is None:
@@ -425,9 +433,10 @@ async def _render_read(
             request, "vault/_secret.html", _no_connector_error_context()
         )
 
-    envelope = await _dispatch(
-        operator, connector_id, _OP_READ, target, mount, path, reveal_secret=True
-    )
+    with answer_scope() as mark:
+        envelope = await _dispatch(
+            operator, connector_id, _OP_READ, target, mount, path, reveal_secret=True
+        )
     context: dict[str, Any] = {
         "error": None,
         "envelope": envelope,
@@ -436,6 +445,8 @@ async def _render_read(
         "target": target.strip(),
     }
     response = get_templates().TemplateResponse(request, "vault/_secret.html", context)
+    if mark.holds_secret:
+        set_no_store(response)
     # The "Show value" button of a waiting read is a POST: it needs the cookie.
     return with_csrf_cookie(response, session)
 

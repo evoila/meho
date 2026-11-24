@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.3",
+  "kit_version": "1.5",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -14,6 +14,9 @@
     "ConnectorAuthError": {
       "kind": "class"
     },
+    "ConnectorOwnMessage": {
+      "kind": "class"
+    },
     "ConnectorUpstreamError": {
       "kind": "class"
     },
@@ -22,6 +25,10 @@
     },
     "EmbeddingService": {
       "kind": "class"
+    },
+    "FILE_REF_PARAMS_SWITCH": {
+      "kind": "value",
+      "type": "str"
     },
     "FingerprintResult": {
       "kind": "class"
@@ -133,6 +140,10 @@
     },
     "RetiredOp": {
       "kind": "class"
+    },
+    "SWITCH_MARKER": {
+      "kind": "value",
+      "type": "str"
     },
     "Target": {
       "kind": "class",

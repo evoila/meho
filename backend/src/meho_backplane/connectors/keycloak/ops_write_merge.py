@@ -142,16 +142,24 @@ async def read_merge_write(
     path: str,
     requested: dict[str, Any],
     read_back_path: str | None = None,
+    before: dict[str, Any] | None = None,
+    read_back_into: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """GET the object at *path*, merge *requested* on top, PUT it back, read it again.
 
     *read_back_path* is where the object lives after the write; it differs
     from *path* only when the update renames the object (a realm rename).
+    *before* is a read of the object the caller already made and built
+    *requested* from; when given, it is written back instead of a new GET,
+    so the write and the requested values come from the same read.
     Returns ``{changed_fields, unrequested_changes, read_back_checked}``:
     the fields the caller sent, the fields that changed without being sent,
-    and whether the read-back ran.
+    and whether the read-back ran. When *read_back_into* is given and the
+    read-back ran, the object that was read back is put in it, so the caller
+    can report what Keycloak holds now.
     """
-    before = await connector._get_admin_json(target, path, operator=operator)
+    if before is None:
+        before = await connector._get_admin_json(target, path, operator=operator)
     merged = merge_representation(before, requested)
     await connector._write_admin(
         target, "PUT", path, operator=operator, json=merged, idempotent_conflict=False
@@ -177,5 +185,7 @@ async def read_merge_write(
     if not isinstance(after, dict):
         return outcome
     outcome["read_back_checked"] = True
+    if read_back_into is not None:
+        read_back_into.update(after)
     outcome["unrequested_changes"] = unrequested_changes(before, after, requested)
     return outcome

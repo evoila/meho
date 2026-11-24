@@ -55,6 +55,12 @@ from typing import Any, Final
 import structlog
 from pydantic import ValidationError
 
+from meho_backplane.agents.grant_sets import (
+    PERSON_ONLY_REMEDIATION,
+    StartingGrantsError,
+    audit_fields,
+    writes_rows,
+)
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -64,10 +70,13 @@ from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
     AgentDefinitionService,
     AgentIdentityRefInvalidError,
+    with_live_grants,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._starting_grants import with_starting_grants
 
 _log = structlog.get_logger(__name__)
 
@@ -87,6 +96,17 @@ _AGENT_OP_IDS: Final[dict[str, str]] = {
 def _row_to_dict(entry: AgentDefinitionRead) -> dict[str, Any]:
     """Serialise an :class:`AgentDefinitionRead` to the MCP wire dict."""
     return entry.model_dump(mode="json")
+
+
+async def _saved_answer(operator: Operator, entry: AgentDefinitionRead) -> dict[str, Any]:
+    """The create and edit answer: the row, and the live grants of its agent."""
+    saved = await with_live_grants(operator.tenant_id, entry)
+    return {
+        "name": entry.name,
+        "agent": _row_to_dict(entry),
+        "live_grants": [grant.model_dump(mode="json") for grant in saved.live_grants],
+        "live_grants_truncated": saved.live_grants_truncated,
+    }
 
 
 def _require_name(arguments: dict[str, Any]) -> str:
@@ -203,15 +223,21 @@ async def _create_handler(
     # pattern, turn-budget bounds, extra="forbid") run for MCP as for
     # REST. The inputSchema does first-pass shape checks; Pydantic runs
     # the typed-field validators.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_AGENT_OP_IDS["create"], audit_op_class="write"
+    )
     try:
         payload = AgentDefinitionCreate.model_validate(arguments)
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     structlog.contextvars.bind_contextvars(
-        audit_op_id=_AGENT_OP_IDS["create"],
-        audit_op_class="write",
         audit_agent_name=payload.name,
+        **audit_fields(payload.starting_grants, agent=payload.identity_ref),
     )
+    if writes_rows(payload.starting_grants):
+        ensure_human_mcp_caller(
+            operator, "meho_agents_create with starting_grants", PERSON_ONLY_REMEDIATION
+        )
     service = AgentDefinitionService()
     try:
         entry = await service.create(
@@ -223,7 +249,9 @@ async def _create_handler(
         raise McpInvalidParamsError("agent_already_exists") from exc
     except AgentIdentityRefInvalidError as exc:
         raise McpInvalidParamsError("identity_ref_unknown") from exc
-    return {"name": entry.name, "agent": _row_to_dict(entry)}
+    except StartingGrantsError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    return await _saved_answer(operator, entry)
 
 
 register_mcp_tool(
@@ -300,6 +328,11 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the first grants of that agent; it is "
+            "required while the agent has no grant yet. The answer lists the "
+            "agent's live grants in live_grants."
+        ),
     ),
     handler=_create_handler,
 )
@@ -319,23 +352,33 @@ async def _edit_handler(
     # validating the update body so a stray ``name`` doesn't trip
     # extra="forbid".
     update_args = {k: v for k, v in arguments.items() if k != "name"}
-    try:
-        payload = AgentDefinitionUpdate.model_validate(update_args)
-    except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["edit"],
         audit_op_class="write",
         audit_agent_name=name,
     )
+    try:
+        payload = AgentDefinitionUpdate.model_validate(update_args)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+    if payload.identity_ref is not None:
+        structlog.contextvars.bind_contextvars(
+            **audit_fields(payload.starting_grants, agent=payload.identity_ref)
+        )
+    if writes_rows(payload.starting_grants):
+        ensure_human_mcp_caller(
+            operator, "meho_agents_edit with starting_grants", PERSON_ONLY_REMEDIATION
+        )
     service = AgentDefinitionService()
     try:
-        entry = await service.update(operator.tenant_id, name, payload)
+        entry = await service.update(operator.tenant_id, name, payload, updated_by_sub=operator.sub)
     except AgentIdentityRefInvalidError as exc:
         raise McpInvalidParamsError("identity_ref_unknown") from exc
+    except StartingGrantsError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
     if entry is None:
         raise McpInvalidParamsError("agent_not_found")
-    return {"name": entry.name, "agent": _row_to_dict(entry)}
+    return await _saved_answer(operator, entry)
 
 
 register_mcp_tool(
@@ -383,6 +426,11 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=with_starting_grants(
+            "starting_grants picks the first grants of the agent a new "
+            "identity_ref names; it is required while that agent has no grant yet. "
+            "The answer lists the agent's live grants in live_grants."
+        ),
     ),
     handler=_edit_handler,
 )

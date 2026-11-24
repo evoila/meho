@@ -11,7 +11,7 @@ shape: arbitrary, operator-chosen keys (``tls.key``, an app token, a
 label the pattern engine can key on. So a read that returns a ``Secret``
 object would leak every value verbatim unless a value happened to match a
 named credential pattern -- exactly the read-side payload gap
-meho-internal#322 surfaced for the Envision visitor tenant.
+that a review of the visitor tenant surfaced.
 
 This module is the k8s per-connector redactor (the same shape as
 ``connectors/keycloak/redaction.py`` and ``connectors/rabbitmq/redact.py``):
@@ -56,6 +56,9 @@ values included, in the last-applied annotation, so every
 ``metadata.annotations`` value of a chart is replaced too (keys kept),
 as on a Secret. So a ``k8s.meho.release.info`` read of the MEHO chart, or
 a ``k8s.cr.info`` of any ``HelmChart``, records and returns no values text.
+A ``kind: HelmChartConfig`` object (the same API group: it overrides the
+values of a packaged chart) and the items of a ``HelmChartConfigList`` are
+masked the same way.
 
 Note on the current CR projection: ``custom_resource_row`` otherwise
 keeps only ``metadata`` + bounded ``.spec`` / ``.status`` excerpts and
@@ -75,7 +78,10 @@ from typing import Any
 from meho_backplane.redaction.engine import hash_replacement
 
 __all__ = [
+    "HELM_CHART_CONFIG_KIND",
+    "HELM_CHART_CONFIG_LIST_KIND",
     "HELM_CHART_KIND",
+    "HELM_CHART_KINDS",
     "HELM_CHART_LIST_KIND",
     "HELM_CHART_VALUE_FIELDS",
     "LAST_APPLIED_ANNOTATION",
@@ -116,6 +122,15 @@ SECRET_DATA_FIELDS: tuple[str, ...] = ("data", "stringData")
 HELM_CHART_KIND = "HelmChart"
 HELM_CHART_LIST_KIND = "HelmChartList"
 
+#: The ``kind`` of the k3s / RKE2 object that overrides the Helm values of
+#: a packaged chart, and of its list envelope. Its ``spec.valuesContent``
+#: holds Helm values like a ``HelmChart``'s.
+HELM_CHART_CONFIG_KIND = "HelmChartConfig"
+HELM_CHART_CONFIG_LIST_KIND = "HelmChartConfigList"
+
+#: The kinds whose Helm values the walk masks.
+HELM_CHART_KINDS: frozenset[str] = frozenset({HELM_CHART_KIND, HELM_CHART_CONFIG_KIND})
+
 #: The two ``spec`` fields of a ``HelmChart`` that hold Helm values:
 #: ``valuesContent`` (one YAML text) and ``set`` (a map of single values).
 HELM_CHART_VALUE_FIELDS: tuple[str, ...] = ("valuesContent", "set")
@@ -124,6 +139,7 @@ HELM_CHART_VALUE_FIELDS: tuple[str, ...] = ("valuesContent", "set")
 _LIST_ITEM_KINDS: dict[str, str] = {
     SECRET_LIST_KIND: SECRET_KIND,
     HELM_CHART_LIST_KIND: HELM_CHART_KIND,
+    HELM_CHART_CONFIG_LIST_KIND: HELM_CHART_CONFIG_KIND,
 }
 
 #: Fixed marker written in place of a Secret value. Non-empty (rather
@@ -163,8 +179,9 @@ def redact_kubernetes_payload(value: Any) -> Any:
     tools can copy the whole manifest into an annotation (for example
     :data:`LAST_APPLIED_ANNOTATION`), so no annotation value on a Secret
     is shown.
-    A mapping whose ``kind`` is :data:`HELM_CHART_KIND` (or a kind-less
-    item of a :data:`HELM_CHART_LIST_KIND` envelope) gets its
+    A mapping whose ``kind`` is in :data:`HELM_CHART_KINDS` (or a kind-less
+    item of a :data:`HELM_CHART_LIST_KIND` or
+    :data:`HELM_CHART_CONFIG_LIST_KIND` envelope) gets its
     ``spec.valuesContent`` and every ``spec.set`` value replaced the same
     way (:data:`HELM_CHART_VALUE_FIELDS`); the ``set`` keys stay. Its
     ``metadata.annotations`` values are replaced like a Secret's, because
@@ -184,7 +201,7 @@ def _walk(value: Any, *, implied_kind: str | None) -> Any:
         if kind is None:
             kind = implied_kind
         is_secret = kind == SECRET_KIND
-        is_chart = kind == HELM_CHART_KIND
+        is_chart = kind in HELM_CHART_KINDS
         out: dict[Any, Any] = {}
         for key, item in value.items():
             if is_secret and key in SECRET_DATA_FIELDS and isinstance(item, dict):

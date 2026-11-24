@@ -99,6 +99,7 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.secret_read_as import record_caller_kv_read
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
     WRAPPED_CREDENTIAL_SCHEME,
@@ -124,7 +125,9 @@ __all__ = [
     "OperatorTokenRequiredError",
     "SecretRefReadError",
     "SecretRefScopeError",
+    "TargetSecretForbiddenError",
     "TargetSecretNotFoundError",
+    "TargetSecretReadFailedError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "check_param_secret_ref",
@@ -247,12 +250,34 @@ class OperatorTokenRequiredError(VaultCredentialsReadError):
 
     Raised by :meth:`VaultCredentialBackend.load_secret_data` before any
     network round-trip when ``operator.raw_jwt`` is empty: a
-    system-initiated call (the topology scheduler, a runbook verify
-    dispatch, a legacy ``execute()`` shim) cannot read a target's
+    system-initiated call (the topology scheduler, a legacy
+    ``execute()`` shim) cannot read a target's
     credentials from Vault. Callers that treat that refusal as an
     expected outcome (#4952) catch this class; every other read-phase
     failure stays a plain :class:`VaultCredentialsReadError`.
     """
+
+
+class TargetSecretReadFailedError(Exception):
+    """The read of the target's own ``secret_ref`` did not get an answer.
+
+    Raised by the shared loader when the Vault client (``requests``) fails
+    during the read: a timeout, a lost connection or a cut answer. It is a
+    plain error of the step before the call, so the call to the target has
+    not started yet. It has its own type, so the rule for uncertain results
+    (:mod:`meho_backplane.operations.uncertain_outcome`) keeps it a plain
+    failure that can run again, while the same ``requests`` fault during a
+    Vault change counts as uncertain. The message names the target and the
+    class of the fault, never the Vault URL or the client text.
+    """
+
+    def __init__(self, *, target_name: str, cause: BaseException) -> None:
+        self.target_name = target_name
+        self.cause_class = type(cause).__name__
+        super().__init__(
+            f"the secret of target {target_name!r} could not be read from Vault "
+            f"({self.cause_class}); the call to the target did not start"
+        )
 
 
 def secret_ref_prefix(secret_ref: str) -> str:
@@ -542,9 +567,8 @@ class VaultCredentialBackend:
         and structurally unwraps the nested ``data["data"]`` to the flat
         secret-field dict.
         """
-        # System-initiated calls (topology scheduler, the runbook verify
-        # dispatch's synthetic operator, the legacy connector ``execute()``
-        # shims, and — unless a check-runner principal is configured, #2642
+        # System-initiated calls (topology scheduler, the legacy
+        # connector ``execute()`` shims, and — unless a check-runner principal is configured, #2642
         # — the sensor runner) carry ``raw_jwt=""``. The readiness probe is
         # not among them: ``/ready`` runs registered backend probes and
         # never resolves a per-target ``secret_ref``, so it does not reach
@@ -566,9 +590,10 @@ class VaultCredentialBackend:
                 "KV-v2 reads, so a prefixed value double-resolves to a 404."
             )
 
-        if operator.check_runner_dispatch:
+        if operator.check_runner_dispatch or _tenant_has_own_vault_role(operator):
             # The check runner reads for every tenant with one Vault login,
-            # so each of its reads must stay inside the sensor's tenant.
+            # so each of its reads must stay inside the sensor's tenant. A
+            # tenant with its own Vault login role gets the same check.
             _enforce_vault_tenant_scope(operator, mount=mount, path=secret_ref)
 
         async with vault_client_for_operator(operator) as client:
@@ -578,8 +603,35 @@ class VaultCredentialBackend:
                 mount_point=mount,
                 raise_on_deleted_version=False,
             )
+        record_caller_kv_read(operator, payload)
 
         return _structural_unwrap(payload, target_name=target_name)
+
+
+class TargetSecretForbiddenError(hvac.exceptions.Forbidden):  # type: ignore[misc]  # hvac has no type stubs
+    """Vault refuses to read the target's own ``secret_ref``.
+
+    Raised by the shared loader when the KV-v2 read of ``target.secret_ref``
+    answers "permission denied" (hvac ``Forbidden``). The dispatcher turns
+    it into the ``connector_vault_forbidden`` answer about the target's own
+    ref. A refusal of any other Vault path stays a plain hvac ``Forbidden``
+    and gets an answer that names that path. The message never carries the
+    Vault URL or the hvac text.
+
+    It is a subclass of hvac ``Forbidden``, so every handler that lets a
+    ``Forbidden`` pass, or catches one, does the same with this error.
+    """
+
+    def __init__(self, *, target_name: str, secret_ref: str) -> None:
+        self.target_name = target_name
+        self.secret_ref = secret_ref
+        super().__init__(
+            f"Vault refused to read secret_ref {secret_ref!r} of target {target_name!r}"
+        )
+
+    def __str__(self) -> str:
+        # hvac's ``VaultError.__str__`` appends ", on <method> <url>".
+        return str(self.args[0])
 
 
 #: The Vault backend is stateless, so a single shared instance serves every
@@ -640,6 +692,10 @@ async def _resolve_and_load(
         )
     except hvac.exceptions.InvalidPath as exc:
         raise TargetSecretNotFoundError(target_name=target.name, secret_ref=ref) from exc
+    except hvac.exceptions.Forbidden as exc:
+        raise TargetSecretForbiddenError(target_name=target.name, secret_ref=ref) from exc
+    except requests.exceptions.RequestException as exc:
+        raise TargetSecretReadFailedError(target_name=target.name, cause=exc) from exc
     return store_ref, secret_data
 
 
@@ -807,6 +863,13 @@ async def missing_secret_field_map_sources(
     return sorted({src for src in field_map.values() if src not in secret_data})
 
 
+def _tenant_has_own_vault_role(operator: Operator) -> bool:
+    """Whether *operator*'s tenant has its own Vault login role (lazy import, see below)."""
+    from meho_backplane.connectors.vault.tenant_scope import tenant_has_own_vault_role
+
+    return tenant_has_own_vault_role(operator)
+
+
 def _enforce_vault_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
     """Run the Vault tenant path check for one read.
 
@@ -909,9 +972,13 @@ async def load_param_secret_data(
     check_param_secret_ref(operator, target.secret_ref or "", param=param, mount=mount)
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
-    except TargetSecretNotFoundError as exc:
+    except (
+        TargetSecretNotFoundError,
+        TargetSecretForbiddenError,
+        TargetSecretReadFailedError,
+    ) as exc:
         # The ref came from a param, not from the target: report it as a
-        # param read error, with the hvac class as its cause.
+        # param read error, with the hvac or requests class as its cause.
         cause = exc.__cause__ if exc.__cause__ is not None else exc
         raise SecretRefReadError(
             param=param, secret_ref=target.secret_ref or "", cause=cause

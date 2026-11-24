@@ -31,6 +31,8 @@ func newEditGroupCmd() *cobra.Command {
 	var (
 		whenToUseFlag     string
 		nameFlag          string
+		category          string
+		labels            []string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -47,11 +49,26 @@ func newEditGroupCmd() *cobra.Command {
 			"file (useful for multi-paragraph hints maintained in version\n" +
 			"control); the same `@<path>` form works for --name though\n" +
 			"single-line display names rarely need it.\n\n" +
+			"--category and --label set the category and labels of every\n" +
+			"operation in the group (an operation's own value wins). Use them\n" +
+			"without --when-to-use and --name.\n" +
+			classifyNote + "\n" +
 			"Role: tenant_admin.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			classify, err := classificationFlagsSet(cmd, "when-to-use", "name")
+			if err != nil {
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
+			}
+			if classify {
+				backplaneURL, err := resolveBackplane(backplaneOverride)
+				if err != nil {
+					return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+				}
+				return patchGroupClassification(cmd, backplaneURL, args[0], args[1], category, labels, jsonOut)
+			}
 			return runEditGroup(cmd, editGroupOptions{
 				ConnectorID:       args[0],
 				GroupKey:          args[1],
@@ -66,6 +83,7 @@ func newEditGroupCmd() *cobra.Command {
 		"replacement when_to_use text; supports `@<path>` to read from a file")
 	cmd.Flags().StringVar(&nameFlag, "name", "",
 		"replacement display name; supports `@<path>` to read from a file")
+	addClassificationFlags(cmd, &category, &labels)
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",

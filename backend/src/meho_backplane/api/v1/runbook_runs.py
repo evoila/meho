@@ -173,7 +173,7 @@ Out of scope
 from __future__ import annotations
 
 import uuid
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Query
@@ -209,6 +209,7 @@ from meho_backplane.runbooks.runs_schemas import (
     StartRunRequest,
 )
 from meho_backplane.runbooks.service import TemplateNotFoundError
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -386,7 +387,8 @@ async def advance_run(
     * :class:`RunAlreadyTerminalError` -> 400 (run is already
       ``completed`` / ``abandoned``).
     * :class:`PreviousStepFailedError` -> 400 (current step is in
-      ``failed`` state; the only forward path is :func:`abort_run`).
+      ``failed`` state and the request has no ``retry``; send
+      ``retry=true`` to run its check again, or use :func:`abort_run`).
     * :class:`PreviousStepNotVerifiedError` -> 400 (engine-side gate:
       previous step never transitioned to ``verified``).
     * :class:`VerifyResponseRequiredError` -> 422 (the step needs a
@@ -412,7 +414,9 @@ async def advance_run(
         audit_op_class="write",
     )
     try:
-        return await service.next_step(operator.tenant_id, operator.sub, run_id, request)
+        return await service.next_step(
+            operator.tenant_id, operator.sub, run_id, request, caller=operator
+        )
     except (
         RunNotFoundError,
         NotRunAssigneeError,
@@ -516,7 +520,10 @@ async def list_runs(
     assignee: str | None = Query(default=None),
     status: Literal["in_progress", "completed", "abandoned"] | None = Query(default=None),
     template_slug: str | None = Query(default=None),
-    work_ref: str | None = Query(default=None),
+    work_ref: Annotated[
+        WorkRefFilter | None,
+        Query(description=WORK_REF_FILTER_DESCRIPTION),
+    ] = None,
     limit: int = Query(default=100, ge=1, le=500),
     operator: Operator = _require_operator,
     service: RunbookRunService = _RUNBOOK_RUN_SERVICE,

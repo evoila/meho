@@ -24,6 +24,13 @@ op_id                               safety       Admin REST API
 ``keycloak.user.logout``            caution      ``POST .../users/{id}/logout``
 ==================================  ===========  ===========================================
 
+Four more writes (client roles, user details and one stored credential) have
+their own modules: ``ops_write_client_role`` (``keycloak.role_mapping.client.assign``
+and ``.remove``, dangerous), ``ops_write_user_update`` (``keycloak.user.update``,
+caution) and ``ops_write_user_credential``
+(``keycloak.user.credential.delete``, dangerous). Their op rows are in
+``ops_write_account_schemas``.
+
 ``keycloak.user.logout`` (#3851) came later. It ends every live session of
 one user, so their refresh tokens stop working at once.
 
@@ -121,6 +128,10 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
+    refuse_login_realm_write,
+    refuse_own_client_write,
+)
 from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     SMTP_PASSWORD_PREFIX,
@@ -129,7 +140,9 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     inline_smtp_password_reason,
     with_smtp_password,
 )
-from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
+from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
+from meho_backplane.connectors.keycloak.realm_params import realm_param
+from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -302,7 +315,11 @@ async def keycloak_realm_create(
     flags.
     """
     representation = dict(params["representation"])
-    realm_name = str(representation.get("realm") or params.get("realm") or "").strip()
+    realm_name = (
+        realm_param(params, "representation.realm", "keycloak.realm.create")
+        or realm_param(params, "realm", "keycloak.realm.create")
+        or ""
+    )
     representation.setdefault("realm", realm_name)
     result = await self._write_admin(
         target, "POST", _ADMIN_REALMS_PATH, operator=operator, json=representation
@@ -327,9 +344,9 @@ async def keycloak_realm_update(
     RealmRepresentation. The handler reads the realm, puts the given fields
     on top, and PUTs the full realm back, so fields the caller did not send
     stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
-    value-free confirmation plus the read-back check. Both realm names are
-    percent-encoded as one path segment, so a ``/``, a dot or a ``%`` in a
-    name stays part of that name.
+    value-free confirmation plus the read-back check. Both realm names must
+    be plain names (:mod:`.realm_params`) and are percent-encoded as one
+    path segment.
 
     The realm's SMTP password comes only from ``smtp_password_secret_ref``
     (see :mod:`.ops_write_realm_smtp`): it is read here and set as
@@ -339,8 +356,12 @@ async def keycloak_realm_update(
     if has_inline_smtp_password(params):
         raise ValueError(f"keycloak.realm.update: {inline_smtp_password_reason()}")
     realms = resolve_realm_config(target)
-    realm_name = str(params.get("realm") or realms.managed_realm).strip()
+    realm_name = realm_param(params, "realm", "keycloak.realm.update") or realms.managed_realm
+    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
     representation = dict(params["representation"])
+    path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
+    current = await self._get_admin_json(target, path, operator=operator)
+    refuse_login_realm_write(realm_name, current, representation)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX
@@ -348,14 +369,14 @@ async def keycloak_realm_update(
         representation["smtpServer"] = with_smtp_password(
             representation.get("smtpServer"), password
         )
-    new_name = _opt_str(representation.get("realm")) or realm_name
     check = await read_merge_write(
         self,
         operator,
         target,
-        path=fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(realm_name)}),
+        path=path,
         requested=representation,
-        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": quote_segment(new_name)}),
+        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
+        before=current,
     )
     return {"realm": realm_name, "updated": True, **check}
 
@@ -438,15 +459,21 @@ async def keycloak_client_update(
                 f"keycloak.client.update: no client with clientId={client_id!r} in realm "
                 f"{realms.managed_realm!r}"
             )
-    check = await read_merge_write(
+    path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
+    requested = dict(params["representation"])
+    current = await self._get_admin_json(target, path, operator=operator)
+    await refuse_own_client_write(
         self,
         operator,
         target,
-        path=fill_path(
-            _CLIENT_PATH,
-            {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
-        ),
-        requested=dict(params["representation"]),
+        "keycloak.client.update",
+        realms.managed_realm,
+        current,
+        named=client_id,
+        requested=requested,
+    )
+    check = await read_merge_write(
+        self, operator, target, path=path, requested=requested, before=current
     )
     return {"id": uuid, "client_id": client_id, "updated": True, **check}
 
@@ -516,12 +543,22 @@ async def keycloak_protocol_mapper_create(
             )
     representation = dict(params["representation"])
     mapper_name = _opt_str(representation.get("name"))
+    client_path = fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": uuid})
+    await refuse_own_client_write(
+        self,
+        operator,
+        target,
+        "keycloak.protocol_mapper.create",
+        realms.managed_realm,
+        await self._get_admin_json(target, client_path, operator=operator),
+        named=client_id,
+    )
     result = await self._write_admin(
         target,
         "POST",
         fill_path(
             _CLIENT_PROTOCOL_MAPPERS_PATH,
-            {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
+            {"realm": realms.managed_realm, "client-uuid": uuid},
         ),
         operator=operator,
         json=representation,
@@ -601,19 +638,10 @@ async def keycloak_user_reset_password(
     value-free confirmation; the response never carries the password.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError(
-                "keycloak.user.reset_password requires either 'id' (UUID) or 'username'"
-            )
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.user.reset_password: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(
+        self, operator, target, params, op_id="keycloak.user.reset_password"
+    )
+    uuid = user.uuid
     password = await _read_password_from_vault(operator, target, params)
     credential = {"type": "password", "value": password, "temporary": _temporary_flag(params)}
     await self._write_admin(
@@ -621,13 +649,13 @@ async def keycloak_user_reset_password(
         "PUT",
         fill_path(
             _USER_RESET_PASSWORD_PATH,
-            {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+            {"realm": realms.managed_realm, "user-id": uuid},
         ),
         operator=operator,
         json=credential,
         idempotent_conflict=False,
     )
-    return {"id": uuid, "username": username, "password_reset": True}
+    return {"id": uuid, "username": user.username, "password_reset": True}
 
 
 async def keycloak_user_logout(
@@ -645,24 +673,15 @@ async def keycloak_user_logout(
     :exc:`KeycloakUserNotFoundError`. The op reads and returns no credential.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError("keycloak.user.logout requires either 'id' (UUID) or 'username'")
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.user.logout: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(self, operator, target, params, op_id="keycloak.user.logout")
+    uuid = user.uuid
     try:
         await self._write_admin(
             target,
             "POST",
             fill_path(
                 _USER_LOGOUT_PATH,
-                {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+                {"realm": realms.managed_realm, "user-id": uuid},
             ),
             operator=operator,
             idempotent_conflict=False,
@@ -673,7 +692,7 @@ async def keycloak_user_logout(
                 f"keycloak.user.logout: no user with id={uuid!r} in realm {realms.managed_realm!r}"
             ) from exc
         raise
-    return {"id": uuid, "username": username, "logged_out": True}
+    return {"id": uuid, "username": user.username, "logged_out": True}
 
 
 # ---------------------------------------------------------------------------
@@ -701,19 +720,10 @@ async def keycloak_role_mapping_assign(
     holds the names of the roles Keycloak returned.
     """
     realms = resolve_realm_config(target)
-    uuid = _opt_str(params.get("id"))
-    username = _opt_str(params.get("username"))
-    if uuid is None:
-        if username is None:
-            raise ValueError(
-                "keycloak.role_mapping.assign requires either 'id' (UUID) or 'username'"
-            )
-        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
-        if uuid is None:
-            raise KeycloakUserNotFoundError(
-                f"keycloak.role_mapping.assign: no user with username={username!r} in realm "
-                f"{realms.managed_realm!r}"
-            )
+    user = await read_user_for_write(
+        self, operator, target, params, op_id="keycloak.role_mapping.assign"
+    )
+    uuid = user.uuid
     role_names = [str(r).strip() for r in params["roles"] if str(r).strip()]
     role_reprs: list[dict[str, Any]] = []
     for name in role_names:
@@ -729,7 +739,7 @@ async def keycloak_role_mapping_assign(
         "POST",
         fill_path(
             _USER_ROLE_MAPPINGS_REALM_PATH,
-            {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+            {"realm": realms.managed_realm, "user-id": uuid},
         ),
         operator=operator,
         json=role_reprs,  # type: ignore[arg-type]  # KC accepts a JSON array body here
@@ -737,7 +747,7 @@ async def keycloak_role_mapping_assign(
     )
     return {
         "id": uuid,
-        "username": username,
+        "username": user.username,
         "assigned_roles": [role["name"] for role in role_reprs],
     }
 

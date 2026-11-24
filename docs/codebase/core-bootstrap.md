@@ -14,9 +14,10 @@ today, the realm stage, finishes the Keycloak realm `meho`:
   the mappers on a client and the scopes assigned to a client. Keycloak
   reads the realm file only at its first start, so this is the only way an
   upgrade reaches a running realm.
-- It makes two people with temporary passwords: the first admin and a
-  second person who can approve. The passwords go into the Secret
-  `<release>-core-first-login`.
+- It makes one person with a temporary password: the first admin, who is
+  also the platform admin. The password goes into the Secret
+  `<release>-core-first-login`. It makes no `approver` login. A login
+  and a Secret key of an older install stay as they are.
 - On the first run it makes the console admin: a user of realm `master`
   who administers realm `meho` in the Keycloak admin console (every role
   of the `master` client `meho-realm` except `impersonation`). Its name and
@@ -25,7 +26,7 @@ today, the realm stage, finishes the Keycloak realm `meho`:
 - On the first run it logs in with Keycloak's temporary first-start account,
   checks that `meho-admin` can log in, and then removes the first-start
   account. Every later run logs in as `meho-admin`.
-- It makes the five role groups of every extra tenant in
+- It makes the three role groups of every extra tenant in
   `coreKeycloak.tenants` (see [Several tenants](#several-tenants)).
 - When `coreKeycloak.ci.enabled` is on, it also makes a login for automated
   install proofs.
@@ -37,14 +38,8 @@ What is true after the Job ran:
 - The first admin can log in with `meho login https://<host>` or in the
   browser. Keycloak asks for a new password first. The token then carries
   the first tenant's id, the role `tenant_admin` and `platform_admin`.
-- The second person is in `MEHO-SA-Operators`. That group gives the role
-  `operator`, and its members may also approve their own changes
-  (`RoleGroup.SA_OPERATORS` in `auth/operator.py`). A change that waits
-  for a second person can be approved by any operator other than the
-  person who asked, or by a member of `MEHO-Approvers`. So the second
-  person can approve the first admin's changes. The first admin may also
-  approve their own changes: members of `MEHO-Admins` may, like members
-  of `MEHO-SA-Operators` (`Operator.may_self_approve`).
+- The first admin may approve their own changes: members of
+  `MEHO-Admins` may (`Operator.may_self_approve`).
 - The console admin can log in to the admin console at
   `https://<host>/auth/admin/master/console/#/meho` (with
   `coreKeycloak.ingress.exposeAdmin: true`), pick realm `meho` and manage
@@ -59,9 +54,8 @@ What is true after the Job ran:
 | Person | Values key (user name) | Groups | What the login carries |
 |---|---|---|---|
 | First admin | `coreKeycloak.firstLogin.adminUsername` (default `admin`) | `MEHO-Admins`, `MEHO-Platform-Admins` | `tenant_role: tenant_admin`, `platform_admin: true` |
-| Second person | `coreKeycloak.firstLogin.approverUsername` (default `approver`) | `MEHO-SA-Operators` | `tenant_role: operator` |
 
-Both get a 32-character password from the one alphabet `[A-Za-z0-9]`, stored
+The first admin gets a 32-character password from the one alphabet `[A-Za-z0-9]`, stored
 as a temporary credential with the required actions `UPDATE_PASSWORD` and
 `CONFIGURE_TOTP`, so Keycloak forces a change at the first login and then
 asks the person to set up an authenticator app. The realm's user profile
@@ -90,8 +84,11 @@ password grant takes it as `totp`). The real-Keycloak test sets up a code
 app for each account with a secret it makes up, makes the code from it,
 and checks that a login without the code or with a wrong one fails.
 
-The Secret `<release>-core-first-login` holds `admin_username`,
-`admin_password`, `approver_username` and `approver_password`. The install
+The Secret `<release>-core-first-login` holds `admin_username` and
+`admin_password`. An older install keeps its
+`approver_username` and `approver_password` keys; the Job ignores them.
+The values key `coreKeycloak.firstLogin.approverUsername` is accepted and
+ignored, and the install notes say so when it is set. The install
 notes show the `kubectl get secret … -o jsonpath | base64 -d` command with
 a pipe into the clipboard (`pbcopy`, `xclip -selection clipboard` or
 `wl-copy`) for each password, and warn that the command without the pipe
@@ -99,11 +96,6 @@ shows the password on screen. They never print a value. The OpenBao unseal
 key line works the same way. The Secret is the source on later runs: if a person is missing but
 the Secret exists, the Job makes the person again with the stored password.
 Changing a user name in values after the first install has no effect.
-
-The two names must be two different Keycloak users. Keycloak ignores case
-and surrounding spaces in a user name, so `Admin` and `admin` are the same
-person. The Job refuses such a pair before it makes the Secret, so a wrong
-pair never leaves one person with a stored password that does not work.
 
 ## The console admin
 
@@ -113,7 +105,7 @@ pair never leaves one person with a stored password that does not work.
 
 Without it nobody could administer realm `meho`: the first-start account
 is removed on the first run, `meho-admin` has only `manage-clients`,
-`manage-realm` and `manage-users`, and the two people have no Keycloak
+`manage-realm` and `manage-users`, and the Admin login has no Keycloak
 admin rights. The
 AD / LDAP recipe (docs-site/install/login/ad-ldap.md) needs a user
 federation, which only a realm admin can add. A company login through
@@ -143,7 +135,7 @@ reset the password of any user of realm `meho`, so a realm admin there
 could be taken over by anyone holding `meho-admin`'s secret. `meho-admin`
 cannot see users of realm `master`. MEHO refuses the console admin's
 tokens: they do not come from realm `meho`. Its password is made like the
-people's (temporary, `UPDATE_PASSWORD`). The Secret
+first admin's (temporary, `UPDATE_PASSWORD`). The Secret
 `<release>-core-console-admin` holds `username` and `password`. The
 Secret keeps the name of the first run: read the name from the Secret,
 not from the values. It is a Secret of its own, not two more keys in
@@ -165,10 +157,10 @@ Only a `master` admin can make users in realm `master`. So:
   Secret was not made by this install. The Job stops and asks for another
   name in `coreKeycloak.firstLogin.consoleAdminUsername`.
 - No user name may start with `service-account-` (Keycloak's prefix for
-  service accounts). The Job refuses it for all three users: the first
-  admin, the second person and the console admin.
+  service accounts). The Job refuses it for both users: the first admin
+  and the console admin.
 
-**One role group per person.** A person is in exactly one of the five role
+**One role group per person.** A person is in exactly one of the role
 groups (`docs/decisions/login-role-groups.md`). `MEHO-Platform-Admins` is
 not a role group: it carries only `platform_admin: true` and no tenant or
 role, so it does not change which group gives the tenant. The realm file
@@ -184,7 +176,7 @@ running realm like every other client of the realm file. The backplane reads the
 Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`. Admin
 guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/several-tenants.md`.
 
-- The five role groups carry `meho_tenant` =
+- The three role groups carry `meho_tenant` =
   `<tenant-uuid>:<tenant>:<Role>`, from the placeholders
   `${MEHO_REALM_TENANT_ID}` and `${MEHO_REALM_TENANT_NAME}`. The name comes
   from `coreKeycloak.tenantName` (default `main`).
@@ -192,8 +184,7 @@ guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/sev
   the `meho_tenant` values of all the person's groups in the claim
   `meho_tenants` (Multivalued and Aggregate on).
 - `coreKeycloak.tenants` is a list of `{name, id}`. For each entry the Job
-  makes `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
-  `-Approvers`. They carry only `meho_tenant`, never `tenant_id` or
+  makes `MEHO-<name>-Readers`, `-Operators` and `-Admins`. They carry only `meho_tenant`, never `tenant_id` or
   `tenant_role`. When such a group exists already, the Job removes
   `tenant_id`, `tenant_role` and `approver` from it
   (`OLD_ACCESS_ATTRIBUTES`) and keeps every other attribute. The plan
@@ -204,7 +195,7 @@ guide (add a tenant, put a person in two tenants, switch): `docs-site/guides/sev
   any call otherwise.
 - No person is put into these groups by the Job. Doing it through MEHO's
   Keycloak operations still needs a second person's approval.
-- A site with one tenant: the upgrade adds `meho_tenant` to the five groups
+- A site with one tenant: the upgrade adds `meho_tenant` to the role groups
   and the mapper to the three clients. The token then lists one tenant, and
   every other claim is the same.
 
@@ -282,6 +273,11 @@ stage (`core/company_login.py`, `ensure_company_login`) does this, in order:
    Keycloak never shows its own login page. With `false`, that default is
    removed and the Keycloak login form shows again: the way in with the
    local accounts when the company login is down.
+   The same is done on the console's own login flow `meho approval
+   touch` (config alias `meho-company-login-redirect-touch`) when the
+   realm has it (#6213), so the console still goes straight to the
+   company login. Its output line is `auto-redirect (meho approval
+   touch): ...`.
 
 What is not done:
 
@@ -332,7 +328,7 @@ and groups with `manage-users`.
   - `Plan` — read from `MEHO_CORE_KEYCLOAK_PLAN`, rendered by the chart:
     the Keycloak Service URL, the realm file path, the Secret names, the
     user names and the extra tenants (`TenantPlan`). Never a value.
-  - `tenant_groups(tenant)` — the five groups of an extra tenant.
+  - `tenant_groups(tenant)` — the three groups of an extra tenant.
   - `load_realm_file(path, environ)` — reads the realm file and fills its
     `${...}` placeholders from the Job's environment (the same variables
     the Keycloak pod gets).
@@ -347,6 +343,9 @@ and groups with `manage-users`.
   `CompanyLoginPlan` (the `company_login` part of the plan, only rendered
   when on) and `ensure_company_login`.
 - `deploy/charts/meho/templates/core-bootstrap-job.yaml` — the Job.
+- `backend/src/meho_backplane/core/keycloak_role_check.py` and
+  `deploy/charts/meho/templates/core-keycloak-role-check.yaml` — the
+  role check before an upgrade (see below).
 - `deploy/charts/meho/templates/_core-bootstrap.tpl` — the plan.
 - `deploy/charts/meho/charts/keycloak/files/meho-realm.json` — the realm
   file; mounted into the Job from the subchart's ConfigMap.
@@ -359,6 +358,7 @@ Helm order (the rest of the core's hooks are in
 | Weight | Object | Phases |
 |---|---|---|
 | -40 | ServiceAccount, Role, RoleBinding `<release>-core-bootstrap` | all four |
+| -28 | Job `<release>-check-manage-realm` (`keycloak-role-check` stage) | pre-upgrade |
 | 0 | the Keycloak StatefulSet imports the realm file at its first start | install, upgrade |
 | 10 | Job `<release>-core-bootstrap` (`keycloak` stage) | post-install, post-upgrade |
 
@@ -389,9 +389,24 @@ Steps of the realm stage, in order:
    older realm the scope `offline_access` and the idle limit, and `meho
    login` gets a long login.
    Before the clients come the **login flows** of the realm file
-   (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
-   approval sign-in`: the password form, then the one-time code when the
-   person has set one up. A missing flow is made with its steps. A run
+   (`core/keycloak_flows.py`). Today that is one flow, `meho
+   approval sign-in level`: the level step (approval level 2, maximum age
+   0), the password form, then the one-time code when the person has set
+   one up. A missing flow is made with its steps. A step with settings in
+   the file (`authenticatorConfig`) gets them; a step whose settings have
+   other values makes the flow one with other steps. After the flows,
+   `ensure_levels` adds the level names of the file's `acr.loa.map` that
+   the flows of this stage use (`stage_levels`: `meho-approve`: 2, not
+   `meho-touch`: 3) to the realm and keeps the names it has (output:
+   `sign-in levels: set (...)` or `kept (...)`); it writes the whole
+   attribute map back, because Keycloak drops realm attributes a write
+   leaves out. It stops before it writes when another name already has
+   level 2, or when a client whose flow this stage binds
+   (`meho-cli-approve`; `bound_clients`, never `meho-web`) has its own
+   `acr.loa.map`. The stage makes only
+   the flows that the file binds to a client other than `meho-web`
+   (`stage_flows`): it never makes or binds a flow of the console client,
+   such as the passkey touch flow, which has its own explicit step. A run
    that stops half-way (a timeout, a restart) can leave a flow with
    missing steps or steps that are still off; the next run adds the
    missing steps and sets the requirements of the file (output:
@@ -407,13 +422,22 @@ Steps of the realm stage, in order:
    binding is not changed. A client that names a flow in
    `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
    to it (output: `kept (login flow set)`). Reading and making login flows
-   needs `manage-realm`. Without it the Job stops (#6280) with
-   `login flow meho approval sign-in: meho-admin may not read or change
+   needs `manage-realm`. Without it the Job stops with
+   `login flow meho approval sign-in level: meho-admin may not read or change
    login flows, ...`, which names the role and the fix in
    docs-site/install/upgrades.md, "The bootstrap Job needs manage-realm".
    It never goes on with an approval client that may lack its own flow. A
    fresh install gets the flow and the binding from the realm import and
    the role from the realm file.
+   The console's flow with the passkey touch level, `meho approval touch`
+   (#6213), is bound only by `meho-web`, so the stage does not make it,
+   binds no client to it, and does not add its level name `meho-touch`;
+   the step prints `not made here (no client of the realm file but
+   meho-web binds it); no client is bound to it by this stage`. A
+   running realm gets it through the operation
+   `keycloak.authflow.ensure_approval_touch`. A flow with a step whose
+   settings the realm file lacks is not made either (`not checked here
+   (the realm file lacks the settings of its steps)`).
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
@@ -438,13 +462,48 @@ Rights: `meho-admin` has `manage-clients`, `manage-realm` and
 to 5, the login flows too; with the company login on, the chart adds
 `manage-identity-providers` (see "Rights" under the company login). An
 install whose first start had an older realm file may lack `manage-realm`;
-its Job stops at step 3 until an admin adds the role once. Only the
+the check before an upgrade stops the upgrade, and an install without the
+check stops at step 3, until an admin adds the role once. Only the
 first-start account can do steps 6 and 7.
 
 The backplane uses `meho-admin` too (`KEYCLOAK_ADMIN_CLIENT_ID`). It reads
 the approval flow and the binding for `/api/v1/health`
 (`auth/approval_sign_in_flow.py`, see docs/codebase/approvals.md), which
 needs `view-realm` or `manage-realm`.
+
+### The role check before an upgrade
+
+The realm stage needs `manage-realm` and runs only after an upgrade, when
+the new version already runs (#6336). So, with the built-in Keycloak, a
+pre-upgrade Job runs `python -m meho_backplane.core.bootstrap
+keycloak-role-check` first (`core/keycloak_role_check.py`). It logs in as
+`meho-admin` and reads the effective roles of its service account in
+`realm-management` (`GET .../users/<id>/role-mappings/clients/<id>/composite`,
+which `manage-clients` and `manage-users` allow). It changes nothing.
+
+- Role there: `role check: meho-admin has manage-realm`, exit 0.
+- Role missing: exit 1 with `core_bootstrap_failed: meho-admin lacks the
+  realm-management role manage-realm, ...`. Helm stops the upgrade before
+  it changes anything. The Job name, `<release>-check-manage-realm`, is in
+  Helm's error, so the error names the role.
+- Cannot tell (no secret, Keycloak does not answer, login refused, a read
+  fails or has an odd shape): `role check: unknown (<reason>)`, exit 0.
+  The upgrade goes on, and the realm stage stops after it if the role is
+  really missing. This keeps an upgrade possible when Keycloak is down,
+  for example when the upgrade is the fix.
+
+The Job runs after the secrets Job (-30) and before every other
+pre-upgrade Job (the Keycloak database Job at -25, the migration Job at
+-10). It has no Kubernetes token, no retry (`backoffLimit: 0`) and its pod
+has the labels of the bootstrap Job's pod, which the Keycloak
+NetworkPolicy admits. The output never holds the secret.
+
+Neither this Job nor the bootstrap Job has `ttlSecondsAfterFinished`. A
+successful one is removed at once (`hook-succeeded`); a failed one stays,
+with its log, until the next install or upgrade replaces it
+(`before-hook-creation`). Helm's own error says only that the Job failed,
+so the log is where the reason is; docs-site/install/upgrades.md, "The
+bootstrap Job needs manage-realm", says where to look.
 
 ### Network rules
 
@@ -535,7 +594,7 @@ when nothing is missing. The Secrets it makes carry only the label
 
 - Core design, section 3 "Secrets at install" (internal design note):
   sub-decisions 3, 8 and 9.
-- `docs/decisions/login-role-groups.md` — the five role groups.
+- `docs/decisions/login-role-groups.md` — the role groups.
 - [core-secrets.md](core-secrets.md) — the Secrets, the hook account and
   its rights.
 - Keycloak bootstrap admin accounts:

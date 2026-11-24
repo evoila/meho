@@ -44,6 +44,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement, AuditLog, Tenant
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.reflex.adoption import (
     ADD_TOOLS,
     BROADCAST_RECENT_TOOL,
@@ -124,6 +125,7 @@ async def _seed_audit(
     method: str = "MCP",
     status_code: int = 200,
     agent_session_id: UUID | None = None,
+    payload: dict[str, object] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row directly."""
     sessionmaker = get_sessionmaker()
@@ -140,7 +142,7 @@ async def _seed_audit(
                 status_code=status_code,
                 request_id=None,
                 duration_ms=Decimal("1.00"),
-                payload={},
+                payload=payload or {},
             ),
         )
         await session.commit()
@@ -153,6 +155,7 @@ async def _seed_dispatch(
     occurred_at: datetime,
     agent_session_id: UUID | None = None,
     status_code: int = 200,
+    payload: dict[str, object] | None = None,
 ) -> None:
     """Insert one dispatcher (``method='DISPATCH'``) row with ``path=op_id``."""
     await _seed_audit(
@@ -162,6 +165,7 @@ async def _seed_dispatch(
         method=DISPATCH_METHOD,
         status_code=status_code,
         agent_session_id=agent_session_id,
+        payload=payload,
     )
 
 
@@ -495,6 +499,38 @@ async def test_cli_rows_split_out_and_meta_metrics_are_na() -> None:
     assert agent.write_back_per_100_call_ops == 100.0
     assert agent.announce_coverage_write_ops == 0
     assert agent.announce_coverage_pct is None
+
+
+@pytest.mark.asyncio
+async def test_cli_login_session_row_stays_on_cli_rest() -> None:
+    """A dispatch row with the CLI login session id counts on ``cli_rest``.
+
+    The CLI row has a session id, but its payload says the id came from the
+    CLI (``session_from_client``). The agent row keeps the ``agent`` surface.
+    A claim made under the CLI id does not cover the CLI row.
+    """
+    await _seed_tenant(_TENANT_A)
+    agent_sid = uuid.uuid4()
+    cli_sid = uuid.uuid4()
+    await _seed_dispatch(
+        tenant_id=_TENANT_A, op_id=_WRITE_OP, occurred_at=_at(100), agent_session_id=agent_sid
+    )
+    await _seed_announce(tenant_id=_TENANT_A, run_id=cli_sid, created_at=_at(150))
+    await _seed_dispatch(
+        tenant_id=_TENANT_A,
+        op_id=_WRITE_OP_2,
+        occurred_at=_at(200),
+        agent_session_id=cli_sid,
+        payload={SESSION_FROM_CLIENT_KEY: True},
+    )
+
+    report = await _report(_TENANT_A)
+    agent = _surface(report, "agent")
+    assert agent.announce_coverage_write_ops == 1
+    assert agent.announce_coverage_announced == 0
+    cli = _surface(report, "cli_rest")
+    assert cli.announce_coverage_write_ops == 1
+    assert cli.announce_coverage_announced == 0
 
 
 # ---------------------------------------------------------------------------

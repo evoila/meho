@@ -20,7 +20,9 @@ The steps of :func:`upload_session`:
    storage (under ``quarantine/`` when the check was not sure), then
    commit the index row, the upload row and the audit row in one
    transaction. When the commit fails, the archive is deleted again, so a
-   session is stored complete or not at all.
+   session is stored complete or not at all. With the switch
+   ``AUDIT_SESSION_LINKS`` on, the same transaction stores the links of
+   the new MCP tool calls and ``meho`` commands (:mod:`.audit_links`).
 
 Every upload, also a refused or unchanged one, writes an audit row.
 """
@@ -40,7 +42,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
+from meho_backplane.session_store.audit_links import (
+    link_cli_calls,
+    link_mcp_sessions,
+    session_links_on,
+)
 from meho_backplane.session_store.config import SessionStoreConfig
+from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
 from meho_backplane.session_store.models import AgentSessionRecord, AgentSessionUpload
 from meho_backplane.session_store.object_store import ObjectStore
 from meho_backplane.session_store.prepare import CheckedArchive, PreparedUpload, prepare_upload
@@ -213,6 +221,8 @@ async def _prepare_or_refuse(
     config: SessionStoreConfig,
 ) -> PreparedUpload:
     try:
+        if record is not None and record.app == HOSTED_RUN_APP:
+            raise SessionConflictError("session_is_a_hosted_run")
         if record is not None and record.uploaded_by_sub != call.operator.sub:
             raise SessionConflictError("session_owned_by_another_person")
         prepared = await run_in_worker(
@@ -265,10 +275,18 @@ def _result(
     )
 
 
-async def _commit(session: AsyncSession, call: _Call, stored: _Stored | None) -> None:
-    """Commit; on failure delete the new archive, so nothing half-stored stays."""
+async def _commit(
+    session: AsyncSession, call: _Call, stored: _Stored | None, *, flush_only: bool = False
+) -> None:
+    """Commit (or only flush); on failure delete the new archive, so nothing half-stored stays.
+
+    A unique key conflict (a lost race for the first upload) becomes a 409.
+    """
     try:
-        await session.commit()
+        if flush_only:
+            await session.flush()
+        else:
+            await session.commit()
     except Exception as exc:
         if stored is not None:
             await _forget_archive(call.store, stored.key)
@@ -299,6 +317,9 @@ async def upload_session(
         if record is None:
             record = _new_record(call.operator, meta, now)
             session.add(record)
+            # Insert it now: the link rows refer to it, and the unit of work
+            # does not order the rows of models with no relationship.
+            await _commit(session, call, None, flush_only=True)
         new_state = _next_state(record.state, meta.state, new_bytes=archive is not None)
         if archive is None and not created and new_state == record.state:
             call.audit(session, {"result": "unchanged"})
@@ -315,18 +336,23 @@ async def upload_session(
         record.state = new_state
         record.last_seen_at = now
         outcome = "created" if created else ("appended" if stored else "state_changed")
-        call.audit(
-            session,
-            {
-                "result": outcome,
-                "state": new_state,
-                "seq": stored.seq if stored else None,
-                "new_bytes": prepared.new_bytes,
-                "archive_sha256": stored.sha256 if stored else None,
-                "quarantined": stored.quarantined if stored else False,
-                "redactions": stored.redactions if stored else 0,
-            },
-        )
+        payload: dict[str, Any] = {
+            "result": outcome,
+            "state": new_state,
+            "seq": stored.seq if stored else None,
+            "new_bytes": prepared.new_bytes,
+            "archive_sha256": stored.sha256 if stored else None,
+            "quarantined": stored.quarantined if stored else False,
+            "redactions": stored.redactions if stored else 0,
+        }
+        if session_links_on():
+            payload["linked_mcp_sessions"] = await link_mcp_sessions(
+                session, record, prepared.tool_calls, now=now
+            )
+            payload["linked_cli_rows"] = await link_cli_calls(
+                session, record, prepared.cli_calls, now=now
+            )
+        call.audit(session, payload)
         await _commit(session, call, stored)
     return _result(meta, new_state, outcome, prepared, stored)
 

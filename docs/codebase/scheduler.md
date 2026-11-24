@@ -61,7 +61,7 @@ DBOS rebase swaps only the loop module.
     a CR id) the trigger works under. Set at create time (triggers have
     no UPDATE path); inherited end-to-end by every dispatched run — see
     "work_ref inheritance" under Dispatch. Indexed
-    `(tenant_id, work_ref)` for the list `--filter-work-ref` exact-match filter.
+    `(tenant_id, work_ref)` for the list `--filter-work-ref` filter (whole ticket id).
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
@@ -505,6 +505,17 @@ resolution lowers `SCHEDULER_TICK_INTERVAL_SECONDS` per deployment (floor
 1 s, e.g. via the chart's `extraEnv`); worst-case latency drops to the chosen
 interval at the cost of one extra scan query per elapsed tick.
 
+## A scheduled run's requests and the people behind them
+
+A scheduled or event run asks as the agent (`principal_sub=<agent-sub>`).
+The person who made any schedule of the agent's definitions, active or not,
+counts as a person behind its requests, and so does the person who made an
+event source when one of those schedules waits for events
+(`scheduled_trigger.created_by_sub`, `event_source.created_by_sub`). The run
+does not store which schedule started it, so MEHO counts them all. A
+schedule is a way to run changes on a timer; it is never a way to approve
+your own change. See [The people behind a request](approvals.md#the-people-behind-a-request).
+
 ## Known issues / limitations
 
 - **One-off resolution is "to the second"** — `next_fire_at <= now`
@@ -609,7 +620,9 @@ The dispatcher is the **event drain's subscription matcher**
 [events.md](events.md)). For each drained `event_outbox` row it fires
 every active `kind=event` trigger in that tenant whose `event_filter`
 the event `payload` contains (`payload @> event_filter`), through the
-same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. The
+same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. An
+external (webhook) event fires only a trigger whose filter names its
+event source by slug or id. The
 fired run's work_ref is `event:{event_id}:{trigger_id}`, which dedupes a
 redelivered event so it never double-fires.
 
@@ -618,6 +631,39 @@ non-empty-inputs rule (`_payload_yields_prompt` in `schemas.py`): an
 input-less event trigger is creatable because the matcher synthesises a
 prompt from the matched event (untrusted-enveloped) at fire time, rather
 than requiring the operator to author one up front.
+
+### Picking a Sensor or a Dashboard: `check_source` (#6182)
+
+A `kind=event` create may carry `check_source` instead of `event_filter`
+(never both; any other kind refuses it with 422). Shape:
+`{kind: "sensor" | "dashboard", id | name, only_worsening}`. No `id` and no
+`name` means "any Sensor" or "any Dashboard". `id` and `name` together are
+refused.
+
+`SchedulerAdminService.create` calls `scheduler/check_source.py`. It checks
+that the Sensor or Dashboard is in the trigger's tenant (a missing one, or one
+of another tenant, gives 422 `check_source_not_found`; MCP invalid-params with
+the same text). It stores the normal filter with the **id**, not the name, so a
+rename does not break the trigger:
+
+```json
+{"source": {"kind": "dashboard", "id": "<id>"}, "worsening": true}
+```
+
+`worsening` is only present when `only_worsening` is true. The filter matches
+the payload of the `check.sensor.changed` and `check.dashboard.changed` events
+(see [events.md](events.md)).
+
+The console form (`Start on`: Sensor, Dashboard or Custom filter), `meho
+scheduler create` (`--on-sensor`, `--on-dashboard`, `--on-any-sensor`,
+`--on-any-dashboard`, `--only-worse`; not with `--event-filter`) and
+`meho_scheduler_create` all send `check_source` and store the same filter. The
+trigger detail page shows "Starts on: Sensor <name>" for a filter of this
+shape. Such a trigger fires only when `CHECKS_AGENT_EVENTS` is on. While it is
+off, the console form warns, and the create answer carries a `notice` that the
+CLI prints. The MCP tool `meho_scheduler_create` shows the `check_source` input
+and its sentence only while the switch is on. While it is off, the tool has the
+same text and input as before, and its input check refuses `check_source`.
 
 Until #2878 this create was refused with `event_triggers_not_implemented`
 (#2325) and pre-existing `active` event rows were parked by a startup

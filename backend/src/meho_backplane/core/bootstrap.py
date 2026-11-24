@@ -5,8 +5,10 @@
 
 The chart runs ``python -m meho_backplane.core.bootstrap <stage>`` after every
 install and every upgrade (``deploy/charts/meho/templates/core-bootstrap-job.yaml``).
-The one stage today is ``keycloak``, the realm stage of #4043
-(:mod:`meho_backplane.core.keycloak`). Exit code ``0`` on success, ``1`` on
+The stages are ``keycloak``, the realm stage of #4043
+(:mod:`meho_backplane.core.keycloak`), and ``keycloak-role-check``, the check
+before an upgrade that ``meho-admin`` has ``manage-realm``
+(:mod:`meho_backplane.core.keycloak_role_check`, #6336). Exit code ``0`` on success, ``1`` on
 any failure with one sentence on stderr as ``core_bootstrap_failed: <sentence>``,
 ``2`` for a wrong command line. See docs/codebase/core-bootstrap.md.
 """
@@ -17,12 +19,15 @@ import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-from meho_backplane.core import keycloak
+from meho_backplane.core import keycloak, keycloak_role_check
 from meho_backplane.core.keycloak import RealmStageError
 
 __all__ = ["STAGES", "main"]
 
-STAGES: Mapping[str, Callable[[], Awaitable[None]]] = {"keycloak": keycloak.run}
+STAGES: Mapping[str, Callable[[], Awaitable[None]]] = {
+    "keycloak": keycloak.run,
+    "keycloak-role-check": keycloak_role_check.run,
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

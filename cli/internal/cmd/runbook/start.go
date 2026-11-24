@@ -265,7 +265,7 @@ func postStartRun(
 // the first line; `--json` callers parse the JSON envelope.
 func renderStartHeader(w io.Writer, r *startResponseView) {
 	fmt.Fprintf(w, "Run ID:      %s\n", r.RunID)
-	fmt.Fprintf(w, "Template:    %s@%d\n", r.TemplateSlug, r.TemplateVersion)
+	fmt.Fprintf(w, "Template:    %s@%d\n", output.SafeText(r.TemplateSlug), r.TemplateVersion)
 	fmt.Fprintln(w)
 }
 
@@ -421,38 +421,37 @@ func decodeNextStepResponse(body []byte) (*startResponseView, *runCompletedView,
 //
 //	Step n/total: <title>  (id: <step.id>)
 //	─────────────────────────────────────────
-//	<body — verbatim, substitutions already applied>
+//	<body — substitutions already applied, control characters escaped>
 //	─────────────────────────────────────────
 //	Verify type: <verify.type>
 //	[Prompt: ...]  // confirm
 //	[Will dispatch: <op_id>]  // operation_call
 func renderCurrentStep(w io.Writer, r *startResponseView) {
 	fmt.Fprintf(w, "Step %d/%d: %s  (id: %s)\n",
-		r.Position.N, r.Position.Total, r.CurrentStep.Title, r.CurrentStep.ID)
+		r.Position.N, r.Position.Total, output.SafeText(r.CurrentStep.Title), output.SafeText(r.CurrentStep.ID))
 	const rule = "─────────────────────────────────────────────"
 	fmt.Fprintln(w, rule)
-	for _, line := range strings.Split(strings.TrimRight(r.CurrentStep.Body, "\n"), "\n") {
-		fmt.Fprintln(w, line)
-	}
+	body := strings.ReplaceAll(strings.TrimRight(r.CurrentStep.Body, "\r\n"), "\r\n", "\n")
+	fmt.Fprintln(w, output.SafeLines(body))
 	fmt.Fprintln(w, rule)
 	if r.CurrentStep.Type == "operation_call" && r.CurrentStep.OpID != nil {
-		fmt.Fprintf(w, "Step kind:   operation_call (op_id: %s)\n", *r.CurrentStep.OpID)
+		fmt.Fprintf(w, "Step kind:   operation_call (op_id: %s)\n", output.SafeText(*r.CurrentStep.OpID))
 	} else {
-		fmt.Fprintf(w, "Step kind:   %s\n", r.CurrentStep.Type)
+		fmt.Fprintf(w, "Step kind:   %s\n", output.SafeText(r.CurrentStep.Type))
 	}
 	if r.CurrentStep.Verify == nil {
 		return
 	}
-	fmt.Fprintf(w, "Verify type: %s\n", r.CurrentStep.Verify.Type)
+	fmt.Fprintf(w, "Verify type: %s\n", output.SafeText(r.CurrentStep.Verify.Type))
 	switch r.CurrentStep.Verify.Type {
 	case "confirm":
 		if r.CurrentStep.Verify.Prompt != nil && *r.CurrentStep.Verify.Prompt != "" {
-			fmt.Fprintf(w, "  Prompt: %s\n", *r.CurrentStep.Verify.Prompt)
+			fmt.Fprintf(w, "  Prompt: %s\n", output.SafeText(*r.CurrentStep.Verify.Prompt))
 		}
 		fmt.Fprintln(w, "  Next: `meho runbook next "+r.RunID+" --verify-response yes|no|escalate`")
 	case "operation_call":
 		if r.CurrentStep.Verify.OpID != nil {
-			fmt.Fprintf(w, "  Will dispatch op_id: %s\n", *r.CurrentStep.Verify.OpID)
+			fmt.Fprintf(w, "  Will dispatch op_id: %s\n", output.SafeText(*r.CurrentStep.Verify.OpID))
 		}
 		fmt.Fprintln(w, "  Next: `meho runbook next "+r.RunID+"` (substrate dispatches the verify call)")
 	}

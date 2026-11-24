@@ -343,8 +343,9 @@ From the form-2 download: `install.sh --from-disk`,
   (see step 3 and `banner.sh` above). The import by hand (#4815) checks
   the rest of the real path: the console questions, `ovftool` and the
   boot menu.
-- **No first-start list yet.** `meho status --first-start` comes with
-  #4042, inside `install.sh`. The banner shows no list until then.
+- **No first-start list on the banner.** MEHO shows the list only after a
+  login (`meho status --first-start` or `/ui/first-start`), so the banner
+  and `install.sh` do not show it.
 - **`meho-host ssh-key add` does not exist yet.** After a console setup
   with an empty SSH key, the admin writes `~/.ssh/authorized_keys` by hand.
 - **An OVF environment with empty fields** gets the wizard's checks and

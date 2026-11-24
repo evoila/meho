@@ -137,6 +137,13 @@ See `docs/codebase/audit_query.md` § *Loose rows: the standing check*.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
+   A `safe` read whose call waits for a person on every call
+   (`call_always_waits` in `meho_backplane.op_classes`, for example a
+   `proxmox.api.get` of a file inside a guest) is refused too: 422
+   `sensor_requires_safe_operation` at create and edit
+   (`SensorRequiresNoPersonError`) and `unknown`
+   (`reason: op_waits_for_person`) at dispatch, so a tick never adds an
+   approval request.
 5. **Connector fit check (#5858)**: when the body names a target, the
    service looks it up in the Sensor's tenant and checks the connector
    against the target's product and version (see **Connector fit** below).
@@ -168,10 +175,17 @@ accepted call, and commits `last_state`/`state_since` through the
   `ok` is confirmed too — deliberately unlike Nagios' immediate hard
   recovery, because the observed flap's second nuisance mail was a
   flapping all-clear); `unknown` participates like any state.
+- A new Sensor starts as `unknown` with no `state_since`. When its first
+  result is `unknown` too, the state does not change, but `state_since` is
+  set to the Sensor's `created_at`: the `unknown` has held since then. So
+  a Sensor that has a `state_since` always has a confirmed state. A
+  `for_seconds` hold also counts from `created_at`. Such a Sensor alerts
+  as `degraded` once `created_at` plus `for_seconds` has passed, so an
+  old Sensor alerts at once and is not held again after an upgrade.
 
-The gate lives in the repository function — not the runner task — so
-runner-local and satellite-gateway batch-posted results are confirmed
-identically. Returns `True` iff the *committed* state changed. A
+The gate lives in the repository function — not the runner task. Only
+the central check loop calls it today; results from a remote runner are
+stored apart and are not counted (not built yet). Returns `True` iff the *committed* state changed. A
 monotonicity guard ignores a result whose `evaluated_at` is not strictly
 newer than the row's last (a stale / reordered / duplicate persist),
 leaving the projection untouched. Downstream, `state_since` marks the
@@ -209,6 +223,10 @@ probe that changes the target's version shows in the next list.
 - The match is `connectors.resolver.connector_serves_target`: the
   resolver's own candidate filter (product equal, version inside the
   connector's `supported_version_range`). No second version check exists.
+- The connector also fits when the resolver picks a subclass of its class
+  for the target. The subclass runs the same operations, as the dispatcher
+  does (for example a Sensor on `vault-1.x` and an OpenBao 2.x target,
+  served by `OpenBaoConnector`).
 - The connector named in the warning is the one `resolve_connector_or_label`
   picks for the target, when it is another connector. The resolver returns
   a class, and a class can also be registered as a fallback that accepts
@@ -360,10 +378,65 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
 `results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
 `meho_sensor_results` MCP tool, and `meho sensor results <id>`. REST and
 the CLI also carry **edit** (`PATCH /api/v1/sensors/{id}`,
-`meho sensor edit <id>`; see **Edit** below). There is **no** pause /
-resume path — `status` is server-initialized to `active` at create
-(clients cannot supply it; a body carrying `status` is a 422) and
-transitions to `paused` only via #2505's runner parking.
+`meho sensor edit <id>`; see **Edit** below). **Pause and resume** are on
+all three surfaces (see **Pause and resume** below). A client cannot supply
+`status` at create (a body carrying it is a 422).
+
+**Pause and resume** (`PATCH /api/v1/sensors/{id}` with `{"status":
+"paused"}` or `{"status": "active"}`, `meho sensor pause <id>` /
+`meho sensor resume <id>`, MCP `meho_sensor_pause` / `meho_sensor_resume`,
+all `tenant_admin`; code in `checks/sensor_pause.py`). A paused Sensor is
+not claimed by the runner, so it makes no call to its target. The row, its
+`sensor_results` history and its Dashboard memberships stay.
+
+- `status` is sent alone. Mixed with other fields, it is a 422.
+- Pause sets `status_reason='paused_by_operator'`. Resume sets
+  `status='active'`, clears the reason, sets `auth_failure_count` to 0 and
+  makes the Sensor due at once.
+- Both are safe to send twice: a Sensor already in the asked status is not
+  written again.
+- The audit row (`op_id=sensor.edit` for REST, `sensor.pause` /
+  `sensor.resume` for MCP) carries the status before and after.
+- An edit that does not name `status` keeps a paused Sensor paused. Only a
+  Sensor the runner parked for a broken cadence (`invalid_cadence:*`)
+  becomes `active` again. A Dashboard file import that changes the Sensor
+  follows the same rule.
+
+**Run once now** (`POST /api/v1/sensors/{id}/run`, `meho sensor run <id>`,
+`tenant_admin`, op id `sensor.run`; code in `checks/sensor_run.py`). The
+route does not run the operation. It calls `accelerate_sensor_next_fire`
+with `not_later_than=now`, so the runner claims the Sensor at its next tick
+and runs it as on its schedule. It answers 202 with the Sensor id and its
+`next_fire_at`. A paused Sensor is 409 `sensor_paused`; an unknown id or
+the id of another tenant is 404. A Sensor that is already due keeps its due
+time, so the call is safe to send twice. There is no MCP tool for it.
+
+**Pause after refused logins** (`checks/auth_park.py`). When the credential
+of a target is no longer valid, every run starts a new login that fails.
+So the runner counts
+the runs in a row where the dispatcher answered `connector_auth_failed`
+(the run's evidence then carries `error_code`). The count is the column
+`sensor.auth_failure_count` (migration `0164`). It reaches
+`SENSOR_AUTH_FAILURE_PARK_THRESHOLD` (default 3): the runner sets
+`status='paused'` with `status_reason='auth_failed:ConnectorAuthError'` and
+stops calling the target. Only a run whose call to the target succeeded
+sets the count back to 0; a timeout or another failed call leaves it as it
+is. The count,
+the pause and the result commit in one transaction. After the commit, the
+runner mails a warning (reason `target_credential_stale`,
+`checks/park_notify.py`) to the `notify_email` of every Dashboard that holds
+the Sensor. The mail uses the checks mail path: the recipient allowlist, the
+`last_mail_*` columns of the Dashboard and the alert-mail audit row (see
+`checks-notifications.md`). It does not depend on `CHECKS_AGENT_EVENTS`.
+With `CHECKS_AGENT_EVENTS` on, the pause also writes a `check.sensor.parked`
+event (same reason, `checks/events.py`) that an event trigger can match. A
+resume re-arms the Sensor: if the credential is still stale, it is paused
+again after the same number of refused logins.
+
+A claimed evaluation can wait for a free slot (at most 16 run at once). Right
+before it calls the target, it reads the Sensor's status again. A Sensor that
+was paused or deleted in the meantime is not run, and no result is written
+(log event `sensor_evaluation_skipped_not_active`).
 
 **Edit** (`PATCH /api/v1/sensors/{id}` → `checks/sensor_edit.edit_sensor`)
 changes a Sensor in place, so its id, its `sensor_results` history and its
@@ -393,7 +466,13 @@ Dashboard memberships stay:
    values.
 
 `identity_sub`, `target`, `for_seconds` and the retry knobs are not
-editable.
+editable. When an edit changes `connector_id`, `op_id`, `params` or
+`assertion`, and `identity_sub` is another person (not the editor, not
+`__sensor__`), MEHO sets `identity_sub` to `__sensor__` and adds the change
+to `before` / `after`. So a Sensor never runs as a person who did not choose
+its operation. The rule is one function,
+`checks/sensor_edit.identity_after_change`; the Dashboard file import uses it
+too (see "Export and import as a file").
 
 A Dashboard has the same edit (`PATCH /api/v1/checks/dashboards/{id}` →
 `checks/dashboard_edit.edit_dashboard`, `meho dashboard edit <id>`):
@@ -418,9 +497,9 @@ and who. Code: `checks/acknowledgement.py`, table
   `SensorAcknowledgementCreate`: `expires_at` (required, with a time
   zone), `reason` (`accepted_risk` / `fix_planned` / `false_alarm`),
   `note` (1..500 characters). Gate `require_approvals_access` (role
-  `operator` or higher, or the `approver` claim, so a `read_only`
-  approver can acknowledge) and `require_human_principal`: agent,
-  service and runner tokens get 403, also with the `approver` claim.
+  `operator` or higher, or the `approver` flag, which MEHO keeps in the
+  code and no role gives today) and `require_human_principal`: agent,
+  service and runner tokens get 403, also with the `approver` flag.
   No MCP tool. Refusals: no or naive `expires_at` (422 at the body), an
   end time in the past or more than 90 days away (422
   `sensor_ack_invalid_end_time`), a green or never-checked Sensor (422
@@ -483,7 +562,14 @@ A Dashboard and its Sensors can move to another site as one JSON file
 - Then, in one transaction with the shared connector-usage lock, Sensors and
   the Dashboard are matched by name in the tenant. A missing one is created,
   a different one is updated (like an edit: due at once, the soft-state
-  window cleared), an equal one is not written. The Dashboard's members
+  window cleared; a Sensor paused by an operator or after refused logins
+  stays paused, only one paused for a broken cadence becomes `active`), an
+  equal one is not written. An update that changes the Sensor's
+  `connector_id`, `op_id`, `target`, `params` or `assertion` follows the
+  identity rule of an edit: when the Sensor runs as another person (not the
+  importer, not `__sensor__`), its `identity_sub` becomes `__sensor__`. The
+  Sensor's entry in the result then has `identity_sub_before` and
+  `identity_sub_after`. The Dashboard's members
   become the Sensors of the file; a member that is not in the file leaves
   the Dashboard but is not deleted. The Dashboard's mail address stays. So
   the same file imported twice changes nothing the second time
@@ -493,7 +579,9 @@ A Dashboard and its Sensors can move to another site as one JSON file
   left) and writes nothing; the request counts as a preview for the audit.
 - The audit row (`op_id=dashboard.import`) carries the Dashboard name and
   id, `dry_run`, the `target_map` and what happened to each Sensor and to
-  the members. It carries no params.
+  the members, and under `identity_sub` the before and after value of each
+  Sensor whose identity the import set to `__sensor__`. It carries no
+  params.
 
 ## Dependencies
 
@@ -525,6 +613,17 @@ A Dashboard and its Sensors can move to another site as one JSON file
   `unknown` forever. That is the expected shape on a Vault deploy; on a
   `credentialBackend=gsm` deploy using per-operator WIF it is the failure
   mode `checkRunner.*` exists to fix (see `docs/deploying.md` § GSM).
+- **A Sensor with no login on an SSH `about` read says "no login".** With
+  no check-runner login, the call has no token and cannot read the
+  target's secret. The `about` read of each SSH connector (`linux`,
+  `bind9`, `hyperv`, `msad`, `pfsense`, `rke2`, `windows_dns`, `winsrv`,
+  `wsfc`) then fails with `ConnectorLoginRequiredError`, and the Sensor
+  reads `unknown` / `reason: dispatch_not_ok` with
+  `dispatch_error: connector_error: ConnectorLoginRequiredError`. A real
+  network failure or a failed sign-in is still
+  `ConnectorUnreachableError`. The probe route is unchanged: it answers
+  `reachable=false` either way. The fix for the Sensor is to give the
+  check runner a login (see above).
 - **A connector that refuses to execute must fail the dispatch, not
   return a reading.** The runner synthesizes only `unknown`, so a
   connector that answers `status="ok"` with a plausible-looking payload
@@ -553,9 +652,12 @@ A Dashboard and its Sensors can move to another site as one JSON file
   sessions (a TOCTOU window); acceptable because the runner re-asserts the
   safe-tier floor at dispatch, so a race that lands a non-safe
   descriptor records `unknown` rather than executing.
-- **The `identity_sub` ownership guard (#2699) is create-time only.** The
-  edit route cannot change `identity_sub`, so it covers every new row, but
-  any `sensor` row
+- **The `identity_sub` ownership guard (#2699) is create-time only.** No
+  route sets `identity_sub` to a person: a create takes only `__sensor__`
+  or the creator, a Dashboard file import creates with `__sensor__`, and
+  an edit or an import that changes what a Sensor runs sets another
+  person's identity to `__sensor__` (`identity_after_change`). So it covers
+  every new row and every changed row, but any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps
   dispatching (and audit-attributing) under it — no data migration
   normalises historical rows. Deployments that ran the pre-guard build

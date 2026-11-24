@@ -222,7 +222,7 @@ one transaction):
 - `list_runs(session, *, tenant_id, work_ref=None, status=None,
   agent_definition_id=None, limit=100, offset=0) -> list[AgentRun]` — the
   agent-run list read substrate (work_ref I3-T2 #1662), newest-first,
-  tenant-isolated. `work_ref` narrows to one exact change ticket
+  tenant-isolated. `work_ref` narrows to one change ticket (whole id)
   (composite `(tenant_id, work_ref)` index); `status` narrows to one
   lifecycle state; `agent_definition_id` narrows to runs produced by one
   agent definition (the name→id resolution lives at the caller — #2472);
@@ -259,6 +259,11 @@ one transaction):
   operator-authorized cancellation path. Requires at least
   `TenantRole.OPERATOR` (cancelling in-flight work is a control action,
   not a read); a `read_only` operator gets `UnauthorizedCancellationError`.
+  Only the run's owner (`identity_sub`) or a person who is an admin in the
+  tenant (the `tenant_admin` role or a platform admin)
+  may stop it (`auth.operator.may_stop_run`); anyone else gets
+  `RunNotOwnedCancellationError` (403 with the rule in the detail), so an
+  agent or service login stops only its own runs.
   Cancelling an already-terminal run surfaces as `IllegalTransitionError`
   (not a silent no-op). The function records the **durable intent**
   (`status='cancelled'` + `ended_at`). `AgentInvoker.cancel` then
@@ -288,6 +293,23 @@ one transaction):
   initial `create_run` so the run never executes without a snapshotted
   policy.
 
+## Saved events
+
+A run that MEHO starts saves each `turn`, `tool_call`, `tool_result` and
+its `final` answer (or `error`) in the session store while it runs
+(`docs/codebase/session-store.md`, "Hosted agent runs"):
+
+- `_create_run_row` adds the run's session record in the same transaction
+  as the run row.
+- The background run passes `on_event` to `PydanticAgentRun.start`; the
+  loop sends each node's events and the `final` event to it. The invoker
+  saves the `error` event of a failed run. The inline stream
+  (`stream_events`) saves each event before it yields it. A refused run
+  (no input, a runbook it cannot run) saves its `error` event.
+- `succeed_run`, `fail_run` and `cancel_run` end the session in the same
+  transaction as the end status (`_end` in `operations/agent_run.py`). A
+  session with no saved final event becomes `unfinished`.
+
 ## In-flight reaper (T4 #825)
 
 `backend/src/meho_backplane/agent/reaper.py` owns the *reclaim* half of
@@ -300,10 +322,11 @@ leases on a fixed cadence
 per-run `in_flight_policy`:
 
 - **`fail_into_audit`** — the conservative default. Transition the run
-  to `failed` with the stable `AGENT_RUN_REAPER_INTERRUPTION_REASON`
-  string, plus an audit row at path
+  to `failed` (through `fail_run`) with the stable
+  `AGENT_RUN_REAPER_INTERRUPTION_REASON` string, plus an audit row at path
   `internal/agent-run/reaper/fail-into-audit`. The next trigger tick
-  fires a fresh run.
+  fires a fresh run. The run's saved events stay, and its session shows
+  `unfinished` (see "Saved events" below).
 - **`resume`** — `release_lease` so the next dispatcher sweep
   re-claims; status stays `running` (the row's current state IS the
   resume point), plus an audit row at path

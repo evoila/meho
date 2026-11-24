@@ -21,16 +21,15 @@ the way the public docs say accepts both logins:
 5. Check the token through the backplane's own JWT check, and check that
    ``mcp:admin`` is in the session's scopes only when it was asked for.
 
-#4590 adds the login role groups. ``bootstrap-clients`` creates five
-groups (MEHO-Readers, MEHO-Operators, MEHO-SA-Operators, MEHO-Admins,
-MEHO-Approvers). Each group carries ``tenant_id`` and ``tenant_role`` as
-group attributes, and MEHO-Approvers also carries ``approver=true``. The
+#4590 adds the login role groups. ``bootstrap-clients`` creates three
+groups (MEHO-Readers, MEHO-Operators, MEHO-Admins). Each group carries
+``tenant_id`` and ``tenant_role`` as group attributes. The
 stock User Attribute mapper reads them into the token. The tests below
 prove, against a real Keycloak:
 
 - a person in each group gets that group's tenant and role in a token
-  from ``meho-cli`` and from a real ``meho-mcp`` login; only the
-  MEHO-Approvers person gets ``approver``;
+  from ``meho-cli`` and from a real ``meho-mcp`` login; no person gets
+  ``approver``;
 - a person in no group gets no ``tenant_id``, and MEHO answers
   ``401 missing_tenant_claim``;
 - on a realm made by the older command (fixed-value ``tenant-id`` /
@@ -40,7 +39,7 @@ prove, against a real Keycloak:
 For several tenants (docs/decisions/2026-10-28-several-tenants-per-person.md)
 the role groups also carry ``meho_tenant``, the ``meho-tenants`` mapper
 lists them in the ``meho_tenants`` claim, and ``--add-tenant`` makes the
-five groups of one more tenant. The tests prove:
+three groups of one more tenant. The tests prove:
 
 - a person in ``MEHO-Readers`` and ``MEHO-lab-b-Operators`` gets both
   tenants in ``meho_tenants``;
@@ -102,13 +101,11 @@ _LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 # last test in this file checks that.
 _HTTP_TIMEOUT = httpx.Timeout(60.0)
 
-# The five role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The three role groups and what a member must get (docs/decisions/login-role-groups.md).
 _ROLE_GROUPS = {
     "MEHO-Readers": ("read_only", False),
     "MEHO-Operators": ("operator", False),
-    "MEHO-SA-Operators": ("operator", False),
     "MEHO-Admins": ("tenant_admin", False),
-    "MEHO-Approvers": ("read_only", True),
 }
 
 
@@ -326,6 +323,17 @@ def _browser_login(
     Fails with Keycloak's own error text when the login is refused (for
     example ``invalid_scope``), so a regression reads plainly.
     """
+    return str(_browser_login_tokens(base_url, scope, username, password)["access_token"])
+
+
+def _browser_login_tokens(
+    base_url: str,
+    scope: str,
+    username: str = _OPERATOR_USER,
+    password: str = _OPERATOR_PASSWORD,
+    client_id: str = _MCP_CLIENT_ID,
+) -> dict:
+    """Run the authorization-code + PKCE login for *client_id*; return the token answer."""
     realm_url = f"{base_url}/realms/{_REALM}/protocol/openid-connect"
     verifier = secrets.token_urlsafe(48)
     challenge = (
@@ -354,7 +362,7 @@ def _browser_login(
             "GET",
             f"{realm_url}/auth",
             params={
-                "client_id": _MCP_CLIENT_ID,
+                "client_id": client_id,
                 "response_type": "code",
                 "redirect_uri": _REDIRECT_URI,
                 "scope": scope,
@@ -398,14 +406,14 @@ def _browser_login(
             f"{realm_url}/token",
             data={
                 "grant_type": "authorization_code",
-                "client_id": _MCP_CLIENT_ID,
+                "client_id": client_id,
                 "code": query["code"][0],
                 "redirect_uri": _REDIRECT_URI,
                 "code_verifier": verifier,
             },
         )
         token.raise_for_status()
-        return str(token.json()["access_token"])
+        return dict(token.json())
 
 
 @pytest.fixture(scope="module")
@@ -508,7 +516,8 @@ async def test_role_group_gives_tenant_and_role(
     operator = await _verify(fresh_keycloak, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role.value == want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
 
 
 @pytest.mark.asyncio

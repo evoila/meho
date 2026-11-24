@@ -41,6 +41,8 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vault.ops_auth_write_schemas import (
     VAULT_AUTH_USERPASS_UPDATE_PASSWORD_PARAMETER_SCHEMA,
+)
+from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -63,6 +65,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.composite import _subop_resume_cleared, composite_resume_var
 from meho_backplane.settings import get_settings
+from tests._people_behind_helpers import give_known_person
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a7")
 _PARAMS: dict[str, Any] = {
@@ -87,6 +90,12 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+async def _known_person_behind(_required_settings_env: None) -> None:
+    """The agent login has a known person behind it, who approves nothing here."""
+    await give_known_person(_operator())
 
 
 @pytest.fixture(autouse=True)
@@ -341,7 +350,8 @@ async def test_password_operation_audit_hash_does_not_depend_on_the_password(
 
     for password in ("first-test-value", "second-test-value"):
         result = await dispatch(
-            operator=_operator(),
+            # A person: an agent's credential write waits for a person.
+            operator=_operator("person-hashcheck", PrincipalKind.USER),
             connector_id="hashcheck-1.x",
             op_id=op_id,
             target=_Target(),
@@ -419,6 +429,7 @@ async def _park(params_hash: str, *, idempotency_key: str | None = None) -> Appr
             params=dict(_PARAMS),
             params_hash=params_hash,
             idempotency_key=idempotency_key,
+            proposed_effect={"safety_level": "caution"},
         )
         await session.commit()
     return request

@@ -67,7 +67,13 @@ from meho_backplane.operations._lookup import (
     installed_owner_clause,
     visible_scope_clause,
 )
+from meho_backplane.operations._search_call_hints import (
+    required_param_names,
+    search_hit_call_hints,
+)
+from meho_backplane.operations._search_typed_first import TYPED_KINDS
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.operations.switch_params import visible_parameter_schema
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 from meho_backplane.settings import get_settings
@@ -116,6 +122,13 @@ _ENABLED_FOR_TENANT_SQL = """
                  AND setting.impl_id = :impl_id
                  AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
                ELSE is_enabled END)"""
+
+# Raw-SQL twin of the ``typed_only`` filter (switch ``SEARCH_TYPED_FIRST``,
+# #4712): when set, only typed and multi-step rows are candidates. The
+# kinds are :data:`~meho_backplane.operations._search_typed_first.TYPED_KINDS`.
+_TYPED_ONLY_SQL = """
+          AND (NOT CAST(:typed_only AS boolean)
+               OR source_kind IN ('typed', 'composite'))"""
 
 #: The text the keyword (BM25) half searches while the switch is off: the
 #: summary and the original ``description``. ``endpoint_descriptor_bm25_idx``
@@ -171,6 +184,8 @@ _BM25_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+          AND (NOT CAST(:typed_only AS boolean)
+               OR source_kind IN ('typed', 'composite'))
           AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
               @@ plainto_tsquery('english', :query)
         ORDER BY score DESC
@@ -208,6 +223,8 @@ _BM25_CUSTOM_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+          AND (NOT CAST(:typed_only AS boolean)
+               OR source_kind IN ('typed', 'composite'))
           AND to_tsvector('english', coalesce(summary, '') || ' '
                 || coalesce(nullif(custom_description, ''), description, ''))
               @@ plainto_tsquery('english', :query)
@@ -243,6 +260,8 @@ _COSINE_CANDIDATES_SQL = text(
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+          AND (NOT CAST(:typed_only AS boolean)
+               OR source_kind IN ('typed', 'composite'))
         ORDER BY embedding <=> CAST(:emb AS vector)
         LIMIT :limit
         """
@@ -256,15 +275,17 @@ def _assert_scope_inlined() -> None:
     and the ``@@`` filter), so its text matches its index expression.
 
     Whitespace is normalised, then each query must contain
-    :data:`_VISIBLE_SCOPE_SQL`, :data:`_ENABLED_FOR_TENANT_SQL` and
-    :data:`_INSTALLED_OWNER_SQL` word for word. An edit to one copy that is
-    not made to the others is a loud ``AssertionError`` at import, not a
-    silent change in which rows a tenant can see.
+    :data:`_VISIBLE_SCOPE_SQL`, :data:`_ENABLED_FOR_TENANT_SQL`,
+    :data:`_INSTALLED_OWNER_SQL` and :data:`_TYPED_ONLY_SQL` word for word.
+    An edit to one copy that is not made to the others is a loud
+    ``AssertionError`` at import, not a silent change in which rows a
+    tenant can see.
     """
     for canonical_name, canonical in (
         ("_VISIBLE_SCOPE_SQL", _VISIBLE_SCOPE_SQL),
         ("_ENABLED_FOR_TENANT_SQL", _ENABLED_FOR_TENANT_SQL),
         ("_INSTALLED_OWNER_SQL", _INSTALLED_OWNER_SQL),
+        ("_TYPED_ONLY_SQL", _TYPED_ONLY_SQL),
     ):
         predicate = " ".join(canonical.split())
         for name, statement in (
@@ -333,7 +354,7 @@ async def resolve_group_id(
     row for the connector, the built-in groups otherwise (#3870). Returns
     ``None`` when the visible bucket has no match.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group resolves
+    Visibility predicate: a group resolves
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. This mirrors the ``list_operation_groups``
@@ -374,6 +395,7 @@ async def hybrid_search(
     query: str,
     limit: int,
     keep_best_meaning: bool = False,
+    typed_only: bool = False,
 ) -> list[OperationSearchHit]:
     """BM25 + cosine RRF over ``endpoint_descriptor`` rows.
 
@@ -386,6 +408,9 @@ async def hybrid_search(
     *keep_best_meaning* (switch ``SEARCH_CLEAR_LEAD``, #6014) adds the
     candidate with the best meaning score after the top *limit* hits when
     the cut left it out. The top *limit* hits and their order stay the same.
+
+    *typed_only* (switch ``SEARCH_TYPED_FIRST``, #4712) keeps only typed and
+    multi-step rows as candidates, so raw rows cannot push them out.
     """
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
@@ -399,6 +424,7 @@ async def hybrid_search(
             query=query,
             limit=limit,
             keep_best_meaning=keep_best_meaning,
+            typed_only=typed_only,
         )
     return await _hybrid_search_fallback(
         session,
@@ -410,6 +436,7 @@ async def hybrid_search(
         query=query,
         limit=limit,
         keep_best_meaning=keep_best_meaning,
+        typed_only=typed_only,
     )
 
 
@@ -424,6 +451,7 @@ async def _hybrid_search_pg(
     query: str,
     limit: int,
     keep_best_meaning: bool,
+    typed_only: bool,
 ) -> list[OperationSearchHit]:
     """PostgreSQL path -- FTS GIN + pgvector IVFFlat + RRF fusion.
 
@@ -445,6 +473,7 @@ async def _hybrid_search_pg(
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
             "installed_packages": installed,
+            "typed_only": typed_only,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -460,6 +489,7 @@ async def _hybrid_search_pg(
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
             "installed_packages": installed,
+            "typed_only": typed_only,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -482,6 +512,7 @@ async def _hybrid_search_fallback(
     query: str,
     limit: int,
     keep_best_meaning: bool,
+    typed_only: bool,
 ) -> list[OperationSearchHit]:
     """SQLite (test-only) path -- substring + Python cosine ranking.
 
@@ -511,6 +542,8 @@ async def _hybrid_search_fallback(
     )
     if group_id is not None:
         stmt = stmt.where(EndpointDescriptor.group_id == group_id)
+    if typed_only:
+        stmt = stmt.where(EndpointDescriptor.source_kind.in_(TYPED_KINDS))
     rows = (await session.execute(stmt)).scalars().all()
     if not rows:
         return []
@@ -645,8 +678,12 @@ async def _hydrate_hits(
     """Bulk-fetch full descriptor rows + group_key for the fused top-N entries.
 
     Each hit shows the risk level and approval that apply to *tenant_id*,
-    with the operator overrides (#4711) — the same values a call uses.
+    with the operator overrides (#4711) — the same values a call uses —
+    the category and labels of the classification, and, while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is on, the call hints
+    (``required_params``, ``target_required``, #4331).
     """
+    from meho_backplane.operations.dispatcher import descriptor_requires_target
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
     descriptor_ids = [e.descriptor_id for e in fused]
@@ -660,8 +697,13 @@ async def _hydrate_hits(
         descriptor.id: (descriptor, group_key) for descriptor, group_key in rows
     }
     policies = await effective_policy_map(
-        session, tenant_id=tenant_id, rows=[descriptor for descriptor, _ in by_id.values()]
+        session,
+        tenant_id=tenant_id,
+        rows=[descriptor for descriptor, _ in by_id.values()],
+        group_keys={descriptor_id: group_key for descriptor_id, (_, group_key) in by_id.items()},
     )
+    # Off: the handler of each hit is not even imported (#4331).
+    call_hints = search_hit_call_hints()
     hits: list[OperationSearchHit] = []
     for entry in fused:
         pair = by_id.get(entry.descriptor_id)
@@ -679,6 +721,14 @@ async def _hydrate_hits(
                 group_key=group_key,
                 safety_level=policy.safety_level,
                 requires_approval=policy.requires_approval,
+                category=policy.category,
+                labels=dict(policy.labels),
+                required_params=(
+                    required_param_names(visible_parameter_schema(descriptor.parameter_schema))
+                    if call_hints
+                    else []
+                ),
+                target_required=call_hints and descriptor_requires_target(descriptor),
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

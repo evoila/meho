@@ -15,17 +15,27 @@ What is true with this feature:
 - A session that is still open can be uploaded again and again. MEHO adds
   only the new bytes. The index row says whether the session is open,
   ended or unfinished.
-- Admins list, read and delete sessions with `meho sessions list`, `show`
-  and `delete`.
+- Admins list, read, download and delete sessions with `meho sessions
+  list`, `show`, `get` and `delete`. `list --since --until` shows the
+  sessions of one week (or any other time).
 - A cleanup job removes sessions older than the tenant's retention period,
   with their files.
 - Every upload, read and delete writes an audit row.
+- A hosted agent run (a run that MEHO starts itself) gets one session too.
+  It saves each of its events while it runs. See "Hosted agent runs"
+  below.
 
 S3-compatible object storage is a file store with the Amazon S3 interface,
 for example MinIO. The customer brings its own.
 
-Not in this part: the laptop uploader (`meho sessions push`), hosted agent
-runs, the link from audit rows to a session, and a review page.
+- A person uploads the sessions of a laptop with `meho sessions push`.
+  See "Laptop uploader" below.
+
+- An audit row of a call that is part of a stored session links to that
+  session, with the switch `AUDIT_SESSION_LINKS` on (off by default). See
+  "Links from audit rows" below.
+
+Not in this part: a review page.
 
 The code is in `backend/src/meho_backplane/session_store/` and
 `backend/src/meho_backplane/api/v1/sessions.py`. The CLI is in
@@ -98,8 +108,15 @@ is two separate sessions.
 | `UploadPlan` | `plan.py` | The new tail of each file, or the conflicts |
 | `CheckedPart` | `secret_check.py` | The checked bytes of one file part, and whether the check was sure |
 | `PreparedUpload` | `prepare.py` | What the worker process returns: the new file states, the conflicts, and the archive of the checked tails |
+| `AgentSessionEvent` | `models.py` | One saved event of a hosted agent run: kind, checked data, quarantine flag, `seq` |
+| `RunEventLog` | `hosted_runs.py` | Saves the events of one hosted run, in order, when they happen |
+| `AgentSessionLink` | `models.py` | One MCP session whose calls are in an uploaded session, with the newest work reference (ticket id) of those calls |
+| `AgentSessionAuditLink` | `models.py` | One audit row of a `meho` CLI command in an uploaded session |
+| `CliCall` | `tool_calls.py` | One `meho` command of a transcript: its words, and when it started and ended |
+| `StoredSessionLink` | `audit_links.py` | The stored session of one audit row: its id, and whether it is a hosted run |
 
-The tables come from migration `0152`.
+The tables come from migrations `0152`, `0162` (`agent_session_event`) and
+`0181` (`agent_session_link`).
 
 ## Control flow
 
@@ -144,6 +161,9 @@ Other uploads that run or wait at the same time go on as normal.
    - anything else: the stored part changed. `409 session_conflict` with
      the paths. Nothing is overwritten.
 
+   The session of a hosted agent run is never changed by an upload: `409
+   session_is_a_hosted_run`.
+
    MEHO stores whole lines only. While the session is `open`, a tail ends
    at the last newline of the file: the last line may still be in
    writing, so it waits for a later upload. With `state` ended or
@@ -187,9 +207,13 @@ replacement never breaks the JSON. Other lines are checked as text.
   before the new tail and knows the tail starts inside a key.
 - **Unclear content goes to quarantine.** The check is not sure when a file
   is not UTF-8 text, when a secret-like name still has a value, for
-  example `"password": "..."` in JSON, or when a private key starts or
+  example `"password": "..."` in JSON (a secret-like name is one that
+  MEHO hides in results, `redaction.md`, or a word of the check's own
+  list; a list or object under such a name counts when any text inside
+  it is a value), or when a private key starts or
   ends in another upload. Variables (`${X}`), placeholders (`<x>`), short
-  values and markers do not count.
+  values, markers and values made only of mask characters (`*`, `•`, `●`,
+  `·`) do not count.
 
 A quarantined upload is stored (with the known secrets replaced) but only a
 tenant admin can download it. An operator gets `403
@@ -202,12 +226,42 @@ upload as in quarantine.
   with filters `project` and `state`. The answer is
   `{items, next_cursor}`; follow `next_cursor` to read every page.
   `meho sessions list --all` does that.
+- The time filter: `since` and `until` (ISO 8601 with a time zone; a
+  time without one is `422 since_needs_time_zone` or
+  `until_needs_time_zone`, and `since` after `until` is
+  `422 since_after_until`). A session matches when its last upload is at
+  or after `since` and it started before `until`. A session without a
+  start time counts from its first upload. So a session that started
+  before the week and got an upload in it is part of the week.
+  `meho sessions list --since <time> --until <time>` sends both.
 - `GET /api/v1/sessions/{session_id}` returns the index row, the file
   hashes and every upload.
 - `GET /api/v1/sessions/{session_id}/uploads/{seq}` returns the stored
   archive of one upload. Put the tails of all uploads together in `seq`
   order to get the whole (checked) files; each upload row says where its
   tail starts.
+- `meho sessions get <session-id> <folder>` does that
+  (`cli/internal/cmd/sessions/get.go`, `assemble.go`):
+  1. It reads the session (`show`), then downloads every upload in `seq`
+     order. Each download writes its own audit row on the server.
+  2. It checks each archive: the hash must match the upload row, and the
+     archive must hold exactly the files the row names. Like the server,
+     it refuses a link or device, a path with `..`, a leading `/`, a
+     backslash or a control character, and a path that comes twice.
+  3. It joins the tails of each file. The `offset` and `added` of a row
+     count the uploaded bytes, before the secret check, so they only
+     prove that no tail is missing: each tail must start where the last
+     one ended. The checked tails are joined as they are.
+  4. Only when every check passed, it writes the files under
+     `<folder>/<session-id>/`, with the paths of the archive. The writes
+     go through `os.Root`, so no write leaves that folder.
+
+  A quarantined upload that the caller may not open (`403
+  session_upload_quarantined`) is skipped, and the command says so. A
+  file that has a part in a skipped upload is written only up to that
+  part and is marked incomplete; when its first part is skipped, it is
+  not written. `--json` prints each file with `bytes`, `written`,
+  `complete` and `missing_uploads`, and the skipped uploads.
 - `DELETE /api/v1/sessions/{session_id}` locks the session row (an upload
   locks it too), deletes the files, then the rows. So an upload at the same
   time ends before the files are listed, or waits until the rows are gone.
@@ -237,6 +291,248 @@ When the store fails, the rows stay and the next run tries again. One run
 removes at most 500 sessions. The job does nothing while the store is not
 configured.
 
+## Laptop uploader (`meho sessions push`)
+
+The code is in `cli/internal/cmd/sessions/push.go`, `outbox.go` and
+`secretcheck.go`. The operator guide `docs-site/guides/agent-sessions.md`
+shows the settings, the outbox layout and a Claude Code hook that fills
+the outbox.
+
+1. **Read the outbox.** One folder per session:
+   `<session-id>/<session-id>.jsonl` and the folder `<session-id>/`.
+   The empty file `meho-ended` says the session ended; without it, the
+   state is `open`. The empty file `meho-send` is a mark by hand.
+2. **Allowlist.** The project folder is the first `cwd` in the
+   transcript. A session is sent only when that folder is in `projects`
+   of `sessions.json` (exact match, no sub-folders), or when it has the
+   hand mark. The project name sent to MEHO is the folder's last part.
+3. **Whole lines.** While a session is open, each file is cut after its
+   last newline, like the server does.
+4. **Receipt.** `meho-receipt.json` in the session folder holds, per
+   file, the bytes sent (`offset`) and their SHA-256 hash, the state,
+   the backplane URL, the tenant ID and MEHO's answer. Before it compares
+   receipts, `push` asks `GET /api/v1/health/live` which tenant the login
+   works in: a login in one tenant sends no `Meho-Tenant` header, so only
+   the server knows its tenant. The same files, state, backplane and
+   tenant as the receipt: nothing is sent. A failed upload writes no receipt, so the next run tries again.
+   The receipt is written to a temporary file and renamed.
+5. **Secret check** (`secretcheck.go`). It follows the server's check:
+   known secrets are replaced, JSON lines are parsed and each string is
+   checked, and a private key over many lines becomes one marker. When
+   the check is not sure (not UTF-8, a secret-like name with a value, a
+   private key with no `END` line), the session is held back and `push`
+   names the file and the reason, never the value. Go's `regexp` has no
+   look-around, so a leading character is matched and kept instead. It
+   also finds GitHub tokens and AWS access keys. Secrets in links
+   (`urlsecret.go`) and BIND key secrets (`bindsecret.go`) are found by
+   code, ported from the server's `url_secret.py` and `bind_secret.py`.
+   The check reads one line at a time, so it then reads all text lines
+   of a file at once with the BIND finder. A BIND secret that it still
+   finds there (the value on a later line than `secret`, or a value over
+   a line break) holds the session back. So does a quoted BIND value with
+   no closing quote yet, also after comments or a line break: an open
+   session can add the rest of the value later.
+   A session that cannot be read or packed counts as failed, and `push`
+   exits non-zero, like for a failed upload.
+6. **Upload.** All checked files go in one gzip tar archive to `POST
+   /api/v1/sessions`, with the person's `meho login` token (refreshed on
+   a `401`).
+
+The laptop always sends the whole (checked) files, not only the new
+tail. The server compares them with what it stored and keeps only the
+new tail. This works because the check works line by line: a line's
+result never depends on a later line, so the checked file of a growing
+session grows only at the end
+(`TestCheckGrowsOnlyAtTheEnd` in `secretcheck_test.go`).
+
+## Hosted agent runs
+
+A hosted run is an agent run that MEHO starts itself: from the run console,
+`meho agent run`, the REST and MCP run calls, a schedule or an event. The
+code is in `session_store/hosted_runs.py` (write) and `agent/run_events.py`
+(read).
+
+- **One session per run.** The transaction that creates the run also adds
+  its `agent_session_record` row. The row's `id` and `session_id` are the
+  run id, `project` is the agent name, `app` is `meho-agent-run`, and
+  `uploaded_by_sub` is the person (or, for a scheduled run, the agent) the
+  run acts for. So the run shows in `meho sessions list`. A child run (one
+  agent starts another) gets no session of its own; its answer is in the
+  parent's tool result.
+- **Each event is saved when it happens.** The run saves each `turn`,
+  `tool_call`, `tool_result` and its `final` answer (or `error`) as one
+  `agent_session_event` row, in order (`seq` 1, 2, 3, ...). Each row
+  commits on its own, so a reader sees it at once and a crash keeps every
+  event saved before it. The background run gets the events from the
+  agent loop (`PydanticAgentRun.start(on_event=...)`); the inline stream
+  saves each event before it sends it.
+- **The same secret check as an upload.** The data of an event is written
+  as one JSON line and passes `secret_check.check_part`. Known secrets are
+  replaced with `[REDACTED:<pattern>]`. When the check is not sure, the
+  event is marked `quarantined`: it is saved with the known secrets
+  replaced, and only a tenant admin can read its data.
+- **The end.** A saved `final` or `error` event sets the state to `ended`.
+  When the run reaches its end status (`succeeded`, `failed` or
+  `cancelled`), `end_run_session` writes the outcome and the end time in
+  the same transaction (`operations/agent_run.py`, also for the reaper).
+  A session that is still `open` then becomes `unfinished`: the run
+  stopped without a final event (a crash, a restart, a lost lease or a
+  cancel). MEHO never adds an ending that the run did not make.
+- **A save and the end do not overlap.** Each save first updates the
+  session row, and only while its state is `open`. The end of the run
+  updates the same row. So the database runs them one after the other: a
+  save that started before a cancel commits before the `cancelled` status
+  does, and a save that comes after the end saves nothing. A reader that
+  sees the end status therefore sees every saved event.
+- **A tool result is saved before the next model call.** The agent loop
+  sends a `tool_result` as soon as the tool is done, before it asks the
+  model again. So the result is kept also when that model call fails or
+  the run hits its turn limit.
+- **A failed save.** When one save fails, MEHO logs
+  `hosted_run_event_not_saved` and saves no more events for that run. So
+  the saved events never have a gap. The run goes on, and its session
+  ends `unfinished` unless a final event was saved.
+
+The events are in the database, not in the object storage. So a run saves
+its events also when no object storage is set up, and the run console can
+follow a live run in order.
+
+**Reading.** `agent/run_events.read_run_events` reads the events after a
+`seq`. It reads the run status before the events, so a view that says the
+run is done holds every event. Rules:
+
+- Only the caller's tenant. Another tenant's run is "not found".
+- The data of an event follows the rule for the run's output
+  (`run_output_visible_to`): only the person who started a direct run
+  reads its event data. Others see the kind and order (`withheld`).
+- A quarantined event shows its data only to a tenant admin.
+- A read with an audit path writes one `sessions.run_events.read` audit
+  row and commits it before the answer goes out.
+
+The run detail page (`/ui/agents/runs/{handle}`) lists the events. The run
+console follows them live through `GET /ui/agents/runs/{handle}/events`
+(`docs/codebase/ui-agent-run-console.md`).
+
+## Links from audit rows
+
+An operator who looks at an audit row can open the session the call came
+from. The code is in `session_store/audit_links.py`.
+
+**The switch.** All of it is behind `AUDIT_SESSION_LINKS` (a `Settings`
+field marked agent-facing, off by default). It stays off until model tests
+show that it helps. With it off:
+
+- an upload stores no new link, and its audit row has no
+  `linked_mcp_sessions` or `linked_cli_rows` key;
+- `GET /api/v1/audit/show/{audit_id}` has no `stored_session_id` field, so
+  `meho audit show` prints no `stored_session:` line;
+- `GET /api/v1/sessions/{session_id}` has no `mcp_sessions` field;
+- the console's audit drawer has no "Stored session" part.
+
+So every answer is the same as before the switch existed. With it on, the
+two new answer fields are left out when they are empty (`exclude_if`), so
+an agent login and a row with no stored session still get the old answer.
+
+**Which rows link.** A row links when its `agent_session_id` belongs to a
+stored session:
+
+- **A hosted run.** Its tool calls write audit rows with the run id as
+  `agent_session_id` (`operations/_audit.py`). The session record of the
+  run has the same id, so no extra row is needed. A child run (one agent
+  starts another) has its own run id and no session, so its rows do not
+  link. `GET /api/v1/sessions/{run id}` lists the run itself in
+  `mcp_sessions`, with the `work_ref` (ticket id) the run was started with
+  (`agent_run.work_ref`). An upload that only names the hosted run app has
+  no run row, so it lists no run.
+- **An uploaded session.** At each upload with new bytes, the worker
+  process also finds the MCP tool calls in the checked tails of the
+  `.jsonl` files (`tool_calls.py`): content blocks
+  `{"type": "tool_use", "name": "mcp__<server>__<tool>", "input": {...}}`.
+  At most 2000 per upload. Then, in the same transaction as the upload,
+  MEHO looks for the audit row of each call: the same tenant, the same
+  person (`operator_sub` = the uploader), an MCP tool call row
+  (`method = 'MCP'`), the same tool name (`payload.op_id`) and the same
+  arguments hash (`payload.params_hash`, the keyed hash of
+  `compute_audit_params_hash`), from 5 minutes before `started_at` to 5
+  minutes after `ended_at` (or after the upload time when the session has
+  not ended). A session with no `started_at` gets no link: the time window
+  would have no start. The `agent_session_id` of a matching row is the MCP
+  session of the call. A call that rows of more than one MCP session
+  match is skipped: when the same person runs two agents at the same time
+  and both call `meho_status {}`, that call does not say which session it
+  belongs to. Each MCP session left is stored as one
+  `agent_session_link` row, with the newest `work_ref` of its audit
+  rows. Every audit row of that MCP session then links to the uploaded
+  session, also the rows of calls whose transcript line did not match.
+  The upload's audit row says how many MCP sessions were new
+  (`linked_mcp_sessions`).
+
+  The new session row is written (flushed) before its link rows, because
+  the link rows refer to it. The unit of work does not order the rows of
+  two models with no `relationship()` between them by their foreign key. `GET /api/v1/sessions/{session_id}` lists them
+  in `mcp_sessions`, and `meho sessions show` prints them.
+
+  The hash is made from the checked arguments. A secret-named value
+  (`password`, `api_key`, ...) does not change the hash, because the audit
+  hash masks those values too. A call whose other arguments the secret
+  check changed gets no match; other calls of the same MCP session still
+  link it.
+
+  Two known gaps. Matching needs the MCP tool call row (`method = 'MCP'`).
+  With `AUDIT_WRAPPER_ROWS_RETIRED=true` (off by default) MEHO writes no
+  such row for most tools, so most uploads find no MCP session. And a tool
+  that writes its own `op_id` (for example `search_docs` writes
+  `meho.docs.search`) never matches its transcript name. Other calls of
+  the same MCP session can still link it.
+- **A `meho` CLI command of an uploaded session.** Its audit rows carry the
+  `meho login` session id (payload key `session_from_client`). Many agent
+  sessions share one login, so that id does not name one of them, and
+  MEHO never links the whole login session. It links each row on its own
+  instead. The worker finds the `meho` commands in the checked tails
+  (`cli_calls_in` in `tool_calls.py`): a `Bash` tool call whose `command`
+  runs `meho`, and the `tool_result` line of its answer. The `timestamp`
+  of the two lines is when the command ran. An upload can end between the
+  two lines. The next upload then has the answer line in its new part,
+  and the worker finds the call line in the part an earlier upload stored
+  (the `earlier` argument; that line is checked for secrets again before
+  it is read). A CLI row then links when it has the same tenant and
+  person, it was written while the command ran (30 seconds of clock
+  slack), and one of these is true:
+  - its `op_id` is a word of the command (`meho call k8s pods.list`);
+  - its command path is a path of the command. The CLI sends the path of
+    the running command in the `Meho-Command` header (`vmware vm list`,
+    no arguments or flags). With the switch on, the audit middleware
+    stores it on the rows of a CLI login session (`payload.cli_command`,
+    in `_mark_client_session` of `audit_cutover.py`). The worker takes
+    the paths of a command line from the words after each `meho` word
+    that are not flags (`CliCall.paths`). A global flag that takes a value
+    (`--work-ref CHG-1`, `--profile default`, also written `--work-ref=CHG-1`)
+    is skipped with its value. So `meho vmware vm list`, whose
+    `op_id` is `GET:/vcenter/vm`, links too.
+ Each such
+  row id is stored as one `agent_session_audit_link` row. The upload's
+  audit row counts the new ones (`linked_cli_rows`). A row that two stored
+  sessions claim (two conversations of one login ran the same operation
+  at the same time) links to neither.
+
+**Who sees the link.** Only a person with the `read` right of the store
+(`may_read_sessions`: `operator` and up, not an agent, service or runner
+login). For anyone else MEHO does not look the session up, so the answer is
+the same as for a row with no stored session.
+
+**Where it shows.**
+
+- `GET /api/v1/audit/show/{audit_id}` returns `stored_session_id`
+  (`AuditEntryDetail` in `api/v1/audit_models.py`). The list, query and
+  replay answers, and the MCP audit tools, do not have the field.
+- The console's audit drawer shows a "Stored session" part. For a hosted
+  run it links to the run page (`/ui/agents/runs/{run id}`). For an
+  uploaded session it shows the session id and `meho sessions show <id>`.
+- `meho audit show` prints `stored_session: <id> (meho sessions show <id>)`.
+
+Deleting a session (by hand or by the cleanup job) deletes both kinds of
+link rows.
+
 ## Dependencies
 
 - `boto3` / `botocore` for the object storage. Path-style addressing and
@@ -254,15 +550,28 @@ configured.
   open it.
 - A changed JSON line is stored as compact JSON, so its bytes differ from
   the upload. The hashes in the index are of the uploaded bytes.
+- The cleanup job and `DELETE /api/v1/sessions/{session_id}` need the
+  object storage to be set up. Without it, the sessions of hosted runs and
+  their events stay.
 
 ## References
 
 - Code: `backend/src/meho_backplane/session_store/`,
   `backend/src/meho_backplane/api/v1/sessions.py`,
   `cli/internal/cmd/sessions/`.
-- Tests: `backend/tests/test_session_store_api.py`,
+- Tests: `cli/internal/cmd/sessions/push_test.go`,
+  `cli/internal/cmd/sessions/secretcheck_test.go`,
+  `backend/tests/test_session_store_api.py`,
+  `backend/tests/test_hosted_run_events.py`,
   `backend/tests/test_session_store_units.py`,
   `backend/tests/test_session_store_worker.py`,
-  `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`.
+  `backend/tests/test_session_store_week_read.py`,
+  `backend/tests/test_session_audit_links.py`,
+  `backend/tests/test_ui_audit_drawer.py` (the "Stored session" part),
+  `cli/internal/cmd/sessions/sessions_test.go`,
+  `cli/internal/cmd/sessions/get_test.go`,
+  `backend/tests/migrations/test_migration_0152_create_agent_session_store.py`,
+  `backend/tests/migrations/test_migration_0181_create_agent_session_link.py`.
 - boto3 S3 client: <https://docs.aws.amazon.com/boto3/latest/reference/services/s3.html>
 - botocore `Config`: <https://docs.aws.amazon.com/botocore/latest/reference/config.html>
+- Go `os.Root`: <https://pkg.go.dev/os#Root>

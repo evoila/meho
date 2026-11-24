@@ -55,6 +55,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.api.v1.runbook_runs import router as runbook_runs_router
 from meho_backplane.audit import AuditMiddleware
@@ -139,7 +140,8 @@ def _configure_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -496,6 +498,10 @@ def test_next_operation_call_match_advances_200(client: TestClient) -> None:
         )
     assert response.status_code == 200
     assert response.json()["current_step"]["id"] == "verify-cluster"
+    # The step runs as the caller of the request: its checked login goes to the service.
+    caller = fake_next.await_args.kwargs["caller"]
+    assert caller.sub == "op-operator"
+    assert caller.raw_jwt == token
 
 
 def test_next_completes_200(client: TestClient) -> None:

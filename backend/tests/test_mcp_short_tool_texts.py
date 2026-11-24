@@ -10,7 +10,8 @@ These tests check:
 * with it on, each tool with a short text is shorter, shows that text with
   its maturity label, and accepts exactly the same inputs (the schema
   without its ``description`` strings is unchanged);
-* with it on, no other tool changes;
+* with it on, no tool sends an ``outputSchema`` (#4714), and no other tool
+  changes;
 * every input path of a short text names a real input of its tool;
 * the short ``add_to_knowledge`` text still follows ``KB_SIMILAR_CHECK``;
 * the short texts hold no issue numbers or planning codes;
@@ -37,8 +38,14 @@ from meho_backplane.mcp.short_texts import (
     with_short_text,
 )
 from meho_backplane.mcp.tools import _short_tool_texts as texts
+from meho_backplane.mcp.tools._connector_classification import classification_for_settings
+from meho_backplane.mcp.tools._group_operations import group_operations_for_settings
+from meho_backplane.mcp.tools._include_raw import include_raw_for_settings
 from meho_backplane.mcp.tools._kb_similar_text import similar_check_for_settings
 from meho_backplane.mcp.tools._operation_recall import recall_schema_for_settings
+from meho_backplane.mcp.tools._preview_policy_fields import policy_schema_for_settings
+from meho_backplane.mcp.tools._search_call_hints_schema import call_hints_schema_for_settings
+from meho_backplane.mcp.tools._search_classification import classification_schema_for_settings
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -62,9 +69,15 @@ SHORT_TEXTS: dict[str, ShortText] = {
     "list_targets": texts.LIST_TARGETS_SHORT,
     "search_docs": texts.SEARCH_DOCS_SHORT,
     "meho_broadcast_watch": texts.BROADCAST_WATCH_SHORT,
+    "search_memory": texts.SEARCH_MEMORY_SHORT,
+    "list_operation_groups": texts.LIST_OPERATION_GROUPS_SHORT,
+    "meho_connector_list": texts.CONNECTOR_LIST_SHORT,
 }
 
-#: The two other switches, both off and both on.
+#: The wire keys a short text changes. The output schema is left out too.
+_SHORT_KEYS = {"description", "inputSchema", "outputSchema"}
+
+#: The other switches, all off and all on.
 _OTHER_SWITCHES = [pytest.param(False, id="other-switches-off"), pytest.param(True, id="on")]
 
 
@@ -72,6 +85,9 @@ def _set_switches(monkeypatch: pytest.MonkeyPatch, *, short: bool, others: bool)
     monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "true" if short else "false")
     monkeypatch.setenv("KB_SIMILAR_CHECK", "true" if others else "false")
     monkeypatch.setenv("TEAM_KNOWLEDGE_RECALL", "true" if others else "false")
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true" if others else "false")
+    monkeypatch.setenv("SEARCH_HIT_CALL_HINTS", "true" if others else "false")
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true" if others else "false")
     get_settings.cache_clear()
 
 
@@ -103,6 +119,16 @@ def _before(name: str) -> dict[str, Any]:
         definition = similar_check_for_settings(definition)
     if name in {"call_operation", "preview_operation"}:
         definition = recall_schema_for_settings(definition)
+    if name == "preview_operation":
+        definition = policy_schema_for_settings(definition)
+    if name == "search_operations":
+        definition = call_hints_schema_for_settings(classification_schema_for_settings(definition))
+    if name in {"meho_connector_edit_op", "meho_connector_edit_group"}:
+        definition = classification_for_settings(definition, _operator())
+    if name in {"search_operations", "list_operation_groups"}:
+        definition = include_raw_for_settings(definition)
+    if name == "list_operation_groups":
+        definition = group_operations_for_settings(definition)
     return definition.to_wire()
 
 
@@ -155,8 +181,8 @@ async def test_switch_on_each_changed_tool_is_shorter_with_the_same_inputs(
         assert _without_descriptions(tool["inputSchema"]) == _without_descriptions(
             before["inputSchema"]
         ), f"{name} accepts other inputs with the switch on"
-        assert {k: v for k, v in tool.items() if k not in {"description", "inputSchema"}} == {
-            k: v for k, v in before.items() if k not in {"description", "inputSchema"}
+        assert {k: v for k, v in tool.items() if k not in _SHORT_KEYS} == {
+            k: v for k, v in before.items() if k not in _SHORT_KEYS
         }
 
 
@@ -164,7 +190,20 @@ async def test_switch_on_changes_no_other_tool(monkeypatch: pytest.MonkeyPatch) 
     _set_switches(monkeypatch, short=True, others=False)
     listed = await _listed()
     changed = {name for name, tool in listed.items() if tool != _before(name)}
-    assert changed == set(SHORT_TEXTS)
+    with_output_schema = {name for name in listed if "outputSchema" in _before(name)}
+    assert changed == set(SHORT_TEXTS) | with_output_schema
+    for name in changed - set(SHORT_TEXTS):
+        before = _before(name)
+        before.pop("outputSchema")
+        assert listed[name] == before, f"{name} changed more than its output schema"
+
+
+async def test_switch_on_lists_no_output_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The short texts leave out every output schema (#4714); off, they stay."""
+    _set_switches(monkeypatch, short=False, others=False)
+    assert any("outputSchema" in tool for tool in (await _listed()).values())
+    _set_switches(monkeypatch, short=True, others=False)
+    assert not [name for name, tool in (await _listed()).items() if "outputSchema" in tool]
 
 
 def test_short_texts_are_for_working_surface_tools() -> None:

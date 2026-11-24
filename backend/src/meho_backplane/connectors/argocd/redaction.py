@@ -9,8 +9,7 @@ a ``password`` (HTTPS basic), an ``sshPrivateKey``, a client-cert
 ``tlsClientCertKey``, a ``bearerToken``, or a ``githubAppPrivateKey``.
 argocd-server returns these inline on the list for a broad-RBAC token, so
 a safe read would surface them verbatim -- the ArgoCD half of the
-read-side payload gap meho-internal#322 surfaced for the Envision visitor
-tenant.
+read-side payload gap that a review of the visitor tenant surfaced.
 
 This is the argocd per-connector redactor (the same shape as
 ``connectors/keycloak/redaction.py`` and ``connectors/rabbitmq/redact.py``):

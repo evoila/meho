@@ -42,7 +42,7 @@
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Agent principals</h1>
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         Registered agent identities and the Keycloak kill switch. Each
         principal is an OAuth client; revoking one blocks all new token
         grants for that identity.
@@ -60,7 +60,7 @@
           hx-swap="outerHTML"
           aria-label="Show revoked principals"
         />
-        <span class="opacity-70">Show revoked</span>
+        <span class="text-muted">Show revoked</span>
       </label>
       {% if can_write %}
       <button
@@ -80,8 +80,10 @@
 
   {# Mount point for HTMX-loaded modals (register / revoke). The empty
      wrapper persists across HTMX swaps so the modal markup always has a
-     stable target. #}
-  <div id="principals-modal-container"></div>
+     stable target. htmx does not swap an error answer by default, so the
+     before-swap hook turns the swap on for the statuses the register and
+     revoke submits answer with their modal (field error or banner). #}
+  <div id="principals-modal-container" hx-on::before-swap="if (event.detail.requestConfig && event.detail.requestConfig.verb === 'post' && [404, 409, 422, 502, 503].includes(event.detail.xhr.status)) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 
   {# Table -- the HTMX swap target for re-renders / toggle. #}
   {% include "agents/principals/_table.html" %}

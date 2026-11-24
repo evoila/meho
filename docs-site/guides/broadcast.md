@@ -71,6 +71,13 @@ meho broadcast watch --principal <jwt-sub>     # only announcements of this agen
 `--op-class` exists too, but it filters operation events, so it matches
 no announcement. Pass `--json` to get one JSON object per line.
 
+The server ends a stream when the login that opened it ends: when the
+token expires, and after one hour at the latest (`FEED_STREAM_MAX_SECONDS`,
+default 3600). The watch then renews the token and opens a new stream
+that starts after the last announcement it printed, so it misses none. A script that reads
+`GET /api/v1/feed` itself must do the same: reconnect with a fresh
+token and the `Last-Event-Id` header set to the `id` of the last event.
+
 `meho broadcast recent` and the agent tool read the stored
 announcements. The default window is the **last 30 minutes**; page
 forward with the cursor:
@@ -84,9 +91,11 @@ forward with the cursor:
 `next_cursor` round-trips back as the next call's `cursor` to read the
 next page of the same view; it is `null` at the end. `watch_checkpoint`
 is where `meho_broadcast_watch` starts so nothing after this read is missed.
-The `filter` object narrows by exact match on `principal`, `target`,
-and `work_ref` (a change-ticket reference), plus `active_only` to drop
-expired TTL claims.
+The `filter` object narrows by exact match on `principal` and `target`.
+It also narrows by `work_ref` (a change-ticket id): white space at both
+ends is ignored, and a value with control or invisible characters, or
+longer than 256 characters, is refused. `active_only` keeps only active
+claims: trusted, not completed, and with a TTL that has not run out.
 
 ## Announce intent
 

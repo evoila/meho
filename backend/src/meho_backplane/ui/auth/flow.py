@@ -110,6 +110,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -317,6 +318,7 @@ def _build_oauth_client(
     settings: Settings,
     *,
     redirect_uri: str | None = None,
+    client_id: str | None = None,
 ) -> AsyncOAuth2Client:
     """Construct a fresh :class:`AsyncOAuth2Client` bound to the BFF client.
 
@@ -343,9 +345,12 @@ def _build_oauth_client(
     ``client_secret_basic`` (the authlib default when a secret is
     supplied) -- carries the credentials in the ``Authorization``
     header. Keycloak accepts both this and ``client_secret_post``.
+
+    ``client_id`` names another client with the same secret: the
+    console's approval sign-in client (#6282). Default: ``meho-web``.
     """
     return AsyncOAuth2Client(
-        client_id=settings.ui_keycloak_client_id,
+        client_id=client_id or settings.ui_keycloak_client_id,
         client_secret=settings.ui_keycloak_client_secret,
         redirect_uri=redirect_uri,
         scope="openid profile email",
@@ -384,6 +389,9 @@ async def build_authorization_request(
     redirect_uri: str,
     return_to: str,
     fresh_sign_in: bool = False,
+    client_id: str | None = None,
+    acr_values: str | None = None,
+    session_id: uuid.UUID | None = None,
 ) -> tuple[str, str, str]:
     """Mint a PKCE-protected authorization URL and register the verifier.
 
@@ -413,6 +421,15 @@ async def build_authorization_request(
         remembered browser, and the new token's ``auth_time`` is now.
         The approvals console uses this when the person's sign-in is too
         old to approve.
+    client_id
+        Another client with the same secret; the console's approval
+        sign-in passes its own approval client (#6282). Default
+        ``meho-web``.
+    acr_values
+        The ``acr_values`` to ask for, such as ``meho-approve``.
+    session_id
+        The console session an approval sign-in belongs to; kept with
+        the pending flow for the callback.
 
     Raises
     ------
@@ -435,7 +452,11 @@ async def build_authorization_request(
     browser_binding = generate_token(48)
     resource = _resource_indicator(settings)
     extra: dict[str, str] = {"prompt": "login", "max_age": "0"} if fresh_sign_in else {}
-    async with _build_oauth_client(settings, redirect_uri=redirect_uri) as client:
+    if acr_values:
+        extra["acr_values"] = acr_values
+    async with _build_oauth_client(
+        settings, redirect_uri=redirect_uri, client_id=client_id
+    ) as client:
         url, state = client.create_authorization_url(
             endpoints.authorization_endpoint,
             code_verifier=code_verifier,
@@ -447,6 +468,7 @@ async def build_authorization_request(
         code_verifier=code_verifier,
         return_to=return_to,
         browser_binding=browser_binding,
+        session_id=session_id,
     )
     return url, state, browser_binding
 
@@ -459,14 +481,18 @@ async def _post_to_token_endpoint(
     authorization_response: str,
     state: str,
     pending: PendingFlow,
+    client_id: str | None = None,
 ) -> dict[str, Any]:
     """Make the token-endpoint POST and return the raw token dict.
 
     Extracted from :func:`exchange_code_for_tokens` to keep the public
     entry-point under the 100-line code-quality cap. Encapsulates the
-    one authlib seam that actually issues the HTTP call.
+    one authlib seam that actually issues the HTTP call. *client_id* as in
+    :func:`_build_oauth_client`.
     """
-    async with _build_oauth_client(settings, redirect_uri=redirect_uri) as client:
+    async with _build_oauth_client(
+        settings, redirect_uri=redirect_uri, client_id=client_id
+    ) as client:
         # ``state`` is passed explicitly so authlib enforces the
         # CSRF cross-check against the response, not just the stored
         # client.state attribute. Mismatch raises authlib's own

@@ -23,7 +23,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -143,7 +143,7 @@ def test_argocd_connector_subclasses_http_connector() -> None:
     assert ArgoCdConnector.product == "argocd"
     assert ArgoCdConnector.version == "3.x"
     assert ArgoCdConnector.impl_id == "argocd-api"
-    assert ArgoCdConnector.supported_version_range == ">=2.0,<4.0"
+    assert ArgoCdConnector.supported_version_range == ">=3.0,<4.0"
     assert ArgoCdConnector.priority == 1
 
 
@@ -278,8 +278,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
     assert h_one != h_two
     assert len(call_log) == 2
     assert connector._creds_cache == {
-        target_cache_key(tenant_one): {"token": f"token-{tenant_one.tenant_id}"},
-        target_cache_key(tenant_two): {"token": f"token-{tenant_two.tenant_id}"},
+        target_secret_cache_key(tenant_one): {"token": f"token-{tenant_one.tenant_id}"},
+        target_secret_cache_key(tenant_two): {"token": f"token-{tenant_two.tenant_id}"},
     }
 
     # Same-tenant re-fetch is a cache HIT — loader not re-invoked.
@@ -525,7 +525,7 @@ async def test_aclose_clears_token_cache_and_pool() -> None:
     """aclose() clears the in-memory token cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert target_cache_key(_TARGET_A) in connector._creds_cache
+    assert target_secret_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}

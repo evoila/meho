@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -133,7 +134,43 @@ def test_announce_from_a_person_returns_agent_identity_required() -> None:
     assert response.status_code == 403
     detail = response.json()["detail"]
     assert detail["code"] == "agent_identity_required"
-    assert "meho agent-principal register" in detail["remediation"]
+    assert "meho agent-principal register <name> --grants none" in detail["remediation"]
+    publish.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("field", "body"),
+    [
+        ("activity", {"activity": "working\x1b[2K\rdone\x07"}),
+        ("activity", {"activity": "line one\nline two"}),
+        ("activity", {"activity": "c1 control \x9b2J"}),
+        ("target", {"activity": "hello", "target": "\x1b]0;title\x07"}),
+        ("targets[1]", {"activity": "hello", "targets": ["cluster-a", "cluster\x7f"]}),
+        ("scope", {"activity": "hello", "scope": "tab\there"}),
+    ],
+)
+def test_announce_refuses_control_characters_in_text_fields(
+    field: str, body: dict[str, Any]
+) -> None:
+    """The four text fields of an announcement hold no control character."""
+    with (
+        patch(
+            "meho_backplane.api.v1.broadcast.resolve_agent_admission",
+            new=AsyncMock(side_effect=fake_admission),
+        ),
+        patch(
+            "meho_backplane.api.v1.broadcast.enforce_announce_rate_limit",
+            new=AsyncMock(),
+        ),
+        patch(
+            "meho_backplane.api.v1.broadcast.publish_agent_announcement",
+            new=AsyncMock(side_effect=_published),
+        ) as publish,
+    ):
+        response = _client().post("/api/v1/broadcast/announce", json=body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == f"{field}: must not contain control characters"
     publish.assert_not_awaited()
 
 

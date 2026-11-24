@@ -13,6 +13,13 @@ inside, and it needs no internet.
 Until then, use [form 2, the Linux server](form-2-linux-server.md), or
 go back to [Which install form is right for you?](which-form.md).
 
+The appliance has the same host command as form 2, `meho-host`. For
+example, when a person of a local account lost the one-time code app and
+the recovery codes, see
+[A person lost the one-time code app](form-2-linux-server.md#a-person-lost-the-one-time-code-app).
+
 When the appliance is ready, the steps after the install are the same
 as for every form. Start with
 [the setup page and the settings file](setup-page.md).
+
+**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).

@@ -44,6 +44,8 @@ is mocked (its behaviour is covered by the service + REST suites).
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -95,6 +97,7 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
@@ -213,10 +216,16 @@ def _seed_request(
     withdraw_reason: str | None = None,
     created_at: datetime | None = None,
     preview_hash: str | None = None,
+    policy_rule: dict[str, object] | None = None,
+    policy_version: int | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
-    effect = proposed_effect or {"op_id": op_id, "connector_id": connector_id}
+    effect = proposed_effect or {
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "safety_level": "caution",
+    }
     # A live pending request carries a future deadline. The decision-time
     # deadline gate (F12 / #274) refuses an overdue row on the approve path,
     # so a decision-flow test must seed a non-expired deadline; ``None`` (the
@@ -253,6 +262,8 @@ def _seed_request(
                     withdrawn_at=withdrawn_at,
                     withdraw_reason=withdraw_reason,
                     preview_hash=preview_hash,
+                    policy_rule=policy_rule,
+                    policy_version=policy_version,
                 ),
             )
         return rid
@@ -514,7 +525,7 @@ def test_detail_modal_renders_request_fields() -> None:
         tenant_id=_TENANT_A,
         op_id="vsphere.vm.create",
         connector_id="vsphere-1.x",
-        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3"},
+        proposed_effect={"op_id": "vsphere.vm.create", "host": "esx-3", "safety_level": "caution"},
     )
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
@@ -697,11 +708,27 @@ def test_detail_modal_approve_enabled_for_other_operator() -> None:
     assert "disabled" not in approve_button
 
 
+#: Words an own-change refusal never holds: it names who may approve and
+#: where to ask, and no setting or other way to approve the change.
+_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS = (
+    "APPROVAL_ALLOW_SELF_APPROVAL",
+    "agent-requester",
+    "break-glass",
+    "re-park",
+)
+
+
+def _assert_names_only_who_may_approve(text: str) -> None:
+    """Assert *text* holds none of :data:`_OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS`."""
+    for word in _OWN_CHANGE_REFUSAL_FORBIDDEN_WORDS:
+        assert word.lower() not in text.lower(), word
+
+
 def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     """When the reviewer IS the requester, Approve is disabled (Deny stays enabled).
 
-    The disabled button's aria-label names the ``APPROVAL_ALLOW_SELF_APPROVAL``
-    break-glass flag (#1401).
+    The disabled button's aria-label says who may approve and where to ask.
+    The page names no setting and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer.
@@ -719,13 +746,11 @@ def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     approve_button = body.split('data-action="approve"')[1].split("</button>")[0]
     deny_button = body.split('data-action="reject"')[1].split("</button>")[0]
     assert "disabled" in approve_button
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_button
+    assert "Ask another person in MEHO-Operators" in approve_button
+    assert "Approvals page" in approve_button
     assert "disabled" not in deny_button
-    # #2669: the disabled button carries actionable single-operator guidance,
-    # not just a greyed-out control -- both patterns named + a docs deep link
-    # so a solo operator reaches an informed choice without reading source.
-    assert "agent-requester" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "You requested this" in body
+    _assert_names_only_who_may_approve(body)
 
 
 def test_detail_modal_unknown_id_is_404() -> None:
@@ -1137,10 +1162,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     """A forged self-approve (bypassing the disabled button) 403s; the row stays pending.
 
     The disabled Approve button is UX only; the BFF re-checks the
-    requester != approver invariant (#1401) via ``approve_request``. Rather
-    than a bare 403, the re-render carries the actionable single-operator
-    guidance -- both patterns named + a docs deep link (#2669) -- so the
-    solo operator reaches an informed choice in place.
+    requester != approver invariant via ``approve_request``. The
+    re-render says who may approve and where to ask, and names no setting
+    and no other way to approve the change.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer, break-glass OFF (default).
@@ -1165,12 +1189,9 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "cannot approve your own request" in body.lower()
-    # #2669: the rejected self-approval renders the guidance, not the bare
-    # error -- both single-operator patterns + the docs link, and the
-    # break-glass flag named as the emergency lever.
-    assert "agent-requester" in body
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in body
-    assert "guides/approvals-and-break-glass" in body
+    assert "Ask another person in MEHO-Operators" in body
+    assert "Approvals page" in body
+    _assert_names_only_who_may_approve(body)
     # The row is NOT approved, and nothing was re-dispatched.
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()
@@ -1774,6 +1795,99 @@ def test_history_work_ref_filter_narrows_results() -> None:
     assert "unticketed.op" not in body
 
 
+# A ticket id that is valid only after cleaning: 256 characters with
+# spaces around it, and 130 decomposed letters (260 before NFC, 130 after).
+_PADDED_LONG_REF = "  " + "x" * 256 + "  "
+_DECOMPOSED_REF = "A\u0308" * 130
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [(_PADDED_LONG_REF, "x" * 256), (_DECOMPOSED_REF, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_history_work_ref_filter_counts_length_after_cleaning(typed: str, stored: str) -> None:
+    """The search box cleans first, then checks the length, like the REST filter."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="ticketed.op", work_ref=stored)
+    _seed_request(tenant_id=_TENANT_A, op_id="other.op", work_ref="gh:evoila/meho#99")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "work_ref": typed},
+            headers=_HX_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    assert "ticketed.op" in response.text
+    assert "other.op" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
+    ids=["invisible", "too-long"],
+)
+@pytest.mark.parametrize(
+    ("path", "headers"),
+    [("/ui/approvals/list", _HX_HEADERS), ("/ui/approvals", {})],
+    ids=["list", "page"],
+)
+def test_history_work_ref_filter_refuses_a_bad_ticket_id(
+    typed: str, message: str, path: str, headers: dict[str, str]
+) -> None:
+    """A refused value is a 422 page or list that shows the rule, not an empty list."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(path, params={"tab": "all", "work_ref": typed}, headers=headers)
+
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert "data-work-ref-refused" in response.text
+    assert message in response.text
+    assert "No  requests for" not in response.text
+
+
+def test_history_load_more_refusal_replaces_the_console() -> None:
+    """A refused value during "Load more" replaces the console, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole console, so the htmx headers send it to the console instead.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "offset": "25", "partial": "rows", "work_ref": "CHG\u200b1"},
+            headers=_HX_HEADERS,
+        )
+        searched = client.get(
+            "/ui/approvals/list",
+            params={"tab": "all", "work_ref": "CHG\u200b1"},
+            headers=_HX_HEADERS,
+        )
+
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#approvals-history"
+    assert paged.headers["HX-Reswap"] == "outerHTML"
+    assert paged.text.count('id="approvals-history"') == 1
+    assert "data-work-ref-refused" in paged.text
+    # The search box already swaps the console; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
+
+
 def test_history_push_url_preserves_work_ref_filter() -> None:
     """``hx-push-url`` carries the active ``work_ref`` so the filtered view round-trips.
 
@@ -2154,6 +2268,116 @@ def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
 
 
+@pytest.mark.parametrize("reviewed_by", [_REVIEWER_SUB, None])
+def test_expired_request_names_its_reviewer_as_the_approver(reviewed_by: str | None) -> None:
+    """An expired request names its reviewer as the approver, not as the one who ended it.
+
+    An approved request that nobody started in time ends as ``expired`` and
+    keeps ``reviewed_by``. The detail page and the list row say "approved
+    by" that person. An expired request without a reviewer names nobody.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="expired.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+        reviewed_by=reviewed_by,
+        decided_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            modal = client.get(f"/ui/approvals/{rid}")
+            row = client.get(f"/ui/approvals/{rid}/row", headers=_HX_HEADERS)
+
+    assert modal.status_code == 200, modal.text
+    assert row.status_code == 200, row.text
+    banner = re.search(r'<h4 class="font-semibold">(.*?)</h4>', modal.text, re.S)
+    assert banner is not None
+    banner_text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", banner.group(1))).split())
+    row_text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", row.text)).split())
+    if reviewed_by is None:
+        assert banner_text == "Expired"
+        assert " by " not in banner_text
+        assert "approved by" not in row_text
+    else:
+        assert banner_text == f"Expired \u00b7 approved by {reviewed_by}"
+        assert "Expired by" not in banner_text
+        assert f"approved by {reviewed_by}" in row_text
+        assert f"\u00b7 by {reviewed_by}" not in row_text
+
+
+def _shown_text(markup: str) -> str:
+    """Return the text as a browser shows it: tags go, white space folds to one space."""
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", "", markup)).split())
+
+
+@pytest.mark.parametrize(
+    ("status_value", "reviewed_by", "banner_phrase", "row_phrase"),
+    [
+        (
+            ApprovalRequestStatus.APPROVED.value,
+            _REVIEWER_SUB,
+            f"Approved by {_REVIEWER_SUB}",
+            f"\u00b7 by {_REVIEWER_SUB}",
+        ),
+        (
+            ApprovalRequestStatus.REJECTED.value,
+            _REVIEWER_SUB,
+            f"Rejected by {_REVIEWER_SUB}",
+            f"\u00b7 by {_REVIEWER_SUB}",
+        ),
+        (
+            ApprovalRequestStatus.EXPIRED.value,
+            _REVIEWER_SUB,
+            f"Expired \u00b7 approved by {_REVIEWER_SUB}",
+            f"\u00b7 approved by {_REVIEWER_SUB}",
+        ),
+        (ApprovalRequestStatus.EXPIRED.value, None, "Expired", None),
+    ],
+)
+def test_closed_request_words_keep_their_spaces(
+    status_value: str,
+    reviewed_by: str | None,
+    banner_phrase: str,
+    row_phrase: str | None,
+) -> None:
+    """The banner and the list row of a closed request read as full phrases in a browser."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="closed.op",
+        status_value=status_value,
+        reviewed_by=reviewed_by,
+        decided_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+        expires_at=datetime(2026, 6, 17, 8, 30, tzinfo=UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            modal = client.get(f"/ui/approvals/{rid}")
+            row = client.get(f"/ui/approvals/{rid}/row", headers=_HX_HEADERS)
+
+    assert modal.status_code == 200, modal.text
+    assert row.status_code == 200, row.text
+    banner = re.search(r'<h4 class="font-semibold">(.*?)</h4>', modal.text, re.S)
+    assert banner is not None
+    assert _shown_text(banner.group(1)) == banner_phrase
+    row_text = _shown_text(row.text)
+    if row_phrase is None:
+        assert "approved by" not in row_text
+        assert "· by" not in row_text
+    else:
+        assert row_phrase in row_text
+
+
 def _seed_withdrawn(op_id: str = "withdrawn.op") -> uuid.UUID:
     return _seed_request(
         tenant_id=_TENANT_A,
@@ -2228,20 +2452,50 @@ def test_detail_modal_pending_row_still_offers_decisions() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_modal(effect: dict[str, object]) -> str:
-    """Seed a pending request with *effect* and return the rendered modal HTML."""
-    _seed_tenant(_TENANT_A, "tenant-a")
-    rid = _seed_request(tenant_id=_TENANT_A, proposed_effect=effect)
+def _render_modal_of(rid: uuid.UUID) -> str:
+    """Return the rendered modal HTML of the seeded request *rid*."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
-
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
             response = client.get(f"/ui/approvals/{rid}")
-
     assert response.status_code == 200, response.text
     return response.text
+
+
+def _render_modal(effect: dict[str, object]) -> str:
+    """Seed a pending request with *effect* and return the rendered modal HTML."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    return _render_modal_of(_seed_request(tenant_id=_TENANT_A, proposed_effect=effect))
+
+
+def test_modal_shows_the_policy_rule_marked_as_shadow() -> None:
+    """The modal names the matched policy rule and says it did not decide (#6044)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        policy_rule={
+            "source": "default",
+            "rule_id": "person.token",
+            "text": "a token call waits",
+            "decided": False,
+        },
+        policy_version=3,
+    )
+    body = _render_modal_of(rid)
+    block = body.split('data-testid="approval-policy-rule"')[1].split("</div>")[0]
+    assert "default:person.token" in block
+    assert "policy version 3" in block
+    assert "a token call waits" in block
+    assert "data-policy-rule-shadow" in block
+
+
+def test_modal_shows_no_policy_rule_without_one() -> None:
+    """A request made with the switch off has no policy rule line (#6044)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    body = _render_modal_of(_seed_request(tenant_id=_TENANT_A))
+    assert 'data-testid="approval-policy-rule"' not in body
 
 
 def test_modal_bespoke_preview_renders_as_a_field_table() -> None:
@@ -2401,6 +2655,153 @@ def test_modal_write_capability_warning_renders_a_denial_alert() -> None:
     assert "may still be denied" in warning
 
 
+def test_modal_shows_the_classification() -> None:
+    """The category badge, the labels and the classification rule (#6041)."""
+    body = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": "network",
+            "labels": {"team": "net", "env": "prod"},
+            "classification_rule": "tenant:classifications[1]",
+        }
+    )
+    assert 'title="Category">network<' in body
+    block = body.split('data-testid="approval-classification"')[1].split("</dl>")[0]
+    assert "env=prod, team=net" in block
+    assert "tenant:classifications[1]" in block
+    assert "disagree" not in block
+
+
+def test_modal_names_a_classification_conflict() -> None:
+    """A null category says that two classification rules disagree."""
+    conflict = _render_modal(
+        {
+            "op_id": "switch.port.disable",
+            "connector_id": "switch-1.x",
+            "safety_level": "caution",
+            "category": None,
+            "labels": {},
+            "classification_rule": "tenant:classifications[0]",
+        }
+    )
+    assert "two classification rules disagree" in conflict
+    assert "tenant:classifications[0]" in conflict
+
+
+def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
+    from meho_backplane.operations.service_grants import CREDENTIAL_CARD_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "k8s.exec",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "credential_wait": CREDENTIAL_CARD_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-credential-wait">')[1].split("</p>")[0]
+    assert line == CREDENTIAL_CARD_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-credential-wait"' not in plain
+
+
+def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
+    """The card lists the commands next to the warning that the preview failed."""
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview_unavailable": True,
+            "preview_error": "dry run refused",
+            "run_commands": [
+                {
+                    "object": "Pod/apps/a",
+                    "container": "web",
+                    "image": "registry.example.test/web:1",
+                    "command": ["sh", "-c", "serve"],
+                    "args": ["--token", "***REDACTED***"],
+                    "exec_commands": {"livenessProbe": ["check", "--alive"]},
+                },
+                {"omitted_containers": 2, "echo_omitted": "2 more container(s) not shown"},
+            ],
+        }
+    )
+    assert "Blast radius unknown" in body
+    block = body.split('data-testid="approval-run-commands"')[1].split("</ul>")[0]
+    assert "Pod/apps/a" in block
+    assert "registry.example.test/web:1" in block
+    assert "serve" in block
+    assert "livenessProbe" in block
+    assert "--alive" in block
+    assert "REDACTED" in block
+    assert "2 more container(s) not shown" in block
+
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "k8s.delete",
+                "connector_id": "kubernetes-1.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-run-commands"' not in plain
+
+
+def test_modal_shows_no_classification_without_one() -> None:
+    """A request made with the switch off has no classification block."""
+    plain = _render_modal(
+        {"op_id": "switch.port.disable", "connector_id": "switch-1.x", "safety_level": "caution"}
+    )
+    assert 'data-testid="approval-classification"' not in plain
+    assert 'title="Category"' not in plain
+
+
+def test_modal_says_meho_could_not_build_the_preview() -> None:
+    """A request whose preview build failed says so plainly on its card."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "op_class": "config_write",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
+    )
+    assert "MEHO could not build the preview of this change." in body
+    assert "data-preview-failed" in body
+    assert "No preview was populated" not in body
+
+
+def test_modal_with_a_preview_has_no_preview_failed_notice() -> None:
+    """A request with a built preview shows no preview-failed notice."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "safety_level": "caution",
+            "preview": {"would_change": ["app/web"]},
+            "preview_populated": True,
+        }
+    )
+    assert "MEHO could not build the preview" not in body
+
+
 def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:
     """A ``preview_unavailable`` envelope renders the error string + unknown copy."""
     body = _render_modal(
@@ -2517,6 +2918,20 @@ def test_modal_pending_shows_consequence_banner_naming_safety_level() -> None:
     assert "re-file" in banner
 
 
+def test_modal_pending_says_a_second_person_is_a_second_login() -> None:
+    """A pending card tells the reader that a second person means a second login."""
+    body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
+    assert 'data-testid="approval-second-login"' in body
+    assert "A second person means a second login." in body
+
+
+def test_modal_decided_row_has_no_second_login_line() -> None:
+    """A decided card offers no decision, so it does not carry the line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    body = _render_modal_of(_seed_withdrawn())
+    assert "approval-second-login" not in body
+
+
 def test_modal_consequence_banner_is_generic_warning_when_safety_absent() -> None:
     """AC1 (absent case): with no ``safety_level`` the banner is generic warning."""
     body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
@@ -2557,7 +2972,7 @@ def test_modal_decisions_are_two_phase_armers_not_direct_posts() -> None:
 
 def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
     """AC3: the armed confirm buttons post to the existing approve/reject routes;
-    the ``/ui/approvals`` route inventory gains no new endpoint."""
+    the ``/ui/approvals`` route inventory gains no new endpoint for the confirm."""
     body, rid = _render_pending_modal()
     assert f'hx-post="/ui/approvals/{rid}/approve"' in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' in body
@@ -2577,6 +2992,8 @@ def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
         ("/ui/approvals/list", frozenset({"GET"})),
         ("/ui/approvals", frozenset({"GET"})),
         ("/ui/approvals/{request_id}", frozenset({"GET"})),
+        # The script block's page links of a long ``linux.script.run`` script.
+        ("/ui/approvals/{request_id}/script", frozenset({"GET"})),
         ("/ui/approvals/{request_id}/approve", frozenset({"POST"})),
         ("/ui/approvals/{request_id}/reject", frozenset({"POST"})),
     }
@@ -2589,7 +3006,8 @@ def test_modal_self_approval_blocks_approve_armer_and_confirm_state() -> None:
 
     approve_armer = _opening_tag(body, 'data-action="approve"')
     assert "disabled" in approve_armer
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_armer
+    assert "Approvals page" in approve_armer
+    _assert_names_only_who_may_approve(body)
     # A blocked Approve never arms: no click-to-arm handler on it, and the
     # approve confirm state is not rendered at all.
     assert "armed = 'approve'" not in body

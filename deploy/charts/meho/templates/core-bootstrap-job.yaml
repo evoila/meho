@@ -3,8 +3,8 @@
 The built-in core's `bootstrap` Job (#4043; core design §3): the realm stage
 finishes the Keycloak realm after every install and upgrade. It sets the
 client secrets from the `<release>-core-*` Secrets, adds what a newer realm
-file brings, makes the first admin and the second person (temporary
-passwords in `<release>-core-first-login`) and removes the first-start
+file brings, makes the first admin login (temporary
+password in `<release>-core-first-login`) and removes the first-start
 account. Safe to run twice. Details: docs/codebase/core-bootstrap.md.
 */}}
 {{- $bootstrapSecret := .Values.coreKeycloak.existingSecrets.bootstrap | default (printf "%s-core-keycloak-bootstrap" .Release.Name) }}
@@ -23,7 +23,9 @@ metadata:
     # successful one is removed, a failed one stays for `kubectl logs`.
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  # No `ttlSecondsAfterFinished` (#6336): a failed Job and its log stay until
+  # the next install or upgrade replaces them. Helm's own error says only
+  # "Job failed"; the log names the reason (docs-site/install/upgrades.md).
   backoffLimit: {{ .Values.migrationJob.backoffLimit }}
   template:
     metadata:

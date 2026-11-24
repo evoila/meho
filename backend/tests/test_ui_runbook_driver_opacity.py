@@ -73,6 +73,7 @@ from meho_backplane.runbooks.schemas import (
     ConfirmVerify,
     DraftTemplateRequest,
     ManualStep,
+    OperationCallVerify,
     PublishTemplateRequest,
     RunbookTemplateBody,
 )
@@ -519,6 +520,46 @@ def test_driver_page_renders_only_current_step() -> None:
     assert "verify-quorum" not in body  # step 2's id
 
 
+def test_driver_page_shows_check_params_and_escapes_html() -> None:
+    """The page shows the params of an ``operation_call`` check, with HTML escaped."""
+    body = RunbookTemplateBody(
+        title="Check procedure",
+        description="One step with an operation check.",
+        target_kind="k8s-node",
+        steps=[
+            ManualStep(
+                id="check-step",
+                title="Check the node",
+                body="Look at the node.",
+                type="manual",
+                verify=OperationCallVerify(
+                    type="operation_call",
+                    op_id="stub.node.status",
+                    params={"node_name": "<img src=x onerror=alert(1)>", "depth": 2},
+                    expect={"ready": True},
+                ),
+            ),
+        ],
+    )
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="check", body=body)
+    run_id = _start_run(tenant_id=_TENANT_A, slug="check")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/runbooks/runs/{run_id}")
+
+    assert response.status_code == 200, response.text
+    page = response.text
+    assert "stub.node.status" in page
+    assert "Params:" in page
+    assert "&#34;depth&#34;: 2" in page or '"depth": 2' in page
+    assert "<img src=x" not in page
+    assert "onerror" in page  # the text is there, escaped
+    assert "Expect:" in page
+
+
 def test_driver_page_unknown_run_returns_404() -> None:
     """A run id that does not resolve renders the 404 page (no leak)."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -701,12 +742,47 @@ def test_next_confirm_no_renders_failed_dead_end_banner() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    # Dead-end banner present; Abort still available; Advance withheld.
+    # Failed banner present; Abort and retry available; Advance withheld.
     assert "failed its verify" in body
     assert "Abort" in body
-    assert f'hx-post="/ui/runbooks/runs/{run_id}/next"' not in body
+    assert "Try this step again" in body
+    assert ">Advance</button>" not in body
     # Run stays in_progress (the step is failed, but the run is not terminal).
     assert _run_row(run_id).state == "in_progress"
+
+
+def test_retry_button_runs_the_failed_step_again() -> None:
+    """After a failed step, "Try this step again" (retry=1) advances the run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
+    run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
+
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "no"},
+            **_csrf_kwargs(token),
+        )
+        # Without retry the failed step still refuses.
+        refused = client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "yes"},
+            **_csrf_kwargs(token),
+        )
+        retried = client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "yes", "retry": "1"},
+            **_csrf_kwargs(token),
+        )
+
+    assert "failed its verify" in refused.text
+    assert retried.status_code == 200, retried.text
+    assert "step 2 of 2" in retried.text
+    assert "failed its verify" not in retried.text
 
 
 def test_next_confirm_yes_advances_to_step_two() -> None:
@@ -1020,3 +1096,29 @@ def test_route_ordering_start_before_run_id_before_slug() -> None:
     )
     dep_calls = [dep.call for dep in reassign_route.dependant.dependencies]
     assert require_ui_admin in dep_calls, "reassign route must Depend on require_ui_admin"
+
+
+def test_driver_page_reload_shows_failed_step_banner() -> None:
+    """After a step failed, a page reload shows the failed-step banner; Advance hidden."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
+    run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
+
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
+    token = mint_csrf_token(str(session_id))
+    with respx.mock(assert_all_called=False) as mock:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        client.post(
+            f"/ui/runbooks/runs/{run_id}/next",
+            data={"verify_type": "confirm", "answer": "no"},
+            **_csrf_kwargs(token),
+        )
+        reloaded = client.get(f"/ui/runbooks/runs/{run_id}")
+
+    assert reloaded.status_code == 200, reloaded.text
+    body = reloaded.text
+    assert "failed its verify" in body
+    assert "verify did not pass" in body
+    assert "Try this step again" in body
+    assert ">Advance</button>" not in body

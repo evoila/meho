@@ -175,6 +175,8 @@ def _op_context(op: ConnectorReviewOp) -> dict[str, Any]:
         "is_enabled": op.is_enabled,
         "tenant_enabled": op.tenant_enabled,
         "tags": op.tags,
+        "category": op.category,
+        "labels": op.labels,
     }
 
 

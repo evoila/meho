@@ -30,15 +30,19 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from meho_backplane.agents.grant_sets import StartingGrants
+from meho_backplane.agents.live_grants import LiveGrant
 
 __all__ = [
     "NAME_PATTERN",
     "AgentDefinitionCreate",
     "AgentDefinitionRead",
+    "AgentDefinitionSaved",
     "AgentDefinitionUpdate",
     "AgentModelTier",
     "validate_name",
@@ -136,6 +140,10 @@ class AgentDefinitionCreate(BaseModel):
     turn_budget: int = Field(ge=1, le=_MAX_TURN_BUDGET)
     output_schema: dict[str, Any] | None = None
     enabled: bool = True
+    #: The first grants of the agent ``identity_ref`` names (#6191).
+    #: Required while ``AGENT_GRANT_REQUIRED`` is not ``off`` and that agent
+    #: has no live grant yet. Not stored on the definition row.
+    starting_grants: StartingGrants | None = None
 
 
 class AgentDefinitionUpdate(BaseModel):
@@ -169,6 +177,17 @@ class AgentDefinitionUpdate(BaseModel):
     turn_budget: int | None = Field(default=None, ge=1, le=_MAX_TURN_BUDGET)
     output_schema: dict[str, Any] | None = None
     enabled: bool | None = None
+    #: The first grants of the agent a new ``identity_ref`` names (#6389).
+    #: Required while ``AGENT_GRANT_REQUIRED`` is not ``off`` and the edit
+    #: points the definition at another agent with no live grant. Only
+    #: with ``identity_ref``. Not stored on the definition row.
+    starting_grants: StartingGrants | None = None
+
+    @model_validator(mode="after")
+    def _starting_grants_need_identity_ref(self) -> Self:
+        if self.starting_grants is not None and self.identity_ref is None:
+            raise ValueError("'starting_grants' is only used together with 'identity_ref'")
+        return self
 
 
 class AgentDefinitionRead(BaseModel):
@@ -196,3 +215,20 @@ class AgentDefinitionRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+
+
+class AgentDefinitionSaved(AgentDefinitionRead):
+    """The answer of a create or an edit: the row and the live grants of its agent.
+
+    ``live_grants`` lists the grants of the agent that ``identity_ref``
+    names that are live after the save, also the ones a starting grant
+    pick just wrote. When MEHO asks for no pick because the agent already
+    has a live grant, these are the grants that say what the agent may do.
+    """
+
+    live_grants: list[LiveGrant] = Field(
+        description="The live grants of the agent that identity_ref names, after the save."
+    )
+    live_grants_truncated: bool = Field(
+        description="True when the agent has more live grants than live_grants lists."
+    )

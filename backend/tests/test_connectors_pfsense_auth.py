@@ -173,7 +173,7 @@ def test_registry_v2_class_attrs() -> None:
     assert PfSenseConnector.product == "pfsense"
     assert PfSenseConnector.version == "2.7"
     assert PfSenseConnector.impl_id == "pfsense-ssh"
-    assert PfSenseConnector.supported_version_range is None
+    assert PfSenseConnector.supported_version_range == ">=2.7,<2.10"
     assert PfSenseConnector.priority == 0
 
 
@@ -365,7 +365,7 @@ async def test_fingerprint_parses_canonical_etc_version() -> None:
 
     assert result.vendor == "netgate"
     assert result.product == "pfsense"
-    assert result.version == "2.7.2-RELEASE"
+    assert result.version == "2.7.2"
     assert result.build == "2.7.2-RELEASE (amd64)"
     assert result.reachable is True
     assert result.probe_method == "ssh: cat /etc/version"

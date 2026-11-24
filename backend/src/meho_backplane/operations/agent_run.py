@@ -71,7 +71,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import RUN_STOP_RULE, Operator, TenantRole, may_stop_run
 from meho_backplane.db.models import (
     AgentDefinition,
     AgentRun,
@@ -82,6 +82,8 @@ from meho_backplane.db.models import (
 from meho_backplane.events.outbox import publish as publish_event
 from meho_backplane.operations.addon_step_events import AddonStepEventService
 from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.session_store.hosted_runs import end_run_session
+from meho_backplane.work_ref import work_ref_filter_values
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -98,6 +100,7 @@ __all__ = [
     "AgentRunNotFoundError",
     "IllegalTransitionError",
     "LeaseLostError",
+    "RunNotOwnedCancellationError",
     "UnauthorizedCancellationError",
     "cancel_run",
     "claim_lease",
@@ -233,6 +236,23 @@ class UnauthorizedCancellationError(AgentRunError):
             f"operator {operator_sub!r} with role {role.value!r} may not cancel an agent run "
             f"(requires at least {_MIN_CANCEL_ROLE.value!r})"
         )
+
+
+class RunNotOwnedCancellationError(AgentRunError):
+    """The caller may not stop a run that another principal started.
+
+    Raised by :func:`cancel_run` when
+    :func:`~meho_backplane.auth.operator.may_stop_run` refuses: the caller
+    is not the run's owner and is not a person with the ``tenant_admin``
+    role or a platform admin in the tenant. The message is
+    :data:`~meho_backplane.auth.operator.RUN_STOP_RULE`, which the boundary
+    shows in its 403.
+    """
+
+    def __init__(self, *, operator_sub: str, role: TenantRole) -> None:
+        self.operator_sub = operator_sub
+        self.role = role
+        super().__init__(RUN_STOP_RULE)
 
 
 class LeaseLostError(AgentRunError):
@@ -387,10 +407,10 @@ async def list_runs(
         session: Open :class:`AsyncSession` (read-only; no commit).
         tenant_id: The tenant whose runs to list.
         work_ref: When supplied, narrows to runs whose ``work_ref``
-            matches this external change ticket exactly
-            (``"gh:evoila/meho#11"``). ``None`` applies no work_ref
-            filter (runs with and without a ticket are returned). An
-            empty string is a legitimate exact-match value, distinct
+            is this external change ticket, the whole id
+            (``"gh:evoila/meho#11"``; :func:`work_ref_filter_values`).
+            ``None`` applies no work_ref filter (runs with and without a
+            ticket are returned). An empty string is a value, distinct
             from ``None`` -- so the filter is applied whenever the
             argument is not ``None``.
         status: When supplied, narrows to runs in this lifecycle state.
@@ -411,7 +431,7 @@ async def list_runs(
     bounded_offset = max(0, offset)
     stmt = select(AgentRun).where(AgentRun.tenant_id == tenant_id)
     if work_ref is not None:
-        stmt = stmt.where(AgentRun.work_ref == work_ref)
+        stmt = stmt.where(AgentRun.work_ref.in_(work_ref_filter_values(work_ref)))
     if status is not None:
         stmt = stmt.where(AgentRun.status == status.value)
     if agent_definition_id is not None:
@@ -586,6 +606,17 @@ async def transition(
             },
         )
 
+    return row
+
+
+async def _end(session: AsyncSession, row: AgentRun, to_status: AgentRunStatus) -> AgentRun:
+    """Move *row* to the end state *to_status* and end its hosted-run session.
+
+    The session record (if the run has one) gets the outcome in the same
+    transaction (:func:`~meho_backplane.session_store.hosted_runs.end_run_session`).
+    """
+    await transition(session, row, to_status)
+    await end_run_session(session, run_id=row.id, outcome=to_status.value)
     return row
 
 
@@ -867,7 +898,7 @@ async def succeed_run(
         row.output_tokens = usage.output_tokens
         row.cache_read_tokens = usage.cache_read_tokens
         row.cache_write_tokens = usage.cache_write_tokens
-    return await transition(session, row, AgentRunStatus.SUCCEEDED)
+    return await _end(session, row, AgentRunStatus.SUCCEEDED)
 
 
 async def fail_run(
@@ -900,7 +931,7 @@ async def fail_run(
     row.error = error
     if cost is not None:
         row.cost = cost
-    return await transition(session, row, AgentRunStatus.FAILED)
+    return await _end(session, row, AgentRunStatus.FAILED)
 
 
 async def cancel_run(
@@ -912,7 +943,10 @@ async def cancel_run(
     """Cancel a running (or pending / awaiting-approval) run.
 
     The operator-authorized cancellation path. Loads the run by id,
-    checks the operator holds at least :data:`_MIN_CANCEL_ROLE`, then
+    checks the operator holds at least :data:`_MIN_CANCEL_ROLE` and may
+    stop this run (:func:`~meho_backplane.auth.operator.may_stop_run`: the
+    run's owner, or a person with the ``tenant_admin`` role or a platform
+    admin in the tenant), then
     transitions it to ``cancelled`` via the same :func:`transition`
     guard every other status change uses -- so a cancel against an
     already-terminal run surfaces as :class:`IllegalTransitionError`
@@ -937,6 +971,8 @@ async def cancel_run(
         AgentRunNotFoundError: No row for *run_id*.
         UnauthorizedCancellationError: The operator's role ranks below
             :data:`_MIN_CANCEL_ROLE`.
+        RunNotOwnedCancellationError: The operator may not stop a run
+            another principal started.
         IllegalTransitionError: The run is already terminal.
     """
     if _ROLE_RANK.index(operator.tenant_role) < _ROLE_RANK.index(_MIN_CANCEL_ROLE):
@@ -948,5 +984,7 @@ async def cancel_run(
     row = await session.get(AgentRun, run_id)
     if row is None:
         raise AgentRunNotFoundError(run_id)
+    if not may_stop_run(operator, row.identity_sub):
+        raise RunNotOwnedCancellationError(operator_sub=operator.sub, role=operator.tenant_role)
 
-    return await transition(session, row, AgentRunStatus.CANCELLED)
+    return await _end(session, row, AgentRunStatus.CANCELLED)

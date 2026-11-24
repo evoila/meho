@@ -398,7 +398,7 @@ async def test_default_model_factory_strips_provider_prefix(
     ``agent_default_model`` defaults to the pydantic-ai spec form
     ``anthropic:claude-sonnet-5-5``; passed raw, the ``anthropic:`` prefix
     reaches the Messages API verbatim and 404s. The factory must strip it
-    (RDC #789 N11).
+    (from a consumer report).
     """
     from pydantic_ai.models.anthropic import AnthropicModel
 

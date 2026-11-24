@@ -117,6 +117,7 @@ from meho_backplane.auth.delegation import (
     resolve_actor_sub,
 )
 from meho_backplane.auth.jwt import verify_jwt_for_audience
+from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
@@ -136,6 +137,7 @@ from meho_backplane.operations.budget_enforcement import (
     evaluate_pre_run_budget,
 )
 from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.session_store.hosted_runs import RunEventLog, add_run_session
 from meho_backplane.settings import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -857,6 +859,13 @@ class AgentInvoker:
                 ttl_seconds=get_settings().agent_run_lease_ttl_seconds,
             )
             run_id = row.id
+            add_run_session(
+                session,
+                run_id=run_id,
+                tenant_id=operator.tenant_id,
+                started_by=operator.sub,
+                agent_name=entry.name,
+            )
             await session.commit()
         return run_id, owner
 
@@ -999,6 +1008,26 @@ class AgentInvoker:
                 )
             await session.commit()
 
+    async def _record_loop_failure(
+        self,
+        run_id: uuid.UUID,
+        exc: Exception,
+        events: RunEventLog,
+        handle: AgentRunHandle | None,
+    ) -> None:
+        """Save the ``error`` event of a failed background run, then record the failure."""
+        if not isinstance(exc, AgentRunError):
+            _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
+        await events.save("error", {"error": str(exc)})
+        await _finish_despite_cancel(
+            self._finalize_run(
+                run_id,
+                output=None,
+                error=str(exc),
+                request_usages=_handle_usages(handle),
+            )
+        )
+
     async def _finalize_success(self, run_id: uuid.UUID, result: AgentRunResult) -> None:
         """Record the output of a run that succeeded and charge its calls."""
         usage = TokenUsage(
@@ -1069,11 +1098,17 @@ class AgentInvoker:
         session_token = agent_session_id_var.set(run_id)
         meta_token = agent_run_audit_meta_var.set(meta)
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         handle: AgentRunHandle | None = None
         try:
             try:
                 handle = self._runtime.start(
-                    definition, operator, inputs, run_id=run_id, model=model
+                    definition,
+                    operator,
+                    inputs,
+                    run_id=run_id,
+                    model=model,
+                    on_event=events.save_event,
                 )
                 result = await self._runtime.result(handle)
             except asyncio.CancelledError:
@@ -1084,19 +1119,8 @@ class AgentInvoker:
                 )
                 raise
             except Exception as exc:
-                if not isinstance(exc, AgentRunError):
-                    _log.warning(
-                        "agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc)
-                    )
                 heartbeat.settle()
-                await _finish_despite_cancel(
-                    self._finalize_run(
-                        run_id,
-                        output=None,
-                        error=str(exc),
-                        request_usages=_handle_usages(handle),
-                    )
-                )
+                await self._record_loop_failure(run_id, exc, events, handle)
                 return
             heartbeat.settle()
             await _finish_despite_cancel(self._finalize_success(run_id, result))
@@ -1274,6 +1298,11 @@ class AgentInvoker:
         path -- the value is unwrapped via ``.get_secret_value()`` only at
         the single :func:`get_client_credentials_token` call below.
 
+        The login id of the verified agent is noted as a machine login
+        (:func:`~meho_backplane.auth.machine_logins.note_machine_login`), the
+        same as for a REST or MCP call, so it never counts as a person behind
+        another login.
+
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
             AgentInvocationError: the authenticated client does not own the
@@ -1308,6 +1337,9 @@ class AgentInvoker:
                 f"scheduled run rejected: agent credentials for {agent_client_id!r} "
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
+        # A machine login never counts as a person behind another login.
+        async with get_sessionmaker()() as session, session.begin():
+            await note_machine_login(session, operator)
         return operator, entry
 
     async def run_scheduled(
@@ -1428,6 +1460,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1466,6 +1499,7 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        await RunEventLog(run_id, operator.tenant_id).save("error", {"error": error})
         await self._finalize_run(run_id, output=None, error=error)
         return AgentRunOutcome(
             run_id=run_id,
@@ -1660,6 +1694,10 @@ class AgentInvoker:
             AgentRunNotFoundError: no run for *run_id* in the tenant.
             run_lifecycle.UnauthorizedCancellationError: the operator's
                 role ranks below the cancel minimum.
+            run_lifecycle.RunNotOwnedCancellationError: the operator is
+                not the run's owner and not a person with the
+                ``tenant_admin`` role or a platform admin in the tenant.
+                The run goes on.
             run_lifecycle.IllegalTransitionError: the run is already
                 terminal (succeeded / failed / cancelled).
         """
@@ -1694,7 +1732,7 @@ class AgentInvoker:
 
         Reads the durable ``agent_run`` rows, tenant-isolated to the
         operator's tenant. ``work_ref`` (when not ``None``) narrows to
-        runs whose external change-ticket reference matches exactly;
+        runs of that external change ticket (the whole id);
         ``status`` (when not ``None``) narrows to one lifecycle state;
         ``agent_name`` (when not ``None``) narrows to runs produced by
         that agent definition. An ``agent_name`` that matches no
@@ -1804,13 +1842,7 @@ class AgentInvoker:
         runbook = _unexecutable_runbook_instruction(definition, inputs)
         if runbook is not None:
             outcome = await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
-            yield (
-                run_id,
-                AgentRunEvent(
-                    kind=AgentRunEventKind.ERROR,
-                    data={"error": outcome.error},
-                ),
-            )
+            yield run_id, AgentRunEvent(kind=AgentRunEventKind.ERROR, data={"error": outcome.error})
             return
 
         terminal_output: dict[str, object] | None = None
@@ -1842,6 +1874,7 @@ class AgentInvoker:
         # fresh for the stream's lifetime; cancel it once the stream
         # terminates (final/error event, client disconnect, cancel).
         heartbeat = _LeaseHeartbeat(run_id, lease_owner)
+        events = RunEventLog(run_id, operator.tenant_id)
         # Usage of the requests the run finished, kept current by the runtime,
         # so a run that ends by an error or a closed stream is still charged.
         usage_sink: list[TokenUsage] = []
@@ -1862,6 +1895,7 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 elif event.kind is AgentRunEventKind.TURN:
                     turns += 1
+                await events.save_event(event)
                 yield run_id, event
         finally:
             await heartbeat.close()

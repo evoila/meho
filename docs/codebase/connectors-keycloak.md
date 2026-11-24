@@ -37,15 +37,23 @@ only `accepted`, `refused` or `error`, so an operator can prove a password
 change worked (the new password is accepted, the old one refused) without a
 `curl` call outside MEHO.
 `keycloak.authflow.ensure_approval_flow` and the read
-`keycloak.identity_provider.list` (read surface **eleven**) set up the
-approval sign-in flow, and `keycloak.authflow.ensure_passkey_code_skip`
-changes the browser sign-in flow for passkeys. Three more safe reads show the
+`keycloak.identity_provider.list` set up the
+approval sign-in flow, `keycloak.authflow.ensure_passkey_code_skip`
+changes the browser sign-in flow for passkeys, and
+`keycloak.authflow.ensure_approval_touch` gives the console client the
+login flow with the passkey touch level. Three more safe reads show the
 login setup: `keycloak.auth_flow.step.list`, `keycloak.required_action.list`
 and `keycloak.events.config.get`. Two more reads, `keycloak.user.get` and
 `keycloak.user.sessions`, show one user's state after a logout or a password
-reset (read surface **sixteen**). In total the connector registers 39
-operations: 16 `safe` reads and 23 writes that wait for
-approval (6 `caution`, 13 `dangerous`, 4 `destructive`).
+reset. Two more, `keycloak.user.lock_status` and
+`keycloak.realm.lock_settings`, show whether a user is locked after failed
+sign-ins. Two more, `keycloak.events.list` and `keycloak.admin_events.list`,
+read the saved login events and admin events. In total the connector registers
+51 operations: 21 `safe` reads and 30 writes that wait for
+approval (8 `caution`, 18 `dangerous`, 4 `destructive`).
+`keycloak.user.required_actions.update` makes a user set up a one-time code
+(OTP) at the next login, and `keycloak.user.otp_status` shows who has one
+(see "One-time code set-up").
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -60,14 +68,18 @@ fresh target with no asserted version still resolves.
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
   `role_list`, `role_users`, `group_list`, `group_member_list`,
   `identity_provider_list`, `auth_flow_step_list`, `required_action_list`,
-  `events_config_get`) and
+  `events_config_get`, `user_lock_status`, `realm_lock_settings`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
   `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
-  `user_logout`, `user_disable`, `user_enable`, `realm_delete`, `user_check_login`,
-  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`),
+  `user_logout`, `user_disable`, `user_enable`,
+  `client_scope_protocol_mapper_update`, `realm_delete`, `user_check_login`,
+  `role_mapping_client_assign`, `role_mapping_client_remove`, `user_update`,
+  `user_credential_delete`,
+  `authflow_ensure_approval_flow`, `authflow_ensure_passkey_code_skip`,
+  `authflow_ensure_approval_touch`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
@@ -96,7 +108,9 @@ fresh target with no asserted version still resolves.
   the nine original approval-gated write ops plus `user.logout` (#3851),
   with `GROUP_WRITE_OPS`, `DELETE_WRITE_OPS` and `USER_ENABLED_OPS`
   (`ops_write_user_enabled_schemas.py`; handlers in
-  `ops_write_user_enabled.py`) spliced in,
+  `ops_write_user_enabled.py`) and `SCOPE_MAPPER_OPS`
+  (`ops_write_scope_mapper_schemas.py`; handler in
+  `ops_write_scope_mapper.py`) spliced in,
   reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
@@ -109,6 +123,13 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/ops_login_check.py`) — the login test op, its
   group text (`WHEN_TO_USE_LOGIN_CHECK_BY_GROUP`) and its approval card.
   It reuses `_read_password_from_vault` from `ops_write.py`.
+- `USER_REQUIRED_ACTION_OPS` + `keycloak_user_required_actions_update` +
+  `keycloak_user_otp_status` (`connectors/keycloak/ops_user_required_actions.py`)
+  — the one-time code ops and the approval card of the write.
+- `LOGIN_USER_WRITES` + `login_user_park_reason` + `refuse_login_user_of_write`
+  + `refuse_login_user_in_realm` (`connectors/keycloak/ops_user_login_guard.py`)
+  — the sign-in user check that the user writes which can lock MEHO out
+  share with `user.delete` (see "Writes that could lock MEHO out").
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -126,9 +147,11 @@ fresh target with no asserted version still resolves.
   (`connectors/keycloak/session.py`) — the two admin-credential shapes
   (tagged union `KeycloakAdminCredentials`).
 - `KeycloakTargetLike` — structural Protocol the concrete `Target` model
-  satisfies; adds `extras` (carrying the realm overrides) to the common
+  satisfies; adds `extras` (carrying the realm names) to the common
   REST-target shape.
 - `RealmConfig` — the resolved `(admin_realm, managed_realm)` pair.
+- `KeycloakManagedRealmMissingError` — raised by `resolve_realm_config`
+  when the target names no managed realm. It is a `ValueError`.
 - `KeycloakAdminTokenError` — raised when the token-endpoint round-trip
   fails or returns no usable `access_token`. On a non-2xx it echoes
   Keycloak's `{error, error_description}` (RFC 6749 §5.2 — both non-secret)
@@ -218,12 +241,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,
-  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS` and
-  `IDENTITY_PROVIDER_OPS`,
+  `LOGIN_CHECK_OPS`, `APPROVAL_FLOW_OPS`, `PASSKEY_CODE_SKIP_OPS`,
+  `IDENTITY_PROVIDER_OPS` and `EVENT_OPS`,
   resolves each `handler_attr` to a bound method, looks the group's
   `when_to_use` up in the merged `WHEN_TO_USE_BY_GROUP` ∪
   `WHEN_TO_USE_WRITE_BY_GROUP` ∪ `WHEN_TO_USE_LOGIN_CHECK_BY_GROUP` ∪
-  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP`
+  `WHEN_TO_USE_AUTHFLOW_BY_GROUP` ∪ `WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP` ∪
+  `WHEN_TO_USE_EVENTS_BY_GROUP`
   (a missing entry is a hard error), and
   upserts via `register_typed_operation`. Idempotent across restarts.
 - `_write_admin(target, method, path, *, operator, json, idempotent_conflict=True)`
@@ -244,13 +268,13 @@ rejects a whitespace-only secret rather than setting an empty password.
 
 ## Read ops (G3.13-T2, extended by #2843 + #3280)
 
-Ten `safety_level="safe"` / `requires_approval=False` read ops in this
-table (an eleventh, `keycloak.identity_provider.list`, is described with the
-approval sign-in flow; three more are in "Login setup reads" below, and two
-more, `keycloak.user.get` and `keycloak.user.sessions`, are described with the
-user reads below), all
-tagged `read-only`, all dispatching via the admin-auth path. The realm is
-the target's `managed_realm` (no per-op realm param):
+Fourteen `safety_level="safe"` / `requires_approval=False` read ops in this
+table. `keycloak.user.get` and `keycloak.user.sessions` are described more
+with the user reads below, and the two lock reads in "Lock status reads".
+Four more reads are not in this table: `keycloak.identity_provider.list`
+(described with the approval sign-in flow) and three in "Login setup reads"
+below. All are tagged `read-only` and dispatch via the admin-auth path. The
+realm is the target's `managed_realm` (no per-op realm param):
 
 | op_id | Admin REST API | returns |
 |---|---|---|
@@ -261,6 +285,8 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
 | `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` | one user's state, credential type and date only |
 | `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` | `{count, sessions}`, no session id, no token |
+| `keycloak.user.lock_status` | `GET .../attack-detection/brute-force/users/{user-id}` | `{locked, numFailures, numTemporaryLockouts, lastFailure}`, no IP address |
+| `keycloak.realm.lock_settings` | `GET /admin/realms/{realm}` | the realm's lock rules only |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
@@ -305,9 +331,11 @@ the general posture (see "Write ops" below).
 The flight recorder stores the vendor answer of each recorded call, before
 the handler's scrub runs. So the connector masks the trace body too:
 `KeycloakConnector.trace_response_body` (`connectors/keycloak/connector.py`)
-parses the Admin REST answer and returns `redact_secret_fields(payload)`,
-the same scrub the result gets. The stored trace and the agent copy of it
-show `***REDACTED***` where the result does. This covers every admin read
+parses the Admin REST answer and returns `redact_trace_fields(payload)`:
+the same scrub the result gets, plus personal fields that an op leaves out
+of its result (today `lastIPFailure`, the IP address of a user's last failed
+sign-in). The stored trace and the agent copy of it show `***REDACTED***`
+for these fields. This covers every admin read
 that goes through the recorded `_get_admin_json` path: the curated read
 ops, and the client reads inside `keycloak.client.update`, the client
 delete lookup and the realm delete. An empty answer is recorded as it is; an
@@ -315,8 +343,9 @@ answer that is not JSON is replaced by a fixed marker. The shared trace
 engine (`docs/codebase/redaction.md`) still runs on what the hook returns
 and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
-`keycloak.client.get` with the recorder on and checks that a made-up client
-secret is in neither the stored trace nor the agent copy.
+`keycloak.client.get` and `keycloak.user.lock_status` with the recorder on
+and checks that a made-up client secret and the failure IP are in neither
+the stored trace nor the agent copy.
 
 ## User state reads (`ops_user_state.py`)
 
@@ -342,6 +371,44 @@ other times in milliseconds; a `notBefore` of 0 (never set) is `null`. Use
 both after `keycloak.user.logout` or `keycloak.user.reset_password` to check
 the result. A failed read, or a body of the wrong shape, is an error, never
 an empty answer.
+
+## Lock status reads (`ops_lock_status.py`)
+
+Keycloak shows "Invalid username or password" for a wrong password and for an
+account locked after too many failed sign-ins. Two `safe` reads tell them
+apart:
+
+- `keycloak.user.lock_status` takes `id` or an exact `username`. It reads
+  `GET .../attack-detection/brute-force/users/{user-id}`. The result is
+  `{userId, locked, numFailures, numTemporaryLockouts, lastFailure}`. The IP
+  address of the last failure (`lastIPFailure`) is personal data and is never
+  returned. The trace mask hides it in the flight recorder trace too.
+  `lastFailure` is ISO 8601 UTC, or `null` when it is absent, null or 0 (no
+  failure yet). A negative number, or one that is not a finite date, is an
+  error: it never reads as "no failure".
+- Keycloak 26 answers the lock status read with 200, `disabled: false` and
+  zero counts for an id it does not know. So with an `id`, the op first reads
+  `GET .../users/{user-id}`. That read gives 404 for an unknown id, and the op
+  raises "user not found". With a `username`, the exact-match lookup already
+  finds the user.
+- Keycloak gives the same "not locked, zero counts" answer for every user
+  when the realm's lock is off. The op's `output_shape` text says so: check
+  `bruteForceProtected` in `keycloak.realm.lock_settings`.
+- An answer without the `disabled` flag is an error, never "not locked". A
+  count or `lastFailure` of the wrong type is an error too.
+- `keycloak.realm.lock_settings` reads the realm and copies only the lock
+  rules: `bruteForceProtected`, `permanentLockout`, `failureFactor`,
+  `waitIncrementSeconds`, `maxFailureWaitSeconds`, `maxDeltaTimeSeconds` and
+  the quick-login fields. Each field is checked: a flag must be a boolean and
+  a number an integer. An absent field is `null`; a field of the wrong type is
+  an error. `bruteForceProtected` is the exception: absent or `null` is an
+  error too, so the caller always knows if the lock is on.
+- The integration test `tests/integration/test_keycloak_lock_reads_e2e.py`
+  runs both reads on the real Keycloak container: counts after failed
+  sign-ins, the lock, an unknown id, and the lock settings on and off.
+
+Keycloak does not say until when a temporary lock lasts. Not built here: an
+unlock operation.
 
 ## Write ops (G3.13-T4, extended by #3280)
 
@@ -369,27 +436,435 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 | `keycloak.user.disable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: false`) |
 | `keycloak.user.enable` | dangerous | `GET` then `PUT .../users/{user-id}` (`enabled: true`) |
+| `keycloak.client_scope.protocol_mapper.update` | dangerous | `GET` then `PUT .../client-scopes/{client-scope-id}/protocol-mappers/models/{id}` |
+| `keycloak.role_mapping.client.assign` | dangerous | `POST .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.role_mapping.client.remove` | dangerous | `DELETE .../users/{user-id}/role-mappings/clients/{client-id}` |
+| `keycloak.user.update` | caution | `PUT .../users/{user-id}` |
+| `keycloak.user.credential.delete` | dangerous | `DELETE .../users/{user-id}/credentials/{credentialId}` |
 | `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 | `keycloak.authflow.ensure_passkey_code_skip` | caution | `POST .../authentication/flows/browser/copy`, then `PUT .../realms/{realm}` |
 | `keycloak.authflow.ensure_approval_flow` | caution | `.../authentication/flows` and the client `PUT` (see "Approval sign-in flow and identity providers") |
+| `keycloak.authflow.ensure_approval_touch` | caution | `.../authentication/flows`, step settings, the realm `PUT`, the client's mapper and `PUT` (see "Console touch flow") |
 | `keycloak.user.check_login` | caution | `POST /realms/{realm}/protocol/openid-connect/token` (see "Login test") |
+| `keycloak.user.required_actions.update` | dangerous | `PUT .../users/{user-id}` (see "One-time code set-up") |
 
-Five more writes are `dangerous` because they can change who gets which
-tenant rights. MEHO reads the rights from the login token, and these
-writes change what goes into it, or who can sign in as whom:
+To make a machine login for an agent seat, with its secret stored in Vault
+and optionally placed in a file on a host, use the three-step recipe in
+[connectors-secret-broker.md](connectors-secret-broker.md), "Ops example — a
+machine login for an agent seat". Step 1 is `keycloak.client.create`, which never returns
+the secret.
+
+Seven more writes are `dangerous` because they can change who gets which
+tenant rights, or how strong a sign-in is. MEHO reads the rights from the
+login token, and these writes change what goes into it, who can sign in as
+whom, or what a sign-in asks for:
 
 - `user.create`: the new user can carry a `groups` list and attributes.
 - `client.create` and `client.update`: a client carries the mappers and
   scopes that fill the token.
 - `protocol_mapper.create`: a mapper decides the claims, also `tenant_id`
   and `tenant_role`.
+- `client_scope.protocol_mapper.update`: the same, for a mapper on a client
+  scope. It is also a change of rights, so its approval rules are stricter
+  (see "Change a protocol mapper of a client scope").
 - `user.reset_password`: it sets the password of any user of the realm.
+- `user.required_actions.update`: taking a required action away (for
+  example the one-time code set-up) makes a user's sign-in weaker.
 
-At `dangerous`, only a MEHO-SA-Operator or a tenant admin may approve
-another person's request. The single-operator self-approval switch
-(`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them. The test
-`backend/tests/test_keycloak_identity_write_approvers.py` checks both rules
-against the registered levels.
+The first five are also changes of rights (next section): an admin (a
+tenant admin or a platform admin) approves each call in the web console,
+and an Operator cannot. The single-operator
+self-approval switch (`APPROVAL_ALLOW_SELF_APPROVAL`) does not cover them.
+The test `backend/tests/test_keycloak_identity_write_approvers.py` checks
+both rules for the first five. `user.required_actions.update` is
+`dangerous` and a change of rights too. The test of the one-time code
+set-up checks that it is `dangerous`.
+
+### Writes that are changes of rights
+
+A Keycloak write that can change what a login token says, who has which
+role, who may sign in, or how strong a sign-in is, is a change of rights.
+For such a write:
+
+- an admin's call in the web console runs at once
+  (`operations/rights_change_console.py`), after a fresh sign-in and the
+  checks of who may make it. A write that reads, writes or makes a
+  credential (`realm.update`, `user.create`, `user.reset_password`) still
+  waits. Outside MEHO's own login realm a write that does not change one
+  login or group (one that is not in `GRANT_OPS`) waits too; in the login
+  realm a platform admin makes it alone;
+- every other call waits: a token call (command line, REST, MCP), also the
+  admin's own token, an agent's call and an Operator's call;
+- only an admin (a tenant admin or a platform admin) approves a waiting
+  call, with a click in the web console; the admin may be the requester,
+  or a person behind the agent that asked. An Operator cannot. In MEHO's
+  own login realm only a platform admin makes such a write alone in the
+  web console, or approves it; a tenant admin's call waits. There the
+  login that asked approves the request only when it asked in the web
+  console. A write that can change the approval sign-in
+  (`approval_sign_in_writes.py`) never runs alone there, and the
+  login that asked never approves it, nor a person behind it. In the
+  login realm the guard of `ops_meho_own_login_guard.py` refuses many of
+  these writes first, before any wait, and no approval lets them run; the
+  rule here holds for the writes the guard lets through. A card names
+  the client only as Keycloak returned it; a failed read leaves the card
+  without a client, and the write counts as one on an approval client.
+  The sign-in clients are the CLI and web approval clients, the console
+  login client and the client of the Keycloak admin API
+  (`KEYCLOAK_ADMIN_CLIENT_ID`), compared without letter case. Such a write
+  is a `client.update` of a sign-in client, or one that sets the
+  `clientId` of one; a `client.create` with the `clientId` of one; a
+  `client.delete` of one (the delete card names the client); a protocol
+  mapper on one or of a sign-in claim; a scope mapper of a sign-in claim;
+  and a `realm.update` of other keys than names, mail, events and
+  languages;
+- a standing grant, an older grant row and a run approval never cover it:
+  each call that waits needs its own approval;
+- no operation setting turns its approval off. An edit that tries is
+  refused (`approval_off_rights_change`), and a floor in
+  `operations/op_policy.py` keeps approval on when an older override row
+  turned it off. This holds for every registered change of rights, not
+  only the Keycloak ones.
+
+`connectors/keycloak/rights_changes.py` holds the decision for every
+Keycloak write, with the reason:
+
+| Write | Change of rights? | Why |
+|---|---|---|
+| `realm.create` | yes | the realm body can hold users, groups, roles, clients, mappers and default roles |
+| `realm.update` | yes | realm settings decide default roles and groups, default client scopes, self sign-up and which user details a user may change |
+| `client.create` | yes | a client carries protocol mappers, scopes, full scope and a service account login |
+| `client.update` | yes | changes mappers, scopes, full scope, service account, redirect URIs, secret and login settings |
+| `client_scope.create` | yes | a client scope carries protocol mappers and role scope mappings |
+| `protocol_mapper.create` | yes | a mapper decides which claims a token holds |
+| `client_scope.protocol_mapper.update` | yes | changes a protocol mapper of a client scope, which decides which claims a token holds |
+| `user.create` | yes | the new user can carry groups, roles and attributes that mappers read |
+| `user.reset_password` | yes | a new password for a login is a change of rights; an admin approves it |
+| `role_mapping.assign` | yes | gives a user realm roles |
+| `role_mapping.client.assign` | yes | gives a user roles of a client |
+| `user.update` | yes | changes a user's user name and email, which tokens carry and which a login or a password reset uses |
+| `user.credential.delete` | yes | removes a user's passkey or one-time code, so it changes how that login signs in |
+| `user.enable` | yes | turns a login on, so it decides who may sign in |
+| `user.required_actions.update` | yes | sets the steps a user must do at the next sign-in, such as setting up a passkey or a one-time code, so it changes how strong that sign-in is |
+| `group.member.add` | yes | puts a user into a group and gives them its roles |
+| `group.update_attributes` | yes | group attributes fill the tenant claims of every member |
+| `authflow.ensure_approval_flow` | yes | maps the `acr` name `meho-approve` to a sign-in level; MEHO reads that `acr` claim of a token to accept an approval |
+| `authflow.ensure_approval_touch` | yes | adds or changes the client's `amr` protocol mapper, which puts a claim into every token, and maps the `acr` name `meho-touch` to a sign-in level |
+| `authflow.ensure_passkey_code_skip` | yes | binds MEHO's own copy of the browser sign-in flow, so it changes the steps and the strength of every sign-in in the realm |
+| `user.check_login` | no | tests one sign-in and changes nothing |
+| `user.logout`, `user.disable`, `user.delete` | no | they only take away |
+| `group.create` | no | a new group has no members; adding one is `group.member.add` |
+| `group.member.remove`, `role_mapping.client.remove`, `group.delete`, `client.delete`, `realm.delete` | no | they only take away |
+
+The core has no ingested (spec-based) Keycloak operations, so the table
+covers the typed writes only. `backend/tests/test_keycloak_rights_change_writes.py`
+fails when a Keycloak write is on neither side of the table, so a new
+write needs this decision in the same pull request. It counts every
+operation that is not a `safe` read without approval tagged `read-only`,
+so a write registered as `safe` is on the list too. The same test checks,
+for each change of rights, that the requester cannot approve it, that a
+standing grant and a run approval do not clear the wait, and that an
+agent's call waits.
+
+Every "yes" write is registered with `register_rights_change_op`, so the
+rule holds in every realm, not only in MEHO's own login realm. Six writes
+of one login or one group are also registered with `register_grant_op`
+(`GRANT_OPS` in `ops_write_grant.py`): `group.member.add`,
+`role_mapping.assign`, `role_mapping.client.assign`, `user.update`,
+`user.credential.delete` and `group.update_attributes`. That adds the
+checks of who the change is for (see "Changes of rights:
+the login is never its own approver" in [approvals.md](approvals.md)).
+Both functions add the per-call mark, so no connector has to set it a
+second time.
+
+**How MEHO decides that a group change gives platform admin rights.**
+`group.member.add` and `group.update_attributes` count as "gives platform
+admin" (the grant fact `platform_admin`) when the group or a parent group
+has the attribute `platform_admin=true`, when the group is
+`MEHO-Platform-Admins` or its path is under `/MEHO-Platform-Admins/`, when
+the group gives the realm role named exactly as in `JWT_PLATFORM_ADMIN_ROLE_NAME`, with the same letter case (when set,
+read from `role-mappings/realm/composite`), or when the new attributes of
+`group.update_attributes` set `platform_admin`. The name alone never
+decides. When MEHO cannot read the group, a parent group or its roles, the
+fact is unknown and a platform admin must approve. The run reads the group
+again with the same rule (`ops_write_grant_platform.py`).
+
+**Every Keycloak write in the login realm needs a platform admin.**
+In MEHO's own login realm, a platform admin approves every Keycloak write.
+The card asks for a platform admin with its own reason unless every key
+the write sets is on a short list of keys that cannot touch sign-in or
+rights. The list is `HARMLESS_KEYS` in `ops_write_login_realm_rule.py`,
+and it is the only place. The three writes of that list are changes of
+rights, and in the login realm every change of rights needs a platform
+admin (`_check_login_realm_approver` in `operations/grant_approval.py`),
+so a write of harmless keys needs one too.
+
+The same rule holds in `master` (Keycloak's admin realm) and in the
+target's `admin_realm`. A Keycloak admin in `master` can change every realm,
+also the one of MEHO's own login. The target's admin realm holds the login
+MEHO uses for that target. In this part, "the login realm" means all of
+these realms (`is_login_realm_name` in `ops_write_grant.py`; letter case
+and spaces at the ends do not count).
+
+
+| Write | Harmless keys | Params that only name the object |
+|---|---|---|
+| `keycloak.realm.update` | `displayName` in `representation` | `realm` |
+| `keycloak.client.update` | `name`, `description` in `representation` | `client_id`, `id` |
+| `keycloak.user.update` | `firstName`, `lastName` in `changes` | `id`, `username` |
+
+A key that is not on the list counts as strict, and so does any other
+param with a value (for example `smtp_password_secret_ref`). A write with
+no keys to set is strict too. `register_login_realm_rule` adds a last step
+(`register_preview_last_step`) to the approval card of every Keycloak
+write in `RIGHTS_CHANGE_OPS` and `NOT_RIGHTS_CHANGE_OPS`:
+
+- It puts `harmless_keys_only` (`HARMLESS_KEYS_ONLY`) on the `grant` block,
+  in every realm.
+- In the login realm, when the call sets a key that is not harmless and
+  the other checks below found no reason, it sets `platform_admin` with
+  the reason "In MEHO's own login realm, in master and in the target's
+  admin realm, a platform admin approves every Keycloak write that sets
+  more than a display name or a description."
+- A write with no `grant` block of its own gets one here, and is
+  registered for the approval check (`register_grant_op`). A write of
+  `NOT_RIGHTS_CHANGE_OPS` is registered with `per_call=False`: in another
+  realm it stays what it was, not a change of rights.
+- A write without a per-call mark also gets a check by its params
+  (`register_grant_cover_check` in `operations/grant_cover_check.py`).
+  When the call changes the login realm and sets more than harmless keys,
+  no standing grant and no run approval clears it: the policy gate looks
+  neither up, and the call waits for a person, so the card asks for a
+  platform admin. A call with no params, and a check that fails, wait
+  too. In another realm a grant clears it.
+
+The realm is the `realm` param for `realm.create` (also the `realm` of its
+representation), `realm.delete`, `realm.update` and `user.check_login`,
+else the realm the target manages, by the name Keycloak answers with
+(`is_login_realm`). A realm that a param names is judged the same way:
+MEHO reads `GET /admin/realms/{realm}` and compares the name in the answer
+(`named_realm_is_protected` in `ops_write_grant.py`), because a Keycloak
+database can match a realm name without letter case or accents. When MEHO
+cannot read it, or cannot read which realms its own login uses, the realm
+counts as the login realm.
+
+For `realm.create`, a realm that Keycloak does not know yet (HTTP 404) is
+judged by its name as typed. So the params check of `realm.create`
+(`realm_params.py`, `is_plain_realm_name`) allows only plain ASCII
+characters in the new name (`realm` and `representation.realm`): letters
+`a` to `z` and `A` to `Z`, digits, the space and the other ASCII signs that
+`realm_name_problem` allows (all but `/`, `\`, `?`, `#` and `%`). A name
+with a letter with an accent is refused before the call waits.
+
+A `secret.move` whose source or sink is a `keycloak:` ref in the login
+realm always needs a platform admin (`secret_move_grant`). For a side in
+another realm, MEHO reads the target the ref names, to know its
+`admin_realm`; when it cannot read that target, the side counts as one in
+the login realm. MEHO calls no Keycloak for a `secret.move` before its run
+checks the target, so it judges a side's realm by the name as typed: a
+name that is not plain ASCII (`is_plain_realm_name`) counts as one in the
+login realm. When a protected realm name (`protected_realm_names`: MEHO's
+own login realms, `master` and the target's `admin_realm`) is not plain
+ASCII, every side on that target counts as one in the login realm. A ref is a
+client-secret source or a user-password sink by its address shape, the
+same way as `build_keycloak_secret_endpoint`: a sink in a realm named
+`clients` is still a sink. A user-password sink in the login realm also
+names its login on the card: `for_login` is `true` and `user_id` is the
+id MEHO reads for the user name. So the person whose password the move
+sets never approves it, also when someone else asked. When MEHO cannot
+read the login, `user_id` is `null` and the request cannot be approved.
+When the name names another login at run start, the run is refused
+(`GRANT_REASON_CHANGED`).
+
+Right before an approved write runs, MEHO builds the card again. The run
+is refused when the write now needs a stricter approval (for example the
+realm became a login realm while the request waited), and nothing is
+written. A request whose approved card has no `harmless_keys_only` fact
+was approved before this rule: it is refused at run start, in every
+realm, and must be sent again (`GRANT_REASON_OLD_CARD`).
+
+Each write, and the tests in `tests/test_keycloak_login_realm_every_write.py` (for each one: in the login realm a
+tenant admin's approval is refused; a platform admin's approval goes
+through and the run check passes; when MEHO cannot read its login realms a
+tenant admin is refused; in another realm a tenant admin approves, and the
+run is refused when the realm becomes a login realm while the request
+waits). `tests/test_keycloak_admin_realm_every_write.py` runs the same four
+tests for each write in `master` and in the target's `admin_realm`; there
+the last one makes the target's `admin_realm` the realm of the write while
+the request waits. `tests/test_keycloak_login_realm_grants_and_password_sink.py`
+tests the grant check for each write without a per-call mark, and the
+login of a `secret.move` password sink:
+
+| Write | In the login realm |
+|---|---|
+| `keycloak.authflow.ensure_approval_flow` | strict |
+| `keycloak.authflow.ensure_approval_touch` | strict |
+| `keycloak.authflow.ensure_passkey_code_skip` | strict |
+| `keycloak.client.create` | strict |
+| `keycloak.client.delete` | strict |
+| `keycloak.client.update` | harmless with only `name` and `description`, else strict |
+| `keycloak.client_scope.create` | strict |
+| `keycloak.client_scope.protocol_mapper.update` | strict |
+| `keycloak.group.create` | strict |
+| `keycloak.group.delete` | strict |
+| `keycloak.group.member.add` | strict |
+| `keycloak.group.member.remove` | strict |
+| `keycloak.group.update_attributes` | strict |
+| `keycloak.protocol_mapper.create` | strict |
+| `keycloak.realm.create` | strict |
+| `keycloak.realm.delete` | strict (MEHO never deletes the login realm, `master` or the admin realm) |
+| `keycloak.realm.update` | harmless with only `displayName`, else strict |
+| `keycloak.role_mapping.assign` | strict |
+| `keycloak.role_mapping.client.assign` | strict |
+| `keycloak.role_mapping.client.remove` | strict |
+| `keycloak.user.check_login` | strict |
+| `keycloak.user.create` | strict |
+| `keycloak.user.credential.delete` | strict |
+| `keycloak.user.delete` | strict |
+| `keycloak.user.disable` | strict |
+| `keycloak.user.enable` | strict |
+| `keycloak.user.logout` | strict |
+| `keycloak.user.required_actions.update` | strict |
+| `keycloak.user.reset_password` | strict |
+| `keycloak.user.update` | harmless with only `firstName` and `lastName`, else strict |
+| `secret.move` with a Keycloak source or sink | strict |
+
+**What else decides, inside the login realm.** `ops_write_platform_reach.py`
+and `ops_write_grant.py` read what a write gives. Their answer gives the
+card a more exact reason, and it also counts for a write of harmless keys
+(a `user.update` of the first name of a login with platform admin rights
+needs a platform admin too):
+
+| Write | Reads |
+|---|---|
+| `user.create` | the new user's attributes, its `groups` (same group rule as above, the path is looked up level by level), realm or client roles |
+| `user.reset_password`, `user.update`, `user.credential.delete` | whether the login has platform admin rights: the attribute on the user, a group that gives them, or the platform admin realm role among all its realm roles (`users/{id}/role-mappings/realm/composite`) |
+| `protocol_mapper.create`, `client.create`, `client.update`, `client_scope.create` | whether a mapper has the claim name `platform_admin` (or `JWT_PLATFORM_ADMIN_CLAIM_NAME`), is a script mapper (a type that starts with `script-`, or `oidc-script-based-protocol-mapper`), or, with `JWT_PLATFORM_ADMIN_ROLE_NAME` set, writes `realm_access` or names that role. A claim name with escaped dots (`a\.b`) counts as the same name with plain dots (`a.b`) |
+| `client_scope.protocol_mapper.update` | the same, for the mapper now and after the change |
+| `realm.update` | new `defaultGroups`, `defaultRole`, `defaultRoles`, `users`, `groups`, `roles`, `clients` or `clientScopes` |
+
+When MEHO cannot read what decides, a platform admin must approve. The
+card says why in `platform_admin_reason`, and the console shows it in the
+row "Platform admin must approve".
+
+The approval request a person reads always holds these facts. A caller
+(the agent's own `preview_operation`, and `meho_approvals_get` /
+`meho_approvals_list`) reads them only while `KEYCLOAK_RIGHTS_CHANGE_CARDS`
+is on. Off, a caller gets what it gets for a write without them: no
+`grant` block for `user.create`, `user.reset_password`,
+`client_scope.protocol_mapper.update`, `secret.move` and the writes that
+get their `grant` block from the last step; and in the `grant` block of
+the other writes of one login or one group, no `platform_admin_reason`,
+no `harmless_keys_only`, and the `platform_admin` fact of the call only
+(not the one read from the login, and not the one of the harmless keys
+rule). The agent's own `preview_operation` with the switch off reads
+nothing more from Keycloak for it. A write in `master` or in the target's
+`admin_realm` (when that realm is not one of MEHO's own login) reads, for
+the caller, like a write in another realm: `login_realm` is `false`,
+`members` is `null` and `effective_roles` is empty. The stored request
+keeps these caller facts under `grant.agent_view`. The approval checks use
+the request a person reads, so the switch does not change who must approve.
+
+**The approval card.** `connectors/keycloak/ops_write_rights_card.py`
+shows the object as it is now next to the new values:
+
+- `client.update` and `realm.update`: `current_values` (the value now of
+  each field the request sends) and the new values. For a map field such
+  as `attributes` or `smtpServer`, the write changes only the keys it
+  sends, so `current_values` shows only those keys;
+- `protocol_mapper.create`: `current_mappers` (the client's mappers now)
+  and `new_mapper`.
+
+Secret values are hidden on both sides. When MEHO cannot read the object,
+the card says `current_values_available: false` (or
+`current_mappers_available: false`) and shows the new values only. The
+writes that make a new object show the new values; there is nothing to
+read yet.
+
+The approval request a person reads (the approval card in the console
+and the approvals API) always shows these cards, on a default install.
+What the caller gets back from `preview_operation` is behind the switch
+`KEYCLOAK_RIGHTS_CHANGE_CARDS` (`Settings.keycloak_rights_change_cards`,
+off by default), because an agent reads it. Off, that preview of
+`client.update` and `protocol_mapper.create` is the generic params echo,
+and the one of `realm.update` is the realm card of
+`ops_write_realm_smtp.py` without `current_values`. The card builders of
+`client.update` and `protocol_mapper.create` get the switch with
+`register_preview_builder_switch`; it applies only when
+`PreviewContext.agent_preview` is true. A call that waits for approval gives
+the caller no card, only the request id. The MCP tools
+`meho_approvals_get` and `meho_approvals_list` follow the same switch:
+off, they show the params echo for `client.update` and
+`protocol_mapper.create`, and the realm card without `current_values` and
+`current_values_available` for `realm.update`
+(`register_person_only_preview_keys`).
+
+A client attribute with a secret in it is hidden like the client secret:
+`client.secret.rotated` (the old secret during a rotation) is on the
+Keycloak list of secret fields in `redaction.py`.
+
+**More cards with the object as it is now.**
+`connectors/keycloak/ops_write_current_state.py` adds the object as it is
+now to the cards of more changes of rights:
+
+| Write | Card key | What it holds |
+|---|---|---|
+| `role_mapping.assign` | `current_roles` | the realm roles given to the user directly now |
+| `role_mapping.client.assign` | `current_roles` | the roles of that client given to the user directly now |
+| `group.member.add` | `current_group` | the first 50 members now (`id`, `username`), `member_count`, `members_complete`, `members_not_shown`, and the realm and client roles given to the group directly |
+| `user.reset_password`, `user.enable` | `current_user` | the user as stored: `username`, `enabled`, `required_actions`. Never a credential, a password or an attribute |
+| `authflow.ensure_passkey_code_skip` | `current_binding` | the realm's browser flow now |
+| `authflow.ensure_approval_flow`, `authflow.ensure_approval_touch` | `current_binding` | the realm's browser flow, and the client's own browser flow now (id and name; `None` when the client uses the realm's flow) |
+
+The members are read in pages of 100, up to 1,000, and one row more to
+know whether there are more. `member_count` is the number read (at most
+1,000); `members_complete: false` means the group has more. The card
+lists the first 50 members by id and then one line in
+`members_not_shown`, for example "950 more members not shown" (or "More
+than 950 more members not shown" past 1,000). When MEHO
+cannot read the state (no live connection, an unknown user, group or
+client, an error, an odd answer), the card says
+`<key>_available: false`, has no `<key>`, and says in `<key>_note`:
+"MEHO could not read the object as it is now; an approved run will be
+refused." MEHO logs `approval_card_state_not_read` with the op and the
+card key.
+
+**The approved run checks the state again.** Each of these writes is
+registered with `register_state_pin` (`operations/approval_state_pin.py`,
+see "State on the card" in [approvals.md](approvals.md)). Right before the
+approved run, MEHO builds the card again. When the state changed while
+the request waited, the run is refused: "The object changed since the
+approval; send the request again." When MEHO could not read the state,
+when the request waited or now, the run is refused too. Nothing is sent
+to Keycloak. A re-run after a first run that failed part way is refused
+when the first run already changed the object: the state is no longer the
+one the approver saw. Send the request again.
+
+For `group.member.add` the run compares only the group id and the roles
+the group gives, not the member list. The new member gets the group's
+roles; who else is in the group does not change that. So a group with
+more than 1,000 members runs, and a member who joined or left while the
+request waited does not refuse the run.
+
+The person who approves always sees the state. What the caller gets back
+from `preview_operation` and from `meho_approvals_get` and
+`meho_approvals_list` follows the same switch `KEYCLOAK_RIGHTS_CHANGE_CARDS`:
+off, these keys (`<key>`, `<key>_available`, `<key>_note`) are left out
+(`register_person_only_preview_keys`). The run check is always on: the
+switch decides only which callers get these card keys. The REST read
+`GET /api/v1/approvals/{id}` returns the keys whatever the switch says.
+
+**Guard.** `rights_changes.py` lists, for each change of rights, the card
+key that shows the object as it is now (`CURRENT_STATE_ON_CARD`), or why
+there is none: the write makes a new object (`NEW_OBJECT_OPS`).
+`backend/tests/test_keycloak_rights_change_current_state.py` fails when a
+change of rights is on neither list.
+
+**MEHO's own realm.** The checks that are stricter in MEHO's own login
+realm read the realm from Keycloak (`GET /admin/realms/{realm}`) and
+compare the `realm` name in the answer with the realms of MEHO's own
+login, without letter case and without spaces at the ends. When the read
+fails, the target counts as MEHO's own realm.
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -421,6 +896,14 @@ guide, and the `user_write` blurb tells the agent not to put `tenant_*`
 on the user (Keycloak's default user profile drops unmanaged
 attributes) but to add the user to one role group.
 
+`role_mapping.assign` and `group.member.add` also wait for a person on
+every call (`declare_per_call_approval` in `op_classes.py`). No standing
+grant of a service account and no run approval covers them, and a grant
+made before this rule does not cover a call. `role_mapping.assign` gives a
+role and every part of it. `group.member.add` gives the new member the
+roles of the group. MEHO does not yet judge a group by the roles it gives,
+so waiting for a person each time is the safe rule.
+
 Four load-bearing properties (of the original nine; the group ops layer
 their own idempotency above):
 
@@ -430,12 +913,16 @@ their own idempotency above):
   `?username=&exact=true`; `role_mapping.assign` also resolves each realm
   role name to its `RoleRepresentation`. A create returns the new UUID
   from the `Location` header.
-- **Names in paths.** Every caller value that goes into a path is
-  encoded with `quote_segment` as one path segment: ids, the realm name
-  and the new realm name of `realm.update`, and each role name of
-  `role_mapping.assign`. A `/`, a dot or a `%` stays part of the name.
+- **Names in paths.** Every value that goes into a path is encoded as
+  one path segment by `fill_path` itself (`_paths.quote_segment`): ids,
+  realm names and role names alike. Handlers pass raw values, so a value
+  is never encoded twice, and a new call site cannot forget it. A `/`, a
+  dot or a `%` in an id stays part of the id. A realm name must be a plain
+  name anyway (see "Target configuration").
   `role_mapping.assign` refuses a role whose returned name is not the
   name asked for, and its result lists the names Keycloak returned.
+  When the user cannot be read when the request is made, the approved run
+  is refused, because the approval card shows no stored username.
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the
@@ -597,14 +1084,17 @@ for example at the end of an event or when someone leaves.
 - Pass `id` (the user's UUID) or `username`. A username is looked up with
   `_find_user_uuid` (exact match), the same as `user.reset_password`.
 - A user that does not exist raises `KeycloakUserNotFoundError`: no match
-  for the username, or a 404 from the logout call for an `id`.
+  for the username, or a 404 when the op reads the user before the logout
+  call. A 404 from the logout call itself (the user was removed in between)
+  raises it too.
 - Safe to run twice. Keycloak answers 204 whether or not the user had
   sessions. The result is `{id, username, logged_out: true}`.
 - It reads and returns no credential. It does not change the password (that
   is `user.reset_password`). It signs out one user only; the realm-wide
   `POST .../logout-all` is not offered.
-- Risk level `caution`, approval required, group `user_write`. No bespoke
-  approval card: the generic params echo shows the `id` / `username`. On the
+- Risk level `caution`, approval required, group `user_write`. The approval
+  card shows the user as Keycloak stores it (see "One user, as Keycloak
+  stores it"). On the
   broadcast feed it is a plain `write` (pinned in
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
@@ -624,6 +1114,18 @@ longer sign in to any app that uses this realm.
 - Safe to run twice: setting `enabled` to the value it already has succeeds.
   A user that does not exist raises `KeycloakUserNotFoundError` and nothing
   is written.
+- **The user this target signs in with is refused.** It is the same check as
+  `keycloak.user.delete` (`check_user_guards`; see
+  `ops_user_login_guard.py`): the user name of a password login, or the
+  service-account user of a client login. It applies when the managed realm
+  is the realm the target signs in to. A disabled sign-in user would make
+  Keycloak refuse the next sign-in of MEHO. The refusal comes before
+  approval (a park check, with a reason that names no user name) and again
+  when the approved request runs. Nothing is written. When it runs, MEHO
+  reads the user once, checks that read, and writes that same read back, so
+  a rename between two reads cannot get the sign-in user past the check.
+  `keycloak.user.enable` is not checked. See "Writes that could lock MEHO
+  out" for the other writes with this check.
 - **Disabling does not end sessions that are already open.** To cut access at
   once, run `keycloak.user.disable`, then `keycloak.user.logout`.
 - Risk level `dangerous`, approval required, group `user_write`. On the
@@ -631,6 +1133,484 @@ longer sign in to any app that uses this realm.
   because `.disable` and `.enable` are not write suffixes).
 - The result is `{id, username, enabled, unrequested_changes, read_back_checked}`
   and carries no credential.
+### Client roles, user details and one stored credential
+
+Four writes in the group `account_write` (rows in
+`ops_write_account_schemas.py`, approval cards in
+`ops_write_account_preview.py`). All need approval, and a person approves
+each call. No standing grant of a service account and no run approval
+covers them: `op_classes.py` marks all four with
+`declare_per_call_approval`, because they change who can sign in and with
+what rights.
+
+`client.assign`, `user.update` and `user.credential.delete` count as a
+change of rights (`GRANT_OPS` in `ops_write_grant.py`). `user.update` can
+change a person's email or user name, and `user.credential.delete` can
+remove their passkey or one-time code, so both change how a person signs
+in. In every realm an admin approves it in the web console; the admin may
+be the person the change is for. In MEHO's own login realm, a role of the `realm-management` client (in any case) also needs a
+platform admin as approver: it decides who may manage the realm. The same
+holds for `role_mapping.assign` and `client.assign` when a part of the
+named role, on any level, is such a role or a role that MEHO's login maps to
+platform admin rights. The card lists them as `effective_roles`, and the run
+is refused when the parts change before it (`ops_write_effective_roles.py`).
+A request that waited from before MEHO read the parts has no
+`effective_roles` on its card. Its run is refused in every realm with "This
+request was made before MEHO read what a role gives. Send it again."
+(`bound_ids_missing` in `operations/grant_approval.py`). They are also
+on the rights-change table (`rights_changes.py`, "Writes that are changes
+of rights"), so in every realm only an admin approves each call, in the web
+console.
+
+- `keycloak.role_mapping.client.assign` and `.remove` (dangerous). Pass the
+  user (`id`, or the exact `username`), `client_id` (the client's name, for
+  example `realm-management`) and `roles` (role names of that client, for
+  example `realm-admin`). The handler finds the client's UUID, reads every
+  role on that client, and only then sends the role representations. An
+  unknown client or role is an error before anything is sent, so a typo never
+  gives or removes part of the roles. Both are safe to run twice. The result
+  has `not_applied`: the names whose state after the write is not the
+  requested one, from a read of the user's roles on that client
+  (`read_back_checked: false` and `not_applied: null` when that read fails;
+  the write itself ran). The `.remove` card for a `realm-management` role
+  has one `warning` line and `holders_after`: how many users still hold
+  each role directly after the change (read from
+  `GET .../clients/{client-uuid}/roles/{role-name}/users`, up to 1000;
+  "unknown" when MEHO cannot read it).
+- `keycloak.user.update` (caution). The user is found by `id` or the current
+  `username`; the new values go in `changes`, with only `username`, `email`,
+  `firstName` and `lastName` allowed. The handler reads the user, puts the
+  fields on top, writes the user back and reads it again. Keycloak changes
+  the user name only when the realm sets `editUsernameAllowed`, and
+  otherwise keeps the old name and still answers 204. So the result has
+  `applied_fields` and `not_applied` (each with a reason that names
+  `editUsernameAllowed` for the user name), and `unrequested_changes` as in
+  `ops_write_merge.py`. User name and email are compared without regard to
+  case, because Keycloak stores them in lower case. Values are never returned.
+  The card shows the current user name and email (`current`, `null` when
+  MEHO cannot read the user) next to the new values in `changes`.
+- `keycloak.user.credential.delete` (dangerous). Pass the user and either
+  `credential_id` or `credential_type` (for example `otp` or
+  `webauthn-passwordless`); a type removes every credential of that type that
+  the user has when the call runs. The handler reads
+  `GET .../users/{user-id}/credentials`, deletes each match, and reads the
+  list again. No match is an error that names the types the user has. When a
+  delete fails after others ran, the error names the ids already removed.
+  Keycloak's list holds `secretData` and `credentialData`; both stay inside the
+  handler. Every credential is cut to an allow-list of `id`, `type`,
+  `userLabel` and `createdDate` (`CREDENTIAL_FIELDS` in
+  `ops_write_user_credential.py`), and that list is the only way a field gets
+  into a result or an approval card. The card shows what will be removed
+  (`will_remove`) and what stays (`will_keep`), and one `warning` line when
+  the user is left with no second factor or with no credential at all. The
+  approved run removes only the credentials on the card: right before it
+  runs, MEHO builds the card again, and when `will_remove` lists other ids
+  (for example a new one-time code of the same type), the run is refused
+  with "the credentials changed since the request; send a new request" and
+  nothing is deleted (`bound_ids` in `operations/grant_approval.py`). The
+  handler checks again with its own read: in the approved run it compares
+  the credentials it matched with the ids on the card the approver saw
+  (`approved_preview`, not the call params). When they differ, it deletes
+  nothing (`KeycloakCredentialsChangedError`). So a credential added
+  between the check and the delete is never removed.
+  A test with recorded `secretData` and `credentialData` checks the result,
+  the approval rows and the audit rows
+  (`tests/test_connectors_keycloak_account_writes.py`).
+
+### Change a protocol mapper of a client scope (#5930)
+
+`keycloak.client_scope.protocol_mapper.update` changes one protocol mapper
+that already exists on a client scope. Example: add one value to a
+hardcoded-claim mapper, such as the `capabilities` claim that lists which
+document collections a person may open. A second hardcoded-claim mapper with
+the same claim name would not add values, it would overwrite the first, so
+the existing mapper is changed.
+
+- Pass the scope as `scope_id` (UUID) or `scope_name` (exact name), and the
+  mapper as `mapper_id` (UUID) or `mapper_name` (exact name on that scope).
+  Pass only the fields to change in `representation`.
+- The op reads the mapper, puts `representation` on top and writes the whole
+  mapper back (`read_merge_write`). Fields not sent stay. `config` merges key
+  by key, so `{"config": {"claim.value": "..."}}` changes only that key.
+- `representation` may hold only `name` and `config`. A change of the
+  mapper's type (`protocolMapper`) or `protocol` makes another kind of
+  mapper, whose config keys mean other things, so the approver could not
+  compare the old and the new values. MEHO refuses such a request
+  (`invalid_params`).
+- A name that matches nothing raises `KeycloakUserNotFoundError` (the shared
+  "not found" error) and nothing is written. A name that matches more than
+  one object raises `ValueError`. A scope list that cannot be read is an
+  error, never "not found".
+- An id and a name sent together must name one object: the name stored in
+  Keycloak for that id must be the name sent. Otherwise MEHO refuses the
+  request before it waits for approval (`refused_before_approval`), and
+  again when it runs. Nothing is written.
+- Safe to run twice. The result shows the ids and the names stored in
+  Keycloak, and lists the changed field names (`changed_fields`,
+  `unrequested_changes`), never values. Check the new value with
+  `keycloak.client_scope.list`.
+- Risk level `dangerous`, approval required, group `protocol_mapper_write`.
+- It is a change of rights: a mapper decides what goes into the login
+  token, so a change can give rights. Each call waits for approval, also
+  an admin's call in the web console:
+  - The op is registered with `register_rights_change_op`. Only a tenant
+    admin or a platform admin approves it, with a click in the web console,
+    and may be the requester. The self-approval switch does not cover it.
+    An Operator cannot approve it.
+  - A person approves each call (`declare_per_call_approval`). No standing
+    grant and no run approval covers it. An agent grant does not either:
+    the op needs approval, so an agent's call always waits.
+- The approval card shows the scope and the mapper with their ids and the
+  names stored in Keycloak (also when the caller sent only one of them). It
+  shows the mapper as it is now (`current`): its type (`protocolMapper`),
+  `protocol`, the claim name, and the old value of each field sent. The new
+  values are in `representation`. Secrets are hidden in both.
+- After approval the run acts on the ids on the card and does not look a
+  name up again. It reads the mapper again before the write. The run is
+  refused and nothing is written when a stored name is no longer the one
+  on the card, when the mapper's type, protocol or config changed after the
+  card was made (then a new request is needed), or when the card lacks the
+  ids or that content (the objects could not be read when the request was
+  made).
+- Not offered: adding a mapper to a client scope, and changing or deleting a
+  mapper on a client.
+
+### One user, as Keycloak stores it
+
+Every Keycloak user write shares one helper,
+`connectors/keycloak/ops_write_user_identity.py`. It covers
+`user.disable`, `user.enable`, `user.logout`, `user.reset_password`,
+`user.delete`, `user.required_actions.update`, `role_mapping.assign`,
+`role_mapping.client.assign`, `role_mapping.client.remove`, `user.update`,
+`user.credential.delete`, `group.member.add` and `group.member.remove`
+(these two name the user as `user_id`). That is 13 ops. A test
+(`test_every_keycloak_user_write_uses_the_shared_user_check`) finds every
+Keycloak write op that takes a user id and a `username`, and fails when one
+of them does not use this check.
+
+- A request with both an id and a `username` must name one user. The
+  username stored in Keycloak for that id must match (case does not
+  count). If not, the request is refused before it waits for approval (a
+  park check), and no approval request is stored. The same check runs
+  again when the approved request runs, so a user who was renamed in
+  between is refused. Nothing is written. `user.delete` uses the same park
+  check, and its lookup (`find_user`) refuses a mismatch.
+- The approval card shows the username stored in Keycloak for the user id
+  (`username`, `user_available: true`). A name the caller sent is never
+  shown as the user's name: when the user cannot be read, the card has no
+  `username`. It shows the sent value as `requested_username`,
+  `user_available: false` and a `user_note` that says MEHO could not read
+  the user and that an approval is refused at the run. The required-actions
+  card does the same.
+- `user.delete` keeps its own card (the delete's `blast_radius` block). Its
+  `username` is only the stored name. For a user that does not exist, the
+  card shows the sent name as `requested_username`. Its lookup uses the
+  shared `user_matches_username` for an id and a name that differ.
+- After approval, the op acts on the user id shown on the card. It does not
+  look the username up again. A card without a user id is refused. A card
+  without a stored username (no `username`, or `user_available` is not
+  true) is refused too: MEHO cannot tell that it is the same user. The
+  run then compares the card's username with the name Keycloak stores
+  now. So a request sent with only an id is refused too when the user was
+  renamed while it waited. Nothing is written. A request that waited
+  across the upgrade to this rule is refused for the same reason: its card
+  has no `user_available`.
+- `user.delete` after approval: it uses the user id and the realm on the
+  card. The run is refused when the card said the user does not exist,
+  when the card shows no username, or when the username stored for that
+  id is not the one on the card (the user was renamed). A user who was deleted and made again with the same
+  name has a new id, so the run finds nothing and answers
+  `already_absent: true`. The delete guards are checked again.
+- The result shows the stored username (`group.member.*` results now carry
+  `username` too).
+- With only an id, or only a username, the call works as before. Each run
+  now reads the user once before the write.
+- The writes in `LOGIN_USER_WRITES` also refuse the user the target signs
+  in with, in the same two places: the park check
+  (`refuse_other_user_check`) and the run (`read_user_for_write`). See the
+  next section. A card builder that only reads the user passes
+  `check_login_user=False`. An op with one more check before approval
+  passes it as `then=` (`user.required_actions.update` checks the names
+  in `add`).
+
+### Writes that could lock MEHO out
+
+A Keycloak target signs in with a user name and a password, or with a
+client secret (then the user is the client's service-account user
+`service-account-<client>`). Some writes on that user make Keycloak refuse
+MEHO's next sign-in, or take its admin rights away. Then MEHO cannot reach
+that Keycloak until a person fixes it by hand.
+
+The check (`ops_user_login_guard.py`) compares the user name and the email
+stored in Keycloak with the target's sign-in name (case does not count). A
+realm can let users sign in with their email, so the target's sign-in name
+can be the email of the user. When either one matches, the user is refused.
+It only
+applies when the realm of the write is the realm the target signs in to
+(`admin_realm`); otherwise it reads no admin credential. It refuses before
+the request waits for approval (a park check, with a reason that names no
+user name) and again when the approved request runs. Nothing is written.
+The error is `KeycloakDeleteRefusedError` with the reason
+`target_login_user`.
+
+| Write | Can it lock MEHO out? | What MEHO does |
+|---|---|---|
+| `user.delete` | yes | refused |
+| `user.disable` | yes: a disabled user cannot sign in | refused; the run checks and writes back one read |
+| `user.required_actions.update` | yes: an action such as `UPDATE_PASSWORD` stops a password sign-in | refused (add and remove) |
+| `user.reset_password` | yes: the target's stored password no longer works, and `temporary: true` adds `UPDATE_PASSWORD` | refused |
+| `secret.move` to `keycloak:<target>/<realm>/<user>#password` | yes, as `user.reset_password` | refused by the sink (`refuse_before_approval`, and again before the write) |
+| `user.credential.delete` | yes: it can delete the password, or a second factor the sign-in needs | refused |
+| `user.update` of `username` or `email` | yes: the target signs in with that name | refused; a first or last name is not |
+| `group.member.remove` | yes: the admin rights can come from a group | refused |
+| `role_mapping.client.remove` | yes: it can remove a `realm-management` role | refused |
+| removing a realm role | no such op | — |
+| `user.logout` | no: it ends open sessions; MEHO signs in again on its next call | not refused |
+| `user.enable`, `role_mapping.assign`, `role_mapping.client.assign`, `group.member.add` | no: they give, not take away | not refused |
+
+Writes on a realm, client or group, not on the user, are outside this
+check. `realm.delete` refuses the realm the target signs in to, and
+`client.delete` refuses the target's own client. `group.delete`,
+`client.update`, `realm.update` and the sign-in flow ops have no such check.
+In MEHO's own login realm, `client.update`, `client.delete` and
+`realm.update` have the check of the next sections.
+
+### Writes that could take MEHO's own access away
+
+In MEHO's own login realm (the realm in `KEYCLOAK_ISSUER_URL` and
+`KEYCLOAK_ADMIN_URL`), a write must not take MEHO's own access away. The
+check is `ops_user_meho_access_guard.py` for user writes and
+`ops_group_meho_access_guard.py` for group writes. It refuses these cases:
+
+| Case | Who | The writes MEHO refuses |
+|---|---|---|
+| A login MEHO itself uses | the service-account user of `KEYCLOAK_ADMIN_CLIENT_ID` or `CHECK_RUNNER_CLIENT_ID` (`service-account-<client>`) | `user.disable`, `user.delete`, `user.required_actions.update`, `user.reset_password`, `user.credential.delete`, `secret.move` into its password, `group.member.remove`, `role_mapping.client.remove`, `user.update` of `username` or `email` |
+| The last active platform admin | an enabled person with platform admin rights, when after the write no other enabled person is sure to have them | the lock-out writes (`user.disable`, `user.delete`, `user.required_actions.update`, `user.reset_password`, `user.credential.delete`, `secret.move` into its password), `group.member.remove`, `group.delete` and `group.update_attributes` |
+| The account that asks | the user whose id is the caller's `sub`, or the service-account user of the caller's client; in an approved run also the person who asked and the person who runs it | the lock-out writes, also adding a required action |
+
+- **When.** Before the request waits for approval (the park check of
+  `refuse_other_user_check`, the park checks of the two group writes, and
+  `refuse_before_approval` of the secret move sink) and again when the
+  call runs (`read_user_for_write`, `keycloak_user_delete`,
+  `keycloak_group_delete`, `keycloak_group_update_attributes`,
+  `write_secret`). A call that a standing grant runs at once still meets
+  the run-time check, so no standing grant and no run approval lets these
+  writes through. A user delete builds its preview again right before the
+  approved run, and that preview runs the same check, so a user delete is
+  refused there (`preview_changed_since_approval`).
+- **One write at a time.** When such a write runs, MEHO holds a lock for
+  the login realm from the count until the write is done
+  (`ops_meho_access_lock.py`): an `asyncio.Lock` per realm in one process,
+  and a PostgreSQL advisory lock (`pg_advisory_xact_lock`) across pods.
+  The connector methods of the guarded writes and the secret move sink
+  open the scope (`meho_access_scope`); the check takes the lock right
+  before it counts. So two writes on the last two platform admins that run
+  at the same moment cannot both pass. The lock's transaction turns off
+  `idle_in_transaction_session_timeout` and `transaction_timeout` for
+  itself, so the database does not end it during a slow Keycloak read.
+  After the count and before the write is sent, MEHO checks that the
+  database still holds the lock (`confirm_meho_access_lock`); when it does
+  not, MEHO refuses the write. The check before approval writes nothing
+  and takes no lock (`meho_access_check_only`). A check that asks for the
+  lock outside both scopes raises `MehoAccessScopeError` and sends no
+  write.
+- **Who has platform admin rights.** The rules of MEHO's login
+  (`ops_meho_admin_count.py`): the user's own `platform_admin` value;
+  without one, the value of the user's groups, where a group's own value
+  wins over its parent's value. The name or path of a group gives no
+  rights. The user that a write changes is a platform admin when one of
+  these values can be `true`. Another person counts only when the value
+  is sure to be `true`: their own value is `true`, or they have no own
+  value and every group of theirs with a value has `true`. For the user
+  that a write changes, and for refusing an odd value, MEHO reads every
+  attribute named `platform_admin` or named in
+  `JWT_PLATFORM_ADMIN_CLAIM_NAME`, in any letter case. For another
+  person to count, the value must be sure both that way and when MEHO
+  reads only the attribute its login reads: `platform_admin`, in exactly
+  this letter case, with the value `true` in any letter case and no white
+  space around it. A value such as `" true"` makes the changed user a
+  platform admin, but makes no other person count.
+- **How MEHO counts.** MEHO first reads only the user's own groups and
+  their parent chains. When the user is no platform admin, it reads
+  nothing more. Else it reads the whole group tree page by page, then the
+  members of the groups whose value is `true`, and each such member again.
+  It counts the enabled members who are not a client's service-account
+  user. A person with the rights only from their own user value is not
+  found this way, so such a person is not counted as another platform
+  admin. For a group write, MEHO first reads the group and the groups
+  under it; when no group there loses the value `true` or gets the value
+  `false`, it reads nothing more.
+- **On doubt MEHO refuses.** A failed or odd Keycloak read (also a row
+  that is not an object, a group or member without an id, a user without
+  a user name or an `enabled` value, a value that is both `true` and not
+  `true`), a list that does not end, settings MEHO cannot read, a lock
+  MEHO cannot take, or a count that takes longer than 30 seconds refuse
+  the write (`meho_access_not_checked`). The refusal says that a Keycloak
+  read failed. Only a user or group MEHO cannot find before approval is
+  let through to wait; the run checks again. When
+  `JWT_PLATFORM_ADMIN_ROLE_NAME` is set, the rights can come from a realm
+  role in ways MEHO cannot count, so such a write on a platform admin is
+  always refused. When MEHO finds no realm in its own settings, every
+  realm counts as its login realm.
+- **The refusal.** `MehoAccessRefusedError` (a `KeycloakDeleteRefusedError`)
+  with the reason `meho_service_login`, `last_platform_admin`,
+  `own_account` or `meho_access_not_checked`. The text says what was
+  refused and why, names no user, and gives no advice to change rights:
+  an agent reads it. Nothing is written.
+- **Who approves.** With a second platform admin the write waits for
+  approval as any other write in the login realm: an operator cannot
+  approve it, another admin can.
+- **Other realms.** The check reads nothing and refuses nothing.
+
+### Writes that could break MEHO's own sign-in clients or login realm
+
+In MEHO's own login realm, MEHO also refuses a write that changes MEHO's
+own sign-in clients or the realm itself so that MEHO's sign-in stops
+working (`ops_meho_own_login_guard.py`):
+
+| Write | What MEHO refuses | What stays allowed |
+|---|---|---|
+| `client.delete` | deleting a client MEHO itself signs in with | deleting any other client |
+| `client.update` | every other change of a client MEHO itself signs in with | `name`, `description`; a new address in `redirectUris` or `webOrigins` when every address the client has stays; `enabled: true`; `authenticationFlowBindingOverrides` set to `""` (the client uses the realm's login flow again), but not on the approval clients (`KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_APPROVE_CLIENT_ID`): their own login flow is the approval sign-in, so MEHO refuses every change of it |
+| `protocol_mapper.create` | a new mapper on a client MEHO itself signs in with: it changes the client's `protocolMappers`, which `client.update` refuses too | a new mapper on any other client |
+| `client_scope.protocol_mapper.update` | a change of a mapper of a client scope that a client MEHO itself signs in with has in `defaultClientScopes` or `optionalClientScopes` (`refuse_scope_mapper_write`) | a mapper change on any other client scope |
+| `realm.update` | every other change of the login realm, for example `enabled: false`, a new `realm` name, `sslRequired`, `attributes` such as `frontendUrl`, a login flow, `defaultSignatureAlgorithm` | `displayName`, `displayNameHtml`; `smtpServer`; the event settings (`eventsEnabled`, `eventsExpiration`, `eventsListeners`, `enabledEventTypes`, `adminEventsEnabled`, `adminEventsDetailsEnabled`); the languages (`internationalizationEnabled`, `supportedLocales`, `defaultLocale`); `enabled: true`; `browserFlow: "browser"` |
+
+- **MEHO's own clients** come from MEHO's settings
+  (`meho_own_client_ids`): `KEYCLOAK_ADMIN_CLIENT_ID`,
+  `CHECK_RUNNER_CLIENT_ID`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_CLI_CLIENT_ID`,
+  `KEYCLOAK_CLI_APPROVE_CLIENT_ID`, `UI_KEYCLOAK_CLIENT_ID`,
+  `UI_KEYCLOAK_APPROVE_CLIENT_ID`, and the sign-in clients of the AI tools
+  (`meho-mcp`, `meho-mcp-code`, `meho-mcp-desktop`). A param of the call
+  never adds or removes one. MEHO reads the client from Keycloak first, by
+  its internal `id` or its `client_id`, and compares the stored `clientId`
+  without letter case.
+- **A change** is a key whose value after the write differs from the value
+  Keycloak holds now, after the merge of the update
+  (`blocked_changes`). A key sent with its current value is no change. A
+  map such as `attributes` counts as one key. Every key that is not on the
+  allowed list counts as a change that can lock MEHO out.
+- **Which realm.** For `client.update`, `client.delete` and the two mapper
+  writes, the target's managed realm. For `realm.update`, the `realm` param or the target's
+  managed realm. In both cases MEHO also reads the realm from Keycloak and
+  takes the name Keycloak answers with: the realm is the login realm when
+  the typed name or the answered name is a login realm. So a realm name in
+  another spelling that Keycloak takes for the login realm counts as the
+  login realm. For the client writes MEHO reads the realm only when the
+  client may be one of its own. For `client_scope.protocol_mapper.update`
+  MEHO first lists the clients of the realm, and reads the realm only when
+  one of its own clients may use the scope.
+- **When.** Before the request waits for approval (the park checks of
+  `register_meho_own_login_checks`, and for `realm.update` after the check
+  of the SMTP password) and again when the call runs
+  (`keycloak_client_update`, `keycloak_client_delete`,
+  `keycloak_realm_update`, `keycloak_protocol_mapper_create`,
+  `keycloak_client_scope_protocol_mapper_update`). The run-time check reads the client or realm
+  once and writes back that same read. So no approval, no standing grant
+  and no run approval lets these writes through. A client that becomes one
+  of MEHO's own while the request waits is refused when it runs.
+- **On doubt MEHO refuses.** At the run, settings MEHO cannot read, a
+  client without a `clientId`, a realm MEHO cannot read for a client
+  write, a realm in an odd shape, or a client list MEHO cannot read for a
+  scope mapper write refuse the write (`meho_access_not_checked`). Before
+  approval, a client, a client list or a realm MEHO cannot read is let
+  through to wait; the run checks again.
+- **The refusal.** `MehoAccessRefusedError` with the reason
+  `meho_own_client`, `meho_login_realm` or `meho_access_not_checked`. The
+  text says what was refused and why, names the keys the caller sent,
+  names no client the caller did not name, and gives no advice to change
+  rights. It says that a realm administrator makes such a change in the
+  Keycloak admin console. Nothing is written. `realm.update` can send a secret, so the
+  error of its run shows no text.
+- **Other realms.** In another realm MEHO refuses only when it cannot
+  check:
+  - `realm.update`: Keycloak's answer for the realm has no realm name
+    (`refuse_login_realm_write`).
+  - The client writes: the client may be one of MEHO's own (its client id
+    is the client id of one of MEHO's own clients, it has no client id, or
+    MEHO cannot read its settings), and MEHO cannot read the realm
+    (`refuse_own_client_write`).
+  - `client_scope.protocol_mapper.update`: one of MEHO's own clients may
+    use the scope, and MEHO cannot read the realm
+    (`refuse_scope_mapper_write`).
+
+  When the realm answer names another realm, MEHO refuses nothing.
+
+### One-time code set-up
+
+Two ops in `ops_user_required_actions.py`. The usual use is to make users
+set up a one-time code (OTP) app: Keycloak then asks for a code at every
+login.
+
+- `keycloak.user.required_actions.update` (dangerous, approval required,
+  group `user_write`). Params: the user (`id` or `username`) and an `add`
+  and/or a `remove` list of required action names, for example
+  `{"username": "alice", "add": ["CONFIGURE_TOTP"]}`.
+  - Keycloak's `PUT .../users/{id}` replaces the whole `requiredActions`
+    list. So the op reads the user, builds the new list (other actions
+    stay), and writes that same read back with `read_merge_write`
+    (`before=` the read). There is no second read before the write, so
+    the written list and the rest of the user come from one read.
+  - After approval, the op uses the user id shown on the approval card.
+    It does not look the username up again. A card without a user id is
+    refused, and nothing is written.
+  - A request with both `id` and `username` must name one user: the
+    username stored in Keycloak for that id must match (case does not
+    count). If not, the request is refused before it waits for approval
+    (a park check), and again when the approved request runs. Nothing is
+    written.
+  - Each name in `add` must be an enabled required action of the realm
+    (`GET .../authentication/required-actions`). An unknown or disabled
+    name is refused before approval (a park check, with no name in the
+    reason) and again before any write, and the error lists the allowed
+    names. A name in both lists is refused too.
+  - The user this target signs in with is refused for every change (add
+    or remove). A required action on it, such as `UPDATE_PASSWORD`, can make
+    Keycloak refuse the next password sign-in of MEHO, and then nobody can
+    reach that Keycloak through MEHO. It is the same check as
+    `keycloak.user.delete` (`ops_user_login_guard.py`), run on the
+    username stored in Keycloak. It is before approval and when the
+    approved request runs, so a user renamed while the request waits is
+    still refused. Nothing is written.
+  - When the list would not change, nothing is written (`changed: false`).
+  - Answer: `{id, username, realm, changed, added, removed,
+    required_actions, unrequested_changes, read_back_checked}`.
+    `required_actions` is the list read back from Keycloak after the
+    write. It is `null` when MEHO does not know the list: when the
+    read-back failed (`read_back_checked: false`), and when the read-back
+    ran but Keycloak's answer had no usable `requiredActions` list
+    (`read_back_checked: true`).
+  - The approval card shows `{resource, username, id, realm, add, remove,
+    current_available, user_available[, current_required_actions,
+    resulting_required_actions][, warning]}`. When the user could be
+    read, the card and the answer show the username stored in Keycloak.
+    When the user cannot be read at park time, the card still shows the
+    request, and the approved run is refused.
+  - When the realm is the one MEHO's own sign-in uses, the card's
+    `warning` has one line for each of these (joined with `; `):
+    - `add` has a passkey set-up (`webauthn-register` or
+      `webauthn-register-passwordless`): "this lets the next sign-in to
+      this account add a new passkey";
+    - `add` has `CONFIGURE_TOTP` or `CONFIGURE_RECOVERY_AUTHN_CODES`:
+      "this gives the person a new way to sign in (...)";
+    - `remove` has `CONFIGURE_TOTP`, `CONFIGURE_RECOVERY_AUTHN_CODES` or a
+      passkey set-up: "this takes a sign-in set-up step away (...): the
+      person will not be asked to set it up".
+  - Two writers at the same time can overwrite each other: Keycloak has no
+    version check on a user.
+- `keycloak.user.otp_status` (safe read, group `user`). Params: `username`
+  (filter) and `max` (default 100, most 500). Keycloak's user list answers
+  a short form without `requiredActions` by default, so `keycloak.user.list`
+  cannot answer this. The op asks for the full form, then reads each
+  user's credentials (one request per user, eight at a time) and keeps
+  only whether a credential of type `otp` exists. Answer: `{rows: [{id,
+  username, enabled, required_actions, has_otp, otp_setup_pending}], total,
+  unknown, truncated, skipped_no_id}`. `has_otp` is `null` (unknown) when
+  the credentials of that user could not be read. `skipped_no_id` counts
+  the user rows left out because Keycloak gave them no id. `truncated` is `true` when more users
+  exist than `max`. A user list answer that is not a list is an error,
+  not an empty list. No credential value, label or other credential field
+  is ever returned.
 
 ### Login test
 
@@ -698,7 +1678,8 @@ How one delete runs:
      `security-admin-console`.
    - `target_login_client` / `target_login_user` — the client and the user
      this MEHO target logs in with: the admin credential's `client_id`, and
-     its `username` (password login) or the client's
+     its `username` (password login, matched against the stored user name
+     and the stored email) or the client's
      `service-account-<clientId>` user (client-secret login). They live in
      the target's `admin_realm`, so these guards apply when `managed_realm`
      is that same realm.
@@ -718,14 +1699,18 @@ a change made while the request waited). A refused delete never reaches an
 approver: the builder raises, the park is refused with
 `blast_radius_required`, and the reason carries the refusal, for example
 `keycloak.client.delete refused (builtin_client): ...`. A delete by name
-acts on the object that has that name when the approved call runs; pass
-the `id` to pin one exact object (the card shows the id).
+of a group or a client acts on the object that has that name when the
+approved call runs; pass the `id` to pin one exact object (the card shows
+the id). A user delete always acts on the user id and the realm on the card
+(see "One user, as Keycloak stores it").
 
 Safe to run twice: when the object is already gone, the handler sends no
 DELETE and returns `already_absent: true`. The approval card says so too
 (`present: false`, irreversibility `none-object-already-absent`), so a
-repeated teardown still waits for approval as usual and then reports
-`already_absent: true`.
+repeated teardown of a group or a client still waits for approval as usual
+and then reports `already_absent: true`. A user delete whose card said the
+user does not exist is refused when it runs: the approver saw no user to
+delete.
 
 The CLI verbs `meho keycloak user|group|client delete` run the same two
 steps: without `--preview-hash` they only preview and print the hash; with
@@ -775,10 +1760,12 @@ steps as the other delete verbs.
 
 Two ops in their own modules, registered by the same walk:
 
-- `keycloak.authflow.ensure_approval_flow` (`ops_authflow.py`) — risk
+- `keycloak.authflow.ensure_approval_flow` (`ops_authflow.py`, its
+  registration metadata in `ops_authflow_schemas.py`) — risk
   level `caution`, approval required, group `authflow_write`. It gives a
-  realm that already runs the login flow `meho approval sign-in` from the
-  chart's realm file, and binds it as the browser flow of the client
+  realm that already runs the login flow `meho approval sign-in level` from
+  the chart's realm file, names its level `meho-approve` (level 2) in the
+  realm attribute `acr.loa.map`, and binds it as the browser flow of the client
   `meho-cli-approve` (param `client_id` to name another client). On the
   target's managed realm:
   1. Find the client. None: stop with `client_not_found`; nothing is
@@ -786,15 +1773,27 @@ Two ops in their own modules, registered by the same walk:
   2. Find the flow by alias (`GET .../authentication/flows`).
      - Missing: make it (`POST .../authentication/flows`), add the steps
        (`POST .../flows/{flowAlias}/executions/execution` and
-       `.../executions/flow` for the sub-flow
-       `meho approval sign-in - one-time code`), then set each step's
+       `.../executions/flow` for the sub-flows
+       `meho approval sign-in level - level 2` and
+       `meho approval sign-in level - one-time code`), then set each step's
        requirement (`PUT .../flows/{flowAlias}/executions`); a new step
        starts as `DISABLED`. The steps are read again and must match.
+     - The level step `conditional-level-of-authentication` gets its
+       settings (`POST .../executions/{id}/config`: level 2, maximum age
+       0) when it has none; settings with other values stop the op with
+       `other_steps`.
      - Present with the same steps (same order, level, name and
        requirement): nothing is written.
      - Present with other steps: stop with `other_steps`, naming the first
        difference. Nothing is written.
-  3. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
+  3. Name the level: read the realm, add `"meho-approve": 2` to its
+     `acr.loa.map` (other names stay), and write the whole attribute map
+     back (Keycloak drops attributes a write leaves out). These checks run
+     before anything is written: a map that is not a JSON object stops
+     the op with `levels_not_object`, another name on level 2 with
+     `level_taken`, and an own `acr.loa.map` on the client with
+     `client_level_map`.
+  4. Bind: read the client, put `authenticationFlowBindingOverrides.browser`
      on top (other overrides and every other field stay), write it back,
      and read it again. A binding that does not read back is an error
      (`check_failed`). Already bound: nothing is written.
@@ -822,6 +1821,99 @@ Both ops read lists with `get_admin_list_strict`: a body that is not a JSON
 array raises `KeycloakUnexpectedResponseError`, so a failed read never looks
 like an empty list.
 
+### Rights of the login flow ops
+
+A change of a login flow needs the role `manage-realm` of the realm's
+admin client. Each `keycloak.authflow.ensure_*` op checks the roles of the
+target's account before the call waits for approval
+(`ops_authflow_rights.py`):
+
+| op_id | roles the run needs |
+|---|---|
+| `keycloak.authflow.ensure_approval_flow` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client binding) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `manage-realm` (the flow copy and the realm's browser flow) |
+| `keycloak.authflow.ensure_approval_touch` | `manage-realm` (the flow and the realm's level map), `manage-clients` (the client's `amr` mapper and the client binding) |
+
+`ensure_approval_flow` and `ensure_approval_touch` also find the client
+first. Keycloak lets any one of `query-clients`, `view-clients` or
+`manage-clients` do that. The card lists them as
+`client_lookup_needs_one_of`. A 403 at this lookup names these roles in
+`extras.remediation` and says that nothing was changed.
+
+The admin client is `realm-management` when the account signs in to the
+managed realm, and `<realm>-realm` when it signs in to `master`. The admin
+roles of the account are in the connector's own admin token, and Keycloak
+checks an Admin REST API call mainly with these roles. So the check reads
+`resource_access.<admin client>.roles` of that token. It needs no extra
+request and no extra right. The token is never shown or stored. When the
+token has `resource_access` but no entry for the admin client, the roles
+count as not checked, not as "no roles". The card and the check of one
+request share one read, so a wrong password makes one failed sign-in.
+
+- **`manage-realm` is missing:** the permission preflight sets `will_be_denied`.
+  MEHO refuses the call before an approval request exists
+  (`write_capability_denied`). `reason` names the account and the missing
+  role; `doc_ref` points here.
+- **`manage-clients` is missing:** the call still waits for approval. A
+  Keycloak permission to manage only the one client (fine-grained admin
+  permissions) gives the same right, and the token does not show it. So
+  its lack does not prove that Keycloak refuses the run
+  (`register_rights_check(..., per_object=...)`). The card says the
+  account lacks the role and MEHO could not check that permission.
+- **The roles cannot be read** (the token is not a JWT, it has no
+  `resource_access` claim or no entry for the admin client, as with a
+  lightweight access token, or the account signs in to a third realm): the
+  call still waits for approval. The card says "MEHO could not check the
+  rights of the target's account".
+- **A 403 at the run:** the op stops with `KeycloakMissingRightsError`.
+  The result has `error_code` `connector_error` (not `connector_http_403`),
+  `http_status` 403 and `exception_class` `KeycloakMissingRightsError`.
+  `extras.remediation` names the roles the op needs, the admin client and
+  the account, and the missing roles when they could be read.
+- **A 403 at a step of `ensure_approval_flow`** after the flow exists (the
+  settings of the level step, the realm's level map, the client binding):
+  the run stops half-way. The error names the refused step and the flow
+  (id, `flow_created`). `extras.remediation` also gives the flow's name and
+  says what the run changed before: the flow, the level setting and the level name. These
+  changes stay; a second run after the fix keeps them and does the rest.
+- **A 403 while an op finds or makes its flow** (`flow_refused_error`, used by
+  `ensure_approval_flow` and `ensure_approval_touch`; the touch op also
+  names a 403 at the realm read of the passkey policy). While the op only
+  reads, the text says nothing was changed. Once it began to make the
+  flow, the text says the flow may be half-made and must be deleted before
+  the next run, because a run finds it with other steps and stops.
+- **A refused read inside a step** is named as a read ("read what is needed
+  to ..."), not as the change of the step (`read_or_write`).
+- **A refused read back after a write in the same step** (`reading_back`,
+  which raises `ReadBackRefusedError`): the text says "read back the change
+  MEHO made to ...", and the list of what the run changed holds that write,
+  marked "MEHO could not read it back". The approval op reads back only the
+  client binding; the touch op reads back the level map, the `amr` mapper
+  fix, the company login default and the binding. The short error message
+  of `ensure_approval_flow` gives the flow id but not the flow's name, so
+  the longest step still fits the 256-character limit.
+- **A 403 at a step of `ensure_approval_touch`** after the flow exists (the
+  realm's level map, the client's `amr` mapper, the company login default,
+  the client binding): the run stops half-way. The error names the refused
+  step. `extras.remediation` also says what the run changed before: the
+  flow (alias, id, `flow_created`), the level map, the mapper and the
+  company login default. These changes stay; a second run after the fix
+  keeps them. When the realm has no company login default and the run
+  removed the flow's old one, a refused read back says "the flow has no
+  company login default". The short error message is cut to fit the
+  256-character limit (`_half_way_text`), so a long client id cannot push
+  its end past it.
+
+After a refusal (before the wait, or a 403 at the run), MEHO drops the
+admin token it keeps, so the next call signs in again. The next step also
+says that Keycloak can keep the old roles in MEHO's sign-in token for a few
+minutes.
+
+The approval card of the three ops lists the roles (`roles_needed`) and the
+result of the check (`rights_check`). A preview (`preview_operation`) does
+not talk to Keycloak; its card says "MEHO checks the rights of the target's
+account when the call is made."
+
 ### Login setup reads (`ops_flow_reads.py`)
 
 Three `safe` reads, group `login_setup`, for the checks before one-time codes
@@ -837,6 +1929,37 @@ A failed read, or a body of the wrong shape, is an error, never an empty list.
 
 The first op is named `.step.list` and not `.executions`, because the event
 feed treats a name that ends in `.list` as a read.
+
+### Login events and admin events (`ops_events.py`)
+
+Two `safe` reads, group `events`, for the first questions of a security
+review: who logged in and who failed, and who changed what. Each copies only
+a fixed list of fields (an allow-list).
+
+| op_id | Admin REST API | rows |
+|---|---|---|
+| `keycloak.events.list` | `GET .../events` | `time`, `type`, `clientId`, `userId`, `ipAddress`, `error`. Filters: `type` (list), `client`, `user`, `ipAddress`, `dateFrom`, `dateTo`. |
+| `keycloak.admin_events.list` | `GET .../admin-events` | `time`, `operationType`, `resourceType`, `resourcePath`, `authRealmId`, `authClientId`, `authUserId`, `authIpAddress`, `error`. Filters: `operationTypes`, `resourceTypes`, `resourcePath`, `authUser`, `authIpAddress`, `dateFrom`, `dateTo`. |
+
+- The admin event `representation` (the JSON text of the change, which can
+  hold a password), the `details` map and the session id are never returned.
+  The flight recorder trace masks `representation` too
+  (`_TRACE_ONLY_FIELDS` in `redaction.py`), because it stores the vendor
+  answer before the op filters it.
+- Each call first reads the realm (`GET /admin/realms/{realm}`). When
+  `eventsEnabled` (login events) or `adminEventsEnabled` (admin events) is
+  false, the answer is `enabled: false` with a `message` and no rows, and
+  Keycloak's event endpoint is not called. A realm answer without the flag
+  is an error. An empty `rows` with `enabled: true` means nothing was saved
+  for the filter.
+- Paging: `first` (default 0) and `max` (default 100, at most 1000). The op
+  asks Keycloak for `max + 1` rows and returns `max`; `has_more` is true when
+  the page is not the end of the list. Answer shape:
+  `{realm, enabled, first, max, has_more, rows, total}`. A long `rows` list
+  comes back behind a result handle like any other list.
+- `dateFrom` and `dateTo` are `YYYY-MM-DD`. Times come back as ISO 8601 in
+  UTC. A failed read, a body that is not a list, or a row that is not an
+  object is an error, never an empty list.
 
 ### Skip the one-time code after a passkey (#5663)
 
@@ -902,11 +2025,87 @@ browser login of the realm will use it, and the way back:
 `keycloak.realm.update` with `{"browserFlow": "browser"}`. The op is pinned
 as a plain `write` in `connectors/keycloak/op_classes.py`.
 
+### Console touch flow (#6213)
+
+`keycloak.authflow.ensure_approval_touch` (`ops_authflow_touch.py`, the
+flow shape and metadata in `ops_authflow_touch_schemas.py`) — risk level
+`caution`, approval required, group `authflow_write`, params `client_id`
+(only `meho-web`; the schema refuses another client) and `replace_custom_login` (default `false`). It gives a running realm what the chart's realm
+file gives a new one: the login flow `meho approval touch` with level 1
+(the normal login) and level 3 (`acr_values=meho-touch`, a passkey every
+time; level 2 is kept for the approval sign-in, `meho-approve`). On the target's managed realm:
+
+1. Find the client. Missing: stop with `client_not_found`, nothing
+   written. The realm's passkey policy must ask for user verification
+   (`webAuthnPolicyPasswordlessUserVerificationRequirement` is
+   `required`); otherwise a touch could pass without a PIN or fingerprint,
+   so the op stops with `verification_not_required`, nothing written.
+2. Find the flow. Missing: check that the Keycloak has every step
+   (`GET .../authentication/authenticator-providers`; Keycloak 26.4 added
+   `conditional-credential`), else stop with `missing_step` before any
+   write. Then make it (`POST .../flows`), add each step and
+   sub-flow in order, read the steps back, set each requirement (a new
+   step starts `DISABLED`; steps are matched by place, because the level
+   condition is in the flow twice), and give the four steps with
+   settings their config (`POST .../executions/{id}/config`). Read it
+   again: steps, requirements and every setting must match
+   (`check_failed` otherwise). There with the same shape and settings:
+   nothing written. There with another shape: stop with `other_steps`.
+3. Map `meho-touch` to level 3 in the realm attribute `acr.loa.map`,
+   next to the names already there (full realm `PUT` with
+   `merge_representation`, read back). Mapped to another level: stop
+   with `loa_conflict` before the bind.
+4. Add the `amr` mapper (`oidc-amr-mapper`) to the client unless it has
+   one. A mapper there that leaves the claim out of the ID token, the
+   access token or the introspection gets those settings turned on (a
+   `PUT` of that mapper, read back; `check_failed` otherwise).
+5. When the realm's browser flow has a company login default on its
+   `identity-provider-redirector` step, give the touch flow's redirector
+   the same `defaultProvider` (new config alias
+   `meho-company-login-redirect-touch`, the name `core/company_login.py`
+   uses, or a `PUT` of the config that is there; read back). Without it
+   the console login stops going straight to the company login until the
+   next chart upgrade. When the realm's flow has no default, a default on
+   the touch flow is removed (`DELETE` of its config, read back), as
+   `core/company_login.py` does.
+6. Bind the flow as the client's browser flow (full client `PUT`, read
+   back). This is the last write. Level 1 is a copy of Keycloak's
+   default login, so the op binds only when the realm's browser flow is
+   `browser` with the default steps, requirements and settings, or
+   `browser with passkeys` with the steps and settings of that `browser`
+   plus the passkey step, and the client has no browser flow of its own.
+   Both flows can be edited, so the op reads them. The default shapes
+   are in `ops_authflow_default_login.py` (the Go helper has the same
+   list in `cli/internal/cmd/admin/keycloak/defaultlogin.go`): Keycloak
+   26.0 to 26.2, 26.3 and newer, with or without the passkey condition,
+   WebAuthn, recovery codes and the organization step. The company
+   login default on the redirect step is allowed; it is MEHO's own
+   setting. The shapes with the organization step count only while the
+   realm's `organizationsEnabled` is false or missing: level 1 has no
+   organization step. Otherwise it
+   makes the flow, does not bind it, and returns `bound: false` with
+   `not_bound_reason`. With `replace_custom_login: true` it binds anyway;
+   `previous_browser_flow_id` names the flow it replaced. A client bound
+   to the touch flow already stays bound and returns `bound: true`, also
+   on a later run without `replace_custom_login`.
+
+The result is `{realm, flow_alias, flow_id, flow_created, flow_steps,
+loa_map_changed, amr_mapper_added, amr_mapper_fixed, redirect_default_copied, client_id, client_uuid,
+bound, not_bound_reason, browser_flow_id, previous_browser_flow_id, binding_changed}`. Errors
+raise `KeycloakTouchFlowError` with a stable `code`. A test keeps the
+op's flow equal to the realm file's. The approval card names the realm,
+the client, the new flow, who is affected, and the way back:
+`keycloak.client.update` with `{"authenticationFlowBindingOverrides":
+{"browser": ""}}`. The op is pinned as a plain `write` in
+`connectors/keycloak/op_classes.py`.
+
 ### Park-time approval preview (#1857)
 
-Fifteen of the write ops register bespoke `proposed_effect` preview builders
+Eighteen of the write ops register bespoke `proposed_effect` preview builders
 (twelve in `connectors/keycloak/ops_write_preview.py`, one in
-`ops_login_check.py`, one in `ops_authflow_passkey.py`, one in
+`ops_user_required_actions.py`, one in `ops_login_check.py`, one in
+`ops_authflow.py`, one in
+`ops_authflow_passkey.py`, one in `ops_authflow_touch.py`, one in
 `ops_write_realm_smtp.py`), wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
@@ -918,7 +2117,7 @@ use:
 | `keycloak.realm.create` | `{resource, realm, representation}` |
 | `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
 | `keycloak.user.reset_password` | `{resource, username, id, realm, password_source, password_secret_ref, temporary[, password_secret_mount, password_secret_key]}` |
-| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles, effective_roles}` |
 | `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
 | `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
 | `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |
@@ -926,8 +2125,11 @@ use:
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 | `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
+| `keycloak.user.required_actions.update` | `{resource, [username,] id, realm, add, remove, current_available, user_available[, user_note, current_required_actions, resulting_required_actions]}` (registered in `ops_user_required_actions.py`) |
 | `keycloak.user.check_login` | `{resource, username, realm, client_id, password_source, password_secret_ref[, password_secret_mount, password_secret_key]}` (registered in `ops_login_check.py`) |
-| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_flow` | `{resource, realm, flow, client_id, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow.py`) |
+| `keycloak.authflow.ensure_passkey_code_skip` | `{resource, realm, copies_flow, new_flow, affects, way_back, roles_needed, rights_check}` (registered in `ops_authflow_passkey.py`) |
+| `keycloak.authflow.ensure_approval_touch` | `{resource, realm, client_id, new_flow, affects, way_back, client_lookup_needs_one_of, roles_needed, rights_check}` (registered in `ops_authflow_touch.py`) |
 | `keycloak.realm.update` | `{resource, realm, representation[, smtp_password_source, smtp_password_secret_ref]}` (registered in `ops_write_realm_smtp.py`) |
 
 The group builders surface `attribute_keys` (which attributes change,
@@ -947,7 +2149,7 @@ bespoke builders are at least as strict as the generic echo they bypass: a
 anywhere in an `additionalProperties` representation) is scrubbed too, so no
 cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
-as `password_source: "vault"` + the ref. The other seven write ops fall
+as `password_source: "vault"` + the ref. The other write ops fall
 through to the generic params-echo
 default. Most builders are pure (no connector I/O) and so fail-soft by
 construction. The four delete builders are not: they read the object live
@@ -959,7 +2161,7 @@ registry contract.
 **Spec-reconcile lane (#2988).** Every request path the connector dispatches
 lives as a `_*_PATH` template constant in
 `backend/src/meho_backplane/connectors/keycloak/_paths.py` (hoisted out of
-inline f-strings by #2988); handlers fill a template via `fill_path`, whose
+inline f-strings by #2988); handlers fill a template via `fill_path` (which encodes every value), whose
 placeholder names are byte-for-byte the pinned spec's own parameter names
 (`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`, `{group-id}` — and
 the camelCase `{groupId}` on the user-group membership sub-resource, a
@@ -967,10 +2169,12 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 49 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+asserts all 55 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
 paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886, +8 login flow and identity provider
-paths at #5621, +3 passkey step paths, +1 user PUT path at #4940) are served by the pinned
+paths at #5621, +3 passkey step paths, +1 user PUT path at #4940,
++5 client role and credential delete paths, +1 client role users path)
+are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched
@@ -992,11 +2196,93 @@ two realm knobs live on `target.extras` (no schema migration):
 
 - `admin_realm` — realm the admin client authenticates against (default
   `master`).
-- `managed_realm` — realm the connector manages + fingerprints (default:
-  `DEFAULT_MANAGED_REALM` in `connectors/keycloak/session.py`).
+- `managed_realm` — realm the connector manages + fingerprints. **Required.**
+  MEHO has no built-in realm name: a target must name its realm.
 
-Resolved through `resolve_realm_config`, which tolerates a missing
-`extras` attribute and falls back to the defaults.
+Resolved through `resolve_realm_config`. The admin realm falls back to
+`master` when it is absent or empty, also when the `extras` attribute is
+missing. The managed realm never falls back: with no `managed_realm` the
+function raises `KeycloakManagedRealmMissingError`.
+
+**A realm is one plain name.** `targets/required_extras.py`
+(`realm_name_problem`) refuses a managed realm, or a set admin realm, that
+holds `/`, `\`, `?`, `#` or `%`, a control character, white space at the
+start or the end, is made only of dots, or is longer than 255 characters
+(Keycloak's own column size). MEHO trims no realm anywhere: a value with
+spaces around it is refused, at REST, CLI and in the console. The same
+check runs at create, at update and before every Keycloak call. A realm
+that comes as an operation parameter passes it too
+(`connectors/keycloak/realm_params.py`): `realm` and
+`representation.realm` of `keycloak.realm.create` / `keycloak.realm.update`,
+`realm` of `keycloak.realm.delete` and of `keycloak.user.check_login`.
+A params check refuses a bad value before the policy gate, so before a
+call waits for approval. The `<realm>` segment of a secret broker ref
+(`<target>/<realm>/<username>#password`, `<target>/<realm>/clients/<id>#secret`)
+must be plain too.
+
+A Keycloak target with no managed realm, or a realm that is not a plain
+name, is refused like this:
+
+- **Operations.** Every operation on it fails before any call to Keycloak.
+  `auth_headers` checks the realms first, before the credential read and
+  also when an admin token is still cached, so no credential is read from
+  the secret store and no request is sent. The error text says how to set
+  the realm.
+- **Probe and fingerprint.** `meho targets probe` answers
+  `reachable: false` with the same text.
+- **Doctor.** `meho doctor` lists every Keycloak target MEHO refuses, as a
+  warning with the fix (`cli/internal/cmd/doctor_keycloak_realm.go`). It
+  reads `GET /api/v1/targets/checks/keycloak-realm`
+  (`api/v1/targets_keycloak_realm.py`): the caller's tenant, or every
+  tenant for a platform admin who is a person. Against an older backplane
+  without that route it reads the caller's targets one by one. A realm of
+  only spaces counts as no realm, here and everywhere else.
+- **Create and update.** `POST /api/v1/targets` and `PATCH` (also
+  `meho targets add`, `meho targets update`, `meho targets import` and the
+  `targets.register` and `targets.update` operations) answer HTTP 422 with
+  the same text. An update is checked on the target as it will be after the
+  write: sending `extras` without `managed_realm`, or changing the product to
+  `keycloak` on a target without one, is refused. The check lives in
+  `targets/required_extras.py`. The console create and edit forms have a
+  "Managed realm" field (`ui/routes/connectors/forms_realm.py`); for a
+  Keycloak target it is required. The edit form keeps every other extras
+  key, so an older target without a realm can be fixed in the console.
+- **Settings file import.** `POST /api/v1/settings/import`
+  (`instance_settings/service.py`) runs the same check in the preview as in
+  the apply, so the preview names the same mistake.
+
+**Allowed, but with a warning.** A managed realm that is the target's
+admin realm (`master` by default), or the realm MEHO itself signs in with
+(the realm in `keycloak_issuer_url` / `keycloak_admin_url`), is allowed.
+`targets/keycloak_realm_warnings.py` gives one line for each case:
+
+- `POST` / `PATCH /api/v1/targets` answer with a `warnings` list
+  (`TargetWriteResult`); `meho targets add` / `update` print each line on
+  stderr.
+- `targets.register` and `targets.update` add `warnings` to their answer,
+  only when there is one. A call made with a token waits for approval, so
+  its card shows the lines first: each op registers a card-warnings builder
+  (`register_card_warnings`, `targets_register_card_warnings` and
+  `targets_update_card_warnings`), and the dispatcher stamps the lines as
+  `target_warnings`. They come from the target as it will be after the
+  write: the sent `product` and `extras`, else the stored ones. A call with
+  no warning has a card without the part.
+- The console create and edit forms show the lines after the save
+  (`_saved_warning_modal.html`, from `forms_realm.saved_with_warnings`)
+  instead of going straight back to the targets list.
+- The settings file import puts each line, with the path of the target
+  entry, in the `warnings` of the preview and of the apply. The import
+  writes at once and has no approval card.
+- The dispatcher stamps the lines as `target_warnings` on the approval
+  card of every write on such a target; the console shows them as a
+  "Check the target" box.
+
+To set the realm on an existing target (`--extra` replaces the whole
+`extras` map, so repeat the keys you keep):
+
+```console
+$ meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>
+```
 
 ## Dependencies
 

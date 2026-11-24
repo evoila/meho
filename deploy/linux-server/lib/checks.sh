@@ -208,10 +208,12 @@ machine_addresses() {
     ip -4 -o addr show scope global | awk '{ split($4, part, "/"); print part[1] }' | sort -u
 }
 
-# check_dns <name> <public address or empty>: the name resolves through DNS,
-# to an address of this machine or to the --public-address.
+# check_dns <name> <public address or empty> [<update 0|1>]: the name resolves
+# through DNS, to an address of this machine or to the --public-address. An
+# update keeps the answers of the install and refuses --public-address, so
+# its fix names only the DNS record.
 check_dns() {
-    local name=$1 public_address=$2 addresses shown local_addresses address
+    local name=$1 public_address=$2 update=${3:-0} addresses shown local_addresses address
     addresses=$(dns_addresses "$name")
     [[ -n $addresses ]] ||
         fail "$name does not resolve through DNS. An entry in /etc/hosts does not count." \
@@ -219,9 +221,14 @@ check_dns() {
     shown=${addresses//$'\n'/, }
     ok "$name resolves through DNS to $shown"
     if [[ -n $public_address ]]; then
-        grep -qxF -- "$public_address" <<<"$addresses" ||
+        if ! grep -qxF -- "$public_address" <<<"$addresses"; then
+            if ((update)); then
+                fail "$name resolves to $shown, not to the address the install was given with --public-address ($public_address)." \
+                    "correct the DNS record so that it points to $public_address. An update keeps the answers of the install."
+            fi
             fail "$name resolves to $shown, not to the address given with --public-address ($public_address)." \
                 "correct the DNS record, or pass the address it points to with --public-address."
+        fi
         ok "$name points to the address given with --public-address"
         return 0
     fi
@@ -232,6 +239,10 @@ check_dns() {
             return 0
         fi
     done <<<"$addresses"
+    if ((update)); then
+        fail "$name resolves to $shown, which is not an address of this machine." \
+            "correct the DNS record so that it points to an address of this machine. An update keeps the answers of the install and takes no --public-address."
+    fi
     fail "$name resolves to $shown, which is not an address of this machine." \
         "correct the DNS record. Behind address translation in your network, pass the translated address with --public-address."
 }

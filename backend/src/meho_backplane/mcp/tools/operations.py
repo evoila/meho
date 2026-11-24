@@ -66,14 +66,46 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
+from meho_backplane.mcp.tools._call_operation_reveal import (
+    APPROVAL_REQUEST_ID,
+    fetch_reveal_over_mcp,
+    reveal_fetch_for_settings,
+)
+from meho_backplane.mcp.tools._call_operation_status import (
+    is_approved_reveal,
+    read_own_request_over_mcp,
+    status_for_settings,
+)
+from meho_backplane.mcp.tools._group_operations import (
+    GROUP_INPUT_PROPERTY,
+    GROUP_NOTE_OUTPUT_PROPERTY,
+    GROUP_OPERATIONS_OUTPUT_PROPERTIES,
+    group_operations_for_settings,
+)
+from meho_backplane.mcp.tools._include_raw import (
+    GROUPS_RAW_OUTPUT_PROPERTY,
+    INCLUDE_RAW_INPUT_PROPERTY,
+    SEARCH_RAW_OUTPUT_PROPERTY,
+    include_raw_for_settings,
+)
 from meho_backplane.mcp.tools._operation_recall import (
     RECALL_OUTPUT_SCHEMA,
     recall_schema_for_settings,
     with_recall,
 )
+from meho_backplane.mcp.tools._preview_policy_fields import PREVIEW_POLICY_OUTPUT_SCHEMA
+from meho_backplane.mcp.tools._preview_typed_writes_text import preview_tool_for_settings
+from meho_backplane.mcp.tools._search_call_hints_schema import (
+    CALL_HINT_PROPERTIES,
+    call_hints_schema_for_settings,
+)
+from meho_backplane.mcp.tools._search_classification import (
+    CLASSIFICATION_PROPERTIES,
+    classification_schema_for_settings,
+)
 from meho_backplane.mcp.tools._short_tool_texts import (
     CALL_OPERATION_SHORT,
-    PREVIEW_OPERATION_SHORT,
+    LIST_OPERATION_GROUPS_SHORT,
     SEARCH_OPERATIONS_SHORT,
 )
 from meho_backplane.operation_picks.recorder import (
@@ -86,6 +118,9 @@ from meho_backplane.operations._contract_guidance import (
     GUIDANCE_MAX_CHARS,
     GUIDANCE_VALUE_MAX_CHARS,
 )
+from meho_backplane.operations._group_listing_operations import GROUP_OPERATIONS_LINE
+from meho_backplane.operations._search_typed_first import INCLUDE_RAW_LINE
+from meho_backplane.operations._secret_values import REVEAL_NOT_IN_BACKGROUND, asks_reveal
 from meho_backplane.operations.meta_tools import (
     SEARCH_NARROWING_MAX,
     SEARCH_OUTCOMES,
@@ -101,6 +136,7 @@ from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 from meho_backplane.recall import RECALL_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import with_data_notice
+from meho_backplane.work_ref import WorkRefError, normalize_work_ref_input
 
 __all__: list[str] = []
 
@@ -180,6 +216,24 @@ async def _search_operations_handler(
         raise McpInvalidParamsError(str(exc), data=exc.as_error_data()) from exc
 
 
+def _clean_work_ref_argument(call_arguments: dict[str, Any]) -> None:
+    """Clean the ``work_ref`` input with the one shared rule, or refuse the call.
+
+    This runs before anything else happens with the call: no target is
+    resolved, no policy check runs, and no row is written.
+    """
+    if call_arguments.get("work_ref") is None:
+        return
+    try:
+        call_arguments["work_ref"] = normalize_work_ref_input(call_arguments["work_ref"])
+    except WorkRefError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_work_ref"}) from exc
+    if not isinstance(call_arguments["work_ref"], str):
+        raise McpInvalidParamsError(
+            "work_ref must be a string", data={"reason": "invalid_work_ref"}
+        )
+
+
 async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
@@ -195,9 +249,24 @@ async def _call_operation_handler(
     (:mod:`meho_backplane.mcp.tools._operation_recall`), also when it
     starts in the background with ``async: true``. A check of a run with
     ``run_id`` does not. Each call (not a check) writes one call record
-    (:mod:`meho_backplane.operation_picks`).
+    (:mod:`meho_backplane.operation_picks`). With ``MCP_REVEAL_FETCH`` on,
+    ``approval_request_id`` fetches the value of the caller's approved
+    secret reveal instead (:mod:`._call_operation_reveal`); it writes no
+    call record. With ``MCP_OWN_REQUEST_STATUS`` on, any other
+    ``approval_request_id`` reads the state of the caller's own request
+    (:mod:`._call_operation_status`); nothing runs. A reveal call cannot run in the background:
+    ``reveal_secret: true`` with ``async: true`` is refused
+    (``reveal_secret_with_async``).
     """
+    if APPROVAL_REQUEST_ID in arguments:
+        settings = get_settings()
+        if settings.mcp_own_request_status and not (
+            settings.mcp_reveal_fetch and await is_approved_reveal(operator, arguments)
+        ):
+            return await read_own_request_over_mcp(operator, arguments)
+        return await fetch_reveal_over_mcp(operator, arguments)
     call_arguments = dict(arguments)
+    _clean_work_ref_argument(call_arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
     wait_seconds = call_arguments.pop("wait_seconds", None)
@@ -214,6 +283,10 @@ async def _call_operation_handler(
             )
         return with_data_notice(
             await poll_call(operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0)
+        )
+    if run_async and asks_reveal(call_arguments.get("params")):
+        raise McpInvalidParamsError(
+            REVEAL_NOT_IN_BACKGROUND, data={"reason": "reveal_secret_with_async"}
         )
     if run_async:
         result = await recorded_background_call(
@@ -251,12 +324,30 @@ async def _preview_operation_handler(
 # ---------------------------------------------------------------------------
 
 
+_list_operation_groups_short_text = with_short_text(LIST_OPERATION_GROUPS_SHORT)
+
+
+def _list_operation_groups_for_settings(
+    definition: ToolDefinition, operator: Operator
+) -> ToolDefinition:
+    """``list_operation_groups`` as shown under the current settings.
+
+    The ``group_operations`` and ``include_raw`` steps run after the short
+    text of ``MCP_SHORT_TOOL_TEXTS``, so it does not drop their description
+    lines.
+    """
+    return group_operations_for_settings(
+        include_raw_for_settings(_list_operation_groups_short_text(definition, operator))
+    )
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
+        for_settings=_list_operation_groups_for_settings,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
@@ -285,6 +376,8 @@ register_mcp_tool(
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
             "the next page. A `null` `next_cursor` is the end."
+            + INCLUDE_RAW_LINE
+            + GROUP_OPERATIONS_LINE
         ),
         inputSchema={
             "type": "object",
@@ -322,6 +415,8 @@ register_mcp_tool(
                     ),
                     "maxLength": 256,
                 },
+                **INCLUDE_RAW_INPUT_PROPERTY,
+                **GROUP_INPUT_PROPERTY,
             },
             "required": ["connector_id"],
             "additionalProperties": False,
@@ -363,6 +458,7 @@ register_mcp_tool(
                                     "rest of the group is still staged."
                                 ),
                             },
+                            **GROUP_OPERATIONS_OUTPUT_PROPERTIES,
                         },
                         "required": [
                             "group_key",
@@ -382,6 +478,8 @@ register_mcp_tool(
                         "page is the end of the listing."
                     ),
                 },
+                **GROUPS_RAW_OUTPUT_PROPERTY,
+                **GROUP_NOTE_OUTPUT_PROPERTY,
             },
             "required": ["connector_id", "groups", "next_cursor"],
         },
@@ -398,7 +496,11 @@ _SAFETY_LEVEL_SCHEMA: dict[str, Any] = {
 }
 
 #: Ranked mode: slim hits. The three score fields appear only when a
-#: tenant_admin caller sets ``include_scores`` (#3668).
+#: tenant_admin caller sets ``include_scores`` (#3668). ``category`` and
+#: ``labels`` appear only while the ``POLICY_CLASSIFICATION`` switch is on
+#: (``_search_classification``). ``required_params`` and ``target_required``
+#: appear only while the ``SEARCH_HIT_CALL_HINTS`` switch is on
+#: (``_search_call_hints_schema``, #4331).
 _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -419,6 +521,8 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
                     "group_key": {"type": ["string", "null"]},
                     "safety_level": _SAFETY_LEVEL_SCHEMA,
                     "requires_approval": {"type": "boolean"},
+                    **CLASSIFICATION_PROPERTIES,
+                    **CALL_HINT_PROPERTIES,
                     "fused_score": {"type": "number"},
                     "bm25_score": {"type": ["number", "null"]},
                     "cosine_score": {"type": ["number", "null"]},
@@ -434,6 +538,7 @@ _SEARCH_RANKED_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "maxItems": SEARCH_NARROWING_MAX,
         },
+        **SEARCH_RAW_OUTPUT_PROPERTY,
     },
     "required": ["hits", "query_duration_ms", "outcome", "narrowing"],
 }
@@ -486,6 +591,7 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
                 "group_key": {"type": ["string", "null"]},
                 "safety_level": _SAFETY_LEVEL_SCHEMA,
                 "requires_approval": {"type": "boolean"},
+                **CLASSIFICATION_PROPERTIES,
                 "parameter_schema": {"type": "object"},
                 "examples": {
                     "type": "array",
@@ -538,13 +644,34 @@ _SEARCH_EXACT_OP_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _search_schema_for_settings(definition: ToolDefinition) -> ToolDefinition:
+    """Take the switched-off fields out of the ``search_operations`` output schema."""
+    return call_hints_schema_for_settings(classification_schema_for_settings(definition))
+
+
+_search_operations_short_text = with_short_text(
+    SEARCH_OPERATIONS_SHORT, then=_search_schema_for_settings
+)
+
+
+def _search_operations_for_settings(
+    definition: ToolDefinition, operator: Operator
+) -> ToolDefinition:
+    """``search_operations`` as shown under the current settings.
+
+    The ``include_raw`` step runs last, so the short text of
+    ``MCP_SHORT_TOOL_TEXTS`` does not drop its description line.
+    """
+    return include_raw_for_settings(_search_operations_short_text(definition, operator))
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
         annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
-        for_settings=with_short_text(SEARCH_OPERATIONS_SHORT),
+        for_settings=_search_operations_for_settings,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "
@@ -585,7 +712,7 @@ register_mcp_tool(
             "or `code_not_installed` (the code of this connector is not in "
             "this MEHO; do not call it; also the answer in exact-op mode). "
             "`advisory` explains any outcome other than "
-            "`matched`; `narrowing` lists next steps."
+            "`matched`; `narrowing` lists next steps." + INCLUDE_RAW_LINE
         ),
         inputSchema={
             "type": "object",
@@ -636,6 +763,7 @@ register_mcp_tool(
                         "picking an operation."
                     ),
                 },
+                **INCLUDE_RAW_INPUT_PROPERTY,
             },
             "required": ["connector_id"],
             # Either `query` (ranked mode) or `op_id` (exact-op mode) is
@@ -660,6 +788,21 @@ register_mcp_tool(
     ),
     handler=_search_operations_handler,
 )
+
+
+_call_operation_short_text = with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings)
+
+
+def _call_operation_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """``call_operation`` as shown under the current settings.
+
+    The fetch text of ``MCP_REVEAL_FETCH`` and the status text of
+    ``MCP_OWN_REQUEST_STATUS`` are added last, so the short text of
+    ``MCP_SHORT_TOOL_TEXTS`` does not replace them.
+    """
+    return status_for_settings(
+        reveal_fetch_for_settings(_call_operation_short_text(definition, operator))
+    )
 
 
 register_mcp_tool(
@@ -884,7 +1027,7 @@ register_mcp_tool(
         # full-detail shape for the envelope row — operators can still
         # see the request params on the SSE feed.
         op_class="tool_call",
-        for_settings=with_short_text(CALL_OPERATION_SHORT, then=recall_schema_for_settings),
+        for_settings=_call_operation_for_settings,
     ),
     handler=_call_operation_handler,
 )
@@ -916,10 +1059,11 @@ register_mcp_tool(
             "a `preview_hash`. It shows the plan as `proposed_effect` only "
             "when the plan can be built without contacting the target; "
             "otherwise `plan_shown` is false and `plan_note` says the plan "
-            "is shown on the approval request instead. An approval-gated op "
-            "that writes a credential (for example `vault.kv.put`) is NOT "
-            'previewable and stays `status="unavailable"`, so its secret '
-            "params never surface. Every preview whose op resolves (ok, "
+            "is shown on the approval request instead. An approval-gated "
+            "typed/composite op that writes a credential and is not "
+            "destructive (for example `vault.kv.put`) is NOT previewable and "
+            'stays `status="unavailable"`, so its secret params never '
+            "surface. Every preview whose op resolves (ok, "
             "unavailable, and the error statuses after the op lookup) also "
             "says the risk level and whether this call will wait for "
             "approval: `safety_level`, `requires_approval`, and "
@@ -1065,6 +1209,7 @@ register_mcp_tool(
                         "it gives none (a person's call that runs at once)."
                     ),
                 },
+                **PREVIEW_POLICY_OUTPUT_SCHEMA,
                 "proposed_effect": {
                     "type": "object",
                     "description": (
@@ -1100,7 +1245,7 @@ register_mcp_tool(
         # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
         # dispatch whose true class lives on the inner DISPATCH row).
         op_class="read",
-        for_settings=with_short_text(PREVIEW_OPERATION_SHORT, then=recall_schema_for_settings),
+        for_settings=preview_tool_for_settings,
     ),
     handler=_preview_operation_handler,
 )

@@ -641,7 +641,7 @@ async def _seed_descriptors(
 async def test_list_operation_groups_surfaces_staged_group_with_enabled_ops() -> None:
     """AC: a staged group holding per-op-enabled ops is surfaced as ``partial``.
 
-    claude-rdc-hetzner-dc#1136: on a connector whose group is still
+    Consumer report: on a connector whose group is still
     ``review_status=staged`` but 3 of its ops were flipped
     ``is_enabled=true`` via ``edit_op``, ``list_operation_groups`` returns
     the containing group marked ``partial=true`` with ``enabled_op_count=3``
@@ -974,7 +974,7 @@ async def test_search_operations_filters_by_group(
 async def test_search_operations_group_scoped_on_partial_group_returns_enabled_ops(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """B1 (claude-rdc-hetzner-dc#1136): group-scoped search on a ``partial`` group.
+    """B1 (consumer report): group-scoped search on a ``partial`` group.
 
     A group still ``review_status=staged`` but holding per-op-enabled ops
     is surfaced by ``list_operation_groups`` as ``partial`` — the agent is
@@ -1564,7 +1564,7 @@ async def test_call_operation_with_target_resolves_and_dispatches(
             TargetORM(
                 id=target_id,
                 tenant_id=_TENANT_A,
-                name="rdc-vault",
+                name="example-vault",
                 aliases=["primary-vault"],
                 product="vault",
                 host="vault.example.com",
@@ -1586,14 +1586,14 @@ async def test_call_operation_with_target_resolves_and_dispatches(
         {
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.versions",
-            "target": {"name": "rdc-vault"},
+            "target": {"name": "example-vault"},
             "params": {"path": "secret/foo"},
         },
     )
 
     assert result["status"] == "ok", result.get("error")
     assert result["result"]["echo"] == {"path": "secret/foo"}
-    assert result["result"]["target_name"] == "rdc-vault"
+    assert result["result"]["target_name"] == "example-vault"
 
 
 @pytest.mark.asyncio
@@ -1728,7 +1728,7 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
     """G0.13-T2 #1132: bare-string ``target`` round-trips like the dict shape.
 
     Mirrors :func:`test_call_operation_with_target_resolves_and_dispatches`
-    but passes ``target="rdc-vault"`` (the bare-string form preferred for
+    but passes ``target="example-vault"`` (the bare-string form preferred for
     cross-tool consistency with ``query_topology`` / ``query_audit``).
     Both shapes must reach the same dispatch result -- the additive
     widening is the contract.
@@ -1760,7 +1760,7 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
             TargetORM(
                 id=target_id,
                 tenant_id=_TENANT_A,
-                name="rdc-vault",
+                name="example-vault",
                 aliases=["primary-vault"],
                 product="vault",
                 host="vault.example.com",
@@ -1782,14 +1782,14 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
         {
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.versions",
-            "target": "rdc-vault",
+            "target": "example-vault",
             "params": {"path": "secret/foo"},
         },
     )
 
     assert result["status"] == "ok", result.get("error")
     assert result["result"]["echo"] == {"path": "secret/foo"}
-    assert result["result"]["target_name"] == "rdc-vault"
+    assert result["result"]["target_name"] == "example-vault"
 
 
 @pytest.mark.asyncio
@@ -1828,7 +1828,7 @@ async def test_call_operation_empty_string_target_returns_target_required_envelo
         (12345, "integer"),
         (12.5, "number"),
         (True, "boolean"),
-        (["rdc-vault"], "array"),
+        (["example-vault"], "array"),
     ],
     ids=["integer", "number", "boolean", "array"],
 )
@@ -1947,8 +1947,8 @@ async def test_call_operation_bare_string_and_dict_target_dispatch_identically(
     Acceptance criterion: tests cover both shapes round-trip to the
     same dispatch result. This test asserts that explicitly -- the
     handler's response envelope is identical (minus dispatcher-side
-    timing) for ``target="rdc-vault"`` and ``target={"name":
-    "rdc-vault"}`` against the same seeded target row.
+    timing) for ``target="example-vault"`` and ``target={"name":
+    "example-vault"}`` against the same seeded target row.
     """
     register_connector_v2(
         product="vault",
@@ -1976,7 +1976,7 @@ async def test_call_operation_bare_string_and_dict_target_dispatch_identically(
             TargetORM(
                 id=uuid.uuid4(),
                 tenant_id=_TENANT_A,
-                name="rdc-vault",
+                name="example-vault",
                 aliases=[],
                 product="vault",
                 host="vault.example.com",
@@ -1998,8 +1998,8 @@ async def test_call_operation_bare_string_and_dict_target_dispatch_identically(
         "op_id": "vault.kv.read",
         "params": {"path": "secret/foo"},
     }
-    result_string = await call_operation(operator, {**base_args, "target": "rdc-vault"})
-    result_dict = await call_operation(operator, {**base_args, "target": {"name": "rdc-vault"}})
+    result_string = await call_operation(operator, {**base_args, "target": "example-vault"})
+    result_dict = await call_operation(operator, {**base_args, "target": {"name": "example-vault"}})
 
     # Compare the dispatch-meaningful fields; ``duration_ms`` is timing.
     assert result_string["status"] == result_dict["status"] == "ok"

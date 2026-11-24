@@ -13,6 +13,9 @@ The design is the internal note `core.md` §5. The code is in
 MEHO 0.45.0 ships the REST endpoints below. The command line and the
 console do not have the settings file yet.
 
+The policy file (categories and classifications) is a separate file with
+its own import that waits for an admin's approval: see [policy.md](policy.md).
+
 Do not confuse this with `backend/src/meho_backplane/settings.py`: those are
 the environment variables, read once at start. They are never in the file.
 
@@ -90,7 +93,14 @@ spec:
   an empty value is `null`; see [kb.md](kb.md#wiki-search-5976)).
   `null` means "use the instance default" (`false` for the switches,
   inherit or none for the others).
+
   `policies: null` resets all of them.
+
+  Note: `KB_WIKI_FILTERED_SEARCH` is not a key of this file. It is an
+  environment variable for the whole instance. It is off by default. When
+  on, a knowledge search with only `product` and `version` filters also
+  searches the tenant's wiki, but only if the collection's index applies
+  exact filters (see [kb.md](kb.md#wiki-search-5976)).
 - `conventions[]` — keyed by `slug`. `title` and `kind` are needed when the
   convention is new. `kind` cannot change on import, the same as on
   `PATCH /api/v1/conventions/{slug}`; delete the convention and import it
@@ -117,6 +127,54 @@ spec:
 - An item in MEHO but not in the file is reported as "not in file" and left
   alone. **Nothing is ever deleted.** (A later `--prune` is its own Task.)
 
+### Policies that change only in the web console
+
+Two policies decide how far an approval reaches or whether a gate runs. A
+file that loosens one of them applies only for a person in the web console
+(`runs_at_once` in `api/v1/_wait_for_approval.py`). The rule and the list
+are in `instance_settings/console_only.py`.
+
+| Policy | Widens an approval, turns a gate off, or changes who approves? | With a token |
+|---|---|---|
+| `run_approval_target_kinds` | Yes: `true` lets one run approval cover a whole target kind ([run-approvals.md](run-approvals.md)) | `false` -> `true` refused; `true` -> `false` applies |
+| `announce_gate_enabled` | Yes: `false` turns the announce gate off | `true` -> `false` refused; `false` -> `true` applies |
+| `flight_recorder.*` | No. Its own route `PATCH /api/v1/tenants/flight-recorder-policy` writes at once for a token | applies |
+| `mail_recipient_allowlist` | No. Its own route `PATCH /api/v1/tenants/mail-recipient-policy` writes at once for a token | applies |
+| `knowledge_wiki_collection` | No. It names a docs collection that knowledge search also reads, and each read still checks the caller's own entitlement to that collection | applies |
+
+The file has no install-level part, so an import writes no install setting.
+Tenant rows and conventions change no approval or gate.
+
+- A call with a token (the CLI, a script, an AI tool with a person's login)
+  that applies a file with such a change gets 403. The reason names each
+  path, for example `spec.tenants[0].policies.run_approval_target_kinds`.
+  MEHO writes nothing from the file, also not its other parts, and makes no
+  revision.
+- `policies: null` resets every policy. When the gate is on, that turns it
+  off, so the same rule applies.
+- A file with mistakes answers 422 first.
+- The preview with a token works. It shows the change in `diff` and names
+  each such path in `warnings`. It writes nothing.
+- A value equal to the stored one is no change and is not refused.
+- The web console cannot apply a settings file yet. Until it has a
+  settings page, these two changes cannot be made at all; they have no
+  REST route of their own. Turning the gate on applies with a token, so
+  after that the gate stays on until then.
+
+- The apply locks the rows of the tenants in the file before it reads
+  their policies, and holds the lock until its commit. A second import of
+  the same tenant waits, then reads what the first one wrote. So it checks
+  and writes the stored policies, not an older copy. The preview takes no
+  lock.
+- A tenant that is new in the file has no row to lock when the plan is
+  made, so the plan starts from the defaults. Right after the apply
+  creates the row (or waits for another import that creates it), it locks
+  the row, plans the file's policies again from what is stored, and runs
+  the console-only check again.
+
+Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
+`tests/integration/test_settings_import_overlap_pg.py`.
+
 ## Never in the file
 
 The schema refuses unknown keys, so none of these can be added by hand; the
@@ -139,13 +197,55 @@ secret check and the CI check (below) catch secret-shaped values anywhere.
 - Target passwords. Only `secret_ref` paths.
 - The machine name, IP address, DNS and NTP servers; ingress class, storage
   class, host names, network ranges. These live in the install form.
-- Who is in which Keycloak group, and the realm setup. These move only with
-  the stretch Task #4049. Adding someone to an approving group is a
-  privilege grant (#3325), so v1 carries no approver list.
+- Who is in which Keycloak group, and the realm setup. Adding someone to an
+  approving group is a privilege grant (#3325), so the file carries no
+  approver list. These move with Keycloak's own tools (see
+  [Moving the login setup](#moving-the-login-setup)).
 - Fields the server manages: `id` (of a target or convention), `tenant_id`,
   `fingerprint`, `created_at`, `updated_at`, `deleted_at`.
 - Settings that exist only as environment variables (the per-tenant maps,
   `APPROVAL_ALLOW_SELF_APPROVAL`).
+
+## Moving the login setup
+
+The login setup lives in Keycloak, not in MEHO's database: the identity
+providers, the directory (LDAP) connection, the groups with their mappers,
+and who is in which group. The settings file does not carry it, and MEHO
+has no code to move it. The owner decided this on 12 November 2026
+(#6400, replacing #4049): carrying it would need more Keycloak rights for
+MEHO's own account in every install, and Keycloak's partial import drops
+the LDAP connection.
+
+Operators move it by hand. The public page
+`docs-site/install/move-login-setup.md` has the full steps:
+
+1. Export the realm `meho` from the old install with Keycloak's partial
+   export (groups and roles, no clients).
+2. Import it into the new install with Keycloak's partial import: only
+   groups and identity providers, and **Skip** for what exists. The new
+   install keeps its own clients, roles and the login its Helm values
+   set up. Then add the mappers of each imported identity provider again
+   by hand: partial import does not read `identityProviderMappers`, and
+   without its group mapper an identity provider's people get no group.
+3. Add the LDAP connection and its group mapper again by hand. Partial
+   import does not read user federation. It does not bring login flows
+   either: when the old install asks for an authenticator code, bind
+   that flow again before the bind password goes in. People set up
+   their authenticator app again at first login.
+4. Type the secrets again: each imported identity provider's client
+   secret, and the LDAP bind password. The export masks them with `*`.
+5. Add the group members that no directory or identity provider brings,
+   with `keycloak.group.member.add`. Each add waits for a person's
+   approval. The export carries no users. Read the old members with
+   `keycloak.group.member.list` and a `max` above the group size:
+   without it Keycloak returns only the first 100. Check the list against
+   the group's **Members** tab in the old admin console.
+
+The new install needs the same `coreKeycloak.firstTenantId`,
+`coreKeycloak.tenantName` and `coreKeycloak.tenants` Helm values, so its
+role groups carry the same tenant ids as the settings file. A company login
+set up with `coreKeycloak.companyLogin` moves with the Helm values and its
+Secret, not with the export.
 
 ## Checks on the file
 
@@ -171,7 +271,8 @@ them at once.
   password has no shape to find. A key that only names something about a
   token or secret (`token_url`, `secret_path`) passes. The name rule is
   `is_secret_param_name` in `broadcast/events.py`, the same one the broadcast
-  scrub and the approval echo use.
+  scrub and the approval echo use. So every name that the results hide is
+  refused here too (`snmpAuthKey`, `pass_phrase`, `password_ref`).
 - A mask such as `*`, `********` or `<keep>` is refused. It never means
   "keep the stored value".
 - Once a secret is found, nothing else is checked: no later check, and not
@@ -230,9 +331,25 @@ file yet.
   tenant, also when its token carries the platform-admin claim: the same
   rule as `authorize_tenant_scope` (`auth/rbac.py`). Tests:
   `tests/test_tenant_scope_person_only.py`.
-- Open, decided by 2026-10-24 (#3325 rule 1): whether an import from the
-  command line writes at once, as the target routes do today, or waits for
-  someone to approve it in the web console. Today it writes at once.
+- A file that adds or changes a target applies only for a person in the
+  web console (`runs_at_once` in `api/v1/_wait_for_approval.py`), the same
+  rule as `POST` and `PATCH /api/v1/targets`. A call with a token (the CLI,
+  a script, an AI tool with a person's login) that applies such a file gets
+  403 with the reason "A settings file that adds or changes targets is
+  applied in the web console. A call with a token cannot write targets at
+  once." Nothing is written, and no approval request is made. While the
+  console has no settings page, add or change targets through the target
+  routes (a call with a token waits for approval there), then import the
+  file: its target entries then match and are no change. The preview
+  works with a token, and so does a file that changes no target (a target
+  entry equal to the stored one is no change). Two policies also change
+  only in the web console: `run_approval_target_kinds` turned on and
+  `announce_gate_enabled` turned off (see
+  [Policies that change only in the web console](#policies-that-change-only-in-the-web-console)).
+  The other parts of the file apply with a token, because their REST
+  routes write at once for a token too: tenants, the other policies
+  (`/api/v1/tenants/...`) and conventions (`/api/v1/conventions`). Tests:
+  `tests/test_settings_import_target_writes.py`.
 
 ## Endpoints
 
@@ -284,7 +401,9 @@ When there are no mistakes, `diff` holds one entry per section — `tenants`,
 ### `POST /api/v1/settings/import`
 
 Runs the same checks. With any mistake it answers 422 with the preview's
-body and writes nothing. Otherwise it adds or updates, never deletes:
+body and writes nothing. When the file adds or changes a target and the
+caller is not a person in the web console, it answers 403 and writes
+nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 
 - One database transaction, in this order: tenants (`ensure_tenant`),
   policies, conventions, targets.

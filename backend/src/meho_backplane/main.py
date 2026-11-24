@@ -50,6 +50,7 @@ from typing import Final
 
 import structlog
 from fastapi import Depends, FastAPI, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -63,6 +64,7 @@ from meho_backplane.agents import (
     stop_grant_expiry_sweeper,
 )
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
 from meho_backplane.api.v1.agent_budgets import router as api_v1_agent_budgets_router
@@ -115,6 +117,13 @@ from meho_backplane.api.v1.operation_overrides import (
 )
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
+from meho_backplane.api.v1.policy import router as api_v1_policy_router
+from meho_backplane.api.v1.policy_classification import (
+    connector_router as api_v1_connector_classification_router,
+)
+from meho_backplane.api.v1.policy_classification import (
+    router as api_v1_policy_classification_router,
+)
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_operation_picks import (
@@ -141,6 +150,9 @@ from meho_backplane.api.v1.sessions import (
     router as api_v1_sessions_router,
 )
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
+from meho_backplane.api.v1.targets_keycloak_realm import (
+    router as api_v1_targets_keycloak_realm_router,
+)
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -215,6 +227,9 @@ from meho_backplane.operations.approval_presence import (
     stop_presence_challenge_cleanup,
 )
 from meho_backplane.operations.approval_restart_recovery import recover_interrupted_approvals
+from meho_backplane.operations.approval_stored_values import (
+    hide_values_of_requests_that_cannot_run,
+)
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -247,6 +262,10 @@ from meho_backplane.request_usage.retention import (
     stop_request_usage_retention_sweeper,
 )
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.embedding_state import (
+    check_embedding_model_at_start,
+    embedding_model_probe,
+)
 from meho_backplane.sandbox_mode import assert_sandbox_mode_consistent
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.session_store.config import load_config as load_session_store_config
@@ -268,7 +287,12 @@ from meho_backplane.ui.auth import (
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.fragment_guard import FragmentNavigationMiddleware
-from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
+from meho_backplane.ui.paths import (
+    brand_css_dir,
+    brand_fonts_dir,
+    ensure_static_dist_dir,
+    static_root_dir,
+)
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
 from meho_backplane.ui.static_files import RevalidateStaticFiles
@@ -362,8 +386,11 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     layout. The consequence of running unenforced is silent otherwise: with
     the empty prefix
     :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`
-    is a no-op and cross-tenant ``vault.kv.*`` isolation is unenforced at the
-    app layer, with no other signal.
+    checks no folder for a tenant without an entry in
+    ``VAULT_OIDC_ROLE_BY_TENANT``, with no other signal. A tenant with an
+    entry (its own Vault login role) always gets the folder check; a second
+    line, ``vault_tenant_scope_tenants_with_own_role``, logs how many
+    tenants that is.
 
     This logs **one** structured advisory at startup naming the env var that
     re-enables the guard. It is purely observability — it does **not** change
@@ -378,8 +405,15 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     lifespan uses (e.g. :func:`_preload_embedding_model`): a single
     ``structlog`` event, no f-strings, no raise.
     """
-    enforced = bool(get_settings().vault_kv_tenant_scope_prefix)
+    settings = get_settings()
+    enforced = bool(settings.vault_kv_tenant_scope_prefix)
     VAULT_TENANT_SCOPE_ENFORCED.set(1 if enforced else 0)
+    from meho_backplane.connectors.vault.tenant_scope import count_tenants_with_own_vault_role
+
+    structlog.get_logger().info(
+        "vault_tenant_scope_tenants_with_own_role",
+        count=count_tenants_with_own_vault_role(settings.vault_oidc_role_by_tenant),
+    )
     if not enforced:
         structlog.get_logger().warning(
             "vault_tenant_scope_unenforced",
@@ -400,6 +434,18 @@ async def _expire_approvals_from_older_release() -> None:
         await expire_approvals_from_older_release()
     except Exception:
         structlog.get_logger().exception("approval_release_expiry_failed")
+
+
+async def _hide_values_of_requests_that_cannot_run() -> None:
+    """Drop the stored values of approval requests that cannot run.
+
+    Fail-open: a failure here is logged and the start goes on. The next
+    start runs the clean-up again.
+    """
+    try:
+        await hide_values_of_requests_that_cannot_run()
+    except Exception:
+        structlog.get_logger().exception("approval_stored_values_clean_up_failed")
 
 
 async def _recover_interrupted_approvals() -> None:
@@ -537,6 +583,14 @@ async def _run_lifespan_startup() -> None:
     # after a restart. Runs after the catalog stamp so a shipped profile keeps
     # its key; like the catalog stamp it never enables an op.
     await restore_ingested_profiled_connectors()
+    # Stored operations whose paths look like Kubernetes paths without the
+    # usual start: one warning line per connector, nothing changes. Imported
+    # here, after the connectors are loaded.
+    from meho_backplane.connectors.kubernetes.short_path_warning import (
+        warn_stored_short_kubernetes_paths,
+    )
+
+    await warn_stored_short_kubernetes_paths()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)
@@ -580,9 +634,19 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Warn when the stored vectors come from another model than the set one.
+    # The readiness check is added only then, and only with the switch
+    # EMBEDDING_MODEL_HEALTH_CHECK on, so by default the health answer (and
+    # so meho_status) stays as it was.
+    model_differs = await check_embedding_model_at_start()
+    if model_differs and get_settings().embedding_model_health_check:
+        register_probe("embedding_model", embedding_model_probe)
     # #5030: an approval covers one exact release. End every waiting
     # approval made under another release before MEHO serves a request.
     await _expire_approvals_from_older_release()
+    # A request that ended without a run, or an approved request of another
+    # release, keeps no secret value and no encrypted handoff row.
+    await _hide_values_of_requests_that_cannot_run()
     # #5025: an approved run that a restart cut short has no result. MEHO
     # does not know if the change happened, so mark it uncertain.
     await _recover_interrupted_approvals()
@@ -1066,6 +1130,9 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# A 422 for a bad request body that encodes even when the refused input
+# holds a lone surrogate (FastAPI's stock handler answers that with a 500).
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 
 app.include_router(health_router)
 app.include_router(first_start_router)
@@ -1130,6 +1197,10 @@ app.include_router(api_v1_doc_collections_router)
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 # G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover
 # (registered before GET /{name} so the literal path wins).
+# GET /api/v1/targets/checks/keycloak-realm: the Keycloak targets MEHO
+# refuses (no managed realm, or a realm that is not a plain name). Two path
+# segments, so it never meets GET /{name}.
+app.include_router(api_v1_targets_keycloak_realm_router)
 app.include_router(api_v1_targets_router)
 # #3272 -- operator mutation surface for the per-tenant flight-recorder
 # capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
@@ -1140,6 +1211,10 @@ app.include_router(api_v1_tenants_router)
 # tenant_admin (own tenant) or platform_admin (several tenants); human-only
 # import. Operator-plane REST + CLI only; no MCP tool.
 app.include_router(api_v1_instance_settings_router)
+# The policy file (policy: v1): /api/v1/policy/validate, /import
+# (?preview=true), /export, /history. tenant_admin or platform_admin; the
+# import is human-only and waits for an admin's approval. REST + CLI only.
+app.include_router(api_v1_policy_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a
@@ -1194,6 +1269,10 @@ app.include_router(api_v1_connectors_ingest_router)
 # #4711 -- the override report: operator overrides of risk levels and
 # approval flags, and the "operations running with reduced approval" list.
 app.include_router(api_v1_operation_overrides_router)
+# #6038 -- read and edit the classification of operations (category,
+# labels, "always wait"): dry run, then a request an admin approves.
+app.include_router(api_v1_policy_classification_router)
+app.include_router(api_v1_connector_classification_router)
 # #5029 -- each tenant turns built-in operations on or off for itself.
 app.include_router(api_v1_connector_tenant_settings_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
@@ -1485,6 +1564,28 @@ app.include_router(mcp_router)
 # * UI router -- ``GET /ui/`` dashboard + the five
 #   ``GET /ui/{slug}`` surface stubs. All routes require a session;
 #   ``UISessionMiddleware`` redirects to login on miss.
+# * Brand assets -- the shared theme, token and font stylesheets, and the
+#   webfonts, served straight out of the installed ``meho-ui`` package.
+#   Mounted rather than copied into this tree: the package is the one copy
+#   of these files, and a second copy here would drift from it.
+#
+#   The font mount's path is not arbitrary. ``meho_ui.brand.fonts`` writes
+#   ``/ui/static/fonts/<file>`` into its own ``@font-face`` rules, so the
+#   stylesheet it ships resolves against this mount with no rewriting.
+#
+#   Mounted BEFORE the two routers for the same reason as ``/ui/static``:
+#   the session middleware exempts the ``/ui/static/`` prefix, so an
+#   unauthenticated browser can still load the login page's styling.
+app.mount(
+    "/ui/static/brand",
+    RevalidateStaticFiles(directory=str(brand_css_dir()), check_dir=False),
+    name="ui_brand",
+)
+app.mount(
+    "/ui/static/fonts",
+    RevalidateStaticFiles(directory=str(brand_fonts_dir()), check_dir=False),
+    name="ui_brand_fonts",
+)
 app.mount(
     "/ui/static",
     RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),
@@ -1561,8 +1662,8 @@ def build_openapi_schema() -> dict[str, object]:
     the ``product`` property on the ``TargetCreate`` request schema
     renders as a JSON Schema enum populated from the live connector
     registry. Without this hook the schema would surface ``product`` as
-    a free-form string — the dogfood signal 5 UX miss in
-    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    a free-form string — the dogfood signal 5 UX miss
+    in consumer feedback (operator typed ``'kubernetes'``,
     resolver matched on ``'k8s'``, no early signal). Paired with the
     runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
     (Options A + C from the task body, sharing one source-of-truth

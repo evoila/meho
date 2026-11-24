@@ -483,7 +483,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `description` | `description` | Verbatim from spec |
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
-| `response_schema` | `response_schema` | Success-response schema or `None` |
+| `response_schema` | `response_schema` | Success-response schema or `None`. The shared schemas it uses are bundled under `components.schemas`, like in `parameter_schema` |
+| `op_class` | `op_class` | `None` from the parser; set only by a connector floor, to `credential_read` or `write` (see "A floor sees the answer and sets the op class") |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
 | `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
@@ -533,6 +534,72 @@ are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
+
+#### A floor sees the answer and sets the op class
+
+A connector floor gets one operation at a time, with its full answer
+schema. The stored `response_schema` holds the shared schemas the answer
+uses, under `components.schemas`, the same way `parameter_schema` does. A
+`$ref` to a shared schema that the file does not define is left as it is
+and does not fail the ingest, because nothing validates an answer schema at
+dispatch. The shared schemas that the file does define are still bundled.
+So a floor must treat a `$ref` it cannot find as unknown: the field behind
+it may hold a secret.
+
+Example: an API has `GET /clients`. Its answer is a list of
+`#/components/schemas/Client`, and `Client` has a `password` field. The
+floor reads `proto.response_schema["components"]["schemas"]["Client"]`,
+finds the field, and returns a copy of the operation with
+`op_class="credential_read"`.
+
+- **Allowed values: `credential_read` and `write` only**
+  (`FLOOR_OP_CLASSES` in `ingest/safety_floors.py`). MEHO has a rule for
+  each of these two on every call. Any other value, also `credential_mint`
+  and `credential_write`, stops the ingest with `InvalidOpClassError`. The
+  message names the operation and the two allowed values, and nothing is
+  stored. `credential_mint` and `credential_write` come in a later Task,
+  when every place below that still reads the op id reads the stored class
+  too.
+- **Stored on the row.** `EndpointDescriptor.op_class` (nullable). A
+  re-ingest stores the class when the floor gives one. When the floor gives
+  none, the class of an earlier ingest stays: a floor never weakens a row.
+  A stored `credential_read` is never replaced by another class: a floor
+  that later gives `write` leaves it in place. A floor may still raise a
+  row from no class, or from `write`, to `credential_read`. A row with a
+  class also keeps its stored risk level and approval flag when they are
+  stricter: a re-ingest only raises them.
+- **Places that use the stored class.** A stored class never replaces a
+  credential or audit class that the op id already gives
+  (`resolve_op_class`). So it also holds in a process that has no floor
+  and no op class list.
+  - The credential read floor, at ingest and at lookup (`op_policy.py`):
+    a stored `credential_read` is at least `caution` and waits for a
+    person.
+  - The dispatcher's secret read flag (`dispatcher.py`). It is read from
+    the row that runs, after any switch to a sibling catalog, so the
+    audit row, the policy and the flag use the same row.
+  - The audit row of a call (`descriptor_op_class` in `_audit.py`) and the
+    audit row written when a call waits for approval (`approval_queue.py`).
+  - The approval request: the class in `proposed_effect`, and the preview,
+    which hides the parameters for a secret class (`_preview.py`).
+  - Standing grants (`service_grants.py`): grant create refuses an op with
+    a stored `credential_read`, and an existing grant row does not run it.
+    The shadow policy marks use the same check (`policy/shadow.py`).
+  - The call trace (`flight_recorder/capture.py` and `typed.py`, through
+    `classify_body_exclusion`): no request body and no answer body is
+    recorded.
+- **Places that still read the op id only.** The subject and outcome of
+  the approval card, the policy file check, the console drawers, the outer
+  MCP row, and the result reducer. A later Task makes them read the stored
+  class before a connector floor sets a class.
+- **Not a global list.** The class is not added to `op_classes.py`.
+  Ingested op ids such as `GET:/clients` are not unique across connectors.
+- **A two-argument floor** (version, operation) works as before.
+
+The bundle makes stored answer schemas bigger, because each operation
+stores the shared schemas it uses. The size is in the pull request that
+added it (#6485). Tests: `tests/test_ingest_floor_answer_schema_op_class.py`
+and `tests/test_ingest_floor_op_class_calls.py`.
 
 #### Connector spec corrections
 
@@ -1189,6 +1256,18 @@ upgrade and a new ingest of the API description.
   `requires_approval=false` (see below). A destructive operation always
   requires approval.
 
+A write step of a multi-step operation uses the override rows of its
+operation the same way, at the step gate and in the step preview
+(`apply_step_policy`, see
+[policy-classification.md](policy-classification.md)). There an override
+only makes the step stricter: one with `requires_approval=false` leaves
+the step's own approval flag as it is.
+
+With the `POLICY_CLASSIFICATION` switch on, a classification entry for the
+connector, group or operation can raise the level further or add a wait,
+after the overrides and before the floors; see
+[policy-classification.md](policy-classification.md).
+
 `lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
 sub-operations, service grants), the operation contract,
 `search_operations` hits, `describe_descriptor` (`GET
@@ -1214,6 +1293,7 @@ review payload also carries `classified_safety_level` /
 | `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
 | `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
 | `requires_approval=false` on an operation with a caller-address parameter | anyone | - | always refused, `approval_off_caller_address` |
+| `requires_approval=false` on an operation registered as a change of rights (`register_rights_change_op`, `register_grant_op`) | anyone | - | always refused, `approval_off_rights_change`; an older override row with approval off does not count either |
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective
@@ -1322,6 +1402,34 @@ reason, author and time of an approval exception.
 so it is lost at the next start (typed) or re-ingest (ingested). Existing
 stricter edits on rows stay until then; re-apply them once with
 `edit-op` to make them stick.
+
+### What survives a start for a typed operation (#5321)
+
+Typed and composite operations are registered from code at every start
+(`operations/typed_register.py`). What happens to each field:
+
+| Field | After a start |
+|---|---|
+| `summary`, `description`, `tags`, schemas, `handler_ref`, group | Written from code. A change in code reaches the database. |
+| `safety_level`, `requires_approval` | Only move up on the row. An admin's choice is an override (see above). |
+| `is_enabled` | Kept. |
+| `custom_description`, `llm_instructions` | Kept when an admin edited them. Otherwise written from code. |
+
+An admin edit (`ReviewService.edit_op`) of `custom_description` or
+`llm_instructions` adds the field name to the row's
+`endpoint_descriptor.admin_edited_fields` (migration `0165`, a JSON list;
+NULL means no edit). At the next start the registration keeps the stored
+value of each listed field and does not write the value from code. The
+embedding text is built from the kept description, so search still finds
+the operation by the admin's words. The edit itself also rebuilds the
+search vector at once. So a start with unchanged code, which keeps the
+saved vector, keeps a vector that matches the admin's words. Clearing
+`custom_description` also counts as an edit: the field stays empty.
+Ingested operations ignore the list: a new ingest writes them as before.
+
+**Upgrade.** An edit made before migration `0165` has no mark. The next
+start writes the value from code, so edit it once more to make it stick.
+
 ### Each tenant turns built-in operations on or off (#5029)
 
 A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is
@@ -1617,6 +1725,24 @@ rows. Three branches:
   signal. A genuinely novel `(product, version)` triple is
   unchanged by #1753.
 
+**Several versions under one name (#4728).** Only classes written by hand
+count in this check. A class made by an earlier ingest (the bare auto-shim,
+or the profiled class made when `--auth-scheme` is set; both are made in
+`connector_registration.py`) covers only the label it was made for, so
+`_find_class_covering_version()` skips it. So `networker-rest` 19.14 followed
+by `networker-rest` 19.12 works and makes `networker-rest-19.12`, the same
+way `vmware-rest-8.0` and `vmware-rest-9.0` coexist. A label outside the
+range of a hand-written class is still refused. The 422 `detail` is an
+object with `kind` (`uncovered_version_label`) and `message`; the CLI
+prints both.
+
+**Names that end in digits (#4728).** `IngestionPipelineService.ingest`
+refuses an `impl_id` that has a dash followed by a digit (for example
+`networker-rest-1912`) with `ImplIdEndsInDigitsError` (REST 422, MCP
+`-32602`, `kind` `impl_id_ends_in_digits`). The connector id
+`<impl_id>-<version>` is split at the first dash followed by a digit, so
+such a name would turn `1912-19.12` into the version.
+
 Called from `register_ingested_operations` (real path) and from
 `IngestionPipelineService._run_dry_run` (dry-run path) so an
 operator's `dry_run=True` validation sees the same 422 the real
@@ -1770,7 +1896,9 @@ per-class `except` arms. The nine siblings and their builders:
   explicit MCP path). Names the upstream URL and the detected
   `content_type` that wasn't a spec (e.g. an HTML login page).
 * `build_unsupported_spec_detail(exc)` — `UnsupportedSpecError`
-  (wrong OpenAPI flavour / unsupported dialect).
+  (wrong OpenAPI flavour / unsupported dialect, or a file whose paths
+  look like Kubernetes paths without the usual start; see
+  "Short Kubernetes paths" under `parse_openapi`).
 * `build_invalid_spec_detail(exc)` — `InvalidSpecError`
   (structurally invalid root document).
 * `build_invalid_schema_detail(exc)` — `InvalidSchemaError`
@@ -2513,6 +2641,48 @@ startup), so every shipped package-data spec and catalog `spec_resource`
 must be metaschema-valid or the backplane crashes on start — the guard
 that keeps a malformed shipped artifact from 500-ing the first ingest
 that touches it (Initiative #1966 boot-validation precedent).
+
+**Short Kubernetes paths.** Right after the server base is worked out,
+`_project_spec_bytes_to_protos` runs every check registered with
+`register_spec_path_refusal(check)`. A check gets each `paths` key that
+has at least one operation, with the relative server base in front. On
+the first refusal text the parser raises `UnsupportedSpecError` with that
+text, so the whole file is refused and nothing is stored. The dry run,
+the ingest and `validate_shipped_artifacts` all use this parser, so all
+three refuse the same file. The hook is modelled on
+`declare_credential_capable_match`.
+
+Today the Kubernetes connector registers one check
+(`connectors/kubernetes/short_paths.py`). It refuses a file when one of
+its paths looks like a Kubernetes path without `/api/v1` or
+`/apis/<group>/<version>`. MEHO reads a Kubernetes call by that start
+([connectors-kubernetes.md](connectors-kubernetes.md)), so it could not
+check these calls. A path with the start in front of the Kubernetes
+part is fine. A start after that part, for example in the rest of a
+pod's `proxy` path, does not count. The shapes, where `{x}` is one segment:
+
+* From any `/` of the path: `/namespaces/{x}/secrets` (with or without
+  `/{x}` after it, also with `/watch` in front), a pod's `exec`,
+  `attach`, `portforward` or `proxy`, and a ServiceAccount `token`.
+* Only at the start of the path, or after one leading `/v1`:
+  `/namespaces/{x}/<core plural>` (pods, services, configmaps, secrets,
+  serviceaccounts, persistentvolumeclaims, endpoints, events,
+  limitranges, resourcequotas, replicationcontrollers, podtemplates,
+  bindings), and `/<group>/<version>/namespaces/{x}/{x}` where the group
+  is `apps`, `batch`, `autoscaling`, `policy` or a name that ends in
+  `.k8s.io`.
+
+Not matched on purpose, so the API file of another product loads:
+cluster-wide paths such as `/nodes/{x}` (other APIs use them too), other
+plurals under `/namespaces/{x}/`, custom API groups, and the second shape
+when it does not start the path (for example
+`/api/namespaces/{x}/services` after a relative server base `/api`). The
+check reads only the path keys. The refusal text names up to three of the
+matched paths and says what to do: use the standard API file that the
+cluster serves, or write the start as a relative server address. There
+is no setting that turns it off.
+`tests/test_ingest_refuses_short_kubernetes_paths.py` also runs the check
+over every API file this repo ships.
 
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /

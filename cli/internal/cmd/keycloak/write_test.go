@@ -77,14 +77,14 @@ func TestRoleMappingHasAssign(t *testing.T) {
 func TestLoadRepresentationHappy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rep.json")
-	if err := os.WriteFile(path, []byte(`{"realm":"evba","enabled":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"realm":"example","enabled":true}`), 0o600); err != nil {
 		t.Fatalf("write rep: %v", err)
 	}
 	rep, serr := loadRepresentation(path)
 	if serr != nil {
 		t.Fatalf("loadRepresentation: %v", serr)
 	}
-	if rep["realm"] != "evba" {
+	if rep["realm"] != "example" {
 		t.Errorf("realm: got %v", rep["realm"])
 	}
 }
@@ -312,5 +312,19 @@ func TestRoleMappingAssignAwaitingApprovalRealPath(t *testing.T) {
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
+	}
+}
+
+// A user delete of a user that does not exist has no stored name: the
+// printed result shows the name that was sent as requested_username.
+func TestWriteResultPrintsRequestedUsername(t *testing.T) {
+	var buf bytes.Buffer
+	printWriteResult("keycloak.user.delete")(&buf, &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(
+			`{"realm":"example","id":"u-1","requested_username":"event-guest","deleted":false,"already_absent":true}`),
+	})
+	if !strings.Contains(buf.String(), "requested_username: event-guest") {
+		t.Fatalf("requested_username not printed:\n%s", buf.String())
 	}
 }

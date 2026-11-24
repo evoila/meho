@@ -59,6 +59,7 @@ from meho_backplane.docs_search import (
     DocsReadSearchAgainError,
     MissingDocsFilterError,
     build_docs_scope,
+    exact_read_scope,
     read_docs,
     resolve_readable_collection,
 )
@@ -190,6 +191,7 @@ async def read_docs_endpoint(
             before=body.before,
             after=body.after,
             cursor=body.cursor,
+            exact_scope=exact_read_scope(scope, body.product, body.version),
         )
     except DocsReadNotFoundError as exc:
         raise HTTPException(

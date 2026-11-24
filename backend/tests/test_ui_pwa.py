@@ -25,6 +25,7 @@ otherwise, like ``test_ui_corpus_collection_action_alerts.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -38,7 +39,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from meho_backplane.ui.paths import static_root_dir, static_src_dir, templates_dir
+from meho_backplane.ui.paths import (
+    static_asset_path,
+    static_mounts,
+    static_src_dir,
+    templates_dir,
+)
 from meho_backplane.ui.static_files import RevalidateStaticFiles
 
 _MANIFEST_URL = "/ui/static/src/pwa/manifest.webmanifest"
@@ -55,16 +61,20 @@ requires_node = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def static_client() -> TestClient:
     app = FastAPI()
-    app.mount(
-        "/ui/static",
-        RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),
-        name="ui_static",
-    )
+    for prefix, directory in static_mounts():
+        app.mount(
+            prefix,
+            RevalidateStaticFiles(directory=str(directory), check_dir=False),
+            name=prefix.strip("/").replace("/", "_"),
+        )
     return TestClient(app)
 
 
 def _disk_path(url: str) -> Path:
-    return static_root_dir() / url.removeprefix("/ui/static/")
+    """The file the app serves for *url*, across all three static mounts."""
+    disk = static_asset_path(url)
+    assert disk is not None, f"{url} is not a /ui/static/ URL"
+    return disk
 
 
 def _png_size(data: bytes) -> tuple[int, int]:
@@ -242,7 +252,7 @@ const cacheObj = (name) => ({
 const caches = {
   open: async (name) => cacheObj(name),
   match: async (key) => store[key] || undefined,
-  keys: async () => ["meho-shell-old", "meho-shell-v1", "other-app"],
+  keys: async () => ["meho-shell-old", "meho-shell-v1", "meho-shell-v2", "other-app"],
   deleted: [],
   delete: async (name) => { caches.deleted.push(name); return true; },
 };
@@ -380,7 +390,7 @@ def test_install_caches_the_shell_and_activate_drops_old_caches(
     worker_run: dict[str, Any],
 ) -> None:
     assert sorted(worker_run["installed"]) == sorted(_shell_urls())
-    assert worker_run["deleted"] == ["meho-shell-old"]
+    assert worker_run["deleted"] == ["meho-shell-old", "meho-shell-v1"]
 
 
 @requires_node
@@ -410,3 +420,127 @@ def test_offline_pages_show_the_offline_page_never_an_old_copy(
     # The shell CSS comes from the cache; nothing is written while offline.
     assert cases["cssOffline"]["responded"] is True
     assert worker_run["writesOffline"] == []
+
+
+# ---------------------------------------------------------------------------
+# Upgrade from the light-only offline page (#6823)
+# ---------------------------------------------------------------------------
+
+# A browser with the app already installed holds the offline page in
+# ``meho-shell-v1``, from before the console followed the computer's
+# setting. The page is only ever served from the cache, so the upgrade has
+# to replace it. This driver models the Cache API per cache, in creation
+# order, as the browser does: ``caches.match`` returns the first hit, so a
+# stale v1 copy would win if activate did not drop it.
+_UPGRADE_DRIVER = r"""
+"use strict";
+const fs = require("fs");
+const vm = require("vm");
+
+const [workerPath, newPagePath] = process.argv.slice(2);
+const ORIGIN = "https://meho.example";
+const OFFLINE = "/ui/static/src/pwa/offline.html";
+const OLD_PAGE = '<html lang="en" data-theme="evoila"><body>MEHO is not reachable</body></html>';
+const NEW_PAGE = fs.readFileSync(newPagePath, "utf8");
+
+const stores = new Map([["meho-shell-v1", new Map([[OFFLINE, { body: OLD_PAGE }]])]]);
+const store = (name) => {
+  if (!stores.has(name)) stores.set(name, new Map());
+  return stores.get(name);
+};
+const respond = (path) => ({
+  ok: true, type: "basic", body: path === OFFLINE ? NEW_PAGE : path,
+  clone() { return { body: this.body }; },
+});
+let online = true;
+const caches = {
+  open: async (name) => ({
+    add: async (url) => {
+      if (!online) throw new TypeError("Failed to fetch");
+      store(name).set(url, respond(url));
+    },
+    put: async (key, resp) => { store(name).set(key, resp); },
+  }),
+  match: async (key) => {
+    for (const s of stores.values()) if (s.has(key)) return s.get(key);
+    return undefined;
+  },
+  keys: async () => [...stores.keys()],
+  delete: async (name) => stores.delete(name),
+};
+const listeners = {};
+const self = {
+  location: { origin: ORIGIN },
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+  skipWaiting: async () => {},
+  clients: { claim: async () => {} },
+};
+const fetchFn = async (request) => {
+  if (!online) throw new TypeError("Failed to fetch");
+  return respond(new URL(request.url).pathname);
+};
+vm.runInNewContext(fs.readFileSync(workerPath, "utf8"),
+  { self, caches, fetch: fetchFn, URL, Promise, Response: { error: () => ({ error: true }) } });
+
+const run = (name) => new Promise((resolve) => {
+  listeners[name]({ waitUntil: (p) => resolve(p) });
+}).then((p) => p);
+
+(async () => {
+  await run("install");
+  await run("activate");
+  online = false;
+  let answer;
+  listeners.fetch({
+    request: { url: ORIGIN + "/ui/approvals", method: "GET", mode: "navigate" },
+    respondWith: (p) => { answer = p; },
+  });
+  const resp = await answer;
+  process.stdout.write(JSON.stringify({ caches: [...stores.keys()], offlineBody: resp.body }));
+})();
+"""
+
+
+@requires_node
+def test_an_installed_app_gets_the_new_offline_page_after_the_upgrade(tmp_path: Path) -> None:
+    """With the computer set to dark, an app installed before #6823 must not
+    keep showing the light-only offline page. The cache-name bump makes the
+    browser install the new worker, which fetches the page again and drops
+    the v1 cache."""
+    driver = tmp_path / "upgrade.js"
+    driver.write_text(_UPGRADE_DRIVER, encoding="utf-8")
+    proc = subprocess.run(
+        ["node", str(driver), str(_WORKER), str(_disk_path(_OFFLINE_URL))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["caches"] == ["meho-shell-v2"]
+    body = result["offlineBody"]
+    assert 'data-theme="evoila-system"' in body
+    assert '<meta name="color-scheme" content="light dark" />' in body
+
+
+#: The offline page each cache version holds. The page is only ever served
+#: from the cache, and the browser re-installs the worker (and so refetches
+#: the page) only when the worker file changes. So a change to the offline
+#: page needs a new cache version: bump CACHE_NAME in service-worker.js and
+#: add the page's new SHA-256 here with that version.
+_OFFLINE_PAGE_BY_CACHE = {
+    "meho-shell-v2": "3287e77e690ff44a243917064d23c436da82ff430304e4f0878b996f35276ef6",
+}
+
+
+def test_a_changed_offline_page_comes_with_a_new_cache_version() -> None:
+    page = hashlib.sha256(_disk_path(_OFFLINE_URL).read_bytes()).hexdigest()
+    worker = _WORKER.read_text(encoding="utf-8")
+    version = re.search(r'CACHE_NAME = CACHE_PREFIX \+ "(v\d+)"', worker)
+    assert version, "CACHE_NAME not found in service-worker.js"
+    cache = "meho-shell-" + version.group(1)
+    assert _OFFLINE_PAGE_BY_CACHE.get(cache) == page, (
+        "offline.html changed: bump CACHE_NAME in service-worker.js and record "
+        f"{page} for the new version in _OFFLINE_PAGE_BY_CACHE"
+    )

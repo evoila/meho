@@ -39,6 +39,7 @@ from meho_backplane.db.models import (
     EndpointDescriptor,
     OperationPolicyOverride,
     ServicePrincipalGrant,
+    TenantPolicy,
 )
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._lookup import lookup_descriptor
@@ -375,6 +376,36 @@ async def test_row_stored_with_lower_values_is_raised_at_dispatch(embedding: Asy
 
     assert await _effective(uuid.uuid4()) == ("caution", True)
     assert await _stored(_TYPED["product"], _TYPED_OP) == ("safe", False)
+
+
+@pytest.mark.asyncio
+async def test_classification_runs_before_the_floor(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``POLICY_CLASSIFICATION`` on, an entry asking for less does not remove the floor."""
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+    await _register_typed(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(
+                tenant_id=None,
+                document={
+                    "classifications": [
+                        {
+                            "match": {"connector": _TYPED_CONNECTOR, "op": _TYPED_OP},
+                            "risk": "safe",
+                            "always_wait": False,
+                            "category": "network",
+                        }
+                    ]
+                },
+                set_by_sub="fixture-admin",
+            )
+        )
+        await session.commit()
+
+    assert await _effective(uuid.uuid4()) == ("caution", True)
 
 
 # -- standing grants ----------------------------------------------------------

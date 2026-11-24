@@ -19,7 +19,7 @@ import (
 
 // newShowCmd returns the `meho approvals show` command.
 //
-//	meho approvals show <id> [--json] [--backplane <url>]
+//	meho approvals show <id> [--script-page N] [--json] [--backplane <url>]
 //
 // Role: operator. Fetches a single approval request via
 // GET /api/v1/approvals/{id} and renders it with proposed_effect and
@@ -28,6 +28,7 @@ func newShowCmd() *cobra.Command {
 	var (
 		jsonOut           bool
 		backplaneOverride string
+		scriptPage        int
 	)
 	cmd := &cobra.Command{
 		Use:   "show <id>",
@@ -40,22 +41,40 @@ func newShowCmd() *cobra.Command {
 			"The \"May approve\" line says whether you may approve the " +
 			"request, and why not, as MEHO works it out with the same " +
 			"checks as the approve (may_approve and may_approve_reason " +
-			"in --json). --json emits the raw JSON envelope.",
+			"in --json). A script of a linux.script.run request has pages " +
+			"of 64 KiB: --script-page N prints page N of the script in " +
+			"the \"Script to run\" block (with --json, that page as JSON). " +
+			"MEHO keeps the script only while the request waits for " +
+			"approval. --json emits the raw JSON envelope.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runShow(cmd, args[0], jsonOut, backplaneOverride)
+			if cmd.Flags().Changed("script-page") && scriptPage < 1 {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("--script-page must be 1 or more"),
+					jsonOut,
+				)
+			}
+			return runShow(cmd, args[0], jsonOut, backplaneOverride, scriptPage)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw JSON instead of the human-readable view")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
+	cmd.Flags().IntVar(&scriptPage, "script-page", 0,
+		"print this page (from 1) of the script of a linux.script.run request")
 	return cmd
 }
 
-func runShow(cmd *cobra.Command, idArg string, jsonOut bool, backplaneOverride string) error {
+func runShow(
+	cmd *cobra.Command,
+	idArg string,
+	jsonOut bool,
+	backplaneOverride string,
+	scriptPage int,
+) error {
 	requestID, err := parseRequestID(idArg)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
@@ -80,6 +99,16 @@ func runShow(cmd *cobra.Command, idArg string, jsonOut bool, backplaneOverride s
 			output.Unexpected("backplane returned 200 OK but no JSON body decoded against ApprovalRequestView"),
 			jsonOut,
 		)
+	}
+	if scriptPage > 0 {
+		page, err := fetchScriptPage(cmd.Context(), client, requestID, scriptPage)
+		if err != nil {
+			return renderScriptPageError(cmd, backplaneURL, err, jsonOut)
+		}
+		if jsonOut {
+			return output.PrintJSON(cmd.OutOrStdout(), page)
+		}
+		detail.ProposedEffect = withScriptPage(detail.ProposedEffect, page)
 	}
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), detail)
@@ -150,10 +179,11 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "May approve:  %s\n", output.SafeText(right))
 	}
 	if d.RightsChange != nil && *d.RightsChange {
-		fmt.Fprintln(w, "Rights change: another admin must approve")
+		fmt.Fprintln(w, "Rights change: approve this change of rights in the web console")
 	}
 	fmt.Fprintf(w, "Connector:    %s\n", output.SafeText(d.ConnectorId))
 	fmt.Fprintf(w, "Operation:    %s\n", output.SafeText(d.OpId))
+	printClassification(w, d.ProposedEffect)
 	// Resolved subject of a path-variable op (#3353): the concrete entity
 	// (name + moid) recovered from identity params, so the reviewer reads
 	// `web-01 (vm-1042)` instead of the unresolved `{vm}` in the op id.
@@ -168,6 +198,9 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Part of:      %s\n", output.SafeText(*rc.ParentCompositeOpId))
 	}
 	fmt.Fprintf(w, "Principal:    %s\n", requesterLabel(d.PrincipalSub, d.PrincipalName, d.PrincipalKind))
+	if line := peopleBehindLine(d.PeopleBehind, d.PeopleBehindKnown); line != "" {
+		fmt.Fprintf(w, "Behind it:    %s\n", output.SafeText(line))
+	}
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", output.SafeText(*d.PrincipalAct))
 	}
@@ -219,6 +252,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	printResultHint(w, d)
 	if d.ProposedEffect != nil {
 		printEffect(w, "", "Effect:", d.ProposedEffect)
+		printScriptPagesHint(w, d.Id.String(), d.ProposedEffect)
 	}
 }
 
@@ -243,6 +277,15 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	}
 	if o.ErrorCode != nil {
 		fmt.Fprintf(w, "Error code:   %s\n", output.SafeText(*o.ErrorCode))
+	}
+	// The run is "ok" when MEHO ran the script, even if the script itself
+	// failed. A non-zero exit code must not read as a plain success.
+	if o.ExitCode != nil {
+		if *o.ExitCode != 0 {
+			fmt.Fprintf(w, "Exit code:    %d (the script ran, but it failed)\n", *o.ExitCode)
+		} else {
+			fmt.Fprintf(w, "Exit code:    %d\n", *o.ExitCode)
+		}
 	}
 	// The next step a failed multi-step operation names (#5377), for
 	// example the VM question that holds the change.

@@ -144,7 +144,7 @@ async def test_forwards_configured_service_token_and_posts_query(
     """The client POSTs with the configured corpus service token, not the JWT (#290)."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     captured: list[httpx.Request] = []
-    # MEHO.Knowledge's actual /search wire shape (#1732): a ``results``
+    # The corpus service's actual /search wire shape (#1732): a ``results``
     # envelope of chunks whose text/source-link fields are ``text`` /
     # ``source_uri``. The adapter must read real hits from this body.
     response = httpx.Response(
@@ -548,7 +548,11 @@ async def test_corpus_client_dials_only_a_checked_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dial's transport checks the host when the connection opens and pins the address."""
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     client = corpus_mod._corpus_client(httpx.Timeout(1.0))
     try:
         backend = client._transport._pool._network_backend  # type: ignore[attr-defined]
@@ -574,7 +578,11 @@ async def test_corpus_client_dials_only_a_checked_address(
 def test_unresolved_name_is_refused_at_connect_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """A name with no address to check is refused, not handed to the stock resolver."""
     monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
 
     with pytest.raises(CorpusDialBlockedError) as exc:
@@ -583,7 +591,11 @@ def test_unresolved_name_is_refused_at_connect_time(monkeypatch: pytest.MonkeyPa
     assert "corpus.test" not in str(exc.value)
 
     # A name listed verbatim on the allowlist is still dialed by name.
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset({"corpus.test"})))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset({"corpus.test"}), (), frozenset()),
+    )
     assert corpus_mod._pin_corpus_addresses("corpus.test") is None
 
 
@@ -612,7 +624,11 @@ async def test_unresolved_name_opens_no_socket_and_is_corpus_unavailable(
     """A failed lookup ends as CorpusUnavailable and the transport never dials the name."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     monkeypatch.setattr(dial_guard, "_unresolved", _REAL_UNRESOLVED)
-    monkeypatch.setattr(guard_mod, "_parse_allowlist", lambda: ((), frozenset()))
+    monkeypatch.setattr(
+        guard_mod,
+        "_parse_allowlist",
+        lambda: guard_mod._Allowlist((), frozenset(), (), frozenset()),
+    )
     monkeypatch.setattr(guard_mod, "_resolve_addrs", lambda _host: [])
 
     inner = _NoSocketBackend()
@@ -744,7 +760,7 @@ async def test_document_id_threads_through_from_results_envelope(
 ) -> None:
     """A populated ``document_id`` arrives on the chunk (#2004).
 
-    The contract names the field ``document_id`` and MEHO.Knowledge speaks
+    The contract names the field ``document_id`` and the corpus service speaks
     that exact key (unlike ``content``/``source_url``, it has no second wire
     name to alias), so a non-blank value must thread straight through the
     ``results`` envelope onto the consumed ``document_id``.
@@ -776,7 +792,7 @@ async def test_blank_document_id_normalises_to_none(
 ) -> None:
     """An empty ``document_id`` is honestly typed as ``None`` (#2004).
 
-    MEHO.Knowledge returns ``document_id: ""`` for a chunk with no owning-
+    The corpus service returns ``document_id: ""`` for a chunk with no owning-
     document concept. ``document_id`` is ``str | None``; a blank-after-strip
     value normalises to ``None`` rather than threading a misleading ``""``,
     so the citation-label fallback (``title -> document_id -> filename ->
@@ -1178,7 +1194,7 @@ async def test_operator_jwt_and_service_token_never_logged(
     ("search_url", "expected"),
     [
         # The readiness URL is the search URL's host root + /readyz (#1732):
-        # MEHO.Knowledge exposes /readyz, not a /status sibling.
+        # The corpus service exposes /readyz, not a /status sibling.
         ("https://corpus.test/v1/search", "https://corpus.test/readyz"),
         ("https://corpus.test/v1/search/", "https://corpus.test/readyz"),
         ("https://corpus.test/corpus", "https://corpus.test/readyz"),
@@ -1227,7 +1243,7 @@ async def test_corpus_status_readyz_200_without_flag_is_ready(
 ) -> None:
     """A bare /readyz 200 (no readiness flag) reads as index_built=True (#1732).
 
-    MEHO.Knowledge's /readyz returns a HealthResponse whose 200 *is* the
+    The corpus service's /readyz returns a HealthResponse whose 200 *is* the
     ready signal; it need not carry an ``index_built`` field. The adapter
     must treat such a body as answerable rather than failing parse.
     """

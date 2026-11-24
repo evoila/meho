@@ -23,6 +23,8 @@
       candidate set + the remediation step (set
       ``target.preferred_impl_id``).
 -#}
+
+{% from "_components.html" import badge %}
 <article
   id="ops-matrix-card"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -46,13 +48,13 @@
             >
               <summary class="cursor-pointer px-3 py-2 text-sm font-semibold">
                 {{ group.name }}
-                <span class="ml-2 text-xs opacity-60">
+                <span class="ml-2 text-xs text-subtle">
                   ({{ group.operations | length }} ops)
                 </span>
               </summary>
               <div class="border-t border-base-300 px-3 py-2 text-xs">
                 {% if group.when_to_use %}
-                  <p class="opacity-70 italic mb-2">{{ group.when_to_use }}</p>
+                  <p class="text-muted italic mb-2">{{ group.when_to_use }}</p>
                 {% endif %}
                 {% if group.operations %}
                   <ul class="divide-y divide-base-300" role="list">
@@ -60,7 +62,7 @@
                       <li class="flex items-start gap-2 py-1.5">
                         <span class="font-mono shrink-0">{{ op.op_id }}</span>
                         {% if op.summary %}
-                          <span class="opacity-70 truncate">{{ op.summary }}</span>
+                          <span class="text-muted truncate">{{ op.summary }}</span>
                         {% endif %}
                         <span class="ml-auto flex items-center gap-1 shrink-0">
                           {#- ``safety_level`` is the closed enum the DB-layer
@@ -77,35 +79,26 @@
                               title="Dangerous — irreversible or high-impact"
                             >{{ safety }}</span>
                           {% elif safety == "caution" %}
-                            <span
-                              class="badge badge-warning badge-xs"
-                              title="Caution — state-changing"
-                            >{{ safety }}</span>
+                            {{ badge(safety, variant="warning", size="xs", title="Caution — state-changing") }}
                           {% else %}
-                            <span
-                              class="badge badge-ghost badge-xs"
-                              title="Safe — read or non-impacting"
-                            >{{ safety }}</span>
+                            {{ badge(safety, variant="quiet", size="xs", title="Safe — read or non-impacting") }}
                           {% endif %}
                           {% if op.requires_approval %}
-                            <span
-                              class="badge badge-outline badge-xs"
-                              title="Requires approval"
-                            >approval</span>
+                            {{ badge("approval", variant="outline", size="xs", title="Requires approval") }}
                           {% endif %}
                         </span>
                       </li>
                     {% endfor %}
                   </ul>
                 {% else %}
-                  <p class="opacity-60 italic">No enabled operations in this group.</p>
+                  <p class="text-subtle italic">No enabled operations in this group.</p>
                 {% endif %}
               </div>
             </details>
           {% endfor %}
         </div>
       {% else %}
-        <p class="text-sm opacity-60">
+        <p class="text-sm text-subtle">
           No enabled operation groups for connector
           <code>{{ connector_id }}</code>.
         </p>
@@ -123,12 +116,12 @@
                ladder needs ``fingerprint.version`` to pick the right
                connector. Re-probe is the correct verb here. #}
             {% if is_tenant_admin %}
-              <p class="text-xs mt-1 opacity-80">
+              <p class="text-xs mt-1 text-muted">
                 Re-probe the target to capture its fingerprint, then this
                 surface will pick a connector automatically.
               </p>
             {% else %}
-              <p class="text-xs mt-1 opacity-80">
+              <p class="text-xs mt-1 text-muted">
                 A tenant_admin can capture one via the Re-probe action on
                 the Fingerprint card.
               </p>
@@ -140,7 +133,7 @@
                same resolver with the same tuple and fail the same way;
                Edit (PATCH product) or Delete is the correct verb. This is
                the v0.7.0 dogfood signal #6 closure (RDC #753 / #1218). #}
-            <p class="text-xs mt-1 opacity-80">
+            <p class="text-xs mt-1 text-muted">
               The target's <code>product</code> slug
               {% if target.product %}(<code>{{ target.product }}</code>){% endif %}
               doesn't match any registered connector. Re-probing won't help
@@ -152,7 +145,7 @@
             </p>
             {% if valid_products %}
               <p class="text-xs mt-1">
-                <span class="opacity-60">Valid products:</span>
+                <span class="text-subtle">Valid products:</span>
                 {% for option in valid_products %}<code>{{ option }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
               </p>
             {% endif %}
@@ -167,7 +160,7 @@
             {{ connector_message or "multiple connector candidates remain" }}
           </p>
           {% if is_tenant_admin %}
-            <p class="text-xs mt-1 opacity-80">
+            <p class="text-xs mt-1 text-muted">
               Set the target's <code>preferred_impl_id</code> to one of the
               candidate impls.
             </p>

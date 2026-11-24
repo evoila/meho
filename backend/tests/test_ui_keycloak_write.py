@@ -82,7 +82,7 @@ from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _OP_OPERATOR = "op-operator"
-_TARGET_NAME = "rdc-keycloak"
+_TARGET_NAME = "example-keycloak"
 _CLIENT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _APPROVAL_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -363,7 +363,7 @@ def test_keycloak_ui_scope_create_modal_renders_unmissable_confirm(
     body = response.text
     assert 'data-write-gate="confirm"' in body
     assert "data-write-requires-approval" in body
-    assert "requires approval" in body
+    assert "change of rights" in body
 
 
 def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
@@ -384,7 +384,7 @@ def test_keycloak_ui_mapper_create_modal_renders_unmissable_confirm(
     body = response.text
     assert 'data-write-gate="confirm"' in body
     assert 'data-safety-level="dangerous"' in body
-    assert "requires approval" in body
+    assert "change of rights" in body
 
 
 def test_keycloak_ui_scope_create_without_csrf_is_403(
@@ -642,7 +642,7 @@ def _make_ok_double() -> Any:
         if op_id in ("keycloak.client.list", "keycloak.client_scope.list"):
             result = {"rows": [], "total": 0}
         elif op_id == "keycloak.realm.get":
-            result = {"realm": {"realm": "evba", "enabled": True}}
+            result = {"realm": {"realm": "example-realm", "enabled": True}}
         return {
             "status": "ok",
             "op_id": op_id,

@@ -26,6 +26,8 @@
     * ``csrf_token``    -- str: minted double-submit token for the row's
                            action ``hx-get``/``hx-headers``.
 -#}
+
+{% from "_components.html" import badge, button %}
 <tr
   id="registry-row-{{ connector_id }}"
   data-connector-id="{{ connector_id }}"
@@ -41,31 +43,23 @@
     <td>
       <div class="flex flex-col">
         <span>{{ row.product }}</span>
-        <span class="text-xs opacity-60">
+        <span class="text-xs text-subtle">
           {{ row.impl_id }} &middot; {{ row.version }}
         </span>
       </div>
     </td>
     <td>
       {% if row.is_builtin %}
-        <span class="badge badge-neutral badge-sm" title="Global / built-in connector">
-          built-in
-        </span>
+        {{ badge("built-in", variant="neutral", title="Global / built-in connector") }}
       {% else %}
-        <span class="badge badge-outline badge-sm" title="Tenant-curated connector">
-          tenant
-        </span>
+        {{ badge("tenant", variant="outline", title="Tenant-curated connector") }}
       {% endif %}
     </td>
     <td>
       {% if row.state == "ingested" %}
-        <span class="badge badge-success badge-sm" title="DB-backed; the dispatcher resolves operations against it">
-          ingested
-        </span>
+        {{ badge("ingested", variant="success", title="DB-backed; the dispatcher resolves operations against it") }}
       {% else %}
-        <span class="badge badge-ghost badge-sm" title="Registered but no descriptor rows yet (not yet dispatchable)">
-          {{ row.state }}
-        </span>
+        {{ badge(row.state, variant="quiet", title="Registered but no descriptor rows yet (not yet dispatchable)") }}
       {% endif %}
     </td>
     <td>
@@ -75,28 +69,20 @@
           ingested-shim is a bare non-dispatchable shim; profiled-but-unreviewed
           is a profile-backed connector still awaiting review-gate clearance. -#}
       {% if row.kind == "typed" %}
-        <span class="badge badge-primary badge-sm" title="Hand-coded connector class — dispatchable">
-          typed
-        </span>
+        {{ badge("typed", variant="primary", title="Hand-coded connector class — dispatchable") }}
       {% elif row.kind == "profiled" %}
-        <span class="badge badge-info badge-sm" title="Profile-backed (ExecutionProfile) connector — dispatchable">
-          profiled
-        </span>
+        {{ badge("profiled", variant="info", title="Profile-backed (ExecutionProfile) connector — dispatchable") }}
       {% elif row.kind == "profiled-but-unreviewed" %}
-        <span class="badge badge-warning badge-sm" title="Profile-backed but not yet review-cleared — not yet dispatchable">
-          profiled (staged)
-        </span>
+        {{ badge("profiled (staged)", variant="warning", title="Profile-backed but not yet review-cleared — not yet dispatchable") }}
       {% else %}
-        <span class="badge badge-ghost badge-sm" title="Bare ingested shim — not dispatchable until replaced">
-          ingested shim
-        </span>
+        {{ badge("ingested shim", variant="quiet", title="Bare ingested shim — not dispatchable until replaced") }}
       {% endif %}
     </td>
     <td class="text-xs tabular-nums">
       <div class="flex flex-col gap-0.5">
         <span title="Groups by review status (staged / enabled / disabled)">
           groups: {{ row.group_count }}
-          <span class="opacity-60">
+          <span class="text-subtle">
             ({{ row.staged_group_count }}s / {{ row.enabled_group_count }}e /
             {{ row.disabled_group_count }}d)
           </span>

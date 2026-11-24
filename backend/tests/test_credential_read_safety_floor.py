@@ -20,7 +20,9 @@ list. These tests check that:
   search, the operation read, the connector review, the console page and
   the preview),
   for a typed and an ingested read stored as ``safe``, also after an
-  override that turned approval off;
+  override that turned approval off, and also when the classification
+  (the ``POLICY_CLASSIFICATION`` switch on) asks for ``safe`` without a
+  wait; the category and labels of the classification are kept;
 * a read marked as one that returns no secret value stays ``safe``: the
   five built-in marked reads, and ``vault.kv.read`` only without
   ``reveal_secret``.
@@ -43,7 +45,12 @@ from meho_backplane.connectors.bind9 import op_classes as _bind9_op_classes  # n
 from meho_backplane.connectors.kubernetes import op_classes as _k8s_op_classes  # noqa: F401
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, OperationPolicyOverride
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    OperationGroup,
+    OperationPolicyOverride,
+    TenantPolicy,
+)
 from meho_backplane.operations._contract import _find_descriptor
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations._request_preview import preview_dispatch
@@ -59,6 +66,7 @@ from meho_backplane.operations.ingest.catalog import parse_catalog
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor, has_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.operations.meta_tools import describe_descriptor
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.routes.connectors.detail import _load_ops_matrix
 
@@ -121,6 +129,11 @@ def op_class_state() -> Iterator[None]:
     saved_root_shell = set(op_classes._ROOT_SHELL)
     saved_per_call = set(op_classes._PER_CALL_APPROVAL)
     saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
+    saved_wait_when_set = dict(op_classes._WAIT_WHEN_SET)
+    saved_credential_capable = set(op_classes._CREDENTIAL_CAPABLE)
+    saved_capable_matches = list(op_classes._CREDENTIAL_CAPABLE_MATCHES)
+    saved_credential_checks = dict(op_classes._CREDENTIAL_CHECKS)
+    saved_hidden_stored_params = dict(op_classes._HIDDEN_STORED_PARAMS)
     try:
         yield
     finally:
@@ -130,6 +143,11 @@ def op_class_state() -> Iterator[None]:
         op_classes._ROOT_SHELL.update(saved_root_shell)
         op_classes._PER_CALL_APPROVAL.update(saved_per_call)
         op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
+        op_classes._WAIT_WHEN_SET.update(saved_wait_when_set)
+        op_classes._CREDENTIAL_CAPABLE.update(saved_credential_capable)
+        op_classes._CREDENTIAL_CAPABLE_MATCHES.extend(saved_capable_matches)
+        op_classes._CREDENTIAL_CHECKS.update(saved_credential_checks)
+        op_classes._HIDDEN_STORED_PARAMS.update(saved_hidden_stored_params)
 
 
 @pytest.fixture
@@ -482,6 +500,71 @@ async def test_override_that_turns_approval_off_does_not_lower_a_credential_read
     seen = await _every_surface(_TYPED_KEY, descriptor_id, _admin(uuid.uuid4()))
 
     assert seen == dict.fromkeys(seen, ("caution", True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("op_class_state")
+@pytest.mark.parametrize("scope", ["install", "tenant"])
+@pytest.mark.parametrize("with_override", [False, True])
+async def test_classification_does_not_lower_a_credential_read(
+    monkeypatch: pytest.MonkeyPatch, scope: str, with_override: bool
+) -> None:
+    """With ``POLICY_CLASSIFICATION`` on, an entry asking for less keeps the floor.
+
+    The entry sets ``safe`` and ``always_wait: false``, at the install or
+    for the caller's tenant, also on top of an override that turned
+    approval off. The read stays ``caution`` with approval on every
+    surface, and the entry's category and labels are kept.
+    """
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+    product, version, impl_id, op_id = _TYPED_KEY
+    op_classes.declare_op_classes(credential_read=(op_id,))
+    descriptor_id = await _seed_safe_row(_TYPED_KEY, source_kind="typed")
+    operator = _admin(uuid.uuid4())
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            TenantPolicy(
+                tenant_id=operator.tenant_id if scope == "tenant" else None,
+                document={
+                    "classifications": [
+                        {
+                            "match": {"connector": f"{impl_id}-{version}", "op": op_id},
+                            "risk": "safe",
+                            "always_wait": False,
+                            "category": "secrets",
+                            "labels": {"team": "platform"},
+                        }
+                    ]
+                },
+                set_by_sub="fixture-admin",
+            )
+        )
+        if with_override:
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=None,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    op_id=op_id,
+                    safety_level="safe",
+                    requires_approval=False,
+                    reason="fixture: approval turned off",
+                    set_by_sub="fixture-admin",
+                )
+            )
+
+    seen = await _every_surface(_TYPED_KEY, descriptor_id, operator)
+
+    assert seen == dict.fromkeys(seen, ("caution", True))
+    async with get_sessionmaker()() as session:
+        row = await session.get(EndpointDescriptor, descriptor_id)
+        assert row is not None
+        policies = await effective_policy_map(session, tenant_id=operator.tenant_id, rows=[row])
+    policy = policies[OpKey.of(row)]
+    assert (policy.safety_level, policy.requires_approval) == ("caution", True)
+    assert (policy.category, dict(policy.labels)) == ("secrets", {"team": "platform"})
 
 
 @pytest.mark.asyncio

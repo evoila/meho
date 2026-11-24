@@ -3,7 +3,7 @@
 
 """Regression tests for ``extra="forbid"`` on every public v1 request schema.
 
-G0.9-T2 (#729) of Initiative #737. Surfaced by the 2026-05-20 RDC
+G0.9-T2 (#729) of Initiative #737. Surfaced by the 2026-05-20 consumer
 in-lab dogfood as "Signal #2": a v0.2.1 client posting the
 pre-rename ``q`` / ``top_k`` keys to ``/api/v1/retrieve`` saw the
 fields silently dropped (Pydantic v2 default ``extra="ignore"``) and
@@ -60,6 +60,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.api.v1.audit_models import AuditQueryRequest
 from meho_backplane.api.v1.kb import IngestKbRequest, KbEntryCreate
@@ -103,7 +104,7 @@ _REQUEST_MODELS: list[tuple[type[BaseModel], dict[str, Any]]] = [
     (IngestKbRequest, {"directory": "/tmp/kb"}),
     (
         TargetCreate,
-        {"name": "rdc-vcenter", "product": "vsphere", "host": "vc.example.lab"},
+        {"name": "example-vcenter", "product": "vsphere", "host": "vc.example.lab"},
     ),
     (TargetUpdate, {"host": "vc-2.example.lab"}),
     (
@@ -237,7 +238,8 @@ def _log_buffer() -> Iterator[io.StringIO]:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -263,7 +265,7 @@ def test_retrieve_route_rejects_signal_2_payload_with_422_extra_forbidden(
 ) -> None:
     """``POST /api/v1/retrieve`` rejects the exact dogfood Signal #2 payload.
 
-    The 2026-05-20 RDC report's reproducer was a v0.2.1 client still
+    The 2026-05-20 consumer report's reproducer was a v0.2.1 client still
     sending ``q`` (the pre-rename field) and ``top_k`` (renamed to
     ``limit``) — that payload used to be silently dropped, producing
     a 422 missing-``query`` error and an apparent "request worked

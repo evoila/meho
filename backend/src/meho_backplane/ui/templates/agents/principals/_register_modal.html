@@ -17,11 +17,14 @@
   form (``banner``), not a generic "something went wrong". The
   field-attributable failures (empty / bad-character name -> 422,
   duplicate name -> 409) render against the ``name`` input.
+  A missing or wrong starting grant pick (422) renders against the
+  pick (#6192).
 
   Submit contract: the form ``hx-post``s to
   ``/ui/agents/principals/register``, swapping
   ``#principals-modal-container``.
-    * Success -> 204 + ``HX-Redirect: /ui/agents/principals``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/principals``, or to the
+      new agent's grants page after a pick that writes grants.
     * Failure -> this same modal re-rendered with ``errors`` / ``banner``
       populated and the operator's typed values echoed back.
 
@@ -35,7 +38,7 @@
       Register agent principal
     </h3>
 
-    <p class="py-2 text-sm opacity-80">
+    <p class="py-2 text-sm text-muted">
       Creates a Keycloak OAuth client for this identity and stores its
       generated credential. The agent authenticates as
       <span class="font-mono">agent:&lt;name&gt;</span> via the
@@ -80,7 +83,7 @@
       </label>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Owner <span class="opacity-60 font-normal">(optional)</span></span>
+        <span class="text-sm font-medium">Owner <span class="text-subtle font-normal">(optional)</span></span>
         <input
           type="text"
           name="owner_sub"
@@ -91,7 +94,7 @@
           placeholder="defaults to you"
           aria-describedby="principal-owner-hint"
         />
-        <span id="principal-owner-hint" class="text-xs opacity-60">
+        <span id="principal-owner-hint" class="text-xs text-subtle">
           Keycloak <span class="font-mono">sub</span> of the owning
           operator. Defaults to the registering operator if left blank.
         </span>
@@ -101,6 +104,8 @@
           </span>
         {% endif %}
       </label>
+
+      {% include "agents/_starting_grants_field.html" %}
 
       <div class="modal-action">
         <button

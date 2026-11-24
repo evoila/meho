@@ -46,7 +46,7 @@ meho secret move \
   --from <kind>:<ref> \
   --to   <kind>:<ref> \
   --reason 'why this move is happening' \
-  [--json] [--backplane <url>]
+  [--merge] [--json] [--backplane <url>]
 ```
 
 `meho secret move` is a thin Cobra layer over
@@ -60,6 +60,25 @@ across the wire is **only** the two references and the reason:
 ```json
 { "from": "<kind>:<ref>", "to": "<kind>:<ref>", "reason": "…" }
 ```
+
+With `--merge`, the verb also sends `"merge": true`. `merge` is a sink
+option of `secret.move`, off by default. When it is on, the sink keeps the
+other fields of the secret and changes only the named field, with
+check-and-set against a parallel change. Only the `vault` and
+`vault-target` sinks support it; another sink kind makes the move fail
+before the source is read. Without `merge`, a Vault sink replaces the
+whole secret. A merge into a secret whose latest version is deleted fails
+and writes nothing. When Vault refuses the merge write, the error says
+whether the secret changed after MEHO read it (`SecretMergeChangedError`:
+run the move again) or Vault refused for another reason
+(`SecretMergeRefusedError`). The approval says whether the sink secret
+exists and, with `merge`, whether the field exists: "yes", "no" or
+"not known". MEHO reads this when the request is made, with only the
+write right on the sink. When the approval says "no", the approved run
+holds to it: a sink secret or field that exists by then refuses the run
+(`SecretSinkChangedError`) and nothing is written. Vault's check-and-set
+makes this check part of the write. "yes" and "not known" do not bind
+the run.
 
 There is deliberately **no** `--value` / `--secret` / `--password` flag
 of any kind. The value is never a CLI argument, flag, env var, or prompt,
@@ -87,14 +106,15 @@ be non-empty — a malformed intent is rejected at param validation
 not deep inside the handler. `kind` selects the store adapter from the
 registry; `ref` is the store-specific address that adapter interprets.
 
-Two kinds ship today (the initiative's "≥2 connector kinds" definition of
-done). A move may be **same-kind** (`vault` → `vault`) or **cross-kind**
-(`vault` → `keycloak`):
+Four kinds ship today. A move may be **same-kind** (`vault` → `vault`) or
+**cross-kind** (`vault` → `keycloak`, `vault` → `linux`):
 
 | `kind` | Role | `ref` grammar | Example |
 | --- | --- | --- | --- |
 | `vault` | source **and** sink | `<path>#<field>` — a KV-v2 path with a required `#<field>` fragment selecting one field | `vault:secret/db/prod#password` |
+| `vault-target` | source **and** sink | `<target>/<path>#<field>` — a registered Vault target, then the same KV-v2 address as `vault` | `vault-target:vault-prod/secret/db/prod#password` |
 | `keycloak` | sink **only** | `<target>/<realm>/<username>#password` — `#password` is the only writable field | `keycloak:kc/meho/operator-a#password` |
+| `linux` | sink **only** | `<target>/<absolute path>#<owner>` — a file in the home of `<owner>` (a normal user: never `root`, never a system user) on a host of a `linux-ssh` target, mode 0600, written as `<owner>` | `linux:app-host/home/app/.config/app/key#app` |
 
 **vault** (`vault:` —
 [`vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)).
@@ -110,6 +130,26 @@ envelope and per-operator Vault policy — see
 [`connector-vault-policy.md`](./connector-vault-policy.md) for the read
 (§2) and write (§6) ACL stanzas the operator's token needs.
 
+**vault-target** (`vault-target:` —
+[`vault_target_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_target_endpoint.py)).
+Like `vault`, but the read or write logs in to Vault under the role of a
+registered Vault target (`extras["vault_role"]`), not the operator's own
+role. Source and sink each name their own target. Before any Vault login,
+MEHO checks: the tenant path rule of `vault`; the target is a Vault target
+of the caller's tenant with its own role; and the caller's MEHO policy for
+the matching op on that target (`vault.kv.read` for a source,
+`vault.kv.put` for a sink, `vault.kv.patch` for a sink with `merge`). A
+move that fails these checks does not wait for approval.
+The approval shows, for each `vault-target` side, the name as typed, the
+target it points to (name and id), that target's Vault role and its
+Vault login mount. The approved run compares the target ids, roles and
+mounts with the approval. If a name points to another target by then,
+the role or the mount of the target changed, or the approval does not
+show them, the run is refused before any Vault login and nothing is read
+or written. A target that is not found at the run is refused the same
+way, with a message that says so.
+`secret.handoff.export` does not accept a `vault-target:` source.
+
 **keycloak** (`keycloak:` —
 [`secret_endpoint.py`](../../backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py)).
 A keycloak adapter is a **sink only**: Keycloak hashes credentials and
@@ -124,6 +164,17 @@ here: the **operator's JWT** authorises only the per-operator target
 resolution, while the Keycloak admin `PUT` itself is minted under the
 **connector's own admin credential** — the operator's token never reaches
 Keycloak.
+
+**linux** (`linux:` —
+[`secret_endpoint.py`](../../backend/src/meho_backplane/connectors/linux/secret_endpoint.py)).
+A linux adapter is a **sink only**. It writes the value to one file on the
+host of a `linux-ssh` target, over SSH with sudo. The file must be inside the
+home of its owner, and the owner writes it. A target of another kind is
+refused. `secret.handoff.import` never writes to a `linux:` place. The
+allowed place, the paths it refuses and the link rules are in
+[`connectors-secret-broker.md`](../codebase/connectors-secret-broker.md),
+"The `linux:` store". A person approves each move: no standing grant and no
+run approval covers `secret.move`.
 
 ### 1.3 The response — value-free by schema
 
@@ -178,7 +229,7 @@ Each claim below ties to the mechanism that enforces it.
 | **The op response** | the handler returns only `{status, value_fingerprint, length}`; the response schema is `additionalProperties: false` over those three ([`ops.py`](../../backend/src/meho_backplane/connectors/secret/ops.py)). |
 | **Logs** | the only in-memory carrier, [`SecretMaterial`](../../backend/src/meho_backplane/connectors/secret/endpoints.py), overrides `__repr__`/`__str__` to render `<SecretMaterial len=N fingerprint=…>` — so a stray `logger.info(..., material=m)` or f-string renders the redacted form, never the value. Adapters log only field **names**/paths, never values, mirroring [`strip_credential_value`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)'s "No secret in logs" discipline. |
 | **The audit row** | this is the load-bearing distinction. The generic dispatch path persists the raw payload behind redaction ([`dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py) module docstring, step 9). For `secret.move` there is **no raw value for the audit row to carry in the first place**: the value was never in the params (only references) and never in the response (only a keyed fingerprint + length). The audit row stores the value-free params + the value-free return. There is nothing to redact. |
-| **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises only the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. It does **no store I/O at all**, so it cannot observe a value to leak. |
+| **The approval `proposed_effect`** | the park-time preview builder ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)) summarises the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`. For a `vault-target` side it adds the target the name points to, that target's Vault role and its Vault login mount. It never reads the source. For a Vault sink it looks up whether the secret (and with `merge`, the field) exists and keeps only "yes", "no" or "not known"; the read data is dropped at once. |
 | **Broadcast / event payloads** | [`classify_op("secret.move")`](../../backend/src/meho_backplane/broadcast/events.py) returns `"other"` (`.move` is in neither the read- nor write-suffix set, and `secret.move` is in no credential allowlist). The broadcast carries the same value-free params + response the audit row sees — there is no value in them to broadcast. |
 
 The transfer is **server-side**: read from source → write to sink, both
@@ -234,15 +285,18 @@ and no value ever rests in a durable artifact.
    `dangerous` carries **two distinct properties** that are worth
    stating precisely, because they are stronger than "parked":
 
-   - **Default with no live grant ⇒ `needs-approval`.** An agent with no
-     matching `AgentPermission` grant — or one whose grant has expired —
-     waits for a person's approval. It never auto-executes.
+   - **No live grant ⇒ depends on `AGENT_GRANT_REQUIRED`.** An agent
+     with no matching `AgentPermission` grant — or one whose grant has
+     expired — waits for a person's approval while the switch is `off`
+     (the default) or `observe`. With `on`, the call is refused
+     (`agent_no_grant`). It never auto-executes.
    - **Ceiling ⇒ `needs-approval`.** A grant can make the verdict
      stricter (`deny`), but a grant that carries `auto-execute` is
      **capped to `needs-approval`** for a `dangerous` op. No grant can
      make a credential move auto-execute.
 
-   In short: no grant ⇒ waits for approval; a `deny` grant ⇒ denied; an
+   In short: no grant ⇒ waits for approval with the switch `off` or
+   `observe`, refused with `on`; a `deny` grant ⇒ denied; an
    `auto-execute` grant ⇒ still waits for approval. A credential move
    never runs without a human in the loop.
 
@@ -277,8 +331,11 @@ and no value ever rests in a durable artifact.
 
 6. **Ref-only `proposed_effect` + hash-only audit.** The approver sees
    the parsed `{kind, ref}` of source and sink plus the reason
-   ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)),
-   and the audit row carries the value-free params hash + the value-free
+   ([`move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)).
+   For a `vault-target` side the approver also sees the target the name
+   points to (name and id) and its Vault role, and for the sink whether
+   the secret exists. The approved run reads and writes only on the
+   targets the approval showed. And the audit row carries the value-free params hash + the value-free
    return — so neither the approval surface nor the durable audit trail
    ever holds the value (§2).
 

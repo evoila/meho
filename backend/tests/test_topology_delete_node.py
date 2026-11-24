@@ -103,10 +103,10 @@ def _enforce_sqlite_foreign_keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 # ---------------------------------------------------------------------------
 
 
-async def _seed_tenant(slug: str = "rdc-internal") -> uuid.UUID:
+async def _seed_tenant(slug: str = "example-tenant") -> uuid.UUID:
     """Return the tenant row's id, inserting it on the first call.
 
-    Look-up-then-insert because migration ``0018`` seeds ``rdc-internal``
+    Look-up-then-insert because migration ``0018`` seeds a tenant
     into the per-worker schema template (see
     :mod:`tests.test_topology_create_node`).
     """
@@ -151,7 +151,7 @@ async def _seed_curated_node(tenant_id: uuid.UUID, *, kind: str, name: str) -> u
 async def test_delete_node_removes_row_and_writes_tombstone() -> None:
     """A manual seed is hard-deleted with a ``removed`` history tombstone."""
     tenant_id = await _seed_tenant()
-    node_id = await _seed_curated_node(tenant_id, kind="vault-role", name="rdc-vault")
+    node_id = await _seed_curated_node(tenant_id, kind="vault-role", name="example-vault")
     sessionmaker = get_sessionmaker()
 
     async with sessionmaker() as session:
@@ -159,7 +159,7 @@ async def test_delete_node_removes_row_and_writes_tombstone() -> None:
 
     assert result.node_id == node_id
     assert result.kind == "vault-role"
-    assert result.name == "rdc-vault"
+    assert result.name == "example-vault"
 
     async with sessionmaker() as session:
         # The live row is gone.
@@ -183,7 +183,7 @@ async def test_delete_node_removes_row_and_writes_tombstone() -> None:
         snapshot = history[0].snapshot
         assert snapshot["after"] is None
         assert snapshot["before"]["kind"] == "vault-role"
-        assert snapshot["before"]["name"] == "rdc-vault"
+        assert snapshot["before"]["name"] == "example-vault"
         assert snapshot["before"]["id"] == str(node_id)
 
         # Exactly one audit row for the delete.

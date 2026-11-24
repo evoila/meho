@@ -10,8 +10,8 @@
   these onto ``#audit-results-rows``, so paging never drops rows already
   shown).
 
-  Each row colour-codes its op_class via the broadcast badge palette
-  (``badge_class``, imported from ``ui.routes.broadcast.feed`` -- no duplicate
+  Each row colour-codes its op_class via the badge palette
+  (``badge_class``, from ``ui.routes.audit.op_class_badges`` -- no duplicate
   colour map) and renders three one-click pivots:
 
     * who-touched -- a ``target``-bound query (``/ui/audit?target=<name>``),
@@ -19,7 +19,9 @@
     * by-work-ref -- a ``work_ref``-bound query
       (``/ui/audit?work_ref=<ref>``), rendered only when the row carries one.
     * replay -- deep-links to the T3 ``/ui/audit/sessions/{id}/replay`` surface
-      when the row carries an ``agent_session_id``. The replay route is
+      when the row carries the ``agent_session_id`` of an agent run or an MCP
+      session (``agent_session``). A row whose id is the CLI login session
+      gets no replay pivot. The replay route is
       ``TENANT_ADMIN``-gated (#1844), so the pivot is an enabled link only
       when ``replay_enabled`` (admin + session present); a plain operator sees
       it disabled with a tooltip.
@@ -51,7 +53,7 @@
           >{{ row.event_class_label }}</span>
         {% endif %}
       </div>
-      <p class="truncate text-xs text-base-content/55">
+      <p class="truncate text-xs text-subtle">
         <span data-tenant title="Tenant">{{ row.tenant_label }}</span>
         <span aria-hidden="true">&middot;</span>
         <span>{{ row.principal_name or row.principal_sub }}</span>
@@ -100,7 +102,7 @@
           {{ icon("share-2", class="size-3.5") }} by-work-ref
         </a>
       {% endif %}
-      {% if row.agent_session_id %}
+      {% if row.agent_session %}
         {% if row.replay_enabled %}
           <a
             class="btn btn-ghost btn-xs gap-1"

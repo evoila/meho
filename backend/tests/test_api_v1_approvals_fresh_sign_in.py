@@ -59,6 +59,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", raising=False)
     monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
     monkeypatch.delenv("APPROVAL_ONE_TIME_CODE_ACR_VALUES", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
     yield
@@ -81,8 +82,12 @@ def _fake_resume(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
     return resumed
 
 
-async def _park(*, destructive: bool = False) -> uuid.UUID:
-    """Park one request by another person and return its id."""
+async def _park(*, destructive: bool = False, no_level: bool = False) -> uuid.UUID:
+    """Park one request by another person and return its id.
+
+    The request is ``caution``, or ``destructive``, or with *no_level* it
+    has no stored risk level.
+    """
     requester = Operator(
         sub="op-requester",
         raw_jwt="<test-raw-jwt>",
@@ -100,7 +105,12 @@ async def _park(*, destructive: bool = False) -> uuid.UUID:
             params=_PARAMS,
             params_hash=compute_params_hash(_PARAMS),
             proposed_effect=(
-                {"op_id": "vm.create", "safety_level": "destructive"} if destructive else None
+                None
+                if no_level
+                else {
+                    "op_id": "vm.create",
+                    "safety_level": "destructive" if destructive else "caution",
+                }
             ),
             preview_hash="preview-hash" if destructive else None,
         )
@@ -496,6 +506,25 @@ async def test_a_destructive_approval_uses_up_the_sign_in(
     _assert_challenge(response, max_age=300)
     assert response.json()["detail"].startswith("fresh_sign_in_already_used:")
     assert await _status(plain) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_a_level_needs_a_sign_in_of_its_own(
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    ac, key = _client
+    first, second = await _park(no_level=True), await _park(no_level=True)
+    token = _token(key, auth_time=int(time.time()), sid="s-no-level")
+
+    assert (await _approve(ac, "decide", first, token)).status_code == 200
+    assert (await _approval_auth(first))["single_use"] is True
+    response = await _approve(ac, "decide", second, token)
+
+    _assert_challenge(response, max_age=300)
+    assert response.json()["detail"].startswith("fresh_sign_in_already_used:")
+    assert await _status(second) == ApprovalRequestStatus.PENDING.value
+    assert _fake_resume == [first]
 
 
 @pytest.mark.asyncio

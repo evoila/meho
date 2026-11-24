@@ -112,6 +112,10 @@ class ConnectorReviewOp(BaseModel):
     # or the payload is not for a built-in connector. The effective value
     # is this field when set, else ``is_enabled``.
     tenant_enabled: bool | None = None
+    # #6038: the category and labels that apply to the viewer's tenant.
+    # ``None`` and empty while the POLICY_CLASSIFICATION switch is off.
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class ConnectorReviewDeleteOp(BaseModel):

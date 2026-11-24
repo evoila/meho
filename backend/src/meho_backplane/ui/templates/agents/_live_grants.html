@@ -1,0 +1,42 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The live grants of the agent that the identity reference names
+  (``GET /ui/agents/principals/live-grants``). The agent definition forms
+  load it next to the starting grant pick. Empty when the field is empty
+  or the agent has no live grant: then MEHO may ask for the pick.
+
+  Context:
+    * ``live``  -- LiveGrants (``grants``, ``truncated``) or None.
+    * ``agent`` -- the identity reference that was asked for.
+-#}
+{% if live and live.grants %}
+  <div class="flex flex-col gap-1 rounded border border-base-300 p-2" data-live-grants="{{ agent }}">
+    <span class="text-sm" data-live-grants-note>This agent already has these grants; no starting grant is needed.</span>
+    <table class="table table-xs">
+      <thead>
+        <tr><th>Operations</th><th>Target</th><th>Verdict</th><th>Ends</th></tr>
+      </thead>
+      <tbody>
+        {% for grant in live.grants %}
+          <tr data-live-grant="{{ grant.id }}">
+            <td class="font-mono break-all">{{ grant.op_pattern }}</td>
+            <td class="break-all">
+              {% if grant.target_scope == "*" %}every target
+              {% elif grant.target_name %}<span class="font-mono">{{ grant.target_name }}</span>
+              {% else %}<span class="font-mono">{{ grant.target_scope }}</span>{% endif %}
+            </td>
+            <td>{{ grant.verdict }}</td>
+            <td>{% if grant.expires_at %}<span data-expires-at="{{ grant.expires_at.isoformat() }}">{{ grant.expires_at.isoformat() }}</span>{% else %}never{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if live.truncated %}
+      <span class="text-xs text-muted" data-live-grants-truncated>
+        The agent has more grants than this list shows. See all of them on the grants page.
+      </span>
+    {% endif %}
+  </div>
+{% endif %}

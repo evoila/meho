@@ -99,6 +99,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newReviewCmd())
 	cmd.AddCommand(newEditGroupCmd())
 	cmd.AddCommand(newEditOpCmd())
+	cmd.AddCommand(newClassifyCmd())
 	cmd.AddCommand(newOverridesCmd())
 	cmd.AddCommand(newRemoveOverrideCmd())
 	cmd.AddCommand(newEnableCmd())
@@ -386,6 +387,18 @@ func renderHTTPStatus(
 				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
+	case http.StatusUnprocessableEntity:
+		if text, ok := unprocessableDetail(body); ok {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf("call %s: HTTP 422: %s", backplaneURL, text)),
+				jsonOut,
+			)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
+			jsonOut,
+		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
@@ -650,4 +663,36 @@ func confirm(cmd *cobra.Command, prompt string) bool {
 	}
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes"
+}
+
+// unprocessableDetail reads a 422 body whose `detail` is a string, a list
+// or an object (for example the structured refusal of an ingest whose
+// version label no connector class covers, #4728). It returns the error
+// name and message, `<name>: <message>`, or just the message when the
+// answer has no name. ok=false means the body has no readable message and
+// the caller prints the raw body.
+func unprocessableDetail(body []byte) (text string, ok bool) {
+	var parsed api.HTTPValidationError
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Detail == nil {
+		return "", false
+	}
+	var parts []string
+	for _, d := range *parsed.Detail {
+		if len(d.Loc) > 0 {
+			// A field-level list: the raw body shows the field names.
+			return "", false
+		}
+		if d.Msg == "" {
+			continue
+		}
+		if d.Type != "" {
+			parts = append(parts, d.Type+": "+d.Msg)
+			continue
+		}
+		parts = append(parts, d.Msg)
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "; "), true
 }

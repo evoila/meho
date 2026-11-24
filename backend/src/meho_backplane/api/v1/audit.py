@@ -14,7 +14,7 @@ Mounts six routes. Five dispatch through the T1
 * ``GET /api/v1/audit/who-touched/{target}`` — pre-canned shortcut
   bound to ``target=<path>``.
 * ``GET /api/v1/audit/by-work-ref/{ref}`` — pre-canned shortcut bound
-  to ``work_ref=<path>`` (exact match); the "show every write
+  to ``work_ref=<path>`` (whole ticket id); the "show every write
   authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
   ``principal_sub=<operator.sub>`` (exact match on the user id).
@@ -80,8 +80,8 @@ minimum (:class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`):
 :mod:`~meho_backplane.api.v1.retrieve` and
 :mod:`~meho_backplane.api.v1.retrieve_usage`. These match the MCP
 ``query_audit`` tool, which is also ``operator``-gated — including its
-``shape="tree"`` *self-session* replay, locked to the caller's own
-session id.
+``shape="tree"`` *self-session* replay, which holds only the rows of
+the caller's own calls.
 
 The **cross-session replay** route
 (``GET /api/v1/audit/sessions/{session_id}/replay``) takes an
@@ -97,6 +97,12 @@ MCP and than ``docs/cross-repo/audit-replay.md``; tightening to
 ``tenant_admin`` closes that gap. Self-scoped audit access
 (``my-recent``, an operator querying their own principal) stays at
 ``operator`` — only the arbitrary-session forensic path is lifted.
+
+Who reads which rows: a person reads every row of the tenant. A service
+login (an agent, a runner, an add-on, any client-credentials login)
+reads only the rows of its own calls on every route here, whatever role
+it carries (:func:`~meho_backplane.audit_query.own_rows_sub`). A row or a
+session of another login answers like one that does not exist.
 
 Error mapping
 =============
@@ -116,27 +122,30 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Final
+from typing import Annotated, Final
 
 import sqlalchemy as sa
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit_models import (
+    AuditEntryDetail,
     AuditQueryRequest,
     AuditReplayResult,
     AuditTraceResult,
+    AuditTraceSearchResult,
 )
 from meho_backplane.audit_query import (
-    AuditEntry,
     AuditQueryFilters,
     AuditQueryResult,
     DurationParseError,
     InvalidCursorError,
     MyRecentPage,
+    ReplayNode,
     UnsupportedFilterError,
     count_loose_rows_in_forest,
+    own_rows_sub,
     parse_duration,
     query_audit,
     replay_session,
@@ -145,11 +154,25 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
-from meho_backplane.flight_recorder import TraceView, load_trace, should_expose_to_agent
+from meho_backplane.flight_recorder import (
+    TraceView,
+    find_traces,
+    load_trace,
+    should_expose_to_agent,
+)
+from meho_backplane.flight_recorder.agent_view import agent_view_trace
+from meho_backplane.session_store.audit_links import (
+    may_read_sessions,
+    session_links_on,
+    stored_session_for,
+)
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
+
+_log = structlog.get_logger(__name__)
 
 #: Module-level :class:`Depends` closure for the flat / self-scoped
 #: routes' RBAC gate (``operator`` minimum). Built once at import time to
@@ -221,12 +244,19 @@ def _bind_audit_overrides(op_id: str = _AUDIT_QUERY_OP_ID) -> None:
 async def _dispatch(
     filters: AuditQueryFilters,
     *,
-    tenant_id: uuid.UUID,
+    operator: Operator,
+    own_rows_only: bool = True,
 ) -> AuditQueryResult:
     """Acquire a session, call :func:`query_audit`, bind ``audit_row_count``.
 
     Centralises the substrate dispatch so each route handler stays
-    focused on filter construction. Maps the substrate's operator-
+    focused on filter construction. The tenant is the caller's own. A
+    service login reads only the rows of its own calls
+    (:func:`~meho_backplane.audit_query.own_rows_sub`); a person reads
+    every row of the tenant. ``own_rows_only=False`` reads every row of the
+    tenant for any caller and binds no ``audit_row_count``; only
+    :func:`trace` uses it, and it checks the row's owner and binds the
+    count itself. Maps the substrate's operator-
     facing validation errors (:class:`InvalidCursorError`,
     :class:`UnsupportedFilterError`) to 400 — other exceptions
     propagate and the chassis turns them into 500.
@@ -234,7 +264,12 @@ async def _dispatch(
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
-            result = await query_audit(filters, tenant_id=tenant_id, session=session)
+            result = await query_audit(
+                filters,
+                tenant_id=operator.tenant_id,
+                session=session,
+                owner_sub=own_rows_sub(operator) if own_rows_only else None,
+            )
     except (InvalidCursorError, UnsupportedFilterError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -242,7 +277,8 @@ async def _dispatch(
     # via ``audit_row_count`` (per ``broadcast/events.py::_maybe_row_count``),
     # giving SSE / Slack subscribers an aggregate signal without
     # revealing the request filter or the matched audit rows.
-    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    if own_rows_only:
+        structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
     return result
 
 
@@ -266,7 +302,7 @@ async def query(
         filters = body.to_filters()
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/who-touched/{target}", response_model=AuditQueryResult)
@@ -290,12 +326,12 @@ async def who_touched(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(target=target, since=since_dt, limit=limit)
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/by-work-ref/{ref:path}", response_model=AuditQueryResult)
 async def by_work_ref(
-    ref: str,
+    ref: Annotated[WorkRefFilter, Path(description=WORK_REF_FILTER_DESCRIPTION)],
     since: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=100, ge=1, le=1000),
     operator: Operator = _require_operator,
@@ -304,10 +340,11 @@ async def by_work_ref(
 
     Pre-canned shortcut over :func:`query_audit` with the ``work_ref``
     filter bound to the path param (work_ref I1-T1 #1655) — the headline
-    "show every write authorised by ticket X" lookup. The match is
-    **exact**: ``ref`` is an opaque identifier (e.g. ``gh:evoila/meho#1``),
-    not a search term, so a non-matching value returns an empty result,
-    never an error.
+    "show every write authorised by ticket X" lookup. ``ref`` is the whole
+    ticket id (e.g. ``gh:evoila/meho#1``), not a search term. White space at
+    both ends is ignored. A value with control or invisible characters, or
+    longer than 256 characters, is refused with an error. A valid value that
+    matches no row returns an empty result.
 
     Unlike :func:`who_touched` / :func:`my_recent`, ``since`` has **no**
     default window: a change-ticket lookup wants the whole governed history
@@ -329,7 +366,7 @@ async def by_work_ref(
         except DurationParseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(work_ref=ref, since=since_dt, limit=limit)
-    return await _dispatch(filters, tenant_id=operator.tenant_id)
+    return await _dispatch(filters, operator=operator)
 
 
 @router.get("/my-recent", response_model=MyRecentPage)
@@ -363,15 +400,15 @@ async def my_recent(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(principal_sub=operator.sub, since=since_dt, limit=limit)
-    result = await _dispatch(filters, tenant_id=operator.tenant_id)
+    result = await _dispatch(filters, operator=operator)
     return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 
 
-@router.get("/show/{audit_id}", response_model=AuditEntry)
+@router.get("/show/{audit_id}", response_model=AuditEntryDetail)
 async def show(
     audit_id: uuid.UUID,
     operator: Operator = _require_operator,
-) -> AuditEntry:
+) -> AuditEntryDetail:
     """Fetch a single audit row by id, scoped to the operator's tenant.
 
     Cross-tenant probe semantics: the substrate's first WHERE clause
@@ -380,20 +417,43 @@ async def show(
     zero rows. The route then surfaces 404 — never 403 — so a probing
     operator cannot distinguish "row doesn't exist" from "row belongs
     to another tenant".
+
+    ``stored_session_id`` names the stored agent session of the row (#4904).
+    It is sent only with the switch ``AUDIT_SESSION_LINKS`` on, to a person
+    who may read sessions
+    (:func:`~meho_backplane.session_store.audit_links.may_read_sessions`).
+    For anyone else, and for a row with no stored session, the answer has
+    no such field: it is the same as before the switch existed.
     """
     _bind_audit_overrides()
     filters = AuditQueryFilters(audit_id=audit_id, limit=1)
-    result = await _dispatch(filters, tenant_id=operator.tenant_id)
+    result = await _dispatch(filters, operator=operator)
     if not result.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
-    return result.rows[0]
+    entry = result.rows[0]
+    link = None
+    if session_links_on() and may_read_sessions(operator):
+        async with get_sessionmaker()() as session:
+            link = await stored_session_for(
+                session,
+                tenant_id=operator.tenant_id,
+                audit_id=entry.id,
+                agent_session_id=entry.agent_session_id,
+                payload=entry.payload,
+            )
+    return AuditEntryDetail(
+        **entry.model_dump(), stored_session_id=link.session_id if link else None
+    )
 
 
 async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView | None:
     """Load the trace of *audit_id* that *operator* may read, or ``None``.
 
-    A person gets every trace of the tenant. An agent login gets a trace
-    only when the tenant lets agents read traces, and never one marked
+    A person gets every trace of the tenant. An agent or service login
+    gets only the trace of a call it made itself (the trace's
+    ``operator_sub`` is its own ``sub``); a trace with no stored caller is
+    never shown to it. An agent login also gets a trace only when the
+    tenant lets agents read traces, and never one marked
     ``redaction_uncertain``. The tenant switch is checked first, so a
     tenant that keeps traces from agents has no trace loaded for them.
     """
@@ -403,9 +463,103 @@ async def _load_trace_for(operator: Operator, audit_id: uuid.UUID) -> TraceView 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         view = await load_trace(session, audit_id=audit_id, tenant_id=operator.tenant_id)
-    if is_agent and view is not None and view.redaction_uncertain:
+    if view is None:
         return None
+    if is_agent and view.redaction_uncertain:
+        return None
+    if _reads_own_traces_only(operator) and (
+        not view.operator_sub or view.operator_sub != operator.sub
+    ):
+        return None
+    if is_agent:
+        return await _agent_copy(view)
     return view
+
+
+async def _trace_asked_by(sub: str, audit_id: uuid.UUID, *, tenant_id: uuid.UUID) -> bool:
+    """True when the stored trace of *audit_id* names *sub* as its caller.
+
+    The caller of a trace is the login that asked for the call, also when a
+    person approved it and the audit row names that person.
+    """
+    async with get_sessionmaker()() as session:
+        view = await load_trace(session, audit_id=audit_id, tenant_id=tenant_id)
+    return view is not None and view.operator_sub == sub
+
+
+async def _agent_copy(view: TraceView) -> TraceView | None:
+    """The copy of *view* an agent login reads, or ``None`` when it cannot be made.
+
+    A Kubernetes span has its secret env values, command-line secrets and
+    annotation secrets hidden
+    (:mod:`meho_backplane.flight_recorder.agent_view`). When the copy fails,
+    the agent gets no trace.
+    """
+    try:
+        return await agent_view_trace(view)
+    except Exception:
+        _log.warning("audit_trace_agent_copy_failed", audit_id=str(view.audit_id), exc_info=True)
+        return None
+
+
+def _reads_own_traces_only(operator: Operator) -> bool:
+    """True when *operator* may read only the traces of its own calls."""
+    return operator.principal_kind in (PrincipalKind.AGENT, PrincipalKind.SERVICE)
+
+
+@router.get("/traces", response_model=AuditTraceSearchResult)
+async def search_traces(
+    request_id: uuid.UUID | None = Query(default=None),
+    caller: str | None = Query(default=None, max_length=512),
+    since: str = Query(default=_DEFAULT_SINCE, max_length=32),
+    until: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=20, ge=1, le=100),
+    operator: Operator = _require_operator,
+) -> AuditTraceSearchResult:
+    """Find stored flight-recorder traces without their audit row (#6452).
+
+    Filters: ``request_id`` (the id of the request that made the call),
+    ``caller`` (the exact login subject of the caller) and the window
+    ``since`` / ``until`` (duration shorthand or ISO-8601; ``since`` defaults
+    to 24 hours). The newest traces come first. Use it when the audit row of
+    a call was never stored, so ``GET /{audit_id}/trace`` cannot be used.
+
+    The trace tables hold the request id and the caller since migration
+    ``0169``; an older trace is found by the time window only. The access
+    rules are those of the single trace read: a person reads every trace of
+    the tenant; an agent or service login reads only the traces of its own
+    calls (its ``caller`` value is ignored); an agent login reads none
+    unless the tenant lets agents read traces, and never a trace marked
+    ``redaction_uncertain``.
+    """
+    _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
+    now = datetime.now(UTC)
+    try:
+        since_dt = parse_duration(since, now=now)
+        until_dt = parse_duration(until, now=now) if until is not None else None
+    except DurationParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    is_agent = operator.principal_kind is PrincipalKind.AGENT
+    if is_agent and not await should_expose_to_agent(tenant_id=operator.tenant_id):
+        return AuditTraceSearchResult(items=[])
+    async with get_sessionmaker()() as session:
+        items = await find_traces(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=request_id,
+            # An agent or service login reads only its own traces: its
+            # ``caller`` is ignored.
+            operator_sub=operator.sub if _reads_own_traces_only(operator) else caller,
+            since=since_dt,
+            until=until_dt,
+            include_redaction_uncertain=not is_agent,
+            limit=limit,
+        )
+    if is_agent:
+        copies = [await _agent_copy(item) for item in items]
+        items = [item for item in copies if item is not None]
+    structlog.contextvars.bind_contextvars(audit_row_count=len(items))
+    return AuditTraceSearchResult(items=items)
 
 
 @router.get("/{audit_id}/trace", response_model=AuditTraceResult)
@@ -424,15 +578,18 @@ async def trace(
     A person keeps **full** access, independent of the agent gate: this serves
     redaction-uncertain traces too, surfacing ``trace.redaction_uncertain`` so
     an operator sees when a trace was withheld from agents. Paired add-ons
-    consume this same route with their operator principal — no separate add-on
-    surface.
+    use this same route — no separate add-on surface. A paired add-on logs in
+    as a service login, so it gets the traces of its own calls.
 
     An **agent** login gets the same rules as the agent read
     (:mod:`meho_backplane.flight_recorder.agent_read`): no trace unless the
     tenant lets agents read traces
-    (:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), and
-    never a trace marked ``redaction_uncertain``. Both answer
-    ``trace_present=False``, like a dispatch with no trace.
+    (:func:`~meho_backplane.flight_recorder.should_expose_to_agent`), only
+    the trace of a call the agent made itself, and never a trace marked
+    ``redaction_uncertain``. A **service** login gets only the trace of a
+    call it made itself. Each answers ``trace_present=False``, like a
+    dispatch with no trace. A call that ran after a person approved it
+    belongs to the login that asked for it.
 
     Absence has two levels. A missing / cross-tenant **audit row** is a 404
     (never 403), matching :func:`show`: the existence check runs through the
@@ -441,6 +598,13 @@ async def trace(
     exists but carries **no trace** is a 200 with ``trace_present=False`` —
     capture is a best-effort opt-in
     (F1/F7), so "no trace" is a normal observable state, not an error.
+
+    A service login reads only the rows of its own calls, so for a row of
+    another login it gets the same 404. One case differs: a call that ran
+    after a person approved it. Its audit row names the person who
+    approved, but its trace names the login that asked for the call. That
+    login gets the trace (:func:`_trace_asked_by`); the answer holds no
+    field of the approver's audit row.
 
     Tenant isolation is enforced twice: the existence check is tenant-scoped,
     and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
@@ -454,12 +618,30 @@ async def trace(
     # row, exactly as ``show`` does — so a probing operator cannot distinguish
     # "no such dispatch" from "dispatch in another tenant".
     audit = await _dispatch(
-        AuditQueryFilters(audit_id=audit_id, limit=1), tenant_id=operator.tenant_id
+        AuditQueryFilters(audit_id=audit_id, limit=1),
+        operator=operator,
+        own_rows_only=False,
     )
+    # The stored row count is bound only after the owner check, so a row of
+    # another login and a missing row leave the same count (0) in the
+    # caller's own audit row.
+    structlog.contextvars.bind_contextvars(audit_row_count=0)
     if not audit.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
+    owner_sub = own_rows_sub(operator)
+    row = audit.rows[0]
+    if (
+        owner_sub is not None
+        and row.principal_sub != owner_sub
+        and not (
+            row.event_class == AuditEventClass.OPERATION_EXECUTION
+            and await _trace_asked_by(owner_sub, audit_id, tenant_id=operator.tenant_id)
+        )
+    ):
+        raise HTTPException(status_code=404, detail="audit row not found")
+    structlog.contextvars.bind_contextvars(audit_row_count=1)
 
-    event_class = audit.rows[0].event_class
+    event_class = row.event_class
     view = None
     if event_class == AuditEventClass.OPERATION_EXECUTION:
         view = await _load_trace_for(operator, audit_id)
@@ -477,6 +659,7 @@ async def _count_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Cheap tenant-scoped count of a session's *anchor* rows.
 
@@ -491,6 +674,8 @@ async def _count_session_rows(
     ``dispatch_child`` whose own ``agent_session_id`` is NULL); those
     are deliberately *not* counted — "session rows" are defined by the
     ``agent_session_id`` anchor, matching the issue's WHERE clause.
+
+    ``owner_sub`` counts only the rows of that login (a service login).
     """
     stmt = (
         sa.select(sa.func.count())
@@ -500,6 +685,8 @@ async def _count_session_rows(
             AuditLog.tenant_id == tenant_id,
         )
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return await session.scalar(stmt) or 0
 
 
@@ -507,6 +694,7 @@ async def _count_excluded_null_session_rows(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
+    owner_sub: str | None = None,
 ) -> int:
     """Count the tenant's ``method=MCP`` rows with a NULL ``agent_session_id``.
 
@@ -523,6 +711,8 @@ async def _count_excluded_null_session_rows(
     methods (CLI / REST rows) are not "excluded" from a surface they
     were never part of. Tenant-scoped and independent of any
     ``session_id`` — the un-negotiated rows belong to no session.
+
+    ``owner_sub`` counts only the rows of that login (a service login).
     """
     stmt = (
         sa.select(sa.func.count())
@@ -533,7 +723,52 @@ async def _count_excluded_null_session_rows(
             AuditLog.agent_session_id.is_(None),
         )
     )
+    if owner_sub is not None:
+        stmt = stmt.where(AuditLog.operator_sub == owner_sub)
     return await session.scalar(stmt) or 0
+
+
+async def _replay_tree(
+    session_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID,
+    owner_sub: str | None,
+    session: AsyncSession,
+) -> tuple[int, list[ReplayNode]]:
+    """Return the anchor row count and the tree of one session.
+
+    With *owner_sub* set (a service login, whatever role it carries), only
+    the login's own rows are counted and walked: the tree, ``row_count``
+    and every other count of the answer hold only its own stored rows. So
+    a session of another login answers ``(0, [])``, the same as a session
+    that does not exist. A session above
+    :data:`_REPLAY_ROW_CAP` anchor rows raises 413 before the tree is built.
+    """
+    row_count = await _count_session_rows(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        owner_sub=owner_sub,
+    )
+    if row_count > _REPLAY_ROW_CAP:
+        # Bind the count so the audit-on-replay broadcast still
+        # reports the (rejected) cardinality, then refuse before
+        # the recursive build runs.
+        structlog.contextvars.bind_contextvars(audit_row_count=row_count)
+        # FastAPI 0.136 renamed the 413 constant to
+        # ``HTTP_413_CONTENT_TOO_LARGE`` (same value, 413) and
+        # deprecated the old ``..._REQUEST_ENTITY_TOO_LARGE`` spelling.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={"detail": "session_too_large", "row_count": row_count},
+        )
+    root = await replay_session(
+        session_id,
+        tenant_id=tenant_id,
+        session=session,
+        owner_sub=owner_sub,
+    )
+    return row_count, root
 
 
 @router.get("/sessions/{session_id}/replay", response_model=AuditReplayResult)
@@ -578,39 +813,25 @@ async def replay(
     empty history — see :func:`_count_excluded_null_session_rows`.
     """
     _bind_audit_overrides(_AUDIT_REPLAY_OP_ID)
+    owner_sub = own_rows_sub(operator)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        row_count = await _count_session_rows(
+        row_count, root = await _replay_tree(
             session_id,
             tenant_id=operator.tenant_id,
-            session=session,
-        )
-        if row_count > _REPLAY_ROW_CAP:
-            # Bind the count so the audit-on-replay broadcast still
-            # reports the (rejected) cardinality, then refuse before
-            # the recursive build runs.
-            structlog.contextvars.bind_contextvars(audit_row_count=row_count)
-            # FastAPI 0.136 renamed the 413 constant to
-            # ``HTTP_413_CONTENT_TOO_LARGE`` (same value, 413) and
-            # deprecated the old ``..._REQUEST_ENTITY_TOO_LARGE`` spelling.
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail={"detail": "session_too_large", "row_count": row_count},
-            )
-
-        root = await replay_session(
-            session_id,
-            tenant_id=operator.tenant_id,
+            owner_sub=owner_sub,
             session=session,
         )
         excluded_null_session_count = await _count_excluded_null_session_rows(
             tenant_id=operator.tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
         loose_row_count = await count_loose_rows_in_forest(
             root,
             tenant_id=operator.tenant_id,
             session=session,
+            owner_sub=owner_sub,
         )
 
     structlog.contextvars.bind_contextvars(audit_row_count=row_count)

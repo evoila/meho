@@ -84,7 +84,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from glob import escape as glob_escape
-from typing import Any, cast
+from typing import Any, Final, Literal, cast
 
 import structlog
 from sqlalchemy import func, or_, select, update
@@ -93,7 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -104,26 +104,42 @@ from meho_backplane.db.models import (
     Target,
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
-from meho_backplane.op_classes import needs_per_call_approval
+from meho_backplane.op_classes import (
+    is_credential_capable,
+    needs_per_call_approval,
+    params_make_credential_call,
+    sandbox_delete_grant_allowed,
+)
+from meho_backplane.operations._target_connector_limit import target_picks_other_connector
 from meho_backplane.operations.caller_address import has_caller_address
+from meho_backplane.operations.credential_read import has_credential_read_floor
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
+from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
+    "CREDENTIAL_CARD_LINE",
+    "CREDENTIAL_CLASSES",
     "DeleteGrantConsoleOnlyError",
     "DeleteGrantNeedsTenantAdminError",
     "GrantModel",
     "GrantValidationError",
     "ServicePrincipalGrantService",
+    "always_wait_grant_reason",
     "caller_address_grant_reason",
     "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
-    "credential_read_grant_reason",
+    "credential_call_waits",
+    "credential_grant_reason",
+    "credential_refusal",
     "delete_grant_reason",
     "delete_shaped_refusal_reason",
+    "descriptor_credential_reason",
+    "descriptor_credential_waits",
     "find_live_grant",
+    "never_covered_reason",
     "null_target_only_park_hint",
     "per_call_approval_grant_reason",
 ]
@@ -318,18 +334,95 @@ def delete_grant_reason(
     return reason
 
 
-def credential_read_grant_reason(op_id: str) -> str | None:
-    """Return why a grant cannot cover *op_id*, or ``None`` when it can.
+#: The op classes of an operation that reads, writes or makes a credential.
+CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_write", "credential_mint"}
+)
 
-    An operation that shows a secret (``classify_op`` says
-    ``credential_read``) always waits for a person. Grant create refuses it
-    and :func:`consult_and_record_grant` never lets a grant row clear it.
+
+def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
+    """Return why no grant and no run approval covers *op_id*, or ``None`` when one can.
+
+    An operation that reads, writes or makes a credential (the classes in
+    :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
+    grant, no agent grant and no run approval covers it. The class comes
+    from *stored_op_class* (the class a connector's safety floor stored on
+    the row of an ingested operation) and from the op id
+    (:func:`resolve_op_class`). A step of a multi-step operation has only
+    its op id. An operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable` counts too,
+    whatever its class.
     """
-    if classify_op(op_id) != "credential_read":
+    if (
+        not is_credential_capable(op_id)
+        and resolve_op_class(op_id, stored_op_class) not in CREDENTIAL_CLASSES
+    ):
         return None
+    return _credential_reason_text(op_id)
+
+
+def _credential_reason_text(op_id: str) -> str:
     return (
-        f"A standing grant cannot cover {op_id}: it shows a secret, so a person always approves it."
+        f"A standing grant, an agent grant or a run approval never covers {op_id!r}: "
+        "it reads, writes or makes a credential, so a person approves each call."
     )
+
+
+def credential_refusal(op_id: str, stored_op_class: str | None = None) -> str | None:
+    """The answer when someone makes a grant or a run approval for *op_id*, or ``None``.
+
+    The reason of :func:`credential_grant_reason`, and what to do.
+    """
+    reason = credential_grant_reason(op_id, stored_op_class)
+    if reason is None:
+        return None
+    return f"{reason} Leave it out."
+
+
+def credential_call_waits(op_id: str, stored_op_class: str | None = None) -> bool:
+    """Return whether a call of *op_id* waits for a person because of its credential class.
+
+    True for every ``credential_mint`` and ``credential_write`` operation.
+    A ``credential_read`` operation waits when its floor applies
+    (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`):
+    a read that is marked in code as one that returns no secret value runs
+    at once. ``vault.kv.read`` waits only for a call with ``reveal_secret``;
+    that call has a raised risk level and the approval flag on its row.
+    An operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable` always waits.
+    """
+    if is_credential_capable(op_id):
+        return True
+    op_class = resolve_op_class(op_id, stored_op_class)
+    if op_class == "credential_read":
+        return has_credential_read_floor(op_id, stored_op_class=stored_op_class)
+    return op_class in CREDENTIAL_CLASSES
+
+
+#: The line on the approval card of a call that reads, writes or makes a credential.
+CREDENTIAL_CARD_LINE: Final[str] = (
+    "This call waits for a person every time: it can read, write or make a credential, "
+    "so no standing grant, agent grant or run approval covers it."
+)
+
+
+def descriptor_credential_reason(descriptor: EndpointDescriptor) -> str | None:
+    """:func:`credential_grant_reason` for the row of one call.
+
+    Also not ``None`` when the params of this call make it a credential
+    call (``credential_call`` on the row, set by
+    :func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
+    """
+    if getattr(descriptor, "credential_call", False):
+        return _credential_reason_text(descriptor.op_id)
+    return credential_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None))
+
+
+def descriptor_credential_waits(descriptor: EndpointDescriptor) -> bool:
+    """:func:`credential_call_waits` for the row of one call, with its params' mark."""
+    if getattr(descriptor, "credential_call", False):
+        return True
+    return credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
 
 
 def per_call_approval_grant_reason(op_id: str) -> str | None:
@@ -360,6 +453,94 @@ def caller_address_grant_reason(descriptor: EndpointDescriptor | None) -> str | 
         f"op {descriptor.op_id!r} connects to an address the caller gives; "
         "a standing grant never covers it, a person approves each call"
     )
+
+
+def always_wait_grant_reason(descriptor: EndpointDescriptor | None) -> str | None:
+    """Return why a grant cannot cover *descriptor*, or ``None`` when it can.
+
+    A classification entry can make an operation always wait
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.policy_always_wait`,
+    set when the row is looked up). Then a person approves each call:
+    grant create refuses it, and :func:`consult_and_record_grant` never
+    lets a grant row clear it, also a grant made before the entry.
+    """
+    if descriptor is None or not descriptor.policy_always_wait:
+        return None
+    return (
+        f"op {descriptor.op_id!r} is classified to always wait; "
+        "a standing grant never covers it, a person approves each call"
+    )
+
+
+#: The kinds of operation that no standing grant and no run approval covers,
+#: in the order :func:`never_covered_reason` checks them.
+NeverCoveredKind = Literal[
+    "credential", "per_call_approval", "caller_address", "always_wait", "delete_shaped"
+]
+
+
+def never_covered_reason(descriptor: EndpointDescriptor) -> tuple[NeverCoveredKind, str] | None:
+    """Return why no standing grant and no run approval covers *descriptor*.
+
+    One rule for both call-time checks: :func:`consult_and_record_grant` and
+    the run approval gate
+    (:func:`meho_backplane.operations.run_approval_gate.consult_and_record_run_approval`).
+    The answer is the first of: a call that reads, writes or makes a
+    credential (:func:`credential_grant_reason`, by stored class or op id),
+    per-call approval, a caller-address field, always wait, and a delete
+    sign. ``None`` when none holds. In sandbox mode a delete grant can still
+    cover a ``delete_shaped`` op; nothing covers the other kinds.
+    """
+    from meho_backplane.settings import get_settings
+
+    op_id = descriptor.op_id
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    checks: tuple[tuple[NeverCoveredKind, str | None], ...] = (
+        ("credential", descriptor_credential_reason(descriptor)),
+        ("per_call_approval", per_call_approval_grant_reason(op_id)),
+        ("caller_address", caller_address_grant_reason(descriptor)),
+        ("always_wait", always_wait_grant_reason(descriptor)),
+        ("delete_shaped", delete_grant_reason(op_id, patterns, descriptor)),
+    )
+    for kind, reason in checks:
+        if reason is not None:
+            return kind, reason
+    return None
+
+
+def _sandbox_delete_exception(
+    op_id: str,
+    stored_op_class: str | None,
+    descriptor: EndpointDescriptor | None,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    """True when a sandbox delete grant may cover *op_id*, although it always waits.
+
+    All of these must hold: the instance is in sandbox mode; the connector
+    marked the op with
+    :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`; the op
+    has no credential class; the params (when known) do not make the call a
+    credential call; no other rule of :func:`never_covered_reason`
+    holds; and the op has a delete sign (:func:`delete_grant_reason`). Only a
+    delete grant may then cover the call: no standing grant, no agent grant
+    and no run approval does.
+    """
+    from meho_backplane.settings import get_settings
+
+    if not sandbox_mode_active() or not sandbox_delete_grant_allowed(op_id):
+        return False
+    if resolve_op_class(op_id, stored_op_class) in CREDENTIAL_CLASSES:
+        return False
+    if params is not None and params_make_credential_call(op_id, params):
+        return False
+    if (
+        per_call_approval_grant_reason(op_id)
+        or caller_address_grant_reason(descriptor)
+        or always_wait_grant_reason(descriptor)
+    ):
+        return False
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    return delete_grant_reason(op_id, patterns, descriptor) is not None
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -684,10 +865,14 @@ class ServicePrincipalGrantService:
         """
         from meho_backplane.settings import get_settings
 
+        if payload.principal_sub == WHAT_IF_SUB:
+            raise GrantValidationError(WHAT_IF_SUB_REFUSAL)
         _reject_wildcards(payload)
-        secret_reason = credential_read_grant_reason(payload.op_id)
-        if secret_reason is not None:
-            raise GrantValidationError(secret_reason)
+        credential_reason = credential_refusal(payload.op_id)
+        if credential_reason is not None and not _sandbox_delete_exception(
+            payload.op_id, None, None
+        ):
+            raise GrantValidationError(credential_reason)
         per_call_reason = per_call_approval_grant_reason(payload.op_id)
         if per_call_reason is not None:
             raise GrantValidationError(per_call_reason)
@@ -703,13 +888,26 @@ class ServicePrincipalGrantService:
         descriptor = await _resolve_descriptor_for_classification(
             tenant_id, payload.connector_id, payload.op_id
         )
-        address_reason = caller_address_grant_reason(descriptor)
+        stored_op_class = getattr(descriptor, "op_class", None)
+        sandbox_delete = _sandbox_delete_exception(payload.op_id, stored_op_class, descriptor)
+        address_reason = (
+            (None if sandbox_delete else credential_refusal(payload.op_id, stored_op_class))
+            or caller_address_grant_reason(descriptor)
+            or always_wait_grant_reason(descriptor)
+        )
         if address_reason is not None:
             raise GrantValidationError(address_reason)
         delete_reason = delete_grant_reason(
             payload.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
         )
         if delete_reason is None:
+            if sandbox_delete:
+                # Not reached: the exception holds only for an op with a
+                # delete sign. Refuse rather than make an ordinary grant.
+                raise GrantValidationError(
+                    f"op {payload.op_id!r} waits for a person on every call; "
+                    "only a delete grant in sandbox mode can cover it"
+                )
             return ServicePrincipalGrant
         if not sandbox_mode_active():
             raise GrantValidationError(delete_reason)
@@ -1370,8 +1568,20 @@ async def consult_and_record_grant(
     declared level only — no method, no tags — so for it the op id is the
     only sign, and both id signs are checked.
 
-    An op that shows a secret (``credential_read``) is refused first, before
-    any lookup: a grant row never clears it, so a person always approves it.
+    A grant names one connector. When the target picks another connector
+    (:func:`~meho_backplane.operations._target_connector_limit.target_picks_other_connector`),
+    no grant is looked up and the call waits for a person.
+
+    The refusals before any lookup come from :func:`never_covered_reason`,
+    the same rule the run approval gate uses.
+
+    An op that reads, writes or makes a credential is refused first, before
+    any lookup (:func:`credential_grant_reason`): a grant row never clears
+    it, so a person approves each call. The one exception is in sandbox
+    mode, for an op a connector marked with
+    :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`: only a
+    live delete grant is looked up for it, never an ordinary grant
+    (:func:`_sandbox_delete_exception`).
 
     An op a connector marked with
     :func:`~meho_backplane.op_classes.declare_per_call_approval` is refused
@@ -1381,12 +1591,15 @@ async def consult_and_record_grant(
     An op with a parameter marked ``x-meho-caller-address: true`` is refused
     before any lookup too (:func:`caller_address_grant_reason`), also before
     a delete grant. A grant row stored before the marker never auto-approves
-    the op: a person approves each call.
+    the op: a person approves each call. The same holds for an op that a
+    classification entry makes always wait (:func:`always_wait_grant_reason`).
 
     **Sandbox mode (#4622).** When the instance runs in sandbox mode and
     the op has any delete sign, a live **delete grant** from
     :class:`~meho_backplane.db.models.SandboxDeleteGrant` is consulted
-    first. For a ``destructive`` op the caller's ``preview_hash`` and
+    first. A delete grant covers a call that always waits only for an op
+    marked with :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`.
+    For a ``destructive`` op the caller's ``preview_hash`` and
     ``params`` are needed: the preview hash is re-computed and compared and
     the blast radius is built and checked (the same checks the park path
     runs) **before** the grant-use row is written, so a refused call leaves
@@ -1406,40 +1619,58 @@ async def consult_and_record_grant(
     real call sends, and the real call checks the hash and the blast
     radius before it uses the grant.
     """
-    secret_reason = credential_read_grant_reason(descriptor.op_id)
-    if secret_reason is not None:
+    other_connector = await target_picks_other_connector(descriptor, target, connector_id)
+    if other_connector is not None:
         _log.info(
-            "service_grant_refused_credential_read",
+            "service_grant_refused_other_connector",
             op_id=descriptor.op_id,
             connector_id=connector_id,
+            target_connector_id=other_connector,
             principal_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
-            reason=secret_reason,
         )
         return None
 
-    per_call_reason = per_call_approval_grant_reason(descriptor.op_id)
-    if per_call_reason is not None:
-        _log.info(
-            "service_grant_refused_per_call_approval",
-            op_id=descriptor.op_id,
-            connector_id=connector_id,
-            principal_sub=operator.sub,
-            tenant_id=str(operator.tenant_id),
-            reason=per_call_reason,
+    never = never_covered_reason(descriptor)
+    if (
+        never is not None
+        and never[0] == "credential"
+        and _sandbox_delete_exception(
+            descriptor.op_id, getattr(descriptor, "op_class", None), descriptor, params
         )
-        return None
-
-    address_reason = caller_address_grant_reason(descriptor)
-    if address_reason is not None:
+    ):
+        # Only a delete grant may cover this call; the ordinary grant
+        # table is never read for it.
+        grant_id = await _consult_delete_grant(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            preview_hash=preview_hash,
+            params=params,
+            record=record,
+        )
+        if grant_id is None:
+            _log.info(
+                "service_grant_refused_credential",
+                op_id=descriptor.op_id,
+                connector_id=connector_id,
+                safety_level=descriptor.safety_level,
+                principal_sub=operator.sub,
+                tenant_id=str(operator.tenant_id),
+                reason=never[1],
+            )
+        return grant_id
+    if never is not None and never[0] != "delete_shaped":
+        kind, reason = never
         _log.info(
-            "service_grant_refused_caller_address",
+            f"service_grant_refused_{kind}",
             op_id=descriptor.op_id,
             connector_id=connector_id,
             safety_level=descriptor.safety_level,
             principal_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
-            reason=address_reason,
+            reason=reason,
         )
         return None
 
@@ -1456,12 +1687,7 @@ async def consult_and_record_grant(
         if grant_id is not None:
             return grant_id
 
-    from meho_backplane.settings import get_settings
-
-    destructive_reason = delete_grant_reason(
-        descriptor.op_id, get_settings().service_grant_delete_shaped_patterns, descriptor
-    )
-    if destructive_reason is not None:
+    if never is not None:
         _log.info(
             "service_grant_refused_delete_shaped",
             op_id=descriptor.op_id,
@@ -1469,7 +1695,7 @@ async def consult_and_record_grant(
             safety_level=descriptor.safety_level,
             principal_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
-            reason=destructive_reason,
+            reason=never[1],
         )
         return None
 
@@ -1696,7 +1922,7 @@ async def _record_grant_use(
     """
     from meho_backplane.operations._audit import (
         parent_audit_id_var,
-        resolve_agent_session_id,
+        resolve_audit_session_id,
         work_ref_var,
     )
     from meho_backplane.request_usage.collector import current_request_id
@@ -1733,7 +1959,7 @@ async def _record_grant_use(
             tenant_id=operator.tenant_id,
             target_id=target_id,
             parent_audit_id=parent_audit_id_var.get(),
-            agent_session_id=resolve_agent_session_id(),
+            agent_session_id=resolve_audit_session_id(),
             method=_GRANT_USE_METHOD,
             path=_GRANT_USE_PATH,
             status_code=_GRANT_USE_STATUS_CODE,

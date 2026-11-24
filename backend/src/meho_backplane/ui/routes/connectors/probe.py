@@ -62,8 +62,13 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import (
+    TargetSecretForbiddenError,
+    TargetSecretNotFoundError,
+)
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.db.engine import get_session
+from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -79,6 +84,7 @@ _log = structlog.get_logger(__name__)
 def _render_alert(
     request: Request,
     *,
+    target_name: str,
     title: str,
     message: str,
     status_code: int,
@@ -95,7 +101,7 @@ def _render_alert(
     return get_templates().TemplateResponse(
         request,
         "connectors/_probe_alert.html",
-        {"title": title, "message": message},
+        {"target_name": target_name, "title": title, "message": message},
         status_code=status_code,
     )
 
@@ -116,10 +122,11 @@ async def _do_probe(
 ) -> HTMLResponse:
     """Re-run the connector probe and return the refreshed card or alert."""
     target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
-    cls, label, message = resolve_connector_or_label(target)
+    cls, label, message = resolve_connector_or_label(target, for_probe=True)
     if label == "no_connector":
         return _render_alert(
             request,
+            target_name=target.name,
             title="No matching connector",
             message=message or f"no connector registered for product={target.product!r}",
             status_code=501,
@@ -127,6 +134,7 @@ async def _do_probe(
     if label == "ambiguous_connector":
         return _render_alert(
             request,
+            target_name=target.name,
             title="Connector resolution ambiguous",
             message=message
             or (
@@ -145,7 +153,27 @@ async def _do_probe(
     # JWT/OIDC login as ``malformed jwt: must have three parts`` on
     # the connectors whose fingerprint authenticates via Vault
     # (for example k8s-1.x).
-    fp = await cls().fingerprint(target, operator=operator)
+    try:
+        fp = await cls().fingerprint(target, operator=operator)
+    except (TargetSecretNotFoundError, TargetSecretForbiddenError) as secret_exc:
+        # The same answer as the REST probe and a call: no Vault text, no
+        # Vault address. Nothing is stored.
+        detail = target_secret_error_detail(secret_exc, tenant_id=session_ctx.tenant_id)
+        _log.warning(
+            "ui_target_reprobe_secret_unreadable",
+            target_name=target.name,
+            tenant_id=str(session_ctx.tenant_id),
+            operator_sub=operator.sub,
+            error_code=detail["error"],
+            secret_ref=detail.get("secret_ref"),
+        )
+        return _render_alert(
+            request,
+            target_name=target.name,
+            title="MEHO cannot read the target's secret",
+            message=str(detail["message"]),
+            status_code=422,
+        )
     # ``model_dump(mode='json')`` produces a JSONB-safe dict; plain
     # ``model_dump()`` would leak Python-native types into the JSON
     # column. Mirror the REST route's write shape exactly.

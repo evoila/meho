@@ -16,10 +16,10 @@ import (
 // approveRightsHelp is the part of `meho approvals approve --help` that
 // explains who may approve (#3329). The server decides; the CLI only
 // shows its answer.
-const approveRightsHelp = "Who may approve: a MEHO-SA-Operator or a MEHO-Admin may " +
+const approveRightsHelp = "Who may approve: a MEHO-Admin may " +
 	"approve their own change. Then approve prints a self-approval line, and the audit " +
 	"log records the self-approval. Another person's dangerous or " +
-	"destructive change needs a MEHO-SA-Operator or a MEHO-Admin. MEHO " +
+	"destructive change needs a MEHO-Admin. MEHO " +
 	"refuses an approval you may not make (403); approve then prints " +
 	"MEHO's reason as it is. meho approvals list and show say for each " +
 	"request whether you may approve it. " + approveWebHint
@@ -38,6 +38,7 @@ const (
 	reasonNoApprovalAccess = "no_approval_access"
 	reasonNotAPerson       = "not_a_person"
 	reasonNotPending       = "not_pending"
+	reasonNotRouted        = "not_routed"
 )
 
 // Approval rules the server sends in approval_rule after an approve.
@@ -55,7 +56,7 @@ func selfApprovalLine(resp *api.DecideResponseBody) string {
 	}
 	switch *resp.ApprovalRule {
 	case ruleSAOperatorSelf:
-		return "self-approved as a MEHO-SA-Operator or MEHO-Admin: this is your own change, recorded in the audit log"
+		return "self-approved as a MEHO-Admin: this is your own change, recorded in the audit log"
 	case ruleBreakGlassSelf:
 		return "self-approved because APPROVAL_ALLOW_SELF_APPROVAL is on: this is your own change, recorded in the audit log"
 	default:
@@ -109,17 +110,19 @@ func approveRightText(may *bool, reason *string) string {
 	case reasonOwnChange:
 		return "no, it is your own change"
 	case reasonWrongGroup:
-		return "no, another person's dangerous or destructive change needs a MEHO-SA-Operator or a MEHO-Admin"
+		return "no, another person's dangerous or destructive change needs a MEHO-Admin"
 	case reasonRoleTooLow:
 		return "no, the operation needs a higher role than yours"
 	case reasonRightsChange:
-		return "no, it is a change of rights and another admin must approve it"
+		return "no, it is a change of rights: approve this change of rights in the web console"
 	case reasonNoApprovalAccess:
 		return "no, your role cannot decide approval requests"
 	case reasonNotAPerson:
 		return "no, only a person can approve"
 	case reasonNotPending:
 		return "no, the request is not pending"
+	case reasonNotRouted:
+		return "no, approvals of this change go to other login groups (the web interface names them)"
 	default:
 		return "no (" + *reason + ")"
 	}

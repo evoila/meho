@@ -57,9 +57,8 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 TENANT_ID = "3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c"
 INSTALL_DATE = "2026-10-23T12:00:00Z"
 ADMIN_LOGIN_VALUE = "fake-admin-login-7f3a"
-APPROVER_LOGIN_VALUE = "fake-approver-login-9c1d"
 UNSEAL_KEY = "fake-unseal-key-5e2b8a4c"
-SECRET_VALUES = (ADMIN_LOGIN_VALUE, APPROVER_LOGIN_VALUE, UNSEAL_KEY)
+SECRET_VALUES = (ADMIN_LOGIN_VALUE, UNSEAL_KEY)
 
 # RKE2's kernel settings file for the CIS profile, as RKE2 v1.37.1 ships it,
 # and the place where its tarball installer puts it.
@@ -207,9 +206,21 @@ KUBECTL_STUB = textwrap.dedent("""\
       *"get secret meho-core-vault-unseal "*)
         cat "$MEHO_FAKE/kube_secret_unseal"
         exit "$(cat "$MEHO_FAKE/kube_secret_unseal_rc")" ;;
+      *"get secret meho-core-tls "*)
+        cat "$MEHO_FAKE/kube_secret_tls"
+        exit "$(cat "$MEHO_FAKE/kube_secret_tls_rc")" ;;
       *) exit 1 ;;
     esac
     """)
+
+# The download's meho command. Its calls go to calls.log, like every stub.
+MEHO_CLI_STUB = textwrap.dedent("""\
+    # fake meho CLI {version}
+    exit 0
+    """)
+
+# The CA of the console certificate, as kubectl prints it decoded. Made up.
+CONSOLE_CA = "-----BEGIN CERTIFICATE-----\nMIIBfakeConsoleCA\n-----END CERTIFICATE-----\n"
 
 # Like RKE2's installer, the stub puts RKE2's kernel settings file for the
 # CIS profile into the share folder of RKE2.
@@ -277,12 +288,12 @@ DEFAULT_ANSWERS = {
     "kube_secret_first_login": (
         f"admin_password={ADMIN_LOGIN_VALUE}\n"
         "admin_username=admin\n"
-        f"approver_password={APPROVER_LOGIN_VALUE}\n"
-        "approver_username=approver\n"
     ),
     "kube_secret_first_login_rc": "0",
     "kube_secret_unseal": f"{UNSEAL_KEY}\n",
     "kube_secret_unseal_rc": "0",
+    "kube_secret_tls": CONSOLE_CA,
+    "kube_secret_tls_rc": "0",
     "rke2_installer_rc": "0",
     "rke2_share_dir": RKE2_SHARE_DIR,
     "rke2_cis_sysctl": RKE2_CIS_SYSCTL,
@@ -317,7 +328,6 @@ DOWNLOAD_PAYLOAD = {
     "rke2/sha256sum-amd64.txt": "fake checksums\n",
     "images/meho-images.linux-amd64.tar.zst": "fake MEHO images\n",
     "chart/meho-0.36.0.tgz": "fake chart\n",
-    "bin/meho": "fake meho CLI\n",
     "VERSION": (
         "MEHO_VERSION=0.36.0\n"
         "MEHO_IMAGE_TAG=v0.36.0\n"
@@ -399,6 +409,7 @@ class FakeMachine:
         )
         _write_script(self.download / "rke2" / "install.sh", RKE2_INSTALLER_STUB)
         _write_script(self.download / "bin" / "helm", HELM_STUB)
+        _write_script(self.download / "bin" / "meho", MEHO_CLI_STUB.format(version="0.36.0"))
         for name, content in DOWNLOAD_PAYLOAD.items():
             path = self.download / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,7 +461,7 @@ class FakeMachine:
         (self.download / "VERSION").write_text(VERSION_FILE.format(meho=meho, rke2=rke2))
         archive = self.download / "images" / "meho-images.linux-amd64.tar.zst"
         archive.write_text(f"fake MEHO images {meho}\n")
-        (self.download / "bin" / "meho").write_text(f"fake meho CLI {meho}\n")
+        _write_script(self.download / "bin" / "meho", MEHO_CLI_STUB.format(version=meho))
 
     def install_rke2_files(self) -> None:
         """What RKE2's installer leaves on the disk that install.sh reads:

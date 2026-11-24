@@ -13,11 +13,15 @@ The design is ``core.md`` §5; the file, the endpoints and the table are in
   sentence plus the diff (added / changed / not in file). Writes nothing and
   calls no outside system.
 * ``POST /api/v1/settings/import`` -- add or update, never delete. 422 with
-  the same body as the preview when the file has mistakes.
+  the same body as the preview when the file has mistakes. 403 for a call
+  with a token when the file adds or changes a target: only a person in the
+  web console writes targets at once, as on ``/api/v1/targets``. The same
+  403 when the file turns on ``run_approval_target_kinds`` or turns off
+  ``announce_gate_enabled`` (:mod:`~meho_backplane.instance_settings.console_only`).
 * ``GET /api/v1/settings/history`` -- the revisions, newest first.
 * ``POST /api/v1/settings/conventions-drift`` -- compare a file that holds
   only conventions with the tenant's operational conventions: added, changed,
-  only in MEHO. Writes nothing. The team wiki's CI job calls it with a login
+  only in MEHO. Writes nothing. The tenant wiki's CI job calls it with a login
   that may run this check and nothing else (``conventions_drift_only``).
 
 Who may call: all four need a login (401 without a token). Export, import and
@@ -226,7 +230,11 @@ async def import_settings(
 
     ``?preview=true`` changes nothing. Without it the import adds or updates
     (never deletes) in one transaction, or answers 422 with the mistakes and
-    writes nothing.
+    writes nothing. A file that adds or changes a target applies only for a
+    person in the web console; a call with a token gets 403 and nothing is
+    written, the same rule as the target routes. The same holds for a file
+    that turns on ``run_approval_target_kinds`` or turns off
+    ``announce_gate_enabled``.
     """
     content = await _read_file(request)
     try:

@@ -29,7 +29,7 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
 
 - **`ArgoCdConnector`** (`connector.py`) — `HttpConnector` subclass. Class
   attributes: `product="argocd"`, `version="3.x"`, `impl_id="argocd-api"`,
-  `supported_version_range=">=2.0,<4.0"`, `priority=1`. The priority outranks
+  `supported_version_range=">=3.0,<4.0"`, `priority=1`. The priority outranks
   a future `GenericRestConnector` auto-shim (priority=0) defensively if both
   somehow register for the same triple.
 - **`ArgoCdTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
@@ -108,8 +108,10 @@ opaque string.
    handler (the operator-context Vault read).
 2. `_load_credentials(target, operator)` acquires the per-instance
    `asyncio.Lock` and checks the `_creds_cache` dict. The cache key is the
-   tenant-unique `(tenant_id, target.id)` pair from `target_cache_key`, so
-   two targets with the same name in different tenants never share a token.
+   tenant-unique `(tenant_id, target.id)` pair plus the secret reference,
+   from `target_secret_cache_key`, so two targets with the same name in
+   different tenants never share a token, and a call uses only the token
+   of the secret reference its target names.
 3. A cached token is handed to a caller only after that caller's own Vault
    read of the target's secret passed once in this process
    (`SecretReaders`). Otherwise the connector calls the loader with
@@ -295,6 +297,29 @@ from params.
 and the approval and audit records treat them as writes. `app.refresh` is
 an HTTP GET, but it makes ArgoCD reconcile the app. `app.delete` and the
 two `appproject` writes are classed `write` by their op-id suffix.
+
+**Writes that wait for a person on every call.** Some writes choose what
+the cluster runs later, or who gets rights. Such a call is a credential
+call: a person approves each one, also for a person's own call, and no
+standing grant, no agent grant and no run approval covers it
+([service-principal-grants.md](service-principal-grants.md#credential-calls)).
+`op_classes.py` marks them:
+
+- `argocd.app.set`, every call (`declare_credential_capable`). The spec
+  names the source and the cluster, and ArgoCD then creates what that
+  source holds.
+- `argocd.appproject.create` and `argocd.appproject.update`, every call
+  (`declare_credential_capable`). A project sets which sources, clusters,
+  namespaces and kinds its apps may deploy: it gives rights.
+- `argocd.app.sync` when it names a `revision` (`declare_credential_check`
+  with `sync_sets_a_revision`). The check uses the same test as the
+  handler: a revision is sent when the value is not empty.
+
+A sync without a revision and `argocd.app.rollback` start what the app
+already defines, so they keep their rules: a standing grant still covers
+them. The approval card of `argocd.app.set` and `argocd.appproject.update`
+shows the spec before and after. The card of `argocd.app.sync` shows its
+params (the generic params echo), so a person reads the revision.
 
 Writes go through the connector's `_write_json` helper (POST/PUT/DELETE,
 **not** retried — a side-effecting verb must not silently re-fire on a 5xx),

@@ -17,6 +17,8 @@
   library. A null ``next_fire_at`` (terminal trigger) / ``last_fired_at``
   (never fired) renders an em-dash.
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _rel(ts) -%}
   {#- Relative-time renderer for both past ("X ago") and future ("in X")
       instants. The scheduler's ``next_fire_at`` is a future instant; its
@@ -47,7 +49,7 @@
     {% for row in rows %}
       <tr data-trigger-id="{{ row.id }}">
         <td>
-          <span class="badge badge-ghost badge-sm">{{ row.kind }}</span>
+          {{ badge(row.kind, variant="quiet") }}
         </td>
         <td>
           <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
@@ -64,29 +66,29 @@
         <td class="font-mono text-xs">
           {{ row.schedule_summary }}
           {% if row.kind == "cron" %}
-            <span class="opacity-50">· {{ row.timezone }}</span>
+            <span class="text-subtle">· {{ row.timezone }}</span>
           {% endif %}
         </td>
         <td>
           {% if row.next_fire_at %}
             <span class="text-xs" title="{{ row.next_fire_at.isoformat() }}">{{ _rel(row.next_fire_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.last_fired_at %}
             <span class="text-xs" title="{{ row.last_fired_at.isoformat() }}">{{ _rel(row.last_fired_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">{{ row.agent_name }}</td>
         <td>
           {% if row.work_ref %}
-            <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
+            {{ badge(row.work_ref, variant="outline", size="xs", class="font-mono") }}
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="flex items-center gap-1">
@@ -117,10 +119,18 @@
       </tr>
     {% endfor %}
   {% else %}
-    <tr>
-      <td colspan="8" class="text-center text-sm opacity-60 py-6">
-        No scheduled triggers match the current filter.
-      </td>
-    </tr>
+    {% if work_ref_error %}
+      <tr>
+        <td colspan="8" class="py-6">
+          <div role="alert" class="alert alert-error text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+        </td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="8" class="text-center text-sm text-subtle py-6">
+          No scheduled triggers match the current filter.
+        </td>
+      </tr>
+    {% endif %}
   {% endif %}
 </tbody>

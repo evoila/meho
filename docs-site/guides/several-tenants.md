@@ -20,11 +20,19 @@ one login. At the end:
 
     Putting a person in a group, or taking them out, runs at the
     **dangerous** risk level when you do it through MEHO, so each change
-    waits for approval. Only a **MEHO-SA-Operator** may approve their own
-    change; anyone else needs a second person (a MEHO-SA-Operator or an
-    admin). The self-approval switch does not cover the dangerous risk
-    level (decision record:
+    waits for approval. The self-approval switch does not cover the
+    dangerous risk level (decision record:
     [tenant groups stay at the dangerous risk level](https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md)).
+
+    - **Putting a person in a group** is a change of rights. The role
+      groups are in MEHO's own login realm, so only a platform admin does
+      it in the web console, where it runs at once after a fresh sign-in,
+      or approves a waiting request there. A tenant admin who is not a
+      platform admin and an Operator cannot approve it. See
+      [Changes of rights](approvals-and-break-glass.md#changes-of-rights).
+    - **Taking a person out of a group** only takes rights away. A
+      MEHO-Admin may approve their own; anyone else
+      needs a second person (an admin).
 
 ## How it works
 
@@ -48,16 +56,15 @@ The design is in the
 ## Before you start
 
 - Your realm has the `meho-tenants` mapper and the `meho_tenant`
-  attribute on the five groups of your first tenant. The standard setup
+  attribute on the role groups of your first tenant. The standard setup
   adds them from v0.39.0 on. To add them to an older realm, run the
   setup again (see [Upgrades](../install/upgrades.md#version-specific-notes)).
 - MEHO v0.40.0 or later. In v0.40.0 to v0.43.0 the web interface answers
   `tenant_not_chosen` to a person in several tenants. The web interface
   has the tenant picker from v0.44.0 on. The CLI and
   MCP work from v0.40.0 on.
-- A MEHO-SA-Operator who approves their own changes, a second person
-  who can approve, or the agent setup from
-  [Approvals and break-glass](approvals-and-break-glass.md#option-2-the-agent-requester-pattern).
+- A platform admin in the web console, each time you put a person in a group (see
+  [Changes of rights](approvals-and-break-glass.md#changes-of-rights)).
 
 ## Step 1: Add the tenant in Keycloak
 
@@ -69,16 +76,14 @@ UUID once and keep it:
 uuidgen | tr 'A-Z' 'a-z'
 ```
 
-The tenant gets five role groups. They carry **only** `meho_tenant`, no
+The tenant gets three role groups. They carry **only** `meho_tenant`, no
 `tenant_id` and no `tenant_role`:
 
 | Group | `meho_tenant` | Role in MEHO |
 |---|---|---|
 | `MEHO-team-b-Readers` | `<tenant-uuid>:team-b:Readers` | `read_only` |
 | `MEHO-team-b-Operators` | `<tenant-uuid>:team-b:Operators` | `operator` |
-| `MEHO-team-b-SA-Operators` | `<tenant-uuid>:team-b:SA-Operators` | `operator`, may approve their own changes |
 | `MEHO-team-b-Admins` | `<tenant-uuid>:team-b:Admins` | `tenant_admin` |
-| `MEHO-team-b-Approvers` | `<tenant-uuid>:team-b:Approvers` | `read_only`, may approve |
 
 Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
@@ -86,7 +91,7 @@ Pick the way that matches your Keycloak. The two setups are safe to run twice.
 
 Run the setup command with `--add-tenant`. Pass the **same**
 `--tenant-id` as on the first run: without it, the command writes
-the all-zero UUID to the five groups of your first tenant. If your
+the all-zero UUID to the role groups of your first tenant. If your
 first tenant is not called `main`, pass its name with
 `--tenant-name` too.
 
@@ -117,7 +122,7 @@ client `meho-web`. If you use the web interface, add the mapper to
 ### The built-in Keycloak
 
 Add the tenant to the Helm values, then run `helm upgrade`. The
-bootstrap Job makes the five groups.
+bootstrap Job makes the three groups.
 
 ```yaml
 coreKeycloak:
@@ -132,7 +137,7 @@ The built-in realm already has the `meho-tenants` mapper on
 
 ### By hand
 
-Create the five groups at the top level, each with the one
+Create the three groups at the top level, each with the one
 attribute `meho_tenant` from the table above. Check that the
 `meho-tenants` mapper is on every client people log in with, with
 **Multivalued** and **Aggregate attribute values** on. The settings
@@ -143,7 +148,7 @@ are in [Keycloak realm setup, Step 3](../install/keycloak-realm.md#step-3-add-th
 Never set `meho_tenant` on a person. With **Aggregate attribute values**
 on, Keycloak adds a value on the person to their list. Keep people from
 editing their own attributes, as
-[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-five-groups)
+[Keycloak realm setup, Step 5](../install/keycloak-realm.md#step-5-create-the-three-groups)
 says.
 
 ## Step 2: Give the tenant its own Vault login role
@@ -158,6 +163,17 @@ Step 6 do not go away on their own: Vault keeps them on the person's
 identity and adds them to every login, with any role. So the person also
 leaves the Vault groups of Step 6 (item 4), and you check each role
 (item 5).
+
+A tenant with an entry in `VAULT_OIDC_ROLE_BY_TENANT` also always gets the
+MEHO folder check. Every Vault path that a caller or a target names for
+this tenant must be in the tenant's folder:
+
+- When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty, the folder is
+  `secret/tenants/<tenant-uuid>/`.
+- When `VAULT_KV_TENANT_SCOPE_PREFIX` is not empty, the folder of that
+  setting applies.
+- With either setting, MEHO also checks a person's read of a target's
+  secret when a call runs on that target.
 
 1. **Write a policy for this tenant's path only.** Put the tenant UUID
    into the path itself. A read-only example:
@@ -233,6 +249,14 @@ leaves the Vault groups of Step 6 (item 4), and you check each role
     [deploying.md](https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes)
     (row v0.35.13).
 
+    Optional: set `VAULT_OIDC_ROLE_TENANTS` to the tenant ids that may
+    use the shared login role `VAULT_OIDC_ROLE`, separated by commas. A
+    tenant that is not in this list and has no entry in
+    `VAULT_OIDC_ROLE_BY_TENANT` then gets a clear refusal, and MEHO tries
+    no Vault login. The list also covers the login of checks (Sensors)
+    and of incoming events when `VAULT_CHECK_RUNNER_ROLE` is empty.
+    Leave it empty on the built-in Vault.
+
 4. **Take the person out of the Vault groups of Step 6.** The roles
    above log in with `user_claim: sub` on the same auth mount as the
    shared role. So every login of the person, with any role, lands on
@@ -289,11 +313,12 @@ meho keycloak group member add --target keycloak-main \
   --username alice@example.com --group-name MEHO-team-b-Operators
 ```
 
-Each command waits for approval. The second person approves it:
+Each command waits for approval. It is a change of rights in MEHO's own
+login realm, so a second person who is a platform admin approves it in
+the web console, never the person who asked with the command line:
 
 ```bash
 meho approvals list
-meho approvals approve <approval-id>
 ```
 
 The rules:
@@ -374,6 +399,10 @@ A platform admin **may**:
   the tenants of the person's own groups.
 - act there as `tenant_admin`. When the person has a role group in that
   tenant, the role of that group applies instead.
+- approve their own changes in a tenant where they act as `tenant_admin`.
+  They count as an admin there, so they may approve their own changes
+  like members of `MEHO-Admins`. A change of rights they approve only
+  with a click in the web console.
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers `403 tenant_select_with_header`: pick that tenant with
@@ -381,10 +410,8 @@ A platform admin **may**:
 
 A platform admin **may not**:
 
-- approve their own changes. Only the `SA-Operators` group of the
-  current tenant allows that.
-- get the `approver` flag from the platform admin group. It comes only
-  from an `Approvers` group of the current tenant.
+- get the `approver` flag from the platform admin group. No role gives
+  this flag today (the old `Approvers` group is read as Readers).
 - pick a tenant that does not exist. MEHO answers
   `403 tenant_not_found` and never makes a tenant from a typo.
 - move a machine login. Agent, service and runner logins always stay in

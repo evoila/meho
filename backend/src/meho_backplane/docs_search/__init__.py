@@ -84,6 +84,7 @@ from meho_backplane.docs_search.read import (
     DocsReadRateLimitedError,
     DocsReadResult,
     DocsReadSearchAgainError,
+    exact_read_scope,
     read_docs,
     resolve_readable_collection,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "citation_link_payload",
     "classify_answer_error",
     "collection_capability_key",
+    "exact_read_scope",
     "expand_docs_query",
     "forwarded_scope",
     "normalize_source_ref",

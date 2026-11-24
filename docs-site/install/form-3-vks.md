@@ -8,6 +8,9 @@ step says what you should see when it worked.
 - **Tested with:** MEHO v0.45.0 (chart 0.45.0), Kubernetes v1.35.5 on
   VCF 9.1, on 10 November 2026. The install itself took 2 minutes and
   17 seconds.
+- **Also tested with:** the same MEHO version on Kubernetes v1.32.10 on
+  vSphere 8.0 Update 3 (VCF 5.2), on 11 November 2026, with the same
+  values file. The install itself took 2 minutes and 46 seconds.
 - **Short version:** the [VKS notes](form-3-your-kubernetes.md#vks-vsphere-kubernetes-service)
   of the form 3 chapter. This page is the long version, with every
   command.
@@ -20,6 +23,8 @@ Two people take part. They can be the same person.
 |---|---|---|
 | **The cluster admin** | Admin of the whole VKS cluster. `kubectl vsphere login` gives this. | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one namespace only | Steps 2 to 8 |
+
+**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 The page uses these example values. Use your own in their place.
 
@@ -397,7 +402,7 @@ What happens, with the times of our test:
 | 43 s | MEHO's database migrations end, and MEHO starts. |
 | 108 s | Keycloak has loaded the realm `meho` and is ready. |
 | 113 s | MEHO is ready. |
-| 123 s | A third Job makes the first two users in Keycloak. |
+| 123 s | A third Job makes the first user in Keycloak. |
 | 137 s | Helm ends. |
 
 When Helm ends, you should see:
@@ -479,11 +484,11 @@ install-verify.sh: 6 passed, 0 failed, 0 warned
 [ok]   MEHO is up
 ```
 
-## Step 6: The first two users, `meho login`, `meho status`
+## Step 6: The first user, `meho login`, `meho status`
 
-The install made two users with temporary passwords: the first admin
-(`admin`) and a second person who can approve the admin's changes
-(`approver`). Write them into a file that only you can read:
+The install made one Admin login with a temporary password (`admin`, in
+`MEHO-Admins` and `MEHO-Platform-Admins`).
+Write the login into a file that only you can read:
 
 ```bash
 umask 077
@@ -491,8 +496,7 @@ kubectl -n meho get secret meho-core-first-login \
   -o go-template='{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}' > first-login.txt
 ```
 
-`first-login.txt` has four lines: `admin_password`, `admin_username`,
-`approver_password` and `approver_username`.
+`first-login.txt` has two lines: `admin_password` and `admin_username`.
 
 Log in with the command line:
 
@@ -534,9 +538,7 @@ Logged in as <your email> (sub: ...)
   Connector packages: none
 ```
 
-Then open `https://meho.example.com/ui/` in a private browser window and
-log in once as `approver`. Keycloak asks for a new password there too.
-Keep both new passwords in your key store, and delete the file:
+Keep the new password in your key store, and delete the file:
 
 ```bash
 shred -u first-login.txt

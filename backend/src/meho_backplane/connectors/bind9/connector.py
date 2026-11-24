@@ -73,7 +73,11 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
-from meho_backplane.connectors.adapters.ssh import SshConnector, run_capped
+from meho_backplane.connectors.adapters.ssh import (
+    SshConnector,
+    fingerprint_error_extras,
+    run_capped,
+)
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -266,6 +270,7 @@ class Bind9Connector(SshConnector):
     product = "bind9"
     version = "9.x"
     impl_id = "bind9-ssh"
+    supported_version_range = ">=9.18,<9.21"
 
     # ~18 lines of executable body wrapped in ~65 lines of docstring
     # encoding the safe-sudo invariant; iter-1 `p1` praised the
@@ -502,7 +507,7 @@ class Bind9Connector(SshConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="ssh: named -v",
-                extras={"error": str(exc)},
+                extras=fingerprint_error_extras(exc),
             )
 
         # ``named.conf`` lives at ``/etc/bind/named.conf`` on every

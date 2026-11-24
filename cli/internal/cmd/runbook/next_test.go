@@ -574,3 +574,13 @@ func TestRunNextJSONHappyPath(t *testing.T) {
 		t.Errorf("envelope: %+v", decoded)
 	}
 }
+
+func TestBuildNextRequestBodyRetry(t *testing.T) {
+	if got := buildNextRequestBody("", false); got.Retry != nil {
+		t.Fatalf("retry must be omitted by default, got %v", *got.Retry)
+	}
+	got := buildNextRequestBody("yes", true)
+	if got.Retry == nil || !*got.Retry {
+		t.Fatal("retry must be true when the flag is set")
+	}
+}

@@ -146,8 +146,8 @@ async def test_no_list_gives_the_same_operator_as_today() -> None:
         raw_jwt="raw.jwt.token",
         tenant_id=_TENANT_A,
         tenant_role=TenantRole.OPERATOR,
-        approver=True,
     )
+    # MEHO does not read the ``approver`` claim, so the flag stays off.
     operator = _operator(approver=True)
     assert operator == expected
     assert await select_current_tenant(operator, None) == expected
@@ -243,7 +243,7 @@ async def test_several_tenants_allow_unchosen_marks_the_operator() -> None:
     [
         ("lab-a", _TENANT_A, TenantRole.READ_ONLY, False),
         (str(_TENANT_B), _TENANT_B, TenantRole.OPERATOR, False),
-        ("team3", _TENANT_C, TenantRole.READ_ONLY, True),
+        ("team3", _TENANT_C, TenantRole.READ_ONLY, False),
     ],
 )
 async def test_several_tenants_header_for_one_of_them(
@@ -618,7 +618,12 @@ def test_status_without_a_chosen_tenant_lists_tenants_and_roles(
         },
         {"tenant_id": str(_TENANT_B), "name": "lab-b", "tenant_role": "operator", "current": False},
     ]
-    assert body["vault"] == {"reachable": False, "read_ok": False, "detail": "tenant_not_chosen"}
+    assert body["vault"] == {
+        "reachable": False,
+        "read_ok": False,
+        "checked": False,
+        "detail": "tenant_not_chosen",
+    }
     assert body["pairings"] == []
     assert seeded == []
 

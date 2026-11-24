@@ -10,6 +10,12 @@ Vault-federation + DB-migration bundle the chassis ``GET /api/v1/health``
 route returns, scoped to the operator the MCP dispatcher already
 authenticated.
 
+The tool is open to every role, but the Vault check inside it is not.
+The check logs in to Vault as the caller and reads a secret, so it runs
+only for a caller with at least the ``operator`` role, the same rule as
+``GET /api/v1/health``. A ``read_only`` caller gets every other part of
+the answer and a ``vault`` block with ``checked=false``.
+
 Why this is the *reference* tool
 ================================
 
@@ -74,7 +80,9 @@ register_mcp_tool(
         description=(
             "Returns the operator's identity (sub, name, email, tenant_id, "
             "tenant_role) and MEHO's dependency status: Vault (reachable + "
-            "KV read OK?), the database's revision and the one this build "
+            "KV read OK?; for a read_only caller it is not checked, with "
+            "checked=false and a detail that says the operator role is "
+            "needed), the database's revision and the one this build "
             "expects, the /ready checks (name, ok, detail), the approval "
             "settings (approval key state, whether a second person must "
             "approve), the gated features and the settings they still need, "

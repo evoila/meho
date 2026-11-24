@@ -67,14 +67,17 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
+from meho_backplane.mcp.tools._work_ref_argument import validation_error_text, work_ref_argument
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
+from meho_backplane.settings import get_settings
 
 _log = structlog.get_logger(__name__)
 
@@ -135,7 +138,7 @@ async def _list_handler(
     )
     kind = arguments.get("kind")
     status = arguments.get("status")
-    work_ref = arguments.get("work_ref")
+    work_ref = work_ref_argument(arguments.get("work_ref"))
     limit_raw = arguments.get("limit", 100)
     offset_raw = arguments.get("offset", 0)
     # The inputSchema does first-pass shape + bounds; the int() cast is
@@ -147,7 +150,7 @@ async def _list_handler(
         operator.tenant_id,
         kind=kind if isinstance(kind, str) else None,
         status=status if isinstance(status, str) else None,
-        work_ref=work_ref if isinstance(work_ref, str) else None,
+        work_ref=work_ref,
         limit=limit,
         offset=offset,
     )
@@ -168,7 +171,7 @@ register_mcp_tool(
             "meho_scheduler_cancel) alongside the model-native `id`. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
             "status ('active'|'paused'|'cancelled'|'fired'), "
-            "work_ref (exact-match change-ticket reference). "
+            "work_ref (the whole ticket id; white space at both ends is ignored). "
             "Tenant-scoped via the JWT; cross-tenant listing is not "
             "exposed on the MCP transport."
         ),
@@ -187,10 +190,12 @@ register_mcp_tool(
                 },
                 "work_ref": {
                     "type": "string",
-                    "maxLength": 256,
                     "description": (
-                        "Optional exact-match filter on the trigger's "
-                        "change-ticket reference (e.g. 'gh:evoila/meho#13')."
+                        "Filter by the whole ticket id (for example "
+                        "'gh:evoila/meho#13'). White space at both ends is "
+                        "ignored. A value with control or invisible "
+                        "characters, or longer than 256 characters, is "
+                        "refused."
                     ),
                 },
                 "limit": {
@@ -231,7 +236,7 @@ async def _create_handler(
     try:
         payload = ScheduledTriggerCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {validation_error_text(exc)}") from exc
     # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
     # crosses the tenant boundary, which is a platform-level capability --
     # not something tenant-admin *rank* confers. Reuse the REST route's
@@ -264,8 +269,57 @@ async def _create_handler(
         )
     except AgentDefinitionMissingError as exc:
         raise McpInvalidParamsError("agent_definition_not_found") from exc
+    except CheckSourceNotFoundError as exc:
+        raise McpInvalidParamsError("check_source_not_found") from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
     return {"trigger_id": str(entry.id), "trigger": _row_to_dict(entry)}
+
+
+_CHECK_SOURCE_AFTER: Final[str] = "dispatched by the event drain, not the clock. "
+_CHECK_SOURCE_SENTENCE: Final[str] = (
+    "Instead of event_filter, check_source ({kind: sensor|dashboard, id or "
+    "name, only_worsening}) starts the agent on a Sensor or Dashboard "
+    "change; no id and no name means any. "
+)
+_CHECK_SOURCE_INPUT: Final[dict[str, Any]] = {
+    "type": ["object", "null"],
+    "description": (
+        "Only for kind=event, not with event_filter. Pick a "
+        "Sensor or Dashboard: {kind: 'sensor'|'dashboard', "
+        "id or name (none = any), only_worsening (bool)}."
+    ),
+    "properties": {
+        "kind": {"type": "string", "enum": ["sensor", "dashboard"]},
+        "id": {"type": ["string", "null"], "format": "uuid"},
+        "name": {"type": ["string", "null"]},
+        "only_worsening": {"type": "boolean"},
+    },
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
+
+def _create_for_settings(definition: ToolDefinition, operator: Operator) -> ToolDefinition:
+    """Show the ``check_source`` input only while ``CHECKS_AGENT_EVENTS`` is on.
+
+    With the switch off the tool has the same text and input as before
+    ``check_source`` existed, and the input check refuses the field.
+    """
+    del operator
+    if not get_settings().checks_agent_events:
+        return definition
+    schema = definition.inputSchema
+    return definition.model_copy(
+        update={
+            "description": definition.description.replace(
+                _CHECK_SOURCE_AFTER, _CHECK_SOURCE_AFTER + _CHECK_SOURCE_SENTENCE, 1
+            ),
+            "inputSchema": {
+                **schema,
+                "properties": {**schema["properties"], "check_source": _CHECK_SOURCE_INPUT},
+            },
+        }
+    )
 
 
 register_mcp_tool(
@@ -282,7 +336,10 @@ register_mcp_tool(
             "kind=one_off), or event_filter (object for kind=event). A "
             "kind=event trigger fires whenever a MEHO event's payload "
             "contains its event_filter (payload @> event_filter); it is "
-            "dispatched by the event drain, not the clock. For "
+            "dispatched by the event drain, not the clock. "
+            "A webhook (external) event fires only a trigger whose "
+            "event_filter names its event source: "
+            "{source: {slug: '<source-slug>'}} or {source: {id: ...}}. For "
             "kind=cron/one_off, inputs (JSON object) is REQUIRED and must "
             "render a non-empty prompt (a 'prompt' string, or any non-empty "
             "object; inputs: {} is rejected); it is optional for kind=event "
@@ -324,7 +381,11 @@ register_mcp_tool(
                 },
                 "event_filter": {
                     "type": ["object", "null"],
-                    "description": "Event-match filter (required when kind=event).",
+                    "description": (
+                        "Event-match filter (required when kind=event). To "
+                        "start on webhook events it must name the event "
+                        "source: source.slug or source.id."
+                    ),
                 },
                 "timezone": {
                     "type": "string",
@@ -364,7 +425,6 @@ register_mcp_tool(
                 },
                 "work_ref": {
                     "type": ["string", "null"],
-                    "maxLength": 256,
                     "description": (
                         "Optional external change-ticket reference (a "
                         "GitHub issue 'gh:evoila/meho#13', a Jira key, a "
@@ -380,6 +440,7 @@ register_mcp_tool(
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
+        for_settings=_create_for_settings,
     ),
     handler=_create_handler,
 )

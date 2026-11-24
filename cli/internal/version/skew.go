@@ -57,21 +57,18 @@ func FetchBackplane(ctx context.Context, client *http.Client, backplaneURL strin
 }
 
 var (
-	semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
-	// Builds from main carry a date-based chart version
-	// (0.1.<YYYYMMDD>-<sha>). It does not follow the release numbers,
-	// so it cannot be compared with a CLI release.
-	calverRe = regexp.MustCompile(`^v?0\.1\.\d{8}-`)
+	// Only a plain release version (X.Y.Z, with an optional "v") can be
+	// compared. Any pre-release part (X.Y.Z-<anything>) does not follow
+	// the release numbers: builds from main carry versions such as
+	// 0.1.<YYYYMMDD>-<sha> or 0.1.0-main-<sha>.
+	semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
 )
 
 // majorMinor returns the major and minor numbers of a release version.
-// ok is false for anything that is not a release version ("dev",
-// "unknown", a main-branch build).
+// ok is false for anything that is not a plain release version ("dev",
+// "unknown", a release candidate, a main-branch build).
 func majorMinor(v string) (major, minor int, ok bool) {
 	v = strings.TrimSpace(v)
-	if calverRe.MatchString(v) {
-		return 0, 0, false
-	}
 	m := semverRe.FindStringSubmatch(v)
 	if m == nil {
 		return 0, 0, false
@@ -86,8 +83,8 @@ func majorMinor(v string) (major, minor int, ok bool) {
 // cannot be compared.
 //
 // Supported: same major version, and the CLI minor version is equal to
-// the backplane's or one lower (N-1). Dev builds and main-branch
-// backplane builds are never compared.
+// the backplane's or one lower (N-1). Dev builds, pre-release
+// versions and main-branch backplane builds are never compared.
 func SkewWarning(cliVersion string, bp Backplane) string {
 	if bp.ChartVersion == nil {
 		return ""

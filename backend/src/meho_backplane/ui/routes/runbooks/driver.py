@@ -130,6 +130,7 @@ from meho_backplane.runbooks.run_service import (
     RunAlreadyTerminalError,
     RunbookRunService,
     RunNotFoundError,
+    StepCallerRequiredError,
 )
 from meho_backplane.runbooks.runs_schemas import (
     AbortRunRequest,
@@ -145,6 +146,7 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_admin,
     require_ui_operator,
 )
+from meho_backplane.ui.roles import resolve_ui_operator
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.runbooks.driver_render import (
     StepView,
@@ -196,10 +198,11 @@ _VERIFY_VALUE_ERRORS: Final[tuple[type[ValueError], ...]] = (
     PreviousStepNotVerifiedError,
     ConfirmVerifyAnswerNotYesError,
     RunAlreadyCompletedError,
+    StepCallerRequiredError,
 )
 
 
-def _build_next_request(verify_type: str, answer: str) -> NextStepRequest:
+def _build_next_request(verify_type: str, answer: str, *, retry: bool = False) -> NextStepRequest:
     """Shape the :class:`NextStepRequest` from the form's verify echo.
 
     The page renders the current step's ``verify.type`` into the Advance
@@ -225,8 +228,9 @@ def _build_next_request(verify_type: str, answer: str) -> NextStepRequest:
         return NextStepRequest(
             last_verified=True,
             verify_response=ConfirmVerifyResponse(type="confirm", answer=normalized),
+            retry=retry,
         )
-    return NextStepRequest(last_verified=True, verify_response=None)
+    return NextStepRequest(last_verified=True, verify_response=None, retry=retry)
 
 
 async def _advance(
@@ -235,8 +239,11 @@ async def _advance(
     run_id: uuid.UUID,
     verify_type: str,
     answer: str,
+    retry: bool = False,
 ) -> HTMLResponse:
     """Advance the run one step and re-render the step fragment.
+
+    ``retry`` runs the check of a failed step again ("Try this step again").
 
     Maps the service / engine outcomes to operator-facing fragments:
 
@@ -246,14 +253,21 @@ async def _advance(
       alert (HTTP 200, never a 500) -- a non-assignee (including a tampered
       POST by a TENANT_ADMIN) cannot advance; the documented path is a
       reassign.
-    * :class:`PreviousStepFailedError` -> the dead-end banner: the step
+    * :class:`PreviousStepFailedError` -> the failed-step banner: the step
       failed (the operator answered ``no`` / ``escalate``, or an
       operation_call verify did not match), so Advance is hidden and the
-      only forward move is Abort.
+      forward moves are "Try this step again" or Abort.
     * terminal / verify ``ValueError``s -> an inline alert.
+
+    For an ``operation_call`` check the person's checked login
+    (:func:`resolve_ui_operator`) goes to the service as ``caller``, so
+    the check runs as that person. When the login cannot be checked right
+    now (or the form names another check type), the service refuses a
+    check that runs an operation, and the driver shows an inline alert.
     """
     service = RunbookRunService()
-    request_model = _build_next_request(verify_type, answer)
+    request_model = _build_next_request(verify_type, answer, retry=retry)
+    caller = await resolve_ui_operator(session) if verify_type != "confirm" else None
 
     structlog.contextvars.bind_contextvars(
         operator_sub=session.operator_sub,
@@ -263,12 +277,12 @@ async def _advance(
     )
     try:
         result = await service.next_step(
-            session.tenant_id, session.operator_sub, run_id, request_model
+            session.tenant_id, session.operator_sub, run_id, request_model, caller=caller
         )
     except NotRunAssigneeError:
         return await _reassigned_away_fragment(request, session, run_id)
-    except PreviousStepFailedError:
-        return await _failed_step_fragment(request, session, run_id)
+    except PreviousStepFailedError as exc:
+        return await _failed_step_fragment(request, session, run_id, reason=str(exc))
     except RunAlreadyTerminalError:
         return await render_step_fragment(
             request,
@@ -309,6 +323,8 @@ async def _failed_step_fragment(
     request: Request,
     session: UISessionContext,
     run_id: uuid.UUID,
+    *,
+    reason: str,
 ) -> HTMLResponse:
     """Render the failed-step dead-end fragment (Advance hidden, Abort only).
 
@@ -316,7 +332,9 @@ async def _failed_step_fragment(
     shows which step the operator is stuck on. ``get_current_step`` returns
     the step body for the failed step (it is still the run's current step);
     we project it with ``failed=True`` so the template hides Advance and
-    renders the dead-end banner. A reassign-race that flipped the run
+    renders the dead-end banner. *reason* is the service's text of why the
+    step failed (for example why the check call did not run); it shows in
+    the banner, as it does after a page reload. A reassign-race that flipped the run
     terminal in the meantime collapses to the matching terminal banner.
     """
     service = RunbookRunService()
@@ -349,7 +367,7 @@ async def _failed_step_fragment(
             abandoned_at=current.abandoned_at,
         )
     return await render_step_fragment(
-        request, session, run_id, view=step_view(current, failed=True)
+        request, session, run_id, view=step_view(current, failed=True), failure_message=reason
     )
 
 
@@ -568,8 +586,16 @@ def register_driver_routes(router: APIRouter) -> None:
         session: UISessionContext = _require_operator,
         verify_type: str = Form(default="", max_length=_MAX_VERIFY_TYPE_LENGTH),
         answer: str = Form(default="", max_length=_MAX_ANSWER_LENGTH),
+        retry: str = Form(default="", max_length=_MAX_ANSWER_LENGTH),
     ) -> HTMLResponse:
-        return await _advance(request, session, run_id, verify_type.strip(), answer.strip())
+        return await _advance(
+            request,
+            session,
+            run_id,
+            verify_type.strip(),
+            answer.strip(),
+            retry=retry.strip() == "1",
+        )
 
     @router.post("/ui/runbooks/runs/{run_id}/abort", response_class=HTMLResponse)
     async def runbooks_run_abort(

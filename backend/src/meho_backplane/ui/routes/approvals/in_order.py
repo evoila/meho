@@ -127,8 +127,8 @@ from meho_backplane.operations.approved_reveal import (
     is_write_reveal,
 )
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
+from meho_backplane.policy.routing_floor import InstallFloor, load_install_floor
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals import routes as _routes
 from meho_backplane.ui.routes.approvals.render import (
@@ -137,7 +137,14 @@ from meho_backplane.ui.routes.approvals.render import (
     project_request_to_view,
     set_csrf_cookie,
 )
+from meho_backplane.ui.routes.approvals.sign_in import sign_in_url, web_sign_in_level
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
+)
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_in_order_router", "group_warnings"]
 
@@ -154,8 +161,6 @@ _PAGE: Final[int] = 500
 #: claimed (``already_resumed``), and how often it looks.
 _RESULT_WAIT_SECONDS: Final[float] = 30.0
 _RESULT_POLL_SECONDS: Final[float] = 0.5
-
-_MAX_WORK_REF_LENGTH: Final[int] = 512
 
 _ONE_USE: Final[str] = (
     "An approval is used once, so this step cannot run again from here. "
@@ -230,28 +235,33 @@ def build_in_order_router() -> APIRouter:
     async def approvals_in_order_plan(
         request: Request,
         session: UISessionContext = _require_session,
-        work_ref: str = Query(min_length=1, max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Query(),
     ) -> HTMLResponse:
         """Render the in-order modal with the steps and a Start button."""
+        ref, refused = _ticket(work_ref)
+        if refused is not None:
+            return _render_refused(request, refused)
         operator = await _routes._resolve_operator(session)
-        run = _Run(steps=await _load_steps(operator, work_ref.strip()))
+        run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
-        return await _render(request, session, work_ref.strip(), run, reason="", started=False)
+        return await _render(request, session, ref, run, reason="", started=False)
 
     @router.post("/ui/approvals/in-order", response_class=HTMLResponse)
     async def approvals_in_order_run(
         request: Request,
         session: UISessionContext = _require_session,
-        work_ref: str = Form(min_length=1, max_length=_MAX_WORK_REF_LENGTH),
+        work_ref: str = Form(),
         reason: str = Form(default="", max_length=MAX_REASON_LENGTH),
         confirm_id: str = Form(default=""),
         step_id: list[str] = Form(default_factory=list),
     ) -> HTMLResponse:
         """Run the steps in order; render what happened to each."""
+        ref, refused = _ticket(work_ref)
+        if refused is not None:
+            return _render_refused(request, refused)
         operator = await _routes._resolve_operator(session)
         confirmed = _parse_confirm_id(confirm_id)
         shown = {_parse_request_id(raw, "step_id") for raw in step_id}
-        ref = work_ref.strip()
         run = _Run(steps=await _load_steps(operator, ref))
         run.warnings = group_warnings([s.row for s in run.steps])
         run.unseen = _unseen_pending(run.steps, shown)
@@ -263,7 +273,9 @@ def build_in_order_router() -> APIRouter:
                 operator_sub=operator.sub,
             )
             return await _render(request, session, ref, run, reason=reason, started=False)
-        await _run_steps(operator, run, reason=reason, confirmed=confirmed)
+        await _run_steps(
+            operator, run, reason=reason, confirmed=confirmed, session_id=session.session_id
+        )
         response = await _render(request, session, ref, run, reason=reason, started=True)
         if run.approved_now:
             # Refresh the bell and the history list, but keep this modal
@@ -272,6 +284,33 @@ def build_in_order_router() -> APIRouter:
         return response
 
     return router
+
+
+def _ticket(raw: str) -> tuple[str, str | None]:
+    """The change ticket of the page, checked like the approvals search box.
+
+    Returns the ticket, or the refusal text when the value breaks the rule.
+    The page needs a ticket, so a blank value is refused too. The ticket is
+    kept as typed, so the window lists the same requests as the Pending tab
+    filtered by the same text.
+    """
+    try:
+        ref = filter_work_ref(raw)
+    except WorkRefError as exc:
+        return raw, refused_filter_text(exc)
+    if ref is None:
+        blank = WorkRefError("work_ref must name a change ticket", rule="empty")
+        return raw, refused_filter_text(blank)
+    return ref, None
+
+
+def _render_refused(request: Request, text: str) -> HTMLResponse:
+    """The modal for a refused ticket id: the rule text, no steps, a 422."""
+    response = get_templates().TemplateResponse(
+        request, "approvals/_in_order_refused.html", {"work_ref_error": text}
+    )
+    mark_work_ref_refused(response)
+    return response
 
 
 def _parse_confirm_id(raw: str) -> uuid.UUID | None:
@@ -307,6 +346,7 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
     """
     rows: list[ApprovalRequest] = []
     async with get_sessionmaker()() as db_session:
+        floor = await load_install_floor(db_session)
         while True:
             page = await list_pending(
                 db_session,
@@ -321,15 +361,17 @@ async def _load_steps(operator: Operator, work_ref: str) -> list[_Step]:
             if len(page) < _PAGE:
                 break
     return [
-        _Step(step=n, row=row, right=_right_if_pending(operator, row))
+        _Step(step=n, row=row, right=_right_if_pending(operator, row, floor))
         for n, row in enumerate(rows, start=1)
     ]
 
 
-def _right_if_pending(operator: Operator, row: ApprovalRequest) -> ApproveRight | None:
+def _right_if_pending(
+    operator: Operator, row: ApprovalRequest, floor: InstallFloor | None
+) -> ApproveRight | None:
     if row.status != ApprovalRequestStatus.PENDING.value:
         return None
-    return approve_right(operator, row)
+    return approve_right(operator, row, floor=floor)
 
 
 def _next_refused(run: _Run) -> _Step | None:
@@ -370,14 +412,19 @@ def group_warnings(rows: list[ApprovalRequest]) -> list[str]:
 
 
 async def _run_steps(
-    operator: Operator, run: _Run, *, reason: str, confirmed: uuid.UUID | None
+    operator: Operator,
+    run: _Run,
+    *,
+    reason: str,
+    confirmed: uuid.UUID | None,
+    session_id: uuid.UUID,
 ) -> None:
     """Go through the steps oldest first until the end, a wait, or a stop."""
     for step in run.steps:
         if run.waiting is not None or run.stopped is not None:
             step.outcome = "not_run"
             continue
-        await _run_step(operator, step, reason=reason, confirmed=confirmed)
+        await _run_step(operator, step, reason=reason, confirmed=confirmed, session_id=session_id)
         if step.outcome == "approved":
             run.approved_now += 1
             if step.self_approval:
@@ -412,7 +459,12 @@ def _settle_approved_step(step: _Step) -> None:
 
 
 async def _run_step(
-    operator: Operator, step: _Step, *, reason: str, confirmed: uuid.UUID | None
+    operator: Operator,
+    step: _Step,
+    *,
+    reason: str,
+    confirmed: uuid.UUID | None,
+    session_id: uuid.UUID,
 ) -> None:
     row = step.row
     if row.status == ApprovalRequestStatus.APPROVED.value:
@@ -426,17 +478,8 @@ async def _run_step(
         step.outcome = "waiting"
         return
 
-    try:
-        approved = await _routes._commit_decision(
-            operator=operator, request_id=row.id, decision="approved", reason=reason
-        )
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        if detail.startswith(_SIGN_IN_PREFIXES):
-            step.outcome, step.detail, step.sign_in_needed = "stopped", _SIGN_IN_AGAIN, True
-        else:
-            step.outcome = "stopped"
-            step.detail = f"The approval was refused: {detail} {WEB_APPROVAL_HINT}"
+    approved = await _approve_step(operator, step, reason=reason, session_id=session_id)
+    if approved is None:
         return
     # The step is approved now: say so when it was the person's own change
     # (#3329), whatever its run does next. The sign is no longer needed.
@@ -478,6 +521,28 @@ async def _run_step(
         )
     else:
         _stop_on_run_status(step, status, getattr(result, "error", None))
+
+
+async def _approve_step(
+    operator: Operator, step: _Step, *, reason: str, session_id: uuid.UUID
+) -> ApprovalRequest | None:
+    """Approve *step*; on a refusal say why on the step and return ``None``."""
+    try:
+        return await _routes._commit_decision(
+            operator=operator,
+            request_id=step.row.id,
+            decision="approved",
+            reason=reason,
+            session_id=session_id,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        if detail.startswith(_SIGN_IN_PREFIXES):
+            step.outcome, step.detail, step.sign_in_needed = "stopped", _SIGN_IN_AGAIN, True
+        else:
+            step.outcome = "stopped"
+            step.detail = f"The approval was refused: {detail} {WEB_APPROVAL_HINT}"
+        return None
 
 
 def _stop_on_run_status(step: _Step, status: object, error: object) -> None:
@@ -549,7 +614,7 @@ async def _render(
         "stopped": _project_step(run.stopped) if run.stopped else None,
         "unseen": [_project_step(s) for s in run.unseen],
         "sign_in_url": (
-            login_location(_ticket_page(work_ref), fresh_sign_in=True)
+            sign_in_url(_ticket_page(work_ref), await web_sign_in_level())
             if run.sign_in_needed
             else None
         ),

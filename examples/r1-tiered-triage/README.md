@@ -28,7 +28,12 @@ the [harness](./workflow.py) writes the decision back to memory as
 the new policy entry and short-circuits re-triage of the same
 class of event — that is the **closed loop**, and that is what
 distinguishes "noisy continuous-classification harness" from
-"agentic system that gets cheaper over time".
+"agentic system that learns from its own verdicts".
+
+In this version both agents use the same model. The tier is stored for
+later, and every tier goes to the one backend set in
+`AGENT_MODEL_BACKEND`. The pattern works as described, but the run does
+not get cheaper by tier yet.
 
 ## Why this is the flagship reference
 

@@ -242,10 +242,12 @@ walk.
 
 !!! warning "An `awaiting_approval` on a topology write is by design"
 
-    Curated writes carry `caution` classification. A **human**
-    tenant_admin executes them immediately, but an **agent** principal's
-    annotate parks in the approval queue like any other governed write —
-    the gate lives in the dispatcher, not the front. See
+    Curated writes carry `caution` classification. A tenant_admin in
+    the operator console runs them at once. A write made with a token
+    waits in the approval queue: an **agent** principal's annotate, and
+    also `meho topology annotate`, `unannotate` and `bulk-import` (a
+    `--dry-run` runs at once). The command prints the approval id;
+    approving the request makes the change. See
     [Approvals and break-glass](approvals-and-break-glass.md).
 
 ## What can go wrong here

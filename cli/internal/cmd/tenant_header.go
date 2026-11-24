@@ -15,14 +15,32 @@ import (
 
 // applyRequestContext is the root PersistentPreRunE. It puts the work
 // reference and the current tenant into the command context, so every
-// backplane request of the command sends the Meho-Work-Ref and
-// Meho-Tenant headers.
+// backplane request of the command sends the Meho-Work-Ref,
+// Meho-Tenant and Meho-Command headers.
 func applyRequestContext(cmd *cobra.Command, args []string) error {
+	if err := applyProfile(cmd); err != nil {
+		return err
+	}
 	if err := applyWorkRef(cmd, args); err != nil {
 		return err
 	}
 	applyTenant(cmd)
+	applyCommand(cmd)
 	return nil
+}
+
+// applyCommand puts the command path without the program name (for
+// example "vmware vm list") into the command context, for the
+// Meho-Command header. A command that resolves its operation itself
+// sends an op_id that is not in the command line, so the backplane needs
+// the path to tell which command of an uploaded agent session wrote an
+// audit row.
+func applyCommand(cmd *cobra.Command) {
+	if sendsNoBackplaneRequest(cmd) {
+		return
+	}
+	path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name())
+	cmd.SetContext(api.WithCommand(cmd.Context(), strings.TrimSpace(path)))
 }
 
 // applyTenant picks the tenant the command works in (#5241):

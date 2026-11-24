@@ -11,10 +11,12 @@ redaction:
   environment read) every value is hidden and only the names stay. For any
   other operation, values under secret-shaped key names are hidden, numbers
   included, except the fields the operation declared as plain
-  (:func:`register_plain_fields`). The caller of every operation gets this
-  view unless a person or a service principal passes ``reveal_secret: true``.
-  An operation that makes a new credential is the exception: the dispatcher
-  returns it to the caller.
+  (:func:`register_plain_fields`). A secret-named field inside a text value
+  (a JSON or YAML file in a string) is hidden in the text too
+  (:func:`~meho_backplane.redaction.secret_text.hide_secret_text`). The
+  caller of every operation gets this view unless a person or a service
+  principal passes ``reveal_secret: true``. An operation that makes a new
+  credential is the exception: the dispatcher returns it to the caller.
 * :func:`reveal_hidden_values` builds the answer of a reveal: the redacted
   answer, with every value the default view hides put back as the
   connector returned it. The redaction of the other fields stays.
@@ -38,12 +40,16 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from meho_backplane.broadcast.events import scrub_secret_named_values
+from meho_backplane.operations._audit import reveal_secret_var
 from meho_backplane.operations._validate import compute_audit_digest_hash
+from meho_backplane.redaction.secret_text import hide_secret_text_leaves
 
 __all__ = [
     "FINGERPRINT_PREFIX",
+    "REVEAL_NOT_IN_BACKGROUND",
     "REVEAL_SECRET_PARAM",
     "SECRET_VALUE_PLACEHOLDER",
+    "asks_reveal",
     "fingerprint_hidden_values",
     "fingerprint_value",
     "fingerprinted_paths",
@@ -52,6 +58,7 @@ __all__ = [
     "plain_fields_of",
     "register_plain_fields",
     "reveal_hidden_values",
+    "reveal_requested",
     "split_reveal_secret",
     "with_reveal_secret",
 ]
@@ -65,6 +72,15 @@ FINGERPRINT_PREFIX: Final[str] = "[FINGERPRINT:hmac-sha256:"
 #: The dispatch control a person or a service principal sets to get the
 #: hidden values of an answer back.
 REVEAL_SECRET_PARAM: Final[str] = "reveal_secret"
+
+#: The answer to a call that sets both ``reveal_secret: true`` and
+#: ``async: true``. A reveal call cannot run in the background: it runs at
+#: once, or through an approval.
+REVEAL_NOT_IN_BACKGROUND: Final[str] = (
+    "`reveal_secret: true` cannot be used with `async: true`. A call that shows "
+    "secret values cannot run in the background: it runs at once, or through an "
+    "approval. Send the call again without `async`."
+)
 
 _MISSING: Final[object] = object()
 
@@ -160,6 +176,23 @@ def split_reveal_secret(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return without, reveal_secret
 
 
+def asks_reveal(params: object) -> bool:
+    """True when *params* (the ``params`` of a call) set ``reveal_secret`` to a true value."""
+    return isinstance(params, Mapping) and bool(params.get(REVEAL_SECRET_PARAM))
+
+
+def reveal_requested() -> bool:
+    """True inside a call whose caller asked for the hidden values.
+
+    The dispatcher sets this only for a ``reveal_secret: true`` call that it
+    lets run: an agent's is refused before the connector is called. A
+    connector that must hide a value before it cuts a text reads this to
+    keep the value whole when the text is not cut, so the reveal can give
+    it back.
+    """
+    return reveal_secret_var.get() is True
+
+
 def with_reveal_secret(params: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of *params* with ``reveal_secret: true`` set."""
     return {**params, REVEAL_SECRET_PARAM: True}
@@ -198,10 +231,9 @@ def hide_secret_values(op_id: str, answer: Any, *, raw: Any = None) -> Any:
     hide = _VALUE_HIDING_OPS.get(op_id)
     if hide is not None:
         return hide(answer, raw)
-    shown, _ = scrub_secret_named_values(
-        answer, hide_numbers=True, plain_names=plain_fields_of(op_id)
-    )
-    return shown
+    plain_names = plain_fields_of(op_id)
+    shown, _ = scrub_secret_named_values(answer, hide_numbers=True, plain_names=plain_names)
+    return hide_secret_text_leaves(shown, plain_names=plain_names)
 
 
 def reveal_hidden_values(raw: Any, redacted: Any, shown: Any) -> Any:

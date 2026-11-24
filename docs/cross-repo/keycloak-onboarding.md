@@ -54,8 +54,11 @@ scripts. The read ops:
 | `client` | `keycloak.client.get` | `GET .../clients/{id}` | read-only |
 | `client_scope` | `keycloak.client_scope.list` | `GET .../client-scopes` | read-only |
 | `user` | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | read-only |
+| `user` | `keycloak.user.otp_status` | `GET .../users` and each user's `.../credentials` (types only) | read-only |
 | `user` | `keycloak.user.get` | `GET .../users/{user-id}` and `.../credentials` (type and date only) | read-only |
 | `user` | `keycloak.user.sessions` | `GET .../users/{user-id}/sessions` (no session id) | read-only |
+| `user` | `keycloak.user.lock_status` | `GET .../attack-detection/brute-force/users/{user-id}` (no IP address) | read-only |
+| `realm` | `keycloak.realm.lock_settings` | `GET /admin/realms/{realm}` (lock rules only) | read-only |
 | `user` | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | read-only |
 | `role` | `keycloak.role.list` | `GET .../roles` | read-only |
 | `role` | `keycloak.role.users` | `GET .../roles/{role-name}/users` | read-only |
@@ -63,7 +66,7 @@ scripts. The read ops:
 | `group` | `keycloak.group.member.list` | `GET .../groups/{group-id}/members` | read-only |
 | `identity_provider` | `keycloak.identity_provider.list` | `GET .../identity-provider/instances` and the login flows | read-only |
 
-Thirteen read ops. All are `safety_level="safe"` and
+Sixteen read ops. All are `safety_level="safe"` and
 `requires_approval=False`. The write ops (below) are `caution`,
 `dangerous` or `destructive`, and all are `requires_approval=True`.
 Every op dispatches through the same
@@ -120,11 +123,16 @@ approves it through the queue.
 | `group_write` | `keycloak.group.delete` | `DELETE .../groups/{group-id}` | destructive |
 | `realm_write` | `keycloak.realm.delete` | `DELETE /admin/realms/{realm}` | destructive |
 | `user_write` | `keycloak.user.logout` | `POST .../users/{id}/logout` | caution |
+| `account_write` | `keycloak.role_mapping.client.assign` | `POST .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.role_mapping.client.remove` | `DELETE .../users/{id}/role-mappings/clients/{client-id}` | dangerous |
+| `account_write` | `keycloak.user.update` | `PUT .../users/{id}` | caution |
+| `account_write` | `keycloak.user.credential.delete` | `DELETE .../users/{id}/credentials/{credentialId}` | dangerous |
+| `user_write` | `keycloak.user.required_actions.update` | `PUT .../users/{id}` (add or remove required actions, for example `CONFIGURE_TOTP`) | dangerous |
 | `user_login_check` | `keycloak.user.check_login` | `POST /realms/{realm}/protocol/openid-connect/token` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_approval_flow` | `.../authentication/flows` and `PUT .../clients/{id}` | caution |
 | `authflow_write` | `keycloak.authflow.ensure_passkey_code_skip` | `.../authentication/flows` and `PUT /admin/realms/{realm}` | caution |
 
-Twenty-one write ops. The group column is the registered group key: use it
+Twenty-six write ops. The group column is the registered group key: use it
 as the `group` argument of `search_operations` (for example
 `group="realm_write"` finds `keycloak.realm.create`).
 
@@ -203,7 +211,7 @@ asks for it. No grant lets a delete run without that approval. An agent
 can never approve: approval is a human decision in the web console or
 the CLI.
 
-One exception: a member of the `MEHO-SA-Operators` or the `MEHO-Admins`
+One exception: a member of the `MEHO-Admins`
 group may approve their own changes at every risk level, deletes
 included. Everyone else needs a second person.
 
@@ -213,7 +221,7 @@ included. Everyone else needs a second person.
 2. **Ask for approval.** Call `call_operation` with the same params and
    the `preview_hash`. The request then waits until a person approves it.
    You cannot approve your own delete, unless you are in
-   `MEHO-SA-Operators` or `MEHO-Admins`.
+   `MEHO-Admins`.
 3. **The delete runs** after the approval. MEHO reports `deleted: true`
    only after a read of the object answers 404.
 
@@ -389,10 +397,12 @@ A keycloak target row carries:
 
 The two realm knobs live on `target.extras` (a free-form JSONB column) so
 they are target-configurable without a schema migration. `admin_realm`
-falls back to `master` when absent. Always set `managed_realm`: its
-fallback is a fixed realm name from early development, not `meho`
-(`DEFAULT_MANAGED_REALM` in
-[`session.py`](../../backend/src/meho_backplane/connectors/keycloak/session.py)).
+falls back to `master` when absent. `managed_realm` is required and has no
+default: MEHO refuses to create or update a Keycloak target without it
+(HTTP 422), and refuses every operation on an older target that lacks it.
+To fix such a target, run
+`meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>`
+(`--extra` replaces the whole `extras` map, so repeat the keys you keep).
 
 `auth_headers` rejects any `auth_model` other than
 `shared_service_account` (or `None` for pre-G0.3 targets) with a clear

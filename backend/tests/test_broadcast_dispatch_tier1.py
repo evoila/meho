@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the broadcast param scrub (meho-internal #151).
+"""Unit tests for the broadcast param scrub.
 
 :func:`~meho_backplane.broadcast.events.scrub_broadcast_params` replaces
 secret-named keys and runs the Tier-1 deterministic redactor over string
@@ -37,6 +37,14 @@ def test_scrub_replaces_secret_named_keys_recursively() -> None:
     assert scrubbed == {
         "spec": {"env": [{"name": "X", "sessionToken": "[REDACTED:param_name]"}]},
     }
+
+
+@pytest.mark.parametrize("name", ["password_secret_ref", "private_key_ref"])
+def test_scrub_finds_a_secret_under_a_ref_name(name: str) -> None:
+    """Found means the broadcast uses its short summary form for the call."""
+    scrubbed, found = scrub_broadcast_params({"host": "h1", name: "made-up-value"})
+    assert found is True
+    assert scrubbed == {"host": "h1", name: "[REDACTED:param_name]"}
 
 
 def test_scrub_benign_params_pass_through_unchanged() -> None:
@@ -102,6 +110,9 @@ def test_scrub_tier1_pass_redacts_labelled_string_shapes() -> None:
         ("primaryConnectionString", True),
         ("connection_strings", True),
         ("ConnectionStrings", True),
+        # a name that ends in ref, where the rest is a secret name
+        ("password_secret_ref", True),
+        ("private_key_ref", True),
         # attribute / reference names — not the secret itself
         ("token_policies", False),
         ("token_ttl", False),

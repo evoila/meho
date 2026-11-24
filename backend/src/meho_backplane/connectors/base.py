@@ -26,6 +26,7 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = [
     "Connector",
+    "ConnectorOwnMessage",
     "ConnectorResourceNotFoundError",
     "ConnectorUpstreamError",
     "ShimKind",
@@ -35,6 +36,18 @@ __all__ = [
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
 type Target = Any
+
+
+class ConnectorOwnMessage:
+    """Mark an error whose message MEHO or the connector wrote itself.
+
+    Add it as a base class of an error type when the message is a fixed
+    sentence of the connector (for example "the account may not read
+    licences"). The message must hold no secret and no text from the vendor
+    system. For an operation that sends a secret, the dispatcher then shows
+    this message instead of hiding it. Never put vendor text, a value from
+    the call, or a secret into such a message.
+    """
 
 
 class ConnectorResourceNotFoundError(Exception):
@@ -139,10 +152,35 @@ class Connector(ABC):
     #: Setting it means "any product version is fine, on purpose".
     version_range_reason: str | None = None
 
+    #: Whether the fallback registration ``(product, "", "")`` of this class
+    #: also checks :attr:`supported_version_range`. ``False`` (the default):
+    #: the fallback serves a target of any version. ``True``: the fallback
+    #: still serves a target whose version is unknown, but the resolver
+    #: does not pick the class for a target whose known version is outside
+    #: the range, and its error names the range. A probe skips this check,
+    #: so a target can be probed again after its system is upgraded.
+    strict_version_range: bool = False
+
+    #: The products a probe must report for this class to serve a target
+    #: (the ``product`` of the target's fingerprint). ``None`` (the
+    #: default): any product, and a target that was never probed. When set,
+    #: the resolver picks the class only for a probed target whose product
+    #: is in the set. Use it when two products share one product slug and
+    #: overlapping version numbers, so the version range alone cannot tell
+    #: them apart.
+    fingerprint_products: frozenset[str] | None = None
+
     #: One plain sentence on what the connector does, shown in the
     #: "What it does" column of the generated connector list on the docs
     #: site. ``None`` (the default) leaves the column empty for this row.
     summary: str | None = None
+
+    #: Other names people and models use for :attr:`product`, for example
+    #: ``("vcenter", "vsphere")`` for a VMware connector. With the switch
+    #: ``CONNECTOR_LIST_PRODUCT_ALIASES`` on, a ``product`` filter of
+    #: ``meho_connector_list`` also matches these names (case is ignored).
+    #: The connector declares them; the core only reads them.
+    product_aliases: tuple[str, ...] = ()
 
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it

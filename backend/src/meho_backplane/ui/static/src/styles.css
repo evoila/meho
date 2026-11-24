@@ -32,10 +32,10 @@
  * Cool graphite neutrals (faint blue cast — never warm/brown), one
  * signal hue: indigo/periwinkle for actions, location, and the brand
  * mark. Fuchsia/teal are quiet supporting accents for data badges;
- * red/amber/blue/green stay strictly semantic. Two themes (meho-dark
- * default + meho-light) toggled by static/src/app/theme.js via the
- * <html data-theme> attribute; both override the full DaisyUI
- * variable set below.
+ * red/amber/blue/green stay strictly semantic. One light theme, the
+ * evoila brand, shipped by the meho-ui package and linked in
+ * _head_assets.html. No dark mode and no theme switch: three apps
+ * sharing one look cannot each carry their own pair.
  */
 
 /*
@@ -73,54 +73,20 @@
  * Theme strategy: the vendored plugin's options handler only accepts
  * {themes, root, logs, include, exclude, prefix} — a custom *named*
  * theme would require vendoring DaisyUI's separate `daisyui-theme.js`
- * release asset forever in lock-step. Instead we enable the built-in
- * dark theme `dim` as the single plugin-level default and override
- * its full variable set in the unlayered blocks below — once for
- * meho-dark (also bound to :root so it is the no-attribute default),
- * once for meho-light. Unlayered author CSS always beats the plugin's
- * `@layer base` output, and `dim` remains a complete dark fallback
- * floor underneath: a missed variable fails *dark*, never white.
+ * release asset forever in lock-step. So the brand theme arrives as a
+ * plain stylesheet from the meho-ui package, linked after this bundle
+ * in _head_assets.html: unlayered author CSS, which always beats the
+ * plugin's `@layer base` output. It needs no Tailwind processing at
+ * all — it is variables, not utilities.
+ *
+ * The built-in `light` stays as the plugin-level floor, so a variable
+ * the brand theme does not set fails *light*, matching the one theme
+ * this console now has. It used to be `dim`, which failed dark.
  */
 @plugin "./vendor/daisyui.js" {
-  themes: dim --default;
+  themes: light --default;
   root: ":root";
   logs: false;
-}
-
-/* ════════════════════════════════════════════════════════════════════
-   Brand typography — self-hosted, latin-subset woff2 (see fonts/FONTS.md)
-   ════════════════════════════════════════════════════════════════════ */
-
-@font-face {
-  font-family: "Bricolage Grotesque";
-  /* Variable: opsz 12–96, wght 200–800. Display voice — wordmark,
-     page titles. Absolute src URL so the CLI never rebases it
-     between src/ (input) and dist/ (output). */
-  src: url("/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2") format("woff2");
-  font-weight: 200 800;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Schibsted Grotesk";
-  /* Variable: wght 400–900. The UI voice. */
-  src: url("/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2") format("woff2");
-  font-weight: 400 900;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2") format("woff2");
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("/ui/static/src/fonts/ibm-plex-mono-latin-500.woff2") format("woff2");
-  font-weight: 500;
-  font-display: swap;
 }
 
 /*
@@ -130,157 +96,121 @@
  * for headings.
  */
 @theme {
-  --font-sans: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Bricolage Grotesque", "Schibsted Grotesk", ui-sans-serif, sans-serif;
+  --font-sans: "Lato", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Rubik", "Lato", ui-sans-serif, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   meho-dark — full DaisyUI variable override (brand default).
-   Bound to :root as well so a missing/unknown data-theme value still
-   lands on the brand dark. Variable list mirrors the vendored
-   plugin's `dim` theme object verbatim; keep in lock-step when
-   bumping DaisyUI.
+   What the brand package does not cover.
+
+   The DaisyUI slots, the radii, the spacing and the fonts arrive from
+   meho-ui's stylesheets, linked in _head_assets.html. These are the
+   console's own: the horizon glow, the film grain, and the topology
+   graph palette that Cytoscape reads from CSS rather than from
+   DaisyUI. They stay here because the graph is a meho surface -- the
+   other two apps have no topology -- so they are not shared tokens.
+
+   The graph colours have a light and a dark value, like the brand: the
+   light values on :root, the dark ones for data-theme="evoila-dark" and,
+   inside the dark @media rule, for "evoila-system" (the console's
+   default, which follows the computer). topology-graph.js reads them
+   when it draws. The light values are the colours the script used to
+   hard-code, so the light graph looks as before. The dark ones are
+   lighter shades of the same colours, checked on the dark card
+   (#162037): node colours and lines at least 3:1, text at least 4.5:1.
    ════════════════════════════════════════════════════════════════════ */
 
-:root,
-[data-theme="meho-dark"] {
-  color-scheme: dark;
+/*
+   Text tokens. Secondary text is a solid colour, never base-content
+   faded with opacity-* or /<n>: faded text drops to 2.5-3.5:1 on the
+   light theme (base-content at 60% is 2.65:1 on the page), and no
+   alpha both looks muted and passes. Each value reaches 4.5:1 on the
+   page (base-200), on cards (base-100) and on the blue sheen at the top
+   of .meho-card (about #DFECF7 light, #1A2542 dark).
 
-  /* Canvas — cool graphite (hue ~255, near-zero chroma). */
-  --color-base-100: oklch(18.5% 0.008 255);  /* card surface */
-  --color-base-200: oklch(14.5% 0.007 255);  /* page canvas */
-  --color-base-300: oklch(24% 0.01 255);     /* raised / hover */
-  --color-base-content: oklch(93% 0.005 255);
+     text-muted   descriptions, nav, table cells     light 5.9:1 · dark 6.7:1
+     text-subtle  metadata, hashes, labels, hints     light 4.6:1 · dark 4.6:1
 
-  /* Primary — THE signal: indigo/periwinkle. Analogous to the
-     graphite base (hue 255 vs 275) and ≥45° from every status hue,
-     so punctuation can never be misread as state. */
-  --color-primary: oklch(62% 0.16 275);
-  --color-primary-content: oklch(97% 0.01 275);
-
-  /* Secondary — fuchsia (write-class data accents; 55° from both
-     the indigo signal and error-red). */
-  --color-secondary: oklch(70% 0.13 330);
-  --color-secondary-content: oklch(16% 0.04 330);
-
-  /* Accent — teal (informational accents; 35° from info-sky). */
-  --color-accent: oklch(73% 0.09 190);
-  --color-accent-content: oklch(16% 0.03 190);
-
-  --color-neutral: oklch(26% 0.01 255);
-  --color-neutral-content: oklch(90% 0.005 255);
-
-  /* Status — strictly semantic. Info sits at sky (225), 50° from
-     the indigo signal. */
-  --color-info: oklch(72% 0.1 225);
-  --color-info-content: oklch(16% 0.03 225);
-  --color-success: oklch(74% 0.13 162);
-  --color-success-content: oklch(16% 0.04 162);
-  --color-warning: oklch(80% 0.13 85);
-  --color-warning-content: oklch(18% 0.04 85);
-  --color-error: oklch(66% 0.19 25);
-  --color-error-content: oklch(14% 0.03 25);
-
-  /* Geometry — softly rounded boxes, tighter fields. */
-  --radius-selector: 0.5rem;
-  --radius-field: 0.5rem;
-  --radius-box: 0.875rem;
-  --size-selector: 0.25rem;
-  --size-field: 0.25rem;
-  --border: 1px;
-  --depth: 0;
-  --noise: 0; /* DaisyUI's own noise stays off — we layer our own grain. */
-
-  /* Atmosphere — a whisper of indigo at the horizon. Saturation x
-     area must stay constant (color theory): a hue covering this much
-     canvas has to sit near-imperceptible or it reads as light leak. */
-  --meho-glow:
-    radial-gradient(ellipse 70% 38% at 50% -12%, oklch(50% 0.08 275 / 0.07), transparent 60%),
-    radial-gradient(ellipse 40% 34% at 100% 104%, oklch(45% 0.05 255 / 0.06), transparent 60%);
-  --meho-grain-opacity: 0.022;
-
-  /* Topology graph palette — read by topology-graph.js via
-     getComputedStyle. MUST stay hex (not oklch): Cytoscape's canvas
-     color parser can't parse oklch(), and getPropertyValue returns
-     the token text exactly as authored here. */
-  --meho-graph-target: #6ee7b4;     /* mint — entry points        */
-  --meho-graph-vm: #7dd3fc;         /* sky — workloads            */
-  --meho-graph-host: #e8b35a;       /* amber — iron               */
-  --meho-graph-cluster: #c4a5f5;    /* violet                     */
-  --meho-graph-datastore: #d9c069;  /* gold — storage             */
-  --meho-graph-network: #67d1dd;    /* cyan — wires               */
-  --meho-graph-node-fallback: #8b93a5;
-  --meho-graph-node-border: #2e333d;
-  --meho-graph-label: #b5bac4;
-  --meho-graph-edge: #424857;
-  --meho-graph-edge-label: #8b93a5;
-  --meho-graph-label-bg: #191c23;
-  --meho-graph-selected: #818cf8;
-  --meho-graph-highlight: #818cf8;
-}
-
-/* ════════════════════════════════════════════════════════════════════
-   meho-light — the daylight sibling. Same single indigo signal,
-   deeper shades for contrast on white.
-   ════════════════════════════════════════════════════════════════════ */
-
-[data-theme="meho-light"] {
-  color-scheme: light;
-
-  --color-base-100: oklch(100% 0 0);          /* card surface */
-  --color-base-200: oklch(97.3% 0.002 255);   /* page canvas  */
-  --color-base-300: oklch(93.5% 0.004 255);   /* raised / hover */
-  --color-base-content: oklch(22% 0.012 255);
-
-  --color-primary: oklch(50% 0.19 275);
-  --color-primary-content: oklch(99% 0.01 275);
-
-  --color-secondary: oklch(52% 0.16 330);
-  --color-secondary-content: oklch(99% 0.01 330);
-
-  --color-accent: oklch(55% 0.1 190);
-  --color-accent-content: oklch(99% 0.01 190);
-
-  --color-neutral: oklch(92% 0.004 255);
-  --color-neutral-content: oklch(25% 0.012 255);
-
-  --color-info: oklch(56% 0.11 225);
-  --color-info-content: oklch(99% 0.01 225);
-  --color-success: oklch(56% 0.12 162);
-  --color-success-content: oklch(99% 0.01 162);
-  --color-warning: oklch(68% 0.13 80);
-  --color-warning-content: oklch(20% 0.04 80);
-  --color-error: oklch(55% 0.19 25);
-  --color-error-content: oklch(99% 0.01 25);
-
-  --radius-selector: 0.5rem;
-  --radius-field: 0.5rem;
-  --radius-box: 0.875rem;
-  --size-selector: 0.25rem;
-  --size-field: 0.25rem;
-  --border: 1px;
-  --depth: 0;
-  --noise: 0;
+   The semantic text colours: the brand's green and amber are fills, not
+   text (1.85:1 and 2.17:1 on white), and its red is 4.49:1 on the page.
+   In the light theme text-success / -warning / -error and the soft
+   badges use darker shades of the same hues. In the dark theme the
+   brand colours themselves pass, so these point back at them.
+   tests/test_ui_text_contrast.py checks every value here.
+*/
+:root {
+  --meho-text-muted: #545866;
+  --meho-text-subtle: #646879;
+  --meho-success-text: #0A775A;
+  --meho-warning-text: #8A610D;
+  --meho-error-text: #AE2121;
 
   --meho-glow:
     radial-gradient(ellipse 70% 38% at 50% -12%, oklch(89% 0.03 275 / 0.22), transparent 60%);
   --meho-grain-opacity: 0.012;
-
-  --meho-graph-target: #0d9468;
-  --meho-graph-vm: #0284c7;
-  --meho-graph-host: #b45309;
-  --meho-graph-cluster: #7c3aed;
-  --meho-graph-datastore: #a16207;
-  --meho-graph-network: #0e7490;
-  --meho-graph-node-fallback: #64748b;
-  --meho-graph-node-border: #cbd5e1;
-  --meho-graph-label: #334155;
+  --meho-graph-target: #0ea5e9;
+  --meho-graph-vm: #22c55e;
+  --meho-graph-host: #f97316;
+  --meho-graph-cluster: #a855f7;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #14b8a6;
+  --meho-graph-node-fallback: #6366f1;
+  --meho-graph-node-border: #1f2937;
+  --meho-graph-label: #1f2937;
   --meho-graph-edge: #94a3b8;
-  --meho-graph-edge-label: #64748b;
+  --meho-graph-edge-label: #475569;
   --meho-graph-label-bg: #f8fafc;
-  --meho-graph-selected: #4f46e5;
-  --meho-graph-highlight: #4f46e5;
+  --meho-graph-selected: #dc2626;
+  --meho-graph-highlight: #dc2626;
+}
+
+[data-theme="evoila-dark"] {
+  --meho-text-muted: #AEB6C6;
+  --meho-text-subtle: #8796B5;
+  --meho-success-text: var(--color-success);
+  --meho-warning-text: var(--color-warning);
+  --meho-error-text: var(--color-error);
+
+  --meho-graph-target: #38bdf8;
+  --meho-graph-vm: #4ade80;
+  --meho-graph-host: #fb923c;
+  --meho-graph-cluster: #c084fc;
+  --meho-graph-datastore: #facc15;
+  --meho-graph-network: #2dd4bf;
+  --meho-graph-node-fallback: #818cf8;
+  --meho-graph-node-border: #0e1424;
+  --meho-graph-label: #c8cfdd;
+  --meho-graph-edge: #6b7da8;
+  --meho-graph-edge-label: #c8cfdd;
+  --meho-graph-label-bg: #162037;
+  --meho-graph-selected: #f46e6e;
+  --meho-graph-highlight: #f46e6e;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="evoila-system"] {
+    --meho-text-muted: #AEB6C6;
+    --meho-text-subtle: #8796B5;
+    --meho-success-text: var(--color-success);
+    --meho-warning-text: var(--color-warning);
+    --meho-error-text: var(--color-error);
+
+    --meho-graph-target: #38bdf8;
+    --meho-graph-vm: #4ade80;
+    --meho-graph-host: #fb923c;
+    --meho-graph-cluster: #c084fc;
+    --meho-graph-datastore: #facc15;
+    --meho-graph-network: #2dd4bf;
+    --meho-graph-node-fallback: #818cf8;
+    --meho-graph-node-border: #0e1424;
+    --meho-graph-label: #c8cfdd;
+    --meho-graph-edge: #6b7da8;
+    --meho-graph-edge-label: #c8cfdd;
+    --meho-graph-label-bg: #162037;
+    --meho-graph-selected: #f46e6e;
+    --meho-graph-highlight: #f46e6e;
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -313,6 +243,77 @@ body::after {
    ════════════════════════════════════════════════════════════════════ */
 
 /*
+ * Headings in the brand's headline colour (navy on light, near-white on
+ * dark), one step above body text, so a title and the description under
+ * it differ in colour as well as weight. In the base layer, so a
+ * heading's own text-* utility (text-error…) still wins. Inside an
+ * alert or a coloured fill a heading keeps inheriting that container's
+ * *-content colour, as before.
+ */
+@layer base {
+  h1, h2, h3, h4 {
+    /* The offline page does not load the brand tokens; fall back to body text. */
+    color: var(--evoila-headline, var(--color-base-content));
+  }
+
+  :is(.alert, .badge, .btn, [class~="bg-primary"], [class~="bg-secondary"],
+      [class~="bg-accent"], [class~="bg-neutral"], [class~="bg-info"],
+      [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"])
+    :is(h1, h2, h3, h4) {
+    color: inherit;
+  }
+}
+
+/* The two secondary text levels; values and ratios above :root. */
+@utility text-muted {
+  color: var(--meho-text-muted);
+}
+
+@utility text-subtle {
+  color: var(--meho-text-subtle);
+}
+
+/*
+ * Readable semantic text. Unlayered, so it beats the layered utilities
+ * and DaisyUI's badge-soft, which colour text with the fill colour.
+ * Solid badges (badge-success…) keep the fill with *-content text on it.
+ */
+.text-success,
+.badge-soft.badge-success {
+  color: var(--meho-success-text);
+}
+
+.text-warning,
+.badge-soft.badge-warning {
+  color: var(--meho-warning-text);
+}
+
+.text-error,
+.badge-soft.badge-error {
+  color: var(--meho-error-text);
+}
+
+/*
+ * On a solid coloured surface -- a solid alert, a solid badge, a button,
+ * a bg-<colour> fill -- the readable text colour is that surface's
+ * *-content value, which the surface sets. The text tokens above are for
+ * the page and cards; on red or amber they would be grey-on-red. So
+ * inside these surfaces they inherit. Soft and outline alerts sit on a
+ * light tint, where the tokens read, so they are left out; ~= matches
+ * whole class names, so tints like bg-error/10 are left out too.
+ */
+:is(.alert-info, .alert-success, .alert-warning, .alert-error):not(.alert-soft, .alert-outline, .alert-dash),
+:is(.badge-primary, .badge-secondary, .badge-accent, .badge-neutral, .badge-info, .badge-success,
+    .badge-warning, .badge-error):not(.badge-soft, .badge-outline, .badge-ghost, .badge-dash),
+.btn:not(.btn-ghost, .btn-link, .btn-outline, .btn-soft, .btn-dash),
+:is([class~="bg-primary"], [class~="bg-secondary"], [class~="bg-accent"], [class~="bg-neutral"],
+    [class~="bg-info"], [class~="bg-success"], [class~="bg-warning"], [class~="bg-error"]) {
+  & :is(.text-muted, .text-subtle, .text-success, .text-warning, .text-error) {
+    color: inherit;
+  }
+}
+
+/*
  * badge-ghost + badge-outline inside a coloured alert (#2460).
  *
  * DaisyUI 5 emits `.badge-outline { color: var(--badge-color) }` after
@@ -322,8 +323,8 @@ body::after {
  * declaration is invalid at computed-value time, and `color` falls back to
  * inheritance. Inside `.alert-*` the inherited value is the alert's
  * `*-content` token — near-black on badge-ghost's base-200 surface in
- * meho-dark, near-white on base-200 in meho-light — so the honesty-gap
- * `mcp:*` labels vanish in both themes.
+ * the evoila theme's base-200 surface — so without this rule the
+ * honesty-gap `mcp:*` labels would vanish.
  *
  * This unlayered author rule beats every layered DaisyUI declaration
  * regardless of emission order, pinning an explicit themed foreground +
@@ -338,10 +339,17 @@ body::after {
 }
 
 /*
- * Layered card: subtle vertical sheen, 1px low-contrast border,
- * a hairline top highlight, and a slow lift on hover. Used alongside
- * DaisyUI's `card` behavior classes. color-mix against base tokens
- * keeps it correct in both themes.
+ * Layered card: a vertical sheen off base-300, a 1px low-contrast
+ * border, a hairline top highlight, and a slow lift on hover. Used
+ * alongside DaisyUI's `card` behavior classes.
+ *
+ * The sheen was switched off in the old light theme because that
+ * palette's base-300 was a near-white grey (oklch(95% 0 0)) and the
+ * gradient was invisible against base-100. The evoila palette makes it
+ * load-bearing again: base-300 is #B7D5EE, so the top of the card
+ * carries a soft blue wash (about #DFECF7) that fades to white by 38%.
+ * The box-shadow stays — on a light surface the card needs the lift
+ * that a dark surface got from the sheen alone.
  */
 .meho-card {
   position: relative;
@@ -353,10 +361,6 @@ body::after {
       color-mix(in oklch, var(--color-base-300) 45%, var(--color-base-100)),
       var(--color-base-100) 38%
     );
-}
-
-[data-theme="meho-light"] .meho-card {
-  background: var(--color-base-100);
   box-shadow: 0 1px 2px oklch(0% 0 0 / 0.04), 0 4px 16px -8px oklch(0% 0 0 / 0.06);
 }
 
@@ -372,10 +376,6 @@ body::after {
     color-mix(in oklch, var(--color-base-content) 20%, transparent),
     transparent
   );
-}
-
-[data-theme="meho-light"] .meho-card::before {
-  display: none;
 }
 
 a.meho-card,
@@ -460,7 +460,7 @@ a.meho-card:hover,
   font-weight: 500;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+  color: var(--meho-text-subtle);
 }
 
 /* Navbar glass: translucent over the glow, hairline bottom border. */
@@ -481,7 +481,7 @@ a.meho-card:hover,
   border-radius: 0.5rem;
   gap: 0.625rem;
   font-weight: 500;
-  color: color-mix(in oklch, var(--color-base-content) 75%, transparent);
+  color: var(--meho-text-muted);
   transition: color 150ms ease, background-color 150ms ease;
 }
 

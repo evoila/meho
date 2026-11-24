@@ -45,6 +45,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from tests._register_runs_as_approved import person_register_runs_as_approved  # noqa: F401
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -53,7 +54,9 @@ from tests.mcp_test_fixtures import (
 )
 
 # MCP calls come with a token; these tests check executed writes (#3980).
-pytestmark = pytest.mark.usefixtures("person_token_writes_run_at_once")
+pytestmark = pytest.mark.usefixtures(
+    "person_token_writes_run_at_once", "person_register_runs_as_approved"
+)
 
 _TOOL = "meho_targets_register"
 
@@ -249,16 +252,16 @@ async def test_human_admin_creates_and_round_trips_via_list_targets(
     """A human tenant_admin registration executes immediately + is listable."""
     client, op = client_with_operator
     created = _register_call(
-        client, 1, {"name": "rdc-vault", "product": "vault", "host": "vault.example"}
+        client, 1, {"name": "example-vault", "product": "vault", "host": "vault.example"}
     ).json()["result"]
     assert created["isError"] is False
     payload = created["structuredContent"]
-    assert payload["name"] == "rdc-vault"
+    assert payload["name"] == "example-vault"
     assert payload["product"] == "vault"
     assert payload["tenant_id"] == str(op.tenant_id)
 
     listed = _list_targets_call(client, 2).json()["result"]["structuredContent"]
-    assert [t["name"] for t in listed["targets"]] == ["rdc-vault"]
+    assert [t["name"] for t in listed["targets"]] == ["example-vault"]
     assert listed["targets"][0]["id"] == payload["target_id"]
 
 

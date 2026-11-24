@@ -199,6 +199,8 @@ async def test_userpass_write_creates_user_value_free_response(
         "username": "ci",
         "mount": "userpass",
         "written": True,
+        "credential_source": "request",
+        "credential_generated": False,
         "token_policies": ["admin", "default"],
     }
     # The password reaches Vault verbatim (the point of the write)...
@@ -571,7 +573,13 @@ async def test_userpass_write_handler_omits_token_policies_when_absent(
         _make_operator(), None, {"username": "ci", "password": "p"}
     )
 
-    assert result == {"username": "ci", "mount": "userpass", "written": True}
+    assert result == {
+        "username": "ci",
+        "mount": "userpass",
+        "written": True,
+        "credential_source": "request",
+        "credential_generated": False,
+    }
     assert "token_policies" not in fake.auth.userpass.write_calls[0]
 
 

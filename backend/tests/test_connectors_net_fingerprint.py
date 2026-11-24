@@ -552,6 +552,8 @@ async def test_detected_product_is_not_the_token_targets_register_needs(
         op_id=TARGETS_REGISTER_OP_ID,
         target=None,
         params={"name": "vc-01", "product": detected["product"], "host": host},
+        # Every targets.register call waits for a person; run it as approved.
+        _approved=True,
     )
 
     assert registered.status == "error", registered

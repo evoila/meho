@@ -153,6 +153,13 @@ between `[REDACTED:` and `]`, and the value ends there. A value that
 only starts like one (`[REDACTED:made-up`) or goes on after the `]`
 (`[REDACTED:x]made-up`) is redacted whole.
 
+The `api_key` rule also skips a value made only of mask characters:
+`*`, `•`, `●` and `·` (`patterns.py::MASK_CHARS`). A tool that reads a
+password prints one of them for each key, and that is not a secret. A
+value that goes on after the masks (`****abc123`) is redacted whole.
+The upload check of the session store uses the same characters, so such
+a value does not send an upload to quarantine.
+
 The secret-*value* part of `authorization_header`, `bearer_token`,
 and `api_key` consumes any non-whitespace, non-quote byte
 (`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is
@@ -250,16 +257,90 @@ The name rule is the shared `broadcast.events.is_secret_param_name`
 broadcast scrub and the approval echo use. The full word list:
 
 - anywhere in the name: `password`, `passwords`, `passwd`, `pwd`,
-  `passphrase`, `passphrases`, `apikey`, `kubeconfig`;
+  `passphrase`, `passphrases` (also written `pass_phrase`), `apikey`,
+  `kubeconfig`;
 - at the end of the name: `secret`, `secrets`, `token`, `credential`,
   `credentials`, `psk` (the pre-shared key of a VPN session);
 - the pairs `api_key`, `access_key`, `private_key`, `encryption_key`,
   `license_key`, `licence_key`, `license_keys`, `licence_keys`,
-  `product_key`, `secret_id`, `secret_value`, `secret_data` anywhere in
-  the name;
+  `product_key`, `secret_id`, `secret_value`, `secret_data`, `pass_phrase`
+  anywhere in the name;
 - the pairs `secret_key`, `shared_key`, `preshared_key`,
   `connection_string`, `connection_strings` only at the end of the name
   (`secret_key_ref` is the name of a Kubernetes Secret and stays plain).
+  `pre_shared_key` ends in `shared_key`, and `license_key` counts
+  anywhere;
+- the device and protocol key pairs `authentication_key` and
+  `privacy_key` (the SNMP keys), `auth_key`, `priv_key`,
+  `community_string`, `community_strings`, `tacacs_key`, `radius_key`,
+  `hmac_key`, `signing_key`, `store_key`, `application_key`,
+  `snmp_community` at the end of the name, or right before a last word
+  `ref` (`auth_key_ref` is hidden; `auth_key_id` and
+  `authentication_key_id` stay plain). The list is
+  `_SECRET_KEY_FINAL_TOKEN_PAIRS`;
+- the pair `shared_secret` anywhere in the name (`shared_secret_ref`);
+- a name in capitals has no word boundary (`AUTHKEY`, `LICENSEKEY`), so a
+  pair written as one word counts too: a final pair as the last word, any
+  other pair as any word;
+- a bare `community` field in an SNMP place
+  (`broadcast.events.is_snmp_community_key`): next to a sibling field
+  whose name has an `snmp` word (`snmp_version`, `snmpPort`), or anywhere
+  under a key with an `snmp` word (`{"snmp": {"community": ...}}`,
+  `{"snmpCommunities": [{"community": ...}]}`). Every walk over data
+  asks it next to the name rule and carries the SNMP place down. The text
+  step sees no parent or sibling, so it hides `snmp_community` but not a
+  bare `community` key;
+- the `value` of a name/value pair named `community`
+  (`[{"name": "community", "value": ...}]`), in data and in text
+  (`broadcast.events.is_secret_pair_name`): such a list gives the pair no
+  SNMP sibling, and a setting named `community` there is the SNMP
+  community;
+- never hidden, whatever the rules say: `primary_key`, `partition_key`,
+  `sort_key`, `key_id`, `public_key` (plain identifiers that end in a key
+  word; the list is `_PLAIN_KEY_NAMES`).
+
+A name whose last word is `ref` has no rule of its own. It follows the
+rules above, so it is hidden when the rest of the name is a secret name
+(`password_ref`, `apiKeyRef`, `private_key_ref`) and stays when it is not
+(`secret_ref`). This change only hides more: every name that the rule
+hid before is still hidden.
+
+The rule is one table test, `test_secret_name_new_fields.py`: each secret
+name in four spellings and with an SNMP prefix, each name that ends in
+`ref` and is hidden (`_SECRET_REF_NAMES`) in four spellings, each plain
+name in four spellings, checked in every place below and in the Keycloak
+scrub. A new name is one new row.
+
+The same rule serves the places that had a list of their own:
+
+- The Keycloak approval previews and its trace
+  (`connectors/keycloak/redaction.py`, `redact_preview_fields` and
+  `redact_trace_fields`) hide the Keycloak field names and every name the
+  shared rule marks (a flag or a number stays).
+  One name is shown on purpose: `passwordPolicy`, the text of the realm's
+  password rules (for example `length(8) and digits(1)`). It holds no
+  password, and the approver needs to read it. `redact_preview_fields`
+  hides it like any other name. Then the realm create card and the realm
+  update card put it back with one shared helper
+  (`connectors/keycloak/ops_write_realm_smtp.py::show_password_policy`):
+  only a text value at the top level of the realm, and only after the
+  value-shape pass checked it for secret-shaped text. A `passwordPolicy`
+  deeper in the realm (for example in an identity provider config) stays
+  hidden. The group, account, SMTP and rights cards do not carry it and
+  still hide it. The trace hides it too.
+- The Keycloak read results (`redact_secret_fields`) hide only the Keycloak
+  field names. The dispatcher hides the shared names in the normal answer
+  and keeps their values, so `reveal_secret: true` still returns them.
+- The secret query names of a link (`redaction/url_secret.py::is_secret_query_name`)
+  are its own last words plus every name the shared rule marks.
+- The pfSense config read (`connectors/pfsense/redaction_names.py`)
+  checks the shared rule first, then its own lists for pfSense element
+  names. It keeps its own lists because pfSense writes many secrets
+  under names that no other place uses (`ipsecpsk`, `ldap_bindpw`).
+- The secret check of an uploaded session file
+  (`session_store/secret_check.py`) sends a file to quarantine when a
+  JSON field, a name/value pair or a quoted pair in text has a name the
+  shared rule marks, and also for its own words in `name=value` text.
 
 Names are read in snake, camel and kebab case.
 Numbers, booleans and `null` stay, except in the trace scrub: there a number
@@ -470,7 +551,65 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
     numbers included; booleans and `None` stay. The name rule is
     `is_secret_param_name` ("One name rule for secret fields" above); the
     `value` of a name/value pair whose `name` is a secret name is hidden
-    too. The
+    too. The default view also hides secret-named fields inside text
+    values: a JSON or YAML file in a string, such as a ConfigMap entry or
+    the last-applied note of kubectl (`redaction/secret_text.py`: the
+    quoted-pair text step, then a YAML read that replaces each secret value
+    in place; a YAML file inside a JSON note is read too). Two more steps
+    (`redaction/secret_markup.py`) hide what the YAML read does not see:
+    a comment line such as `# dbPassword: ...` in a YAML text (with the
+    comment lines below it whose text after the `#` is indented deeper:
+    a commented-out block value or a value over more lines), every
+    `key: value` line of a text that does not read as YAML (the key bare
+    or in quotes; the lines below a secret-named key that are indented
+    deeper are hidden with the value; a quoted value ends at its closing
+    quote, also when it holds an escaped quote (`\"` or `''`); a note after
+    the value such as `# rotate monthly` stays, and so does a comment line
+    below the key that is not part of a block value or of a quoted value
+    that is still open, with its own secret-named value hidden; a byte
+    order mark at the start of the text is skipped), and XML text: the text of a secret-named
+    element (`<password>...</password>`, child elements and CDATA
+    included; a closing tag closes the nearest open element with its
+    name, tags inside CDATA are text, and the text of an XML comment is
+    read on its own, in one pass, as comments do not nest), a
+    secret-named attribute (`dbPassword="..."`), the `value` attribute and
+    the text of an element whose `name` or `key` attribute is a secret
+    name (`<add key="DbPassword" value="..."/>`), and the `<value>` child
+    of an element whose `<name>` child is a secret name (the name/value
+    form of many Java and Hadoop configuration files). The name of such a
+    pair is read as XML text first, so a name in CDATA or with a character
+    reference (`&#x50;`) is the same name. In a JSON text each
+    string is read on its own, and as text: its escapes (`\"`, `\u003c`)
+    are read before its XML. The XML step itself changes only the hidden
+    value and keeps the other escapes of the string. When the YAML step
+    also reads the JSON text, it writes the changed string back, and a
+    `\u` escape can then become the plain character; the JSON still
+    parses and means the same. A start tag and a closing tag in two
+    different strings are no element. In a YAML text each value (with
+    its key on the same entry) and each comment is read on its own in the
+    same way, so a start tag and a closing tag in two different YAML
+    values or comment lines are no element, and the keys and values
+    between them stay. A text that is one complete XML document (such as
+    one root element with `key: value` lines in it), or reads as neither
+    YAML nor JSON, is read as XML whole, so an element over more lines is
+    still hidden. These steps
+    write the marker without quotes. A step that is too deep to read hides
+    the whole text. An element with no closing tag is not touched, and
+    text without a secret-named field comes back unchanged. The YAML read
+    uses the same rules as the key-name walk: a bare `community` in an SNMP
+    place, and the `value` of a secret-named pair also when it is a list
+    or a map. A hidden value becomes `key: "[REDACTED:param_name]"` on one
+    line and keeps its anchor, so the text still reads as YAML. An alias
+    of an anchor inside a hidden value also becomes the marker. An alias
+    that a merge key uses (`<<: *name`, or each alias of a merge list
+    `<<: [*name]`) becomes an empty map `{}` when it names a hidden value
+    or a value inside one. A map an alias names in an SNMP place is
+    checked with the SNMP rule there. A text nested deeper than the
+    levels the pass reads, or too deep to parse, is hidden whole when it
+    may hold a secret name. The dispatcher builds this view in a
+    worker thread, like the redaction pass of a script, so a large text
+    value does not hold up other requests. The audit copy
+    then holds a fingerprint of the whole text. The
     reducer runs on this view, so the rows stored behind a result handle
     and its sample rows are clean too.
 - **Plain fields** (`register_plain_fields(op_id, names)`, exported by
@@ -529,10 +668,21 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   on the audit row of every secret read (`True` = values asked for,
   `False` = default view) and on the row of any other operation when the
   values were asked for (`True`). Every other dispatch leaves it `None`,
-  so the key is absent.
+  so the key is absent. A short row (stored when the database refuses the
+  full row, [audit_query.md](audit_query.md#text-the-table-cannot-store-and-the-short-row-6452))
+  keeps `reveal_secret` too. Find such rows with
+  `meho audit query --full-row-lost`.
 - **Fail closed.** The success-path audit row is required
-  (`require_audit=True`): when it does not commit, the caller gets
-  `audit_commit_failed` and no value, also for a reveal.
+  (`require_audit=True`): when no row commits, the caller gets
+  `audit_commit_failed` and no value, also for a reveal. A short row
+  counts as a committed row: the call then returns its answer, also the
+  hidden values of a reveal, and the short row holds the reveal choice but
+  not the answer.
+  A short row has a small `error` object that MEHO builds itself. It holds
+  only `error_code` and, for a call that waits for approval or was refused,
+  `approval_request_id` (a UUID). It never holds an error text, so no text of
+  the target reaches it (`operations/audit_row_safe.py:236-252`; the full
+  list is in [audit_query.md](audit_query.md#text-the-table-cannot-store-and-the-short-row-6452)).
 - **Stored audit copy** (`fingerprint_hidden_values`). For **every** op,
   the dispatcher walks the raw answer and the default view side by side.
   Each leaf or subtree that the view hides (Tier-1 redaction, the name
@@ -573,7 +723,14 @@ Why two new columns rather than one `audit_log.payload` extension:
 - `raw_payload` is potentially **large** (a connector list response
   can be megabytes); keeping it in a dedicated column lets the
   audit-query surface skip it on list endpoints without parsing
-  JSON to find the field.
+  JSON to find the field. The list reads do skip it (#6818): the
+  audit list (`query_audit`, used by REST, CLI, MCP and the console)
+  and the recent-operations lists of the topology drawer and the
+  target page load every column except `raw_payload`
+  (`defer(AuditLog.raw_payload, raiseload=True)`, so a read of it on
+  such a row fails instead of running one more query). The row still
+  keeps the whole raw answer; the policy replay reads it with its own
+  query.
 - `redaction_manifest` is **structured** (a list of dicts with a
   fixed schema); a future GIN index on the JSONB column (e.g.
   "find every audit row where the `kubeconfig` rule fired in the
@@ -849,6 +1006,118 @@ provisioned.
   `python -m spacy download <model>`.
 
 No new runtime dependencies were added by Task #1070, #1071, or #1073.
+
+## Compare with main
+
+A pull request that changes how MEHO hides secrets is compared with the
+base branch on a fixed set of made-up inputs. The author sees a fault
+before a reviewer reads the pull request.
+
+- **The inputs.** `backend/tests/redaction_compare/inputs.py` builds about
+  1,500 texts and structures from forms (`password=`, `--password`, a URL
+  with a login, JSON, YAML, XML, a command line, a shell script, a nested
+  result), value styles (plain, quoted, with a space, empty) and
+  containers. A fixed seed makes the same inputs on every run. Each
+  planted part has an id: `s...` is a secret value, `p...` is a plain word
+  that must stay visible.
+- **The steps.** `redact` with the default policy, `scrub_content`,
+  `scrub_broadcast_params`, `redact_error_payload`, the default view of an
+  answer, `hide_command_text` and `hide_shell_script`
+  (`backend/tests/redaction_compare/answers.py`).
+- **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
+  one line for each input, sorted by id: the input id and one sha256
+  checksum (`sum`) over the full answers of all steps the input runs on.
+  It holds no lists of hidden and shown parts.
+  `backend/tests/test_redaction_compare_snapshot.py` fails on any change of
+  any answer, also when a step only starts or stops hiding a value, and
+  names the inputs that changed, are missing or are new. The same file
+  checks three properties on main: a text with no secret comes back
+  unchanged, hiding twice gives the answer of hiding once, and the time
+  grows in a straight line with the size.
+- **Write the snapshot again.** From `backend/`:
+  `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
+- **The records.** `redaction_compare.py --records FILE`, run from a
+  `backend/` folder, writes one record for each input and step: the parts
+  the step hides, the parts it shows, a hash of the whole answer (`sha`),
+  and a hash of the answer without its planted parts (`rest`). For `rest`,
+  each planted part (secret or plain) and each hiding marker becomes one
+  `<hidden>` token. A plain part counts as shown only where it stands
+  outside a hiding marker. So `--[REDACTED:password]` in place of
+  `--password <value>` hides the label `password` too, and the job sees it
+  as a plain part now hidden. `--password [REDACTED:password]` hides only
+  the value. A test checks that each planted part, labels too, stands in
+  its input with the same spelling. The records are never committed.
+- **The CI job** "Secret hiding compared with the base branch" makes a
+  second checkout of the base commit and builds the base records there,
+  with the base's own code and input set. It builds the pull request
+  records with the pull request's own code and input set in a container
+  with no mounted folder: the files go in on stdin and the records come
+  out on stdout. So the pull request's code can write only its own
+  records. Both files stay in the job's temporary folder. Then it runs
+  the rule of `scripts/ci/redaction_compare.py --judge` on the two record
+  files. It fails when a part that the base hides is now shown, when a
+  plain part that the base shows is now hidden, when the answer changed in
+  another way, or when an input of the base is missing from the pull request's
+  records. A secret part that the base showed and the pull request hides
+  passes: that is the purpose of a fix. When a part is hidden or shown,
+  the job still compares `rest`, so another change of the same answer
+  (lost quotes, a dropped field) fails as `text`, next to the part
+  difference. An approved entry for the part does not cover it: the other
+  change needs its own `text` entry.
+- **A wanted difference.** List it in
+  `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
+  the step, the part id (or `text`, or `removed` for a dropped input) and
+  a one-line reason. Only the entries that the pull request adds count:
+  the job reads the base branch's approved file with `git show` too (no
+  file counts as empty). A new entry that matches no difference fails the
+  job. An entry that is already in the base's file approves nothing and
+  never fails the job, so it can stay after the merge. To approve the same
+  input, step and part again, add a new entry (for example with a new
+  reason).
+- **The rules come from the base branch.** The job reads the rule script
+  of the base commit with `git show` and runs the judge with
+  `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The approved file is the one that the pull request commits: it is the
+  open list that a reviewer reads. The job reads it, the base's approved
+  file and the rule script from git before any code of the pull request
+  runs. The job passes with "no compare on the base branch yet" only when
+  a git lookup of the base tree succeeds and finds no rule script. When
+  the lookup fails, or the base has the script, any failed step fails the
+  job: the lookup, the second checkout, either environment sync, either
+  record build, or the judge.
+- **The job log shows no names and no numbers, on purpose.** The log of
+  a public repo is public, so the job runs the judge with
+  `--summary-only`. Then the judge prints no input id, no step, no part id
+  and no number: only one closing line, either "no difference is left that
+  is not approved" or "differences are left that are not approved". A
+  stale approved entry is still printed, because it is in the committed
+  approved file already. The exit code is the same as without the flag.
+- **See the differences locally.** Without `--summary-only` the judge
+  prints each difference that is not approved (input id, step, kind) and
+  the counts. From the repo root, with the pull request branch checked out,
+  run the block below. It works in a new private folder from `mktemp -d`,
+  stops when a step fails (also either record build), and removes the
+  folder and the second checkout when it ends, so no record file is left
+  behind or read again by a later run.
+
+  ```bash
+  (
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    git worktree add --detach "$tmp/base" origin/main
+    rules="$tmp/base/scripts/ci/redaction_compare.py"
+    (cd "$tmp/base/backend" && uv sync --frozen \
+      && uv run python "$rules" --records "$tmp/base.jsonl")
+    (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
+    git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
+      > "$tmp/base-approved.yaml"
+    python3 -I "$rules" \
+      --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      --approved backend/tests/snapshots/redaction_compare_approved.yaml \
+      --base-approved "$tmp/base-approved.yaml"
+  )
+  ```
 
 ## Known issues / future work
 
@@ -1240,6 +1509,67 @@ explicit omission reason (`record_sdk_vendor_call(response_body_omitted=...)`),
 the span stores `BODY_OMITTED_MARKER`, and the trace is marked uncertain.
 This closes the case where the F2 cap cuts only a trailing newline, the cut
 body still parses, and an unmasked Secret value would otherwise be kept.
+
+### What an agent reads in the trace of a Kubernetes call
+
+The stored trace keeps the Kubernetes API answer with the whole object, for
+example the full pod definition of a pod list. Who reads what:
+
+- **A person** (the console, `meho audit trace`, `GET /api/v1/audit/{id}/trace`
+  and `GET /api/v1/audit/traces`) reads the stored trace as it is.
+- **A service login** (a paired add-on) reads the stored traces of its own
+  calls as they are, on the same REST routes.
+- **An agent login** reads a copy on the two REST trace routes.
+- **The trace handle** on a `call_operation` answer
+  (`flight_recorder_trace_handle`, paged with `result_query`) holds the copy
+  for every caller. A person and a service login read the stored trace on
+  the REST routes, in the console and with `meho audit trace`.
+
+In the agent's copy, each span of a Kubernetes call (connector product
+`k8s`, or an operation id that starts with `k8s.`) goes through
+`connectors/kubernetes/trace_agent_view.py::agent_view`, at any depth of the
+span (pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs,
+CronJobs, pod templates in custom resources, the items of a list):
+
+- Each `env` list goes through the same secret rules as the direct answer
+  of an operation (`operations/_secret_values.py::hide_secret_values`):
+  `scrub_secret_named_values` with numbers hidden, then
+  `hide_secret_text_leaves`. So the value of an entry with a secret-shaped
+  name (`DB_PASSWORD`, `API_TOKEN`) becomes `[REDACTED:param_name]`, and a
+  secret field inside a text value is hidden. Plain values (`LOG_LEVEL`)
+  stay. The names, an entry with `valueFrom` and every `envFrom` entry stay.
+  `test_flight_recorder_k8s_agent_view_same_rules.py` runs the same Pod and
+  Deployment through both paths and checks that they hide the same env
+  values.
+- Each `command` and `args` pair goes through the command-line pass of the
+  `k8s.job.create` approval preview (`ops_write_preview._hide_command_line`).
+  The words stay. Hidden are the value of a secret-named `NAME=VALUE` or
+  `--name=value`, the argument after a secret flag (a password flag and its
+  value on a command line), the
+  password in `user:password` after `-u`, the password in a URL and tokens
+  with a known vendor prefix. The script after `sh -c` is read as a shell
+  script. On a container command line, the pass counts `-p` as a password
+  flag after any program. So the word after it is hidden in the copy, also
+  when it is not a password (for example the folder of `mkdir -p`).
+- An annotation value that is a JSON object or list (the
+  `kubectl.kubernetes.io/last-applied-configuration` annotation holds a
+  whole earlier object) is cleaned by the same walk. Each text inside it
+  also goes through `command_line.hide_in_text`. Then it is written back
+  as JSON. A last-applied value that is not such JSON becomes
+  `[MEHO-REDACTED:last-applied-configuration]`. Other annotation values go
+  through `command_line.hide_in_text` (the password in a URL, tokens with a
+  known vendor prefix).
+
+Nothing else in the span changes: `managedFields` and plain values stay as
+they are in the stored trace. The spans of every other connector
+are copied unchanged. The copy is made when the agent reads, so the stored
+trace stays as it is (`flight_recorder/agent_view.py`). When a trace holds
+a Kubernetes span, the walk runs in a worker thread (`asyncio.to_thread`),
+and its time grows in line with the size of the trace. When the copy cannot
+be made (a body nested too deep), the agent gets no trace. Tests:
+`test_flight_recorder_k8s_agent_view.py`,
+`test_flight_recorder_k8s_agent_view_reads.py`,
+`test_flight_recorder_k8s_agent_view_same_rules.py`.
 
 ## References
 

@@ -21,7 +21,7 @@
 #   - helm, so the chart tests can render deploy/charts/meho offline.
 #
 # Versions follow CI and the production image: Python 3.14 (same base
-# image digest as backend/Dockerfile), uv 0.11.12, Go 1.26.10 (the floor in
+# image digest as backend/Dockerfile), uv 0.11.12, Go (the version in
 # cli/go.mod), helm v3.16.4 (chart.yml). Bump them together.
 #
 # Try it locally from a clean checkout:

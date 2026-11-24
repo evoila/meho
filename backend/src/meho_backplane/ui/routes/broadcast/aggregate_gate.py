@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Aggregate-only payload gate shared by the broadcast + audit drawers.
+"""Aggregate-only payload gate of the audit drawer.
 
 Decision #3 (Initiative #338) withholds the raw request payload of a
 sensitive operation from any console surface that resolves the canonical
-``audit_log`` row. The broadcast event drawer
-(:mod:`meho_backplane.ui.routes.broadcast.event`) established the rule;
-the audit-query row drawer (:mod:`meho_backplane.ui.routes.audit`)
-reuses it verbatim. To keep the sensitive op-class set single-sourced
-(both surfaces must agree byte-for-byte on what is redacted), the gate
-lives here and both routers import it -- there is no second copy of the
-``{credential_read, credential_mint, audit_query}`` set.
+``audit_log`` row. The broadcast event drawer established the rule; it
+was removed with the operation rows of Broadcast (#3762), and the
+audit-query row drawer (:mod:`meho_backplane.ui.routes.audit`) keeps
+using it. The gate stays here so the sensitive op-class set has one
+copy: the ``{credential_read, credential_mint, audit_query}`` set.
 
 The gate has three parts:
 

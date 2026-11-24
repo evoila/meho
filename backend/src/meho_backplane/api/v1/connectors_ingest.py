@@ -203,6 +203,11 @@ from fastapi import status as http_status
 from fastapi.responses import JSONResponse, Response
 
 from meho_backplane.api.v1.operations import connector_not_ingested_404
+from meho_backplane.api.v1.policy_classification import (
+    CLASSIFICATION_PATCH_RESPONSES,
+    classification_patch,
+    classification_request_response,
+)
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -228,6 +233,7 @@ from meho_backplane.operations.ingest import (
     EditOpBody,
     EditOpResponse,
     EnableReadsResponse,
+    ImplIdEndsInDigitsError,
     IngestionPipelineResult,
     IngestionPipelineService,
     IngestJob,
@@ -256,12 +262,12 @@ from meho_backplane.operations.ingest import (
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
     build_connector_legacy_tenant_copy_detail,
+    build_connector_name_detail,
     build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
-    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -727,7 +733,7 @@ async def _ingest_result_dispatchable(
     *,
     tenant_id: UUID,
 ) -> bool:
-    """Post-run honesty gate for the async ingest job (claude-rdc-hetzner-dc#1136).
+    """Post-run honesty gate for the async ingest job.
 
     Resolve the connector exactly the way the dispatch/query
     meta-tools do — parse the ``connector_id`` into its natural-key
@@ -1224,7 +1230,7 @@ def _raise_ingest_http_error(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             build_version_mismatch_detail(exc),
         ) from exc
-    if isinstance(exc, ProductImplIdMismatch):
+    if isinstance(exc, ProductImplIdMismatch | ImplIdEndsInDigitsError):
         # G0.27 / T3 (#1817). The round-trip guard moved from this route
         # into IngestionPipelineService.ingest so every entry point fails
         # closed; here we map the service exception onto the same 422
@@ -1232,7 +1238,7 @@ def _raise_ingest_http_error(
         # Shared builder with the MCP -32602 path so the two can't drift.
         raise HTTPException(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            build_product_impl_id_mismatch_detail(exc),
+            build_connector_name_detail(exc),
         ) from exc
     if isinstance(exc, UncoveredVersionLabel):
         # G0.9-T9 (#741). Checked BEFORE the generic ValueError-family arm
@@ -1454,6 +1460,7 @@ async def get_review_endpoint(
     "/{connector_id}/groups/{group_key}",
     status_code=http_status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    responses=CLASSIFICATION_PATCH_RESPONSES,
 )
 async def edit_group_endpoint(
     connector_id: str,
@@ -1466,7 +1473,18 @@ async def edit_group_endpoint(
     At least one of the two body fields must be set; an empty body
     yields 400. Writes one ``meho_connector_edit_group`` audit row
     via the service layer. Returns 204 on success.
+
+    ``category`` / ``labels`` (#6038) are a change of rights: sent alone,
+    they ask for the change and answer ``202`` with the approval request
+    id; a tenant admin must approve it in the web console. Sent with other fields: 400.
     """
+    classification = classification_patch(
+        {"connector": connector_id, "group": group_key},
+        body,
+        other_fields=("when_to_use", "name"),
+    )
+    if classification is not None:
+        return await classification_request_response(operator, classification)
     service = ReviewService(operator)
     try:
         await service.edit_group(
@@ -1503,13 +1521,14 @@ async def edit_group_endpoint(
 @router.patch(
     "/{connector_id}/operations/{op_id:path}",
     response_model=EditOpResponse,
+    responses=CLASSIFICATION_PATCH_RESPONSES,
 )
 async def edit_op_endpoint(
     connector_id: str,
     op_id: str,
     body: EditOpBody,
     operator: Operator = _require_admin,
-) -> EditOpResponse:
+) -> EditOpResponse | JSONResponse:
     """Edit a per-op operator override.
 
     At least one of ``custom_description`` / ``safety_level`` /
@@ -1540,7 +1559,24 @@ async def edit_op_endpoint(
     error="insufficient_user_authentication"``. A tenant admin asking for it
     gets ``403``; a level below the classification, a missing reason or a
     destructive operation gets ``400``.
+
+    ``category`` / ``labels`` (#6038) are a change of rights: sent alone,
+    they ask for the change and answer ``202`` with the approval request
+    id; a tenant admin must approve it in the web console. Sent with other fields: 400.
     """
+    classification = classification_patch(
+        {"connector": connector_id, "op": op_id},
+        body,
+        other_fields=(
+            "custom_description",
+            "safety_level",
+            "requires_approval",
+            "is_enabled",
+            "reason",
+        ),
+    )
+    if classification is not None:
+        return await classification_request_response(operator, classification)
     return await apply_op_edit(
         connector_id,
         op_id,

@@ -145,7 +145,11 @@ if an operator needs one (#1177: one closed-set config, no DSL).
 
 Every `net.*` op is **targetless** (the destination is a param,
 `target=None`) and `safety_level="safe"` + `requires_approval=False`, so
-for an **agent** principal it auto-executes with no grant and **bypasses
+for an **agent** principal it auto-executes with no grant while
+`AGENT_GRANT_REQUIRED` is `off` (the default) or `observe`. With `on`, an
+agent needs a grant whose `target_scope` is `*` or empty (a grant for
+named targets never matches a call with no target); with no such grant the call is
+refused (`agent_no_grant`). When it runs, it **bypasses
 the per-target tenant boundary entirely** — it is the one op family that
 can reach an address no target in the caller's tenant resolves to. The
 instance-wide `MEHO_NETDIAG_PROBE_ALLOWLIST` is a **single** knob: on a
@@ -191,6 +195,34 @@ bounds. A refusal from the per-tenant scope raises the same
 — see below) but its message names `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`
 so the operator knows the per-tenant bound, not the instance floor,
 refused.
+
+#### The tenant bound lists addresses the backplane can reach
+
+The bound is checked on the address the probe dials. It does not know
+whether the backplane has a route to that address. Some estates use a
+private network that the backplane cannot reach directly. The backplane
+reaches them only through NAT alias addresses on a routing host. If the
+tenant bound lists only the private network, then:
+
+- a probe to a private address passes the check, but it times out;
+- a probe to the alias address is refused by the bound.
+
+So put the addresses the backplane really reaches (for example the NAT
+aliases) in the tenant bound. Do this in
+`netdiag.probeAllowlistTenants`. The allow list check itself is
+unchanged.
+
+A switch can add a `hint` field to a `timeout` result from
+`net.tcp_check`, `net.dns_lookup` or `net.http_probe`. The hint says
+that no route from the backplane is a possible cause, so a timeout is
+not read as an outage of the probed service.
+
+- The switch is the env var `MEHO_NETDIAG_TIMEOUT_HINT`. Set it with
+  the chart's `extraEnv`.
+- It is off by default. Only the value `true` turns it on. It is read
+  on each probe.
+- With the switch off, every result keeps its old shape: no `hint`.
+- Other results never have a `hint`, also with the switch on.
 
 ### 2. Audit-visible host:port
 
@@ -377,6 +409,29 @@ the TLS-phase stream exceptions above; anyio is already present
 transitively via httpx and is now declared a direct dependency in
 `backend/pyproject.toml` so the requirement is explicit (same pattern as
 `dnspython` / `cryptography`).
+
+### Private or demo CA — the CA pin of a registered target
+
+A service with a private or demo CA fails the default TLS check and reads
+`tls_error`. For an `https` URL the probe now looks for a registered
+target of the **same tenant** whose `host` or `fqdn` equals the probed
+host (or the host name in `host_header`), ignoring case, and that has a
+`tls_ca_pin`. Soft-deleted targets never match. The code is in
+`connectors/net/http_probe_trust.py`.
+
+- The agent supplies no certificate and there is no "skip verification"
+  switch. Only a pin an operator registered on a target is used. The
+  certificate chain and host name checks stay on.
+- The pin is used for the first host only. `_walk_redirects` sends a hop
+  to another host through the default-trust client. A redirect to the
+  same host keeps the pin. Both clients share one cookie jar, so a
+  cookie set on one hop is sent on the next.
+- When several targets match, the one registered with the probed port
+  wins (port 443 when the URL has no port). Else the first by name.
+- No target lookup runs for a plain-http URL or for a host the allowlist
+  refuses.
+- The result carries `trust` (`default` or `pinned`) and `trust_target`
+  (the target name, or null). `net.http_probe` stays `safe`.
 
 ### Vhost-routed probes by IP — `host_header` (#2896)
 
@@ -889,8 +944,8 @@ connectors' ops.
 
 The dispatcher stores this class on the audit row as `op_class`
 (`operations/_audit.py`, `descriptor_op_class`). A dispatch publishes no
-broadcast event; the class feeds the audit row, the announce gate, and the
-target activity warning.
+broadcast event; the class feeds the audit row and the dispatch-time
+advisories.
 
 ## Key types / control flow
 

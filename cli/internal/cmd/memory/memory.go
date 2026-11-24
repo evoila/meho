@@ -556,13 +556,17 @@ func pluralisePtr(p *string) string {
 	return *p
 }
 
-// writeBodyToStdout writes the entry body verbatim plus exactly one
-// trailing newline. Same single-trailing-newline contract `meho kb
-// show` uses — the substrate stores the body unmodified, so a
-// hand-written memory that already ends in `\n` would otherwise
-// produce two newlines when Fprintln adds its own.
+// writeBodyToStdout writes the entry body plus exactly one trailing
+// newline. Same contract as `meho kb show`: an agent may have written
+// the body, so each line goes through output.SafeLines (control
+// characters, also a tab, show as visible escapes; the line breaks
+// stay, and a CRLF line end counts as a plain line break). The
+// substrate stores the body unmodified, so a hand-written memory that
+// already ends in `\n` would otherwise produce two newlines when
+// Fprintln adds its own.
 func writeBodyToStdout(w io.Writer, body string) {
-	fmt.Fprintln(w, strings.TrimRight(body, "\r\n"))
+	body = strings.ReplaceAll(strings.TrimRight(body, "\r\n"), "\r\n", "\n")
+	fmt.Fprintln(w, output.SafeLines(body))
 }
 
 // parseTTLFlag parses the `--ttl 7d` flag value into an ISO-8601

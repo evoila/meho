@@ -67,7 +67,9 @@ global):
      tags-when-unchanged) when changed, advance ``updated_at``.
      ``safety_level`` and ``requires_approval`` only move up: a
      stricter value saved on the row (for example by an operator,
-     #5037) stays. The "skip re-embed"
+     #5037) stays. A ``custom_description`` or ``llm_instructions``
+     that an admin edited (listed in ``admin_edited_fields``, #5321)
+     also stays, and the embedding text uses the admin's description. The "skip re-embed"
      branch is the operationally critical path for connector init
      speed on restart -- a connector with 50 typed ops avoids 50
      ONNX inferences (~500-2500 ms total CPU) every pod restart
@@ -140,7 +142,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -160,6 +162,7 @@ from meho_backplane.operations.embed import (
     compute_embedding_text_hash,
     encode_endpoint_text,
 )
+from meho_backplane.operations.switch_registration import check_switch_names
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
@@ -179,6 +182,7 @@ __all__ = [
     "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
+    "remove_built_in_connector_rows",
     "run_typed_op_registrars",
     "validate_composite_handler_signature",
 ]
@@ -586,6 +590,30 @@ async def _bind_catalog_session(session: AsyncSession) -> AsyncIterator[None]:
         _CATALOG_SESSION.reset(token)
 
 
+async def remove_built_in_connector_rows(*, product: str, version: str, impl_id: str) -> None:
+    """Delete the built-in operation and group rows of one typed connector.
+
+    For a registrar whose operations exist only while a switch is on: with
+    the switch off it calls this, so rows from a start with the switch on
+    are not found, listed or called. Writes only through the start-up
+    registration transaction (:func:`operation_catalog_write`); outside it
+    (a registry check that runs a registrar with no database) it does
+    nothing.
+    """
+    session = _CATALOG_SESSION.get()
+    if session is None:
+        return
+    for model in (EndpointDescriptor, OperationGroup):
+        await session.execute(
+            delete(model).where(
+                model.tenant_id.is_(None),
+                model.product == product,
+                model.version == version,
+                model.impl_id == impl_id,
+            )
+        )
+
+
 async def _run_typed_op_registrars(
     *,
     embedding_service: EmbeddingService | None = None,
@@ -632,7 +660,9 @@ async def _populate_catalog(
 #: the registration helper only inspects the bare callable's identity
 #: and asyncness, not its parameter shape (the dispatcher validates
 #: incoming params against ``parameter_schema`` at dispatch time).
-type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
+#: A handler may also return an error :class:`OperationResult` with its
+#: own ``error_code``; the dispatcher audits it and passes it through.
+type TypedOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResult]]
 
 
 #: Type alias for composite-op handlers. The dispatcher's composite
@@ -1689,6 +1719,10 @@ async def _register_in_session(
         parameter_schema, safety_level=safety_level, requires_approval=requires_approval
     )
 
+    # A parameter switch name that MEHO does not know stops the op from
+    # registering, so a typo never shows a parameter.
+    check_switch_names(parameter_schema, op_id=op_id)
+
     log = structlog.get_logger()
     now = datetime.now(UTC)
     # #5037: the connector package whose folder holds the handler, or None
@@ -1767,6 +1801,22 @@ async def _register_in_session(
                 f"(handler_ref={handler_ref!r}). If this is intentional, "
                 "delete the existing endpoint_descriptor row first."
             )
+
+        # #5321: a field an admin edited keeps the admin's value. The code
+        # value no longer reaches the row, and the embedding text below uses
+        # the admin's description, so search finds the op by it.
+        admin_edited = existing.admin_edited_fields or []
+        if "custom_description" in admin_edited:
+            custom_description = existing.custom_description
+        if "llm_instructions" in admin_edited:
+            llm_instructions = existing.llm_instructions
+        incoming_text = build_embedding_text(
+            summary=summary,
+            description=description,
+            custom_description=custom_description,
+            tags=tags_list,
+        )
+        incoming_hash = compute_embedding_text_hash(incoming_text)
 
         # A built-in network check stored with the old caller-address values
         # goes back to its new values before the raise-only update below.

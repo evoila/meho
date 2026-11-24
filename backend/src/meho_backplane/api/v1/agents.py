@@ -22,11 +22,14 @@ Route inventory
   404 when absent. Role: ``operator``.
 * ``POST /api/v1/agents`` -- create a definition. Body:
   :class:`~meho_backplane.agents.schemas.AgentDefinitionCreate`. Returns
-  the row with HTTP 201; 409 on a duplicate ``(tenant, name)``. Role:
+  the row and the agent's live grants
+  (:class:`~meho_backplane.agents.schemas.AgentDefinitionSaved`) with
+  HTTP 201; 409 on a duplicate ``(tenant, name)``. Role:
   ``tenant_admin``.
 * ``PATCH /api/v1/agents/{name}`` -- partial update. Body:
   :class:`~meho_backplane.agents.schemas.AgentDefinitionUpdate`. Returns
-  the updated row; 404 when absent. Role: ``tenant_admin``.
+  the updated row and the agent's live grants; 404 when absent. Role:
+  ``tenant_admin``.
 * ``DELETE /api/v1/agents/{name}`` -- delete a definition. Returns 204;
   404 when absent / cross-tenant. Role: ``tenant_admin``.
 
@@ -63,18 +66,26 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.agents.grant_sets import (
+    PERSON_ONLY_REMEDIATION,
+    StartingGrantsError,
+    audit_fields,
+    writes_rows,
+)
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
+    AgentDefinitionSaved,
     AgentDefinitionUpdate,
 )
 from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
     AgentDefinitionService,
     AgentIdentityRefInvalidError,
+    with_live_grants,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 
 __all__ = ["router"]
 
@@ -166,29 +177,37 @@ async def show_agent(
 
 @router.post(
     "",
-    response_model=AgentDefinitionRead,
+    response_model=AgentDefinitionSaved,
     status_code=http_status.HTTP_201_CREATED,
 )
 async def create_agent(
     body: AgentDefinitionCreate,
     operator: Operator = _require_admin,
-) -> AgentDefinitionRead:
+) -> AgentDefinitionSaved:
     """Create one agent definition under the operator's tenant.
 
     ``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409
     ``agent_already_exists`` (the per-tenant name natural-key contract
     the ``agent_definition_tenant_name_idx`` unique index enforces).
     The system prompt / toolset content is never bound to the audit row;
-    only the agent name is.
+    only the agent name and the starting grant pick are. A missing pick
+    (while the switch is not ``off`` and the agent has no grant) or an
+    unknown target name returns 422 and writes nothing. A pick that adds
+    grants is for a person only, the same rule as the grant routes: an
+    agent, service or runner login gets 403 ``human_principal_required``.
+    The answer lists the live grants of the agent in ``live_grants``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["create"],
         audit_op_class="write",
         audit_agent_name=body.name,
+        **audit_fields(body.starting_grants, agent=body.identity_ref),
     )
+    if writes_rows(body.starting_grants):
+        ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
     service = AgentDefinitionService()
     try:
-        return await service.create(
+        entry = await service.create(
             tenant_id=operator.tenant_id,
             created_by_sub=operator.sub,
             payload=body,
@@ -208,40 +227,60 @@ async def create_agent(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="identity_ref_unknown",
         ) from exc
+    except StartingGrantsError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return await with_live_grants(operator.tenant_id, entry)
 
 
-@router.patch("/{name}", response_model=AgentDefinitionRead)
+@router.patch("/{name}", response_model=AgentDefinitionSaved)
 async def edit_agent(
     name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
     body: AgentDefinitionUpdate,
     operator: Operator = _require_admin,
-) -> AgentDefinitionRead:
+) -> AgentDefinitionSaved:
     """Apply a partial update to one agent definition by name.
 
     ``tenant_admin`` only. Only the fields the caller set are applied
     (``exclude_unset``), so a PATCH can change a single field. ``name``
     is not updatable -- renaming is a delete + recreate. A cross-tenant
-    / absent name returns 404 ``agent_not_found``.
+    / absent name returns 404 ``agent_not_found``. A new ``identity_ref``
+    that names an agent with no grant needs ``starting_grants`` while the
+    switch is not ``off``, the same rules and errors as a create (#6389).
+    The answer lists the live grants of the agent in ``live_grants``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_AGENT_OP_IDS["edit"],
         audit_op_class="write",
         audit_agent_name=name,
     )
+    if body.identity_ref is not None:
+        structlog.contextvars.bind_contextvars(
+            **audit_fields(body.starting_grants, agent=body.identity_ref)
+        )
+    if writes_rows(body.starting_grants):
+        ensure_human_principal(operator, remediation=PERSON_ONLY_REMEDIATION)
     service = AgentDefinitionService()
     try:
-        entry = await service.update(operator.tenant_id, name, body)
+        entry = await service.update(operator.tenant_id, name, body, updated_by_sub=operator.sub)
     except AgentIdentityRefInvalidError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="identity_ref_unknown",
+        ) from exc
+    except StartingGrantsError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         ) from exc
     if entry is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="agent_not_found",
         )
-    return entry
+    return await with_live_grants(operator.tenant_id, entry)
 
 
 @router.delete(

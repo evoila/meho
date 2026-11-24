@@ -23,7 +23,7 @@ shape the boundary scenarios share:
   produces.
 * :func:`seed_tenants_with_overlap` — the load-bearing two-tenant
   shape: tenant A and tenant B each get a row for the same target
-  name (``"rdc-vcenter"``) and the same principal sub (``"damir"``).
+  name (``"example-vcenter"``) and the same principal sub (``"operator-a"``).
   The substrate's tenant-boundary invariant is the assertion that
   tenant A's query never returns tenant B's row even when the names
   collide.
@@ -164,7 +164,7 @@ async def seed_audit_rows(
     *,
     tenant_id: uuid.UUID,
     count: int,
-    principal_sub: str = "damir",
+    principal_sub: str = "operator-a",
     op_id: str = "vsphere.vm.list",
     op_class: str = "read",
     target_id: uuid.UUID | None = None,
@@ -213,9 +213,9 @@ async def seed_tenants_with_overlap(
 ) -> dict[str, uuid.UUID]:
     """Seed two tenants with overlapping target names + operator subs.
 
-    Both tenants get a ``"rdc-vcenter"`` target and a ``"damir"``
+    Both tenants get a ``"example-vcenter"`` target and a ``"operator-a"``
     operator. The substrate's tenant boundary must split them
-    correctly: tenant-A's query for ``target="rdc-vcenter"`` returns
+    correctly: tenant-A's query for ``target="example-vcenter"`` returns
     only tenant-A's row, never tenant-B's, even though the name
     collides.
 
@@ -226,14 +226,14 @@ async def seed_tenants_with_overlap(
     target_a = await seed_target(
         session,
         tenant_id=tenant_a,
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vcenter",
         host="vc-a.example",
     )
     target_b = await seed_target(
         session,
         tenant_id=tenant_b,
-        name="rdc-vcenter",
+        name="example-vcenter",
         product="vcenter",
         host="vc-b.example",
     )
@@ -241,7 +241,7 @@ async def seed_tenants_with_overlap(
         session,
         tenant_id=tenant_a,
         occurred_at=now - timedelta(seconds=60),
-        principal_sub="damir",
+        principal_sub="operator-a",
         op_id="vsphere.vm.list",
         op_class="read",
         target_id=target_a,
@@ -250,7 +250,7 @@ async def seed_tenants_with_overlap(
         session,
         tenant_id=tenant_b,
         occurred_at=now - timedelta(seconds=30),
-        principal_sub="damir",
+        principal_sub="operator-a",
         op_id="vsphere.vm.list",
         op_class="read",
         target_id=target_b,

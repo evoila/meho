@@ -65,6 +65,9 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
+      - 'docs/deploying.md'
+      - 'scripts/ci/upgrade_rows.py'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'docs/compatibility/**'
@@ -72,12 +75,10 @@ on:
       - 'scripts/ci/check_tested_live_claims.py'
       - 'backend/scripts/validate_live_tests.py'
       - '.github/workflows/docs-site.yml'
-  # Fires when a PR enters the merge queue, so the check can be made
-  # required in branch protection and still report against the
-  # synthesised merge commit. Bare `merge_group:` because the event
-  # does not support `paths:` filtering — same rationale as
-  # readme-version-check.yml (#769). The build is a strict mkdocs run
-  # (~seconds), so the redundant queue runs are negligible.
+  # Bare `merge_group:`: the event does not support `paths:` filtering.
+  # The strict build stays in the queue: two pull requests can each pass
+  # alone and break the build together (one moves a page, the other links
+  # to it). The build runs on a hosted runner (#6350).
   merge_group:
   push:
     # A tag publishes a new docs version, like the image / chart / CLI
@@ -91,6 +92,7 @@ on:
     paths:
       - 'mkdocs.yml'
       - 'docs-site/**'
+      - 'docs/upgrade-rows/**'
   workflow_dispatch:
 
 # Read-only by default; the deploy job elevates to the minimum it
@@ -116,6 +118,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The new-row check below needs the base branch and its history.
+          fetch-depth: 0
 
       - name: Install uv
         # Pinned uv, the same version as ci.yml (its python-lint job says
@@ -128,6 +133,14 @@ jobs:
       - name: Install docs toolchain (locked)
         run: uv sync --locked --only-group docs
         working-directory: backend
+
+      - name: Check new upgrade rows
+        # A new row file must go into the folder of the next release, not
+        # into a folder of a version that is already released.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: python3 scripts/ci/upgrade_rows.py --check-new-rows "$BASE_REF"
 
       - name: Check "tested live" claims
         # A page or the release notes may say a version was tested live

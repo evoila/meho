@@ -6,6 +6,8 @@
 # Tested on 2026-11-09 on a VKS cluster with Kubernetes v1.35.5 (VCF 9.1):
 # installed by an admin of one namespace, every pod under the enforced pod
 # security rule `restricted`, no extra rights (#5833).
+# Tested on 2026-11-11, unchanged, on a VKS cluster with Kubernetes v1.32.10
+# (vSphere 8.0 Update 3, VCF 5.2), with the same result (#6118).
 #
 # Before the install:
 # - VKS brings no ingress controller. The cluster admin installs Traefik from

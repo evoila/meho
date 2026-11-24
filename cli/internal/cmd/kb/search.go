@@ -52,7 +52,7 @@ func newSearchCmd() *cobra.Command {
 			"backend (G0.4-T5 contract). The route audits the query " +
 			"hash but not the raw query (decision #3 in " +
 			"docs/decisions/locked-decisions.md). When your tenant keeps " +
-			"its lessons in a team wiki, the wiki's hits follow the table, " +
+			"its lessons in a tenant wiki, the wiki's hits follow the table, " +
 			"or a line says why the wiki was not searched.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
@@ -204,8 +204,8 @@ func printSearchTable(w io.Writer, r *api.RetrieveResponse) {
 		fmt.Fprintf(w, "%-5d %-8.4f %-40s %s\n",
 			i+1,
 			hit.FusedScore,
-			truncate(hitSlug(hit), 40),
-			truncate(snippetOf(hit.Body), 80),
+			output.SafeText(truncate(hitSlug(hit), 40)),
+			output.SafeText(truncate(snippetOf(hit.Body), 80)),
 		)
 	}
 	if r.QueryDurationMs > 0 {

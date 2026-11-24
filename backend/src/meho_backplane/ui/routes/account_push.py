@@ -13,14 +13,18 @@ or while the push key is missing):
   ``p256dh``, ``auth`` from the browser's push subscription. Checked by
   :func:`~meho_backplane.web_push.endpoints.check_subscription`; a refused
   subscription gets 422 with one plain sentence. Stored for the signed-in
-  person (from the session, never from the body).
+  person (from the session, never from the body), with the person's login
+  facts in the current tenant (read from their login; see
+  :mod:`meho_backplane.web_push.recipients`).
 * ``POST /ui/account/push/unsubscribe`` -- form field ``endpoint``: deletes
   the person's own subscription of this browser.
 * ``POST /ui/account/push/status`` -- form field ``endpoint``: answers
   ``{"on": true}`` when the signed-in person has a stored subscription for
   this browser, else ``{"on": false}``. The switch shows this answer, not
   only what the browser holds. It is a POST so the endpoint never lands in
-  a URL or an access log.
+  a URL or an access log. When it is on, the person's login facts in the
+  current tenant are read again from their login, so a changed login group
+  counts from the next page open.
 * ``POST /ui/account/push/remove`` -- form field ``subscription_id``:
   deletes one subscription of the person, or (for a ``tenant_admin``) one
   made in the current tenant. Any other id is 404.
@@ -42,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_session
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.roles import is_ui_tenant_admin
+from meho_backplane.ui.roles import is_ui_tenant_admin, resolve_ui_operator
 from meho_backplane.ui.templating import get_templates
 from meho_backplane.web_push.endpoints import (
     SubscriptionRefusedError,
@@ -50,12 +54,14 @@ from meho_backplane.web_push.endpoints import (
     push_service_name,
 )
 from meho_backplane.web_push.keys import push_public_key
+from meho_backplane.web_push.recipients import login_facts_for
 from meho_backplane.web_push.store import (
     PushStoreError,
     delete_own_by_endpoint,
     is_own_endpoint,
     list_for_person,
     list_for_tenant,
+    refresh_login_facts,
     remove_subscription,
     save_subscription,
 )
@@ -136,6 +142,7 @@ async def _subscribe(
             operator_sub=session_ctx.operator_sub,
             tenant_id=session_ctx.tenant_id,
             subscription=checked,
+            facts=login_facts_for(await resolve_ui_operator(session_ctx)),
         )
     except PushStoreError:
         return _store_failed("ui_push_subscription_save_failed", session_ctx)
@@ -180,6 +187,16 @@ async def _status(
         on = await is_own_endpoint(
             db_session, operator_sub=session_ctx.operator_sub, endpoint=endpoint
         )
+        # No login read (a short outage) keeps the stored facts: writing
+        # "none" would stop the messages until the next page open.
+        operator = await resolve_ui_operator(session_ctx) if on else None
+        if operator is not None:
+            await refresh_login_facts(
+                db_session,
+                operator_sub=session_ctx.operator_sub,
+                tenant_id=session_ctx.tenant_id,
+                facts=login_facts_for(operator),
+            )
     except PushStoreError:
         return _store_failed("ui_push_subscription_status_failed", session_ctx)
     return JSONResponse({"on": on})

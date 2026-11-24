@@ -112,6 +112,7 @@ from meho_backplane.operations.ingest._internals import (
     load_ops_outside_groups,
     login_type_of,
     operator_disabled_op_ids,
+    refresh_op_embedding,
     scope_has_groups,
     scope_has_rows,
     select_groups,
@@ -210,6 +211,8 @@ def _review_op(
         tags=list(op.tags),
         needs_reingest=op.needs_reingest,
         tenant_enabled=(tenant_settings or {}).get(op.op_id),
+        category=policy.category if policy else None,
+        labels=dict(policy.labels) if policy else {},
     )
 
 
@@ -1048,6 +1051,7 @@ class ReviewService:
         :data:`_UNSET` default leaves it untouched, an explicit ``None``
         writes SQL NULL (the MCP tool's ``null`` arg), a string sets it.
         REST forwards it only when supplied (``EditOpBody`` min_length=1).
+        A change of it also rebuilds the op's search vector (#5321).
 
         Returns :class:`EditOpWarning` advisories — empty on the
         common path. ``is_enabled=True`` runs the enable-time
@@ -1167,6 +1171,8 @@ class ReviewService:
                 is_enabled=is_enabled,
                 llm_instructions=llm_instructions,
             )
+            if "custom_description" in fields_updated:
+                await refresh_op_embedding(op_row)
             payload: dict[str, Any] = {
                 "connector_id": connector_id,
                 "op_id": op_id,

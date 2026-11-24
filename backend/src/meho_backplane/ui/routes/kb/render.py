@@ -67,6 +67,8 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from meho_backplane.ui.code_theme import code_css
+
 __all__ = ["pygments_css", "render_markdown"]
 
 _lock = threading.Lock()
@@ -81,60 +83,10 @@ _lock = threading.Lock()
 #: :data:`_PYGMENTS_CSS`.
 _FORMATTER = HtmlFormatter(nowrap=True, cssclass="kb-code")
 
-#: Pygments styles paired to the console's two DaisyUI 5 themes. The
-#: default/dark scope uses a dark-background style (light token colours);
-#: the ``meho-light`` scope keeps pygments' light ``default`` style (dark
-#: token colours). Both surfaces sit on ``var(--color-base-200)``, which
-#: the templates pin — so the code block follows the active theme instead
-#: of the dead DaisyUI 4 ``--b2`` variable that used to force a light
-#: background in both themes (#2452).
-_DARK_STYLE = "github-dark"
-_LIGHT_STYLE = "default"
-
-#: Selector the light-theme rules are scoped under. Higher specificity
-#: than the bare ``.kb-code`` default block, so it wins when the
-#: ``data-theme="meho-light"`` attribute is present and is inert
-#: otherwise.
-_LIGHT_SCOPE = '[data-theme="meho-light"] .kb-code'
-
-
-def _style_defs(style: str, scope: str, *, tokens_only: bool) -> str:
-    """Return pygments colour rules for *style*, scoped under *scope*.
-
-    The opaque container rule pygments emits (``<scope> { background:
-    ...; color: ... }``) is always dropped: the template owns the code
-    block background via ``var(--color-base-200)`` so it follows the
-    active theme, and keeping pygments' hard-coded background/foreground
-    would (a) fight the DaisyUI surface and (b) leak a light style's dark
-    text — or a dark style's light text — into the wrong theme.
-
-    ``tokens_only`` additionally drops the style-independent global rules
-    (``pre { line-height }``, ``td.linenos`` / ``span.linenos``) so the
-    second (light) block does not re-emit them; the first (dark) block
-    keeps them once.
-    """
-    defs = HtmlFormatter(nowrap=True, cssclass="kb-code", style=style).get_style_defs(scope)
-    container_prefix = f"{scope} {{ background:"
-    kept: list[str] = []
-    for line in defs.splitlines():
-        if line.startswith(container_prefix):
-            continue
-        if tokens_only and not line.startswith(scope):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-
-
-#: Cached, theme-scoped CSS for the ``kb-code`` formatter. Generated once
-#: at module load; safe to embed in a ``<style>`` block. Two blocks: the
-#: default/dark token colours under ``.kb-code`` and the light-theme
-#: overrides under ``[data-theme="meho-light"] .kb-code``.
-_PYGMENTS_CSS: str = "\n".join(
-    (
-        _style_defs(_DARK_STYLE, ".kb-code", tokens_only=False),
-        _style_defs(_LIGHT_STYLE, _LIGHT_SCOPE, tokens_only=True),
-    )
-)
+#: Token colours for ``.kb-code`` blocks, a light and a dark set, from
+#: :mod:`meho_backplane.ui.code_theme` (shared with the memory renderer).
+#: The block background and plain text colour come from the theme too.
+_PYGMENTS_CSS: str = code_css(".kb-code")
 
 
 def _highlight_code(code: str, lang: str, attrs: str) -> str:
@@ -193,16 +145,20 @@ def render_markdown(body: str) -> Markup:
     return Markup(html)
 
 
-def pygments_css() -> str:
-    """Return the theme-scoped CSS rules for the ``kb-code`` formatter.
+def pygments_css() -> Markup:
+    """Return the CSS token-colour rules for the ``kb-code`` formatter.
 
     Callers inject this into a ``<style>`` block in the entry-detail
-    template. The string carries two token-colour rule sets: a
-    default/dark set under ``.kb-code`` and a ``[data-theme="meho-light"]
-    .kb-code`` override, so code blocks stay legible in both console
-    themes. The container background is deliberately omitted — the
-    template pins it to ``var(--color-base-200)`` so the block follows
-    the active theme. The string is pure CSS (no ``<style>`` wrapper) so
-    callers can compose it with other inline styles as needed.
+    template: the block on ``base-200`` with ``base-content`` text, and
+    token colours for the light and the dark theme (see
+    :mod:`meho_backplane.ui.code_theme`). The string is pure CSS (no
+    ``<style>`` wrapper) so callers can compose it with other inline
+    styles as needed.
+
+    Returned as :class:`~markupsafe.Markup` so autoescaping keeps the
+    quotes in the dark-theme selectors (``[data-theme="evoila-dark"]``).
+    Escaped to ``&#34;`` inside ``<style>``, the selectors match nothing
+    and dark pages keep the light token colours. The CSS is built only
+    from pygments' bundled styles and fixed selectors, so it is safe.
     """
-    return _PYGMENTS_CSS
+    return Markup(_PYGMENTS_CSS)

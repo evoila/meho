@@ -37,12 +37,12 @@
         <h4 class="text-sm font-semibold">Large auth-method set stored out-of-band</h4>
         <p class="text-xs">The auth-method list spilled to the read-back store; the summary is below.</p>
         <dl class="mt-2 space-y-1 text-xs">
-          <div class="flex gap-2"><dt class="opacity-60">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd></div>
+          <div class="flex gap-2"><dt class="text-subtle">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd></div>
           {% if handle.total_rows is not none %}
-            <div class="flex gap-2"><dt class="opacity-60">Methods</dt><dd data-handle-total-rows>{{ handle.total_rows }}</dd></div>
+            <div class="flex gap-2"><dt class="text-subtle">Methods</dt><dd data-handle-total-rows>{{ handle.total_rows }}</dd></div>
           {% endif %}
           {% if handle.ttl_seconds is not none %}
-            <div class="flex gap-2"><dt class="opacity-60">TTL</dt><dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd></div>
+            <div class="flex gap-2"><dt class="text-subtle">TTL</dt><dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd></div>
           {% endif %}
         </dl>
       </div>
@@ -63,7 +63,7 @@
         {% endfor %}
       </ul>
     {% else %}
-      <div class="rounded-box border border-base-300 bg-base-100 px-3 py-6 text-center text-sm opacity-60" data-vault-auth="empty">
+      <div class="rounded-box border border-base-300 bg-base-100 px-3 py-6 text-center text-sm text-subtle" data-vault-auth="empty">
         No auth methods reported.
       </div>
     {% endif %}

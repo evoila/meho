@@ -73,20 +73,32 @@ import uuid
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.agents.grant_sets import (
+    StartingGrants,
+    StartingGrantsError,
+    has_live_grant,
+    require_pick,
+    resolve_scopes,
+    write_starting_grants,
+)
 from meho_backplane.agents.identity_ref import (
     AgentIdentityRefInvalidError,
 )
 from meho_backplane.agents.identity_ref import (
     validate_identity_ref as _validate_identity_ref,
 )
+from meho_backplane.agents.live_grants import load_live_grants
 from meho_backplane.agents.mapping import apply_changes, build_definition_row
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
+    AgentDefinitionSaved,
     AgentDefinitionUpdate,
     validate_name,
 )
+from meho_backplane.auth.machine_logins import is_machine_login
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition
@@ -100,6 +112,8 @@ __all__ = [
     # import path; the validator was extracted in G11.2-T9 (#1112) and
     # ``_validate_identity_ref`` below is the alias internal call sites use.
     "AgentIdentityRefInvalidError",
+    "StartingGrantsError",
+    "with_live_grants",
 ]
 
 
@@ -109,6 +123,20 @@ __all__ = [
 #: a tenant that grows past it doesn't accidentally stream the whole
 #: table back to a casual ``meho agent list``.
 DEFAULT_LIST_LIMIT: int = 100
+
+
+async def with_live_grants(
+    tenant_id: uuid.UUID, entry: AgentDefinitionRead
+) -> AgentDefinitionSaved:
+    """Return *entry* with the live grants of its agent (the create and edit answers).
+
+    Read after the save, so the list also holds the grants a starting
+    grant pick just wrote.
+    """
+    live = await load_live_grants(tenant_id, entry.identity_ref)
+    return AgentDefinitionSaved(
+        **entry.model_dump(), live_grants=live.grants, live_grants_truncated=live.truncated
+    )
 
 
 class AgentDefinitionExistsError(Exception):
@@ -179,6 +207,10 @@ class AgentDefinitionService:
         AgentIdentityRefInvalidError
             When ``identity_ref`` does not resolve to a registered,
             non-revoked agent principal in *tenant_id* (G11.2-T8 #1099).
+        StartingGrantsError
+            No starting grant pick while the switch is not ``off`` and the
+            agent has no live grant, or a target name that does not
+            resolve (#6191). Nothing is written.
         ValueError
             When *name* contains characters outside the safe set.
         """
@@ -195,6 +227,9 @@ class AgentDefinitionService:
             # authoritative runtime gate are explained in the new
             # :mod:`meho_backplane.agents.identity_ref` module docstring.
             await _validate_identity_ref(session, tenant_id, payload.identity_ref)
+            grant_scopes = await self._starting_grant_scopes(
+                session, tenant_id, payload.identity_ref, payload.starting_grants
+            )
             session.add(row)
             try:
                 await session.flush()
@@ -203,6 +238,13 @@ class AgentDefinitionService:
                 if _is_unique_violation(exc):
                     raise AgentDefinitionExistsError(payload.name) from exc
                 raise
+            await write_starting_grants(
+                session,
+                tenant_id=tenant_id,
+                principal_sub=payload.identity_ref,
+                created_by_sub=created_by_sub,
+                scopes=grant_scopes,
+            )
             # Refresh so DB-side defaults (created_at / updated_at on PG)
             # are visible on the returned row before the session closes.
             await session.refresh(row)
@@ -215,6 +257,23 @@ class AgentDefinitionService:
             created_by_sub=created_by_sub,
         )
         return entry
+
+    @staticmethod
+    async def _starting_grant_scopes(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        identity_ref: str,
+        starting: StartingGrants | None,
+        *,
+        outcome: str = "Nothing was created.",
+    ) -> list[str]:
+        """Check the starting grant pick and return the scopes of its rows (#6191).
+
+        The pick is required only when the agent has no live grant yet.
+        """
+        if starting is None and not await has_live_grant(session, tenant_id, identity_ref):
+            require_pick(None)
+        return await resolve_scopes(session, tenant_id, starting, outcome=outcome)
 
     async def list_(
         self,
@@ -284,6 +343,8 @@ class AgentDefinitionService:
         tenant_id: uuid.UUID,
         name: str,
         payload: AgentDefinitionUpdate,
+        *,
+        updated_by_sub: str | None = None,
     ) -> AgentDefinitionRead | None:
         """Apply a partial update to ``(tenant_id, name)``; ``None`` if absent.
 
@@ -306,8 +367,23 @@ class AgentDefinitionService:
         the definition was created or last identity-ref'd. The runtime
         check that the principal is still live at invocation time is
         G11.3's responsibility, not this validator's.
+
+        *updated_by_sub* becomes ``updated_by_sub`` of the row, the person who
+        last changed the definition. An edit by a login that MEHO knows as a
+        machine login keeps the person who was there
+        (:mod:`meho_backplane.auth.machine_logins`).
+
+        A new ``identity_ref`` that names another agent with no live grant
+        needs a starting grant pick while ``AGENT_GRANT_REQUIRED`` is not
+        ``off``, the same rule as :meth:`create` (#6389). A pick that adds
+        rows writes them to that agent, with ``created_by_sub`` =
+        *updated_by_sub*, in the same transaction. Raises
+        :class:`StartingGrantsError` and writes nothing when the pick is
+        missing or names a target that does not resolve.
         """
-        changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+        changes = payload.model_dump(
+            exclude_unset=True, exclude_none=True, exclude={"starting_grants"}
+        )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await lock_connector_usage_shared(session)  # #5027, see create
@@ -322,10 +398,34 @@ class AgentDefinitionService:
                 return None
             # Re-validate identity_ref only when the PATCH body sets it.
             new_identity_ref = changes.get("identity_ref")
+            grant_scopes: list[str] = []
             if new_identity_ref is not None:
                 await _validate_identity_ref(session, tenant_id, new_identity_ref)
+                if new_identity_ref != row.identity_ref or payload.starting_grants is not None:
+                    grant_scopes = await self._starting_grant_scopes(
+                        session,
+                        tenant_id,
+                        new_identity_ref,
+                        payload.starting_grants,
+                        outcome="Nothing was changed.",
+                    )
             apply_changes(row, changes)
+            if updated_by_sub is not None and not await is_machine_login(
+                session, tenant_id, updated_by_sub
+            ):
+                # A machine edit keeps the person who last changed the definition.
+                row.updated_by_sub = updated_by_sub
             await session.flush()
+            if grant_scopes and new_identity_ref is not None:
+                if updated_by_sub is None:
+                    raise ValueError("updated_by_sub is needed to write starting grants")
+                await write_starting_grants(
+                    session,
+                    tenant_id=tenant_id,
+                    principal_sub=new_identity_ref,
+                    created_by_sub=updated_by_sub,
+                    scopes=grant_scopes,
+                )
             await session.refresh(row)
             entry = AgentDefinitionRead.model_validate(row)
             await session.commit()

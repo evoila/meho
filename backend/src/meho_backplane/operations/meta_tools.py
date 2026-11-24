@@ -85,7 +85,7 @@ from typing import Annotated, Any, Final, Literal, get_args
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, WithJsonSchema
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -100,6 +100,11 @@ from meho_backplane.operations._errors import (
     result_target_required,
     unknown_connector_message,
 )
+from meho_backplane.operations._group_listing_operations import (
+    add_group_operations,
+    group_listing_operations,
+    load_group_operations,
+)
 from meho_backplane.operations._lookup import (
     close_connector_ids,
     connector_class_registered,
@@ -112,6 +117,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations._search_call_hints import hidden_call_hint_fields
 from meho_backplane.operations._search_clear_lead import (
     search_clear_lead,
     top_hit_lead_is_unclear,
@@ -120,6 +126,15 @@ from meho_backplane.operations._search_plain_sentences import (
     group_leaves_one_operation,
     top_hit_holds_a_query_word,
 )
+from meho_backplane.operations._search_typed_first import (
+    TYPED_KINDS,
+    group_has_typed_operation_clause,
+    groups_raw_block,
+    raw_op_count,
+    search_raw_block,
+    typed_only_for_caller,
+)
+from meho_backplane.operations._target_connector_limit import allowed_connectors_var
 from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
@@ -131,7 +146,15 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
-from meho_backplane.operations.op_policy import OpKey, effective_policy_map
+from meho_backplane.operations.op_policy import (
+    OpKey,
+    effective_policy_map,
+    hidden_classification_fields,
+)
+from meho_backplane.operations.switch_params import (
+    visible_llm_instructions,
+    visible_parameter_schema,
+)
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -139,6 +162,7 @@ from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
 )
+from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
 __all__ = [
     "SEARCH_CLASSIFY_MIN_HITS",
@@ -212,8 +236,14 @@ class UnknownConnectorError(ValueError):
 
     @classmethod
     async def for_caller(cls, *, tenant_id: uuid.UUID, connector_id: str) -> UnknownConnectorError:
-        """Build the error with the close ids *tenant_id* can see (#4136)."""
+        """Build the error with the close ids *tenant_id* can see (#4136).
+
+        With a bound connector list, only the close ids on the list are named.
+        """
         did_you_mean = await close_connector_ids(tenant_id=tenant_id, connector_id=connector_id)
+        allowed = allowed_connectors_var.get()
+        if allowed is not None:
+            did_you_mean = [cid for cid in did_you_mean if cid in allowed]
         return cls(
             unknown_connector_message(connector_id, did_you_mean),
             connector_id=connector_id,
@@ -356,7 +386,7 @@ class OperationGroupSummary(BaseModel):
     so groups-first discovery isn't blind to per-op enablement — an agent
     that called ``list_operation_groups`` FIRST (as the tool description
     instructs) still sees the group whose ops ``search_operations`` and
-    dispatch already treat as live (claude-rdc-hetzner-dc#1136).
+    dispatch already treat as live.
 
     * ``operation_count`` / ``enabled_op_count`` — both count the group's
       ``is_enabled=True`` descriptors. They are equal by construction;
@@ -392,6 +422,16 @@ class OperationSearchHit(BaseModel):
     ``description`` is the original text, or the admin's
     ``custom_description`` while the ``AGENT_READS_CUSTOM_DESCRIPTION``
     switch is on (:func:`~meho_backplane.operations._search.agent_description`).
+
+    ``category`` and ``labels`` are the operation's classification for the
+    caller's tenant. :func:`search_operations` leaves them out while the
+    ``POLICY_CLASSIFICATION`` switch is off. ``category`` is ``None`` when
+    two classification entries conflict.
+
+    ``required_params`` and ``target_required`` tell the agent how to make
+    a first call. :func:`search_operations` leaves them out while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is off
+    (:mod:`~meho_backplane.operations._search_call_hints`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -402,6 +442,10 @@ class OperationSearchHit(BaseModel):
     group_key: str | None
     safety_level: str
     requires_approval: bool
+    category: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    required_params: list[str] = Field(default_factory=list)
+    target_required: bool = False
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
@@ -544,7 +588,7 @@ class CallOperationBody(BaseModel):
     op_id: str = Field(min_length=1)
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
-    work_ref: str | None = Field(default=None, min_length=1)
+    work_ref: WorkRef | None = Field(default=None, description=WORK_REF_FIELD_DESCRIPTION)
     preview_hash: str | None = Field(
         default=None,
         min_length=1,
@@ -712,6 +756,21 @@ class PreviewOperationResponse(BaseModel):
             "(a person's call that runs at once)."
         ),
     )
+    policy_rule: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched "
+            "({source, rule_id, text, decided}). decided is false: today's checks "
+            "decide. Null when the evaluator failed."
+        ),
+    )
+    approvers: list[str] | None = Field(
+        default=None,
+        description=(
+            "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve "
+            "the call when policy_verdict is needs-approval; empty otherwise."
+        ),
+    )
     proposed_effect: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -784,6 +843,7 @@ async def _count_ops_per_group(
     group_ids: list[uuid.UUID],
     *,
     tenant_id: uuid.UUID,
+    typed_only: bool = False,
 ) -> dict[uuid.UUID, int]:
     """Count the ops that are on for *tenant_id*, per group, in one query.
 
@@ -791,6 +851,7 @@ async def _count_ops_per_group(
     first, then the install default, #5029). One SQL round-trip + Python
     aggregation keeps the application-side group-by portable across PG +
     SQLite. Excludes NULL ``group_id`` — ungrouped ops don't contribute.
+    *typed_only* counts only typed and multi-step ops (#4712).
     """
     if not group_ids:
         return {}
@@ -799,6 +860,8 @@ async def _count_ops_per_group(
         enabled_for_tenant_clause(tenant_id=tenant_id),
         installed_owner_clause(),
     )
+    if typed_only:
+        count_stmt = count_stmt.where(EndpointDescriptor.source_kind.in_(TYPED_KINDS))
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
     for row in count_rows:
@@ -814,8 +877,10 @@ def _build_operation_groups_query(
     version: str,
     impl_id: str,
     tenant_id: uuid.UUID,
-    limit: int,
+    limit: int | None,
     cursor: str | None,
+    typed_only: bool = False,
+    group_key: str | None = None,
 ) -> Any:
     """Build the keyset-paginated :class:`OperationGroup` SELECT.
 
@@ -826,7 +891,7 @@ def _build_operation_groups_query(
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
 
-    Visibility predicate (claude-rdc-hetzner-dc#1136): a group surfaces
+    Visibility predicate: a group surfaces
     when it is fully enabled (``review_status='enabled'``) **or** still
     ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
     enabled descriptor. The per-op branch is a correlated ``EXISTS`` over
@@ -842,6 +907,11 @@ def _build_operation_groups_query(
     so it also reads the tenant's own on/off settings (#5029) and hides a
     group whose rows all belong to a connector package that is not
     installed (#5037).
+
+    *typed_only* (switch ``SEARCH_TYPED_FIRST``, #4712) also needs a typed
+    or multi-step op in the group, so a group of raw ops only is left out.
+    ``limit=None`` reads every group, for a count. *group_key* keeps only
+    that group (#4713).
     """
     stmt = (
         select(OperationGroup)
@@ -863,6 +933,10 @@ def _build_operation_groups_query(
     )
     if cursor is not None:
         stmt = stmt.where(OperationGroup.group_key > cursor)
+    if typed_only:
+        stmt = stmt.where(group_has_typed_operation_clause(tenant_id))
+    if group_key is not None:
+        stmt = stmt.where(OperationGroup.group_key == group_key)
     return stmt
 
 
@@ -929,11 +1003,22 @@ async def _require_dispatchable_connector(
 async def list_operation_groups(
     operator: Operator,
     arguments: dict[str, Any],
+    *,
+    list_operations: bool | None = None,
 ) -> dict[str, Any]:
     """Return the operation groups for *connector_id* visible to the agent.
 
     ``arguments`` shape: ``{"connector_id": str, "limit"?: int,
-    "cursor"?: str}``.
+    "cursor"?: str, "include_raw"?: bool, "group"?: str}``. ``include_raw``
+    matters only while the ``SEARCH_TYPED_FIRST`` switch is on
+    (:mod:`._search_typed_first`): then the counts and the groups are of
+    typed and multi-step ops unless it is set, and the answer also carries
+    ``raw_operations``.
+
+    *list_operations* puts each group's typed and multi-step operations into
+    the answer, with a size limit (:mod:`._group_listing_operations`, #4713).
+    ``None`` (the default) follows the ``GROUP_LISTING_OPERATIONS`` switch.
+    ``group`` is used only then: it keeps one group.
 
     A group is returned when it is fully enabled
     (``review_status='enabled'``) **or** still ``staged``/``disabled`` at
@@ -941,7 +1026,7 @@ async def list_operation_groups(
     ``edit_op is_enabled=true``); the latter carries ``partial=True`` with
     a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
     to per-op enablement that ``search_operations`` + dispatch already
-    honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
+    honour. A group that is not enabled and
     holds zero enabled ops stays hidden. Tenant scoping:
     :func:`~meho_backplane.operations._lookup.visible_scope_clause` — the
     tenant's own rows when it has a row for the connector, the built-in
@@ -989,6 +1074,8 @@ async def list_operation_groups(
     """
     connector_id = arguments["connector_id"]
     limit, cursor = _coerce_list_operation_groups_pagination(arguments)
+    with_operations = group_listing_operations() if list_operations is None else list_operations
+    group_filter = (arguments.get("group") or None) if with_operations else None
     product, version, impl_id = parse_connector_id(connector_id)
     await _require_dispatchable_connector(
         operator=operator,
@@ -998,22 +1085,59 @@ async def list_operation_groups(
         impl_id=impl_id,
     )
     sessionmaker = get_sessionmaker()
-    group_stmt = _build_operation_groups_query(
-        product=product,
-        version=version,
-        impl_id=impl_id,
-        tenant_id=operator.tenant_id,
-        limit=limit,
-        cursor=cursor,
-    )
+    query_args: dict[str, Any] = {
+        "product": product,
+        "version": version,
+        "impl_id": impl_id,
+        "tenant_id": operator.tenant_id,
+    }
     async with sessionmaker() as session:
         code_missing = await connector_code_missing(
             session, tenant_id=operator.tenant_id, product=product, version=version, impl_id=impl_id
         )
+        plan = await typed_only_for_caller(
+            session,
+            tenant_id=operator.tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            include_raw=bool(arguments.get("include_raw")),
+        )
+        typed_only = plan is not None and plan[0]
+        group_stmt = _build_operation_groups_query(
+            **query_args,
+            limit=limit,
+            cursor=cursor,
+            typed_only=typed_only,
+            group_key=group_filter,
+        )
         # A connector whose code is not in this MEHO offers no group (#5585).
         groups = [] if code_missing else (await session.execute(group_stmt)).scalars().all()
         counts = await _count_ops_per_group(
-            session, [g.id for g in groups], tenant_id=operator.tenant_id
+            session, [g.id for g in groups], tenant_id=operator.tenant_id, typed_only=typed_only
+        )
+        op_lines = (
+            await load_group_operations(
+                session,
+                groups,
+                tenant_id=operator.tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            )
+            if with_operations
+            else None
+        )
+        raw_block = (
+            None
+            if plan is None or code_missing
+            else groups_raw_block(
+                included=not typed_only,
+                has_typed=plan[1],
+                hidden_groups=(
+                    await _raw_only_group_count(session, query_args) if typed_only else 0
+                ),
+            )
         )
     summaries = [
         OperationGroupSummary(
@@ -1045,11 +1169,30 @@ async def list_operation_groups(
         cursor=cursor,
         next_cursor=next_cursor,
     )
-    return {
+    answer: dict[str, Any] = {
         "connector_id": connector_id,
         "groups": [s.model_dump(mode="json") for s in summaries],
         "next_cursor": next_cursor,
     }
+    if raw_block is not None:
+        answer["raw_operations"] = raw_block
+    if op_lines is not None:
+        # No note for a connector whose code is missing: no group is shown at all.
+        add_group_operations(answer, op_lines, group_filter=None if code_missing else group_filter)
+    return answer
+
+
+async def _raw_only_group_count(session: Any, query_args: dict[str, Any]) -> int:
+    """Count the visible groups that a typed-first listing leaves out (#4712)."""
+    counts = []
+    for typed_only in (False, True):
+        stmt = _build_operation_groups_query(
+            **query_args, limit=None, cursor=None, typed_only=typed_only
+        )
+        counts.append(
+            int((await session.execute(select(func.count()).select_from(stmt.subquery()))).scalar())
+        )
+    return counts[0] - counts[1]
 
 
 async def _has_enabled_operation(
@@ -1254,6 +1397,7 @@ async def _run_search(
     group_key: str | None,
     query: str,
     limit: int,
+    typed_only: bool = False,
 ) -> tuple[list[OperationSearchHit], SearchOutcome, list[str] | None]:
     """Run the search and pick its outcome.
 
@@ -1268,6 +1412,9 @@ async def _run_search(
     hits so the near-tie check can see the second hit. The outcome is read
     from that list; the returned ``hits`` are then cut to *limit* without
     changing their order.
+
+    *typed_only* leaves raw operations out of the candidates (switch
+    ``SEARCH_TYPED_FIRST``, #4712).
     """
     group_id: uuid.UUID | None = None
     if group_key is not None:
@@ -1315,6 +1462,7 @@ async def _run_search(
         query=query,
         limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
         keep_best_meaning=search_clear_lead(),
+        typed_only=typed_only,
     )
     if hits:
         outcome = _classify_hits(
@@ -1360,7 +1508,10 @@ async def search_operations(
 
     ``arguments`` shape: ``{"connector_id": str, "query"?: str,
     "op_id"?: str, "group": str | None, "limit": int = 10,
-    "include_scores"?: bool}``. One of ``query`` / ``op_id`` is needed.
+    "include_scores"?: bool, "include_raw"?: bool}``. One of ``query`` /
+    ``op_id`` is needed. ``include_raw`` matters only while the
+    ``SEARCH_TYPED_FIRST`` switch is on (:mod:`._search_typed_first`); then
+    the ranked answer also carries ``raw_operations``.
 
     **Exact-op mode (#3668).** When ``op_id`` is set, there is no
     ranking: the handler looks up that one operation and returns
@@ -1374,7 +1525,10 @@ async def search_operations(
     **Ranked mode.** Returns ``{"hits": [...], "query_duration_ms":
     float, "outcome": str, "advisory": str | None, "narrowing":
     [str]}``. Each hit carries ``op_id`` / ``summary`` / ``description``
-    / ``group_key`` / ``safety_level`` / ``requires_approval``. The
+    / ``group_key`` / ``safety_level`` / ``requires_approval``, and
+    ``category`` / ``labels`` while the ``POLICY_CLASSIFICATION`` switch
+    is on, and ``required_params`` / ``target_required`` while the
+    ``SEARCH_HIT_CALL_HINTS`` switch is on (#4331). The
     ranking scores are added only when ``include_scores`` is true and
     the caller is ``tenant_admin``; anyone else gets the slim hit. Tenant
     boundary enforced: every candidate query filters on the same
@@ -1461,15 +1615,37 @@ async def search_operations(
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        hits, outcome, detail = await _run_search(
+        plan = await typed_only_for_caller(
             session,
             tenant_id=operator.tenant_id,
             product=product,
             version=version,
             impl_id=impl_id,
-            group_key=group_key,
-            query=query,
-            limit=limit,
+            include_raw=bool(arguments.get("include_raw")),
+        )
+        search_args: dict[str, Any] = {
+            "tenant_id": operator.tenant_id,
+            "product": product,
+            "version": version,
+            "impl_id": impl_id,
+            "group_key": group_key,
+            "query": query,
+            "limit": limit,
+        }
+        typed_only = plan is not None and plan[0]
+        hits, outcome, detail = await _run_search(session, **search_args, typed_only=typed_only)
+        raw_block = (
+            None
+            if plan is None
+            else search_raw_block(
+                included=not typed_only,
+                has_typed=plan[1],
+                hidden_matches=(
+                    await _hidden_raw_matches(session, search_args)
+                    if typed_only and outcome in ("no_match", "ambiguous")
+                    else 0
+                ),
+            )
         )
     duration_ms = (time.monotonic() - started) * 1000
     advisory, narrowing = _search_guidance(
@@ -1487,14 +1663,38 @@ async def search_operations(
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )
-    exclude = None if show_scores else set(_SCORE_FIELDS)
-    return {
+    exclude = (
+        hidden_classification_fields()
+        | hidden_call_hint_fields()
+        | (set() if show_scores else set(_SCORE_FIELDS))
+    )
+    answer: dict[str, Any] = {
         "hits": [h.model_dump(mode="json", exclude=exclude) for h in hits],
         "query_duration_ms": duration_ms,
         "outcome": outcome,
         "advisory": advisory,
         "narrowing": narrowing,
     }
+    if raw_block is not None:
+        answer["raw_operations"] = raw_block
+    return answer
+
+
+async def _hidden_raw_matches(session: Any, search_args: dict[str, Any]) -> int:
+    """Count the raw operations a search with ``include_raw`` would also return.
+
+    Runs only when a typed-first search found no clear match (#4712), so the
+    answer can say how many raw hits were left out.
+    """
+    hits, _, _ = await _run_search(session, **search_args)
+    return await raw_op_count(
+        session,
+        tenant_id=search_args["tenant_id"],
+        product=search_args["product"],
+        version=search_args["version"],
+        impl_id=search_args["impl_id"],
+        op_ids=[hit.op_id for hit in hits],
+    )
 
 
 def _json_type_name(value: Any) -> str:
@@ -1988,12 +2188,18 @@ async def describe_descriptor(
             group_id=descriptor.group_id,
             group_key=group_key,
             tags=list(descriptor.tags or []),
-            parameter_schema=dict(descriptor.parameter_schema or {}),
+            parameter_schema=dict(visible_parameter_schema(descriptor.parameter_schema) or {}),
             response_schema=(
                 dict(descriptor.response_schema) if descriptor.response_schema else None
             ),
             llm_instructions=(
-                dict(descriptor.llm_instructions) if descriptor.llm_instructions else None
+                dict(
+                    visible_llm_instructions(
+                        descriptor.llm_instructions, descriptor.parameter_schema
+                    )
+                )
+                if descriptor.llm_instructions
+                else None
             ),
             safety_level=policy.safety_level,
             requires_approval=policy.requires_approval,

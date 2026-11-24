@@ -55,6 +55,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.operations._audit import SESSION_FROM_CLIENT_KEY
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -69,6 +70,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
@@ -176,6 +178,7 @@ def _seed_audit_row(
     agent_session_id: uuid.UUID | None = None,
     row_id: uuid.UUID | None = None,
     event_class: str = "legacy_request",
+    payload_extra: dict[str, object] | None = None,
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id."""
     resolved_id = row_id or uuid.uuid4()
@@ -193,7 +196,7 @@ def _seed_audit_row(
                     path="/mcp",
                     status_code=status_code,
                     duration_ms=Decimal("1.0"),
-                    payload={"op_id": op_id, "op_class": op_class},
+                    payload={"op_id": op_id, "op_class": op_class, **(payload_extra or {})},
                     work_ref=work_ref,
                     agent_session_id=agent_session_id,
                     event_class=event_class,
@@ -413,6 +416,84 @@ def test_tenant_label_falls_back_to_the_id(
 # ===========================================================================
 # AC2(b): forward-cursor paging -- next page + advanced Load-more cursor
 # ===========================================================================
+
+
+# A ticket id that is valid only after cleaning: 256 characters with
+# spaces around it, and 130 decomposed letters (260 before NFC, 130 after).
+_PADDED_LONG_REF = "  " + "x" * 256 + "  "
+_DECOMPOSED_REF = "A\u0308" * 130
+
+
+@pytest.mark.parametrize("path", ["/ui/audit", "/ui/audit/results"])
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [(_PADDED_LONG_REF, "x" * 256), (_DECOMPOSED_REF, "\u00c4" * 130)],
+    ids=["padded-256", "decomposed-130"],
+)
+def test_audit_work_ref_filter_counts_length_after_cleaning(
+    path: str, typed: str, stored: str
+) -> None:
+    """The search box cleans first, then checks the length, like the REST filter."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_audit_row(tenant_id=_TENANT_A, second=0, op_id="vsphere.vm.matching", work_ref=stored)
+    _seed_audit_row(
+        tenant_id=_TENANT_A, second=1, op_id="vsphere.vm.other", work_ref="gh:evoila/meho#99"
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(path, params={"work_ref": typed})
+    assert response.status_code == 200, response.text
+    assert "vsphere.vm.matching" in response.text
+    assert "vsphere.vm.other" not in response.text
+
+
+@pytest.mark.parametrize("path", ["/ui/audit", "/ui/audit/results"])
+@pytest.mark.parametrize(
+    ("typed", "message"),
+    [("CHG\u200b1", "control or invisible characters"), ("x" * 257, "at most 256 characters")],
+    ids=["invisible", "too-long"],
+)
+def test_audit_work_ref_filter_refuses_a_bad_ticket_id(path: str, typed: str, message: str) -> None:
+    """A refused value is a 422 page or fragment that shows the rule and lists no row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_rows(tenant_id=_TENANT_A, count=1, op_id="vsphere.vm.seen")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(path, params={"work_ref": typed})
+    assert response.status_code == 422, response.text
+    assert response.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert message in response.text
+    assert "vsphere.vm.seen" not in response.text
+
+
+def test_audit_load_more_refusal_replaces_the_results() -> None:
+    """A refused value during "Load more" replaces the results, not the rows list.
+
+    The pager appends its answer into the rows list. The refused answer is the
+    whole results block, so the htmx headers send it to the results area.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_rows(tenant_id=_TENANT_A, count=1, op_id="vsphere.vm.seen")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        paged = client.get(
+            "/ui/audit/results", params={"partial": "rows", "work_ref": "CHG\u200b1"}
+        )
+        searched = client.get("/ui/audit/results", params={"work_ref": "CHG\u200b1"})
+    assert paged.status_code == 422, paged.text
+    assert paged.headers[WORK_REF_REFUSED_HEADER] == "1"
+    assert paged.headers["HX-Retarget"] == "#audit-results"
+    assert paged.headers["HX-Reswap"] == "innerHTML"
+    assert paged.text.count('id="audit-results-inner"') == 1
+    assert "control or invisible characters" in paged.text
+    assert "vsphere.vm.seen" not in paged.text
+    # The search form already swaps the results; its answer needs no new target.
+    assert searched.status_code == 422, searched.text
+    assert "HX-Retarget" not in searched.headers
+    assert "HX-Reswap" not in searched.headers
 
 
 def test_audit_first_page_renders_load_more_when_more_rows() -> None:
@@ -703,6 +784,43 @@ def test_replay_pivot_absent_when_row_has_no_session() -> None:
     assert "/replay" not in response.text
 
 
+def test_replay_pivot_absent_for_cli_login_session_row() -> None:
+    """A row whose session id came from the CLI renders no replay pivot.
+
+    The link "Replay agent session" shows only on a row of an agent session.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    agent_session = uuid.uuid4()
+    cli_session = uuid.uuid4()
+    _seed_audit_row(
+        tenant_id=_TENANT_A, second=0, op_id="agent.session.op", agent_session_id=agent_session
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="cli.session.op",
+        agent_session_id=cli_session,
+        payload_extra={SESSION_FROM_CLIENT_KEY: True},
+    )
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/audit/results")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "cli.session.op" in body
+    assert f"Replay agent session {agent_session}" in body
+    assert f"/ui/audit/sessions/{cli_session}/replay" not in body
+    assert f"Replay agent session {cli_session}" not in body
+
+
 # ===========================================================================
 # Pivots: who-touched / by-work-ref deep-links
 # ===========================================================================
@@ -713,7 +831,7 @@ def test_who_touched_and_work_ref_pivots_render() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
     # A target name resolves via the LEFT JOIN; seed a target row + an audit
     # row referencing it so target_name is denormalized onto the entry.
-    target_id = _seed_target(tenant_id=_TENANT_A, name="rdc-vcenter")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="example-vcenter")
     _seed_audit_row_with_target(
         tenant_id=_TENANT_A,
         second=0,
@@ -728,7 +846,7 @@ def test_who_touched_and_work_ref_pivots_render() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     # who-touched pivot binds the target; by-work-ref binds the ref.
-    assert "/ui/audit?target=rdc-vcenter" in body
+    assert "/ui/audit?target=example-vcenter" in body
     assert "work_ref=gh" in body  # urlencoded; the gh: prefix survives
 
 

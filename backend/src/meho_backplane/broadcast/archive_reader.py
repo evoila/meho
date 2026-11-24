@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, Final, cast
 from uuid import UUID
 
@@ -78,6 +79,7 @@ from meho_backplane.broadcast.archive_sequence import (
     number_unnumbered_rows,
     oldest_retained_seq,
 )
+from meho_backplane.broadcast.claim_archive import ended_claim_ids
 from meho_backplane.broadcast.client import get_broadcast_blocking_client, get_broadcast_client
 from meho_backplane.broadcast.history import (
     DEFAULT_WINDOW_MINUTES,
@@ -86,6 +88,7 @@ from meho_backplane.broadcast.history import (
     row_to_announcement,
     stream_key,
 )
+from meho_backplane.broadcast.read_to_end import run_to_end
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.settings import get_settings
@@ -233,6 +236,19 @@ async def _scan(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def _without_ended_claims(
+    session: AsyncSession,
+    tenant_id: UUID,
+    rows: list[AgentAnnouncement],
+    flt: AnnouncementFilter,
+) -> list[AgentAnnouncement]:
+    """For ``active_only``, drop the steps of claims that have ended (#3762)."""
+    if not flt.active_only:
+        return rows
+    ended = await ended_claim_ids(session, tenant_id, rows)
+    return [row for row in rows if row.claim_id not in ended]
+
+
 @dataclass(frozen=True)
 class StoredAnnouncement:
     """One archived announcement with its per-tenant sequence number."""
@@ -341,6 +357,7 @@ async def read_announcement_history(
             upper=position.watermark,
             limit=limit,
         )
+        readable = await _without_ended_claims(session, tenant_id, rows, flt)
     gap = _scan_gap(position.after_seq, position.watermark, rows, limit) or window_gap
     next_cursor = None
     if len(rows) == limit:
@@ -350,7 +367,7 @@ async def read_announcement_history(
             HistoryPosition(watermark=position.watermark, after_seq=last, since=position.since),
         )
     return {
-        "events": _serialize(rows, flt, since=position.since),
+        "events": _serialize(readable, flt, since=position.since),
         "next_cursor": next_cursor,
         "watch_checkpoint": encode_watch_checkpoint(tenant_id, position.watermark),
         "gap": gap,
@@ -380,28 +397,33 @@ class AnnouncementWatch:
 
 
 async def _watch_scan(
-    tenant_id: UUID, after: int, flt: AnnouncementFilter, seen: set[str]
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    after: int,
+    flt: AnnouncementFilter,
+    seen: set[str],
 ) -> _WatchScan:
     """One archive scan after *after*; moves the checkpoint even when nothing matches."""
-    async with get_sessionmaker()() as session:
-        await _number_older_writes(session, tenant_id)
-        watermark = await archive_watermark(session, tenant_id)
-        if after > watermark:
-            return _WatchScan(
-                [],
-                watermark,
-                False,
-                _gap(
-                    "checkpoint_ahead",
-                    None,
-                    "the checkpoint is ahead of the archive; watching restarts at its current end.",
-                ),
-            )
-        rows = await _scan(session, tenant_id, after=after, upper=watermark, limit=WATCH_SCAN_LIMIT)
+    await _number_older_writes(session, tenant_id)
+    watermark = await archive_watermark(session, tenant_id)
+    if after > watermark:
+        return _WatchScan(
+            [],
+            watermark,
+            False,
+            _gap(
+                "checkpoint_ahead",
+                None,
+                "the checkpoint is ahead of the archive; watching restarts at its current end.",
+            ),
+        )
+    rows = await _scan(session, tenant_id, after=after, upper=watermark, limit=WATCH_SCAN_LIMIT)
+    readable = await _without_ended_claims(session, tenant_id, rows, flt)
     gap = _scan_gap(after, watermark, rows, WATCH_SCAN_LIMIT)
     full = len(rows) == WATCH_SCAN_LIMIT
     new_after = cast("int", rows[-1].seq) if full else watermark
-    return _WatchScan(_matching(rows, flt, seen), new_after, full, gap)
+    return _WatchScan(_matching(readable, flt, seen), new_after, full, gap)
 
 
 class _StreamWake:
@@ -475,7 +497,10 @@ async def watch_announcement_rows(
     seen: set[str] = set()
     while True:
         await wake.mark()
-        scan = await _watch_scan(tenant_id, after, flt, seen)
+        scan = await run_to_end(
+            get_sessionmaker(),
+            partial(_watch_scan, tenant_id=tenant_id, after=after, flt=flt, seen=seen),
+        )
         after = scan.after
         remaining = deadline - loop.time()
         if scan.matched or scan.full or scan.gap is not None or remaining <= 0:
@@ -531,26 +556,43 @@ async def latest_announcements(
     time of the read: a watcher that starts there misses nothing after
     this read. DB errors propagate (fail-loud).
     """
-    tenant_id = operator.tenant_id
-    async with get_sessionmaker()() as session:
-        await _number_older_writes(session, tenant_id)
-        watermark = await archive_watermark(session, tenant_id)
-        stmt = (
-            select(AgentAnnouncement)
-            .where(
-                AgentAnnouncement.tenant_id == tenant_id,
-                AgentAnnouncement.seq <= watermark,
-            )
-            .order_by(AgentAnnouncement.seq.desc())
-            .limit(limit)
-        )
-        if since is not None:
-            stmt = stmt.where(AgentAnnouncement.created_at >= since)
-        rows = list((await session.execute(stmt)).scalars().all())
-    rows.reverse()
-    return LatestAnnouncements(
-        events=_matching(rows, flt or AnnouncementFilter()), watermark=watermark
+    return await run_to_end(
+        get_sessionmaker(),
+        partial(
+            _latest,
+            tenant_id=operator.tenant_id,
+            limit=limit,
+            since=since,
+            active_filter=flt or AnnouncementFilter(),
+        ),
     )
+
+
+async def _latest(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    limit: int,
+    since: datetime | None,
+    active_filter: AnnouncementFilter,
+) -> LatestAnnouncements:
+    await _number_older_writes(session, tenant_id)
+    watermark = await archive_watermark(session, tenant_id)
+    stmt = (
+        select(AgentAnnouncement)
+        .where(
+            AgentAnnouncement.tenant_id == tenant_id,
+            AgentAnnouncement.seq <= watermark,
+        )
+        .order_by(AgentAnnouncement.seq.desc())
+        .limit(limit)
+    )
+    if since is not None:
+        stmt = stmt.where(AgentAnnouncement.created_at >= since)
+    rows = list((await session.execute(stmt)).scalars().all())
+    readable = await _without_ended_claims(session, tenant_id, rows, active_filter)
+    readable.reverse()
+    return LatestAnnouncements(events=_matching(readable, active_filter), watermark=watermark)
 
 
 async def first_seq_since(operator: Operator, since: datetime) -> tuple[int, dict[str, Any] | None]:
@@ -563,8 +605,14 @@ async def first_seq_since(operator: Operator, since: datetime) -> tuple[int, dic
     announcements from that time may be gone, and a later scan cannot
     count them because the resume point is already past them.
     """
-    tenant_id = operator.tenant_id
-    async with get_sessionmaker()() as session:
-        await _number_older_writes(session, tenant_id)
-        position, gap = await _history_start(session, tenant_id, since)
+    return await run_to_end(
+        get_sessionmaker(), partial(_first_seq_since, tenant_id=operator.tenant_id, since=since)
+    )
+
+
+async def _first_seq_since(
+    session: AsyncSession, *, tenant_id: UUID, since: datetime
+) -> tuple[int, dict[str, Any] | None]:
+    await _number_older_writes(session, tenant_id)
+    position, gap = await _history_start(session, tenant_id, since)
     return position.after_seq, gap

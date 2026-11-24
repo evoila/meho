@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the SA-Operators flag on the person (#3327).
+"""Tests for the self-approval flag on the person.
 
-``Operator.self_approver`` says the person is in the SA-Operators group of
-the current tenant. ``Operator.may_self_approve`` is the one question the
-approval checks ask; it also says yes for a MEHO-Admin (#5969). The flag
-is off by default and every unclear token gives ``False``. A machine login
+MEHO reads the old group SA-Operators as Operators, so no default group
+sets ``Operator.self_approver``. ``Operator.may_self_approve`` is the one
+question the approval checks ask; it says yes for a MEHO-Admin. The flag is
+off by default and every unclear token gives ``False``. A machine login
 never gets it.
 """
 
@@ -33,7 +33,7 @@ with warnings.catch_warnings():
 from meho_backplane.auth import current_tenant
 from meho_backplane.auth.current_tenant import select_current_tenant
 from meho_backplane.auth.jwt import _operator_from_claims, clear_jwks_cache, verify_jwt
-from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, RoleGroup, TenantRole
 from meho_backplane.settings import get_settings
 
 _ISSUER: str = "https://keycloak.test/realms/meho"
@@ -101,10 +101,10 @@ def test_token_without_groups_or_tenants_gives_no_flag() -> None:
 @pytest.mark.parametrize(
     "group", ["MEHO-SA-Operators", "/MEHO-SA-Operators", "meho-sa-operators", "/Meho-SA-operators"]
 )
-def test_sa_operators_group_sets_the_flag(group: str) -> None:
+def test_sa_operators_group_is_read_as_operators(group: str) -> None:
     operator = _operator(_claims(groups=[group]))
-    assert operator.self_approver is True
-    assert operator.may_self_approve is True
+    assert operator.self_approver is False
+    assert operator.may_self_approve is False
     assert operator.tenant_role is TenantRole.OPERATOR
 
 
@@ -129,7 +129,7 @@ def test_malformed_groups_claim_gives_no_flag(raw: Any) -> None:
     with capture_logs() as logs:
         operator = _operator(_claims(groups=raw))
     assert operator.self_approver is False
-    assert [e["event"] for e in logs] == ["malformed_groups_claim"]
+    assert logs == []
 
 
 @pytest.mark.parametrize(
@@ -147,17 +147,15 @@ def test_groups_list_with_a_bad_entry_gives_no_flag(groups: list[Any]) -> None:
         operator = _operator(_claims(groups=groups))
     assert operator.self_approver is False
     assert operator.may_self_approve is False
-    assert [(e["event"], e["reason"]) for e in logs] == [
-        ("malformed_groups_claim", "entry_not_a_string")
-    ]
+    assert logs == []
 
 
 def test_custom_group_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``JWT_SELF_APPROVER_GROUP`` changes the group that counts."""
+    """``JWT_SELF_APPROVER_GROUP`` gives no self-approval: no group counts."""
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
     get_settings.cache_clear()
-    assert _operator(_claims(groups=["Ops-Self-Approve"])).self_approver is True
-    assert _operator(_claims(groups=["ops-self-approve"])).self_approver is True
+    assert _operator(_claims(groups=["Ops-Self-Approve"])).self_approver is False
+    assert _operator(_claims(groups=["ops-self-approve"])).self_approver is False
     assert _operator(_claims(groups=["MEHO-SA-Operators"])).self_approver is False
 
 
@@ -186,9 +184,11 @@ def test_blank_group_name_keeps_the_default(monkeypatch: pytest.MonkeyPatch) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_current_tenant_sa_entry_sets_the_flag() -> None:
+def test_current_tenant_sa_entry_is_read_as_operators() -> None:
     operator = _operator(_claims(meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators"]))
-    assert operator.self_approver is True
+    assert operator.self_approver is False
+    assert operator.may_self_approve is False
+    assert operator.tenant_role is TenantRole.OPERATOR
 
 
 @pytest.mark.parametrize("group", ["Readers", "Operators", "Admins", "Approvers"])
@@ -259,11 +259,11 @@ def test_good_entry_next_to_a_bad_entry_gives_no_flag(raw: Any) -> None:
 
 
 def test_list_entry_decides_whatever_the_group_is_called() -> None:
-    """The flag comes from the group's ``meho_tenant`` value, not from its name."""
+    """The role comes from the group's ``meho_tenant`` value, not from its name."""
     operator = _operator(
         _claims(groups=["sa-ops-team"], meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators"])
     )
-    assert operator.self_approver is True
+    assert operator.self_approver is False
     assert operator.tenant_role is TenantRole.OPERATOR
 
 
@@ -300,8 +300,8 @@ _ENTRY_A_OPERATORS = f"{_TENANT_A}:lab-a:Operators"
 _ENTRY_B_SA = f"{_TENANT_B}:lab-b:SA-Operators"
 
 
-async def test_switching_to_the_sa_tenant_turns_the_flag_on() -> None:
-    """The flag is read again from the entry of the tenant the request names."""
+async def test_switching_to_the_sa_tenant_gives_the_operator_role_and_no_flag() -> None:
+    """The role is read again from the entry of the tenant the request names."""
     operator = _operator(_claims(meho_tenants=[_ENTRY_A_OPERATORS, _ENTRY_B_SA]))
     assert operator.tenant_id == _TENANT_A
     assert operator.self_approver is False
@@ -309,8 +309,8 @@ async def test_switching_to_the_sa_tenant_turns_the_flag_on() -> None:
     in_b = await select_current_tenant(operator, "lab-b")
     assert in_b.tenant_id == _TENANT_B
     assert in_b.tenant_role is TenantRole.OPERATOR
-    assert in_b.self_approver is True
-    assert in_b.may_self_approve is True
+    assert in_b.self_approver is False
+    assert in_b.may_self_approve is False
 
     back_in_a = await select_current_tenant(in_b, str(_TENANT_A))
     assert back_in_a.self_approver is False
@@ -344,7 +344,7 @@ async def test_platform_admin_in_a_tenant_without_a_group_counts_as_an_admin(
 
     monkeypatch.setattr(current_tenant, "_find_existing_tenant", _lookup)
     operator = _operator(_claims(platform_admin=True, meho_tenants=[_ENTRY_B_SA]))
-    assert operator.self_approver is True
+    assert operator.self_approver is False
     in_c = await select_current_tenant(operator, "team-c")
     assert in_c.tenant_id == tenant_c
     assert in_c.role_from_platform_admin is True
@@ -360,7 +360,7 @@ async def test_status_answer_without_a_chosen_tenant_gets_no_flag() -> None:
     )
     unchosen = await select_current_tenant(operator, None, allow_unchosen=True)
     assert unchosen.tenant_chosen is False
-    assert unchosen.self_approver is True
+    assert unchosen.self_approver is False
     assert unchosen.may_self_approve is False
 
 
@@ -456,14 +456,16 @@ def test_flag_changes_nothing_else() -> None:
     sa = _operator(_claims(groups=["MEHO-SA-Operators"]))
     assert sa.tenant_role is plain.tenant_role is TenantRole.OPERATOR
     assert sa.approver is plain.approver is False
-    assert sa.model_dump(exclude={"self_approver"}) == plain.model_dump(exclude={"self_approver"})
+    assert sa.old_group is RoleGroup.SA_OPERATORS
+    excluded = {"self_approver", "old_group"}
+    assert sa.model_dump(exclude=excluded) == plain.model_dump(exclude=excluded)
 
 
 def test_operator_stays_frozen() -> None:
     operator = _operator(_claims(groups=["MEHO-SA-Operators"]))
     with pytest.raises(ValidationError):
-        operator.self_approver = False
-    assert operator.self_approver is True
+        operator.self_approver = True
+    assert operator.self_approver is False
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +491,7 @@ def _mint(key: Any, payload_extra: dict[str, Any]) -> str:
         return token.decode("ascii") if isinstance(token, bytes) else token
 
 
-def test_verify_jwt_reads_the_flag_from_a_signed_token() -> None:
+def test_verify_jwt_reads_an_old_group_as_the_operator_role() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         key = JsonWebKey.generate_key("RSA", 2048, options={"kid": "kid-sa"}, is_private=True)
@@ -512,7 +514,7 @@ def test_verify_jwt_reads_the_flag_from_a_signed_token() -> None:
             sa = client.get("/whoami", headers={"Authorization": f"Bearer {sa_token}"})
             plain = client.get("/whoami", headers={"Authorization": f"Bearer {plain_token}"})
     assert sa.status_code == 200, sa.text
-    assert sa.json() == {"may_self_approve": True}
+    assert sa.json() == {"may_self_approve": False}
     assert plain.json() == {"may_self_approve": False}
 
 
@@ -537,19 +539,19 @@ def _rights_approver(
     )
 
 
-def test_a_second_admin_may_approve_a_rights_change() -> None:
-    assert _rights_approver().may_approve_rights_change("requester") is True
+def test_an_admin_may_approve_a_rights_change() -> None:
+    assert _rights_approver().may_approve_rights_change() is True
 
 
 def test_a_platform_admin_may_approve_a_rights_change() -> None:
     operator = _rights_approver(role=TenantRole.OPERATOR, platform_admin=True)
-    assert operator.may_approve_rights_change("requester") is True
+    assert operator.may_approve_rights_change() is True
 
 
-@pytest.mark.parametrize("sub", ["requester", "REQUESTER"])
-def test_the_requester_never_approves_their_own_rights_change(sub: str) -> None:
-    operator = _rights_approver(sub, platform_admin=True, self_approver=True)
-    assert operator.may_approve_rights_change("requester") is False
+def test_the_admin_who_asked_may_approve_their_own_rights_change() -> None:
+    """The check names no requester: the admin who asked is an admin too."""
+    operator = _rights_approver("requester")
+    assert operator.may_approve_rights_change() is True
 
 
 @pytest.mark.parametrize(
@@ -565,4 +567,4 @@ def test_the_requester_never_approves_their_own_rights_change(sub: str) -> None:
     ids=["operator", "sa-operator", "reader", "agent", "service", "no-tenant-chosen"],
 )
 def test_others_may_not_approve_a_rights_change(operator: Operator) -> None:
-    assert operator.may_approve_rights_change("requester") is False
+    assert operator.may_approve_rights_change() is False

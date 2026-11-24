@@ -17,6 +17,8 @@
   ended). Pure server-side; no JS, no client date library. All timestamps
   are tz-aware UTC (coerced in the view projection).
 -#}
+
+{% from "_components.html" import badge %}
 {% macro _ago(ts) -%}
   {#- Past-relative renderer ("X ago"). Input is a tz-aware UTC datetime
       (coerced in the projection); the tooltip carries the exact ISO
@@ -65,38 +67,38 @@
           {% else %}
             {# Ad-hoc run, or the producing definition was deleted after the
                run: no agent back-link to render (#2472). #}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
-        <td><span class="badge badge-ghost badge-sm">{{ row.trigger }}</span></td>
+        <td>{{ badge(row.trigger, variant="quiet") }}</td>
         <td class="text-xs">
           {% if row.model %}
             <span class="font-mono">{{ row.model }}</span>
-            <span class="opacity-50 block">{{ row.provider or "—" }} · {{ row.model_tier }}</span>
+            <span class="text-subtle block">{{ row.provider or "—" }} · {{ row.model_tier }}</span>
           {% else %}
-            <span class="opacity-50">{{ row.model_tier }}</span>
+            <span class="text-subtle">{{ row.model_tier }}</span>
           {% endif %}
         </td>
         <td class="text-xs">{{ row.turns }}</td>
         <td>
           {% if row.work_ref %}
-            <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
+            {{ badge(row.work_ref, variant="outline", size="xs", class="font-mono") }}
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.created_at %}
             <span class="text-xs" title="{{ row.created_at.isoformat() }}">{{ _ago(row.created_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">
           {% if row.started_at and row.ended_at %}
             {{ _duration(row.started_at, row.ended_at) }}
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
@@ -111,10 +113,18 @@
       </tr>
     {% endfor %}
   {% else %}
-    <tr>
-      <td colspan="10" class="text-center text-sm opacity-60 py-6">
-        No agent runs match the current filter.
-      </td>
-    </tr>
+    {% if work_ref_error %}
+      <tr>
+        <td colspan="10" class="py-6">
+          <div role="alert" class="alert alert-error text-sm" data-work-ref-refused>{{ work_ref_error }}</div>
+        </td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="10" class="text-center text-sm text-subtle py-6">
+          No agent runs match the current filter.
+        </td>
+      </tr>
+    {% endif %}
   {% endif %}
 </tbody>

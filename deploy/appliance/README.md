@@ -10,6 +10,8 @@ first start `docs/codebase/appliance-firststart.md`.
 | --- | --- |
 | `build.sh` | The five steps against the lab's vCenter: base image, form-2 install, appliance pieces, clean, export. |
 | `clean.sh` | Runs on the build VM: removes everything that must differ between appliances, checks itself, powers off. |
+| `os-packages.sh` | Makes the signed OS-package file of a release (a flat apt repository). |
+| `upload-release.sh` | Uploads the release files to Google Cloud Storage, one folder per release. |
 | `rewrite-ovf.sh` | Puts our product section and the OVF transports into the exported `.ovf`. |
 | `product-section.xml` | The wizard fields of the import in vCenter. |
 | `firststart/` | Runs once at the appliance's first boot: reads the wizard fields (or, without them, asks on the VM console), sets up the machine, installs the core from the disk. Also the console banner. |
@@ -43,8 +45,10 @@ CIS profile (#4636), the migration fix (#5248) and the OpenBao setup
 lab that points to `MEHO_BUILD_ADDRESS`, because the form-2 install checks
 it. Make a new SSH key for every build.
 
-Step 3 hardens the OS to CIS Ubuntu 24.04 Level 1 - Server
-(`cis/harden.sh`). The build VM must reach the Ubuntu archive then, and
+Step 2 installs every Ubuntu package update and restarts the build VM
+into the newest kernel, before the form-2 install. Step 3 hardens the OS
+to CIS Ubuntu 24.04 Level 1 - Server (`cis/harden.sh`). The build VM must
+reach the Ubuntu archive in both steps, and
 the machine that runs `build.sh` downloads the CIS content of
 ComplianceAsCode from GitHub once (about 180 MB, kept in the cache). The
 scan's result list is `meho-appliance-<version>-cis.txt` in the out-dir;

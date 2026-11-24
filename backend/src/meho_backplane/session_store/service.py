@@ -13,17 +13,23 @@ because only the stored row knows whether an upload is in quarantine.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass
+from meho_backplane.db.models import AgentRun, AuditEventClass
 from meho_backplane.session_store.audit import add_audit_row, write_audit_row
+from meho_backplane.session_store.audit_links import session_links_on
 from meho_backplane.session_store.config import SessionStoreConfig
+from meho_backplane.session_store.hosted_runs import HOSTED_RUN_APP
 from meho_backplane.session_store.models import (
+    AgentSessionAuditLink,
+    AgentSessionEvent,
+    AgentSessionLink,
     AgentSessionRecord,
     AgentSessionRetention,
     AgentSessionUpload,
@@ -34,6 +40,7 @@ from meho_backplane.session_store.schemas import (
     SessionDetail,
     SessionFileState,
     SessionListResponse,
+    SessionMcpLink,
     SessionRetention,
     summary_of,
     upload_part_of,
@@ -42,6 +49,7 @@ from meho_backplane.session_store.schemas import (
 __all__ = [
     "QuarantinedError",
     "SessionNotFoundError",
+    "SessionWindow",
     "delete_record_rows",
     "delete_session",
     "get_retention",
@@ -59,6 +67,19 @@ class SessionNotFoundError(Exception):
 
 class QuarantinedError(Exception):
     """The upload is in quarantine and the caller is not an admin."""
+
+
+@dataclass(frozen=True)
+class SessionWindow:
+    """A time window for the list: the sessions that were active in it.
+
+    A session matches when its last upload is at or after ``since`` and it
+    started before ``until``. A session without a start time counts from
+    its first upload.
+    """
+
+    since: datetime | None = None
+    until: datetime | None = None
 
 
 async def _record(
@@ -80,6 +101,7 @@ async def list_sessions(
     path: str,
     project: str | None,
     state: str | None,
+    window: SessionWindow,
     limit: int,
     offset: int,
 ) -> SessionListResponse:
@@ -89,6 +111,11 @@ async def list_sessions(
         query = query.where(AgentSessionRecord.project == project)
     if state is not None:
         query = query.where(AgentSessionRecord.state == state)
+    if window.since is not None:
+        query = query.where(AgentSessionRecord.last_seen_at >= window.since)
+    if window.until is not None:
+        started = func.coalesce(AgentSessionRecord.started_at, AgentSessionRecord.created_at)
+        query = query.where(started < window.until)
     query = query.order_by(AgentSessionRecord.last_seen_at.desc(), AgentSessionRecord.id).offset(
         offset
     )
@@ -101,7 +128,14 @@ async def list_sessions(
             op_id="sessions.list",
             method="GET",
             path=path,
-            payload={"project": project, "state": state, "offset": offset, "count": len(page)},
+            payload={
+                "project": project,
+                "state": state,
+                "since": window.since.isoformat() if window.since else None,
+                "until": window.until.isoformat() if window.until else None,
+                "offset": offset,
+                "count": len(page),
+            },
         )
         await session.commit()
     more = len(rows) > limit
@@ -122,6 +156,7 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
                 .order_by(AgentSessionUpload.seq)
             )
         )
+        mcp_sessions = await _mcp_sessions(session, record) if session_links_on() else None
         add_audit_row(
             session,
             operator,
@@ -135,7 +170,35 @@ async def read_session(operator: Operator, session_id: str, *, path: str) -> Ses
         **summary_of(record).model_dump(),
         files={p: SessionFileState(**state) for p, state in record.files.items()},
         uploads=[upload_part_of(upload) for upload in uploads],
+        mcp_sessions=mcp_sessions,
     )
+
+
+async def _mcp_sessions(session: AsyncSession, record: AgentSessionRecord) -> list[SessionMcpLink]:
+    """The MCP sessions of *record*: its stored links, or the hosted run itself.
+
+    A hosted run's tool calls carry the run id as their session id, and the
+    run has the work reference (ticket id) it was started with.
+    """
+    links = [
+        SessionMcpLink(mcp_session_id=link.mcp_session_id, work_ref=link.work_ref)
+        for link in await session.scalars(
+            select(AgentSessionLink)
+            .where(AgentSessionLink.record_id == record.id)
+            .order_by(AgentSessionLink.linked_at, AgentSessionLink.mcp_session_id)
+        )
+    ]
+    if record.app == HOSTED_RUN_APP:
+        run = (
+            await session.execute(
+                select(AgentRun.id, AgentRun.work_ref).where(
+                    AgentRun.id == record.id, AgentRun.tenant_id == record.tenant_id
+                )
+            )
+        ).first()
+        if run is not None:
+            links.insert(0, SessionMcpLink(mcp_session_id=run.id, work_ref=run.work_ref))
+    return links
 
 
 async def read_upload(
@@ -215,10 +278,18 @@ async def delete_session(
 
 
 async def delete_record_rows(session: AsyncSession, record_id: uuid.UUID) -> None:
-    """Delete one record and its upload rows in *session* (the caller commits)."""
+    """Delete one record with its upload rows, saved events and both kinds of links.
+
+    The caller commits.
+    """
     await session.execute(
         delete(AgentSessionUpload).where(AgentSessionUpload.record_id == record_id)
     )
+    await session.execute(delete(AgentSessionLink).where(AgentSessionLink.record_id == record_id))
+    await session.execute(
+        delete(AgentSessionAuditLink).where(AgentSessionAuditLink.record_id == record_id)
+    )
+    await session.execute(delete(AgentSessionEvent).where(AgentSessionEvent.record_id == record_id))
     await session.execute(delete(AgentSessionRecord).where(AgentSessionRecord.id == record_id))
 
 

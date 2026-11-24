@@ -30,6 +30,7 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
     consult_and_record_grant,
+    credential_grant_reason,
     find_live_grant,
     null_target_only_park_hint,
 )
@@ -456,6 +457,48 @@ async def test_existing_grant_row_still_clears_an_ordinary_write() -> None:
     assert await _grant_use_audit_rows() == 1
 
 
+def test_a_stored_secret_read_class_cannot_be_granted() -> None:
+    """A class a connector's safety floor stored on the row counts like the op id."""
+    assert credential_grant_reason("GET:/clients") is None
+    assert credential_grant_reason("GET:/clients", "credential_read") is not None
+    assert credential_grant_reason("GET:/clients", "write") is None
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_row_never_clears_an_op_with_a_stored_secret_read_class() -> None:
+    """A grant row never runs an ingested op whose row stores ``credential_read``.
+
+    The op id alone says ``read``. The stored class makes a person approve
+    each call, also when a grant row for the op is already there.
+    """
+    op_id = "GET:/clients"
+    await _seed_grant_row(op_id)
+    descriptor = EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=op_id,
+        source_kind="ingested",
+        method="GET",
+        safety_level="caution",
+        requires_approval=True,
+        parameter_schema={},
+    )
+    operator = _service_operator()
+    control = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR, record=False
+    )
+    assert control is not None
+
+    descriptor.op_class = "credential_read"
+    grant_id = await consult_and_record_grant(
+        operator=operator, descriptor=descriptor, target=None, connector_id=_CONNECTOR
+    )
+
+    assert grant_id is None
+    assert await _grant_use_audit_rows() == 0
+
+
 @pytest.mark.asyncio
 async def test_decide_only_consult_reports_the_grant_but_records_no_use() -> None:
     """``record=False`` answers "would a grant clear this?" and writes nothing (#4923).
@@ -836,13 +879,13 @@ async def test_create_selector_grant_round_trips() -> None:
             op_id="vmware.composite.vm.create",
             connector_id=_CONNECTOR,
             target_product="vmware",
-            target_name_pattern="esx-dc*",
+            target_name_pattern="esx-host*",
             reason="authorise runtime-created ESXi appliances",
         ),
     )
     assert entry.target_id is None
     assert entry.target_product == "vmware"
-    assert entry.target_name_pattern == "esx-dc*"
+    assert entry.target_name_pattern == "esx-host*"
 
 
 def test_create_rejects_target_id_with_selector() -> None:
@@ -867,7 +910,7 @@ async def test_create_refuses_duplicate_active_selector() -> None:
         op_id="vmware.composite.vm.create",
         connector_id=_CONNECTOR,
         target_product="vmware",
-        target_name_pattern="esx-dc*",
+        target_name_pattern="esx-host*",
         reason="first",
     )
     await svc.create(_TENANT_ID, _CREATOR, payload)
@@ -911,7 +954,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
             op_id="vmware.composite.vm.create",
             connector_id=_CONNECTOR,
             target_product="vmware",
-            target_name_pattern="esx-dc*",
+            target_name_pattern="esx-host*",
             reason="runtime-created appliances",
         ),
     )
@@ -925,7 +968,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
         connector_id=_CONNECTOR,
         target_id=fresh_target_id,
         target_product="vmware",
-        target_name="esx-dc19",
+        target_name="esx-host19",
     )
     assert matched is not None
     assert matched.id == created.id
@@ -940,7 +983,7 @@ async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) 
             connector_id=_CONNECTOR,
             target_id=fresh_target_id,
             target_product="k8s",
-            target_name="esx-dc19",
+            target_name="esx-host19",
         )
     ) is None
 
@@ -1015,7 +1058,7 @@ async def test_concrete_target_grant_wins_over_selector(session: AsyncSession) -
         connector_id=_CONNECTOR,
         target_id=concrete_id,
         target_product="vmware",
-        target_name="esx-dc19",
+        target_name="esx-host19",
     )
     assert matched is not None
     assert matched.id == concrete.id

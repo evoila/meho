@@ -27,9 +27,13 @@
 //     markup would otherwise be parsed into live DOM by the swap (the same
 //     injection class the broadcast surface closed in PR #1044) --
 //     ``x-text`` bindings render every field inert.
-//   * Close the stream when a ``final`` or ``error`` frame arrives, so
-//     neither the browser nor the sse extension reconnects to a finished
-//     run (``closeStream``).
+//   * Close the stream when a ``final``, ``error`` or ``end`` frame
+//     arrives, so neither the browser nor the sse extension reconnects to
+//     a finished run (``closeStream``). The stream reads the run's saved
+//     events from the session store, so a reload shows the events so far
+//     and then the live ones. With ``rememberRun`` the controller puts
+//     ``?run=<id>`` in the page address once the run id is known, so a
+//     reload follows the same run.
 //   * Track the run lifecycle the operator cares about: the ``run_id``
 //     (surfaced as a deep-link to the run detail, T3 #1830), the terminal
 //     status pill (``succeeded`` / ``failed`` from ``final`` / ``error``),
@@ -49,7 +53,8 @@
 //     The proxy's 404 / 409 / 403 map to inline feedback: a 409 means the
 //     run already reached a terminal state (the controller flips to
 //     ``cancelled``/done rather than erroring), a 404 means the run no
-//     longer exists, a 403 means the operator may not cancel it.
+//     longer exists, a 403 means the operator may not cancel it (the
+//     console shows the rule of the answer: who may stop the run).
 //
 // Frame wire-shape (from ``api/v1/agent_runs._format_event``)
 //   Each SSE frame is ``event: <kind>`` with ``data:`` a single-line JSON
@@ -59,8 +64,34 @@
 //     tool_result  -> { tool_name, content }
 //     final        -> { output }
 //     error        -> { error }
+//     end          -> { status, state, last_seq }  (the last frame; state is
+//                     "ended", or "unfinished" when the run stopped
+//                     without a final event)
+//   A saved event's frame also has its ``seq``. When the caller may not
+//   read its data, the frame has ``withheld: true`` (a run another person
+//   started) or ``quarantined: true`` (the secret check was not sure; only
+//   a tenant admin reads it) instead of the data.
 //   The kind is the EventSource event ``type`` (the ``sse-swap`` name),
 //   read off ``$event.detail.type``; ``$event.detail.data`` is the JSON.
+
+// The text of a refused stop (403). The detail of the answer is
+// ``agent_run_cancel_forbidden: <rule>`` when the run belongs to another
+// login; the rule says who may stop the run, so the console shows it.
+const STOP_REFUSED_PREFIX = "agent_run_cancel_forbidden: ";
+
+async function stopRefusedText(response) {
+  const fallback = "You do not have permission to stop this run.";
+  let detail;
+  try {
+    detail = (await response.json()).detail;
+  } catch (e) {
+    return fallback;
+  }
+  if (typeof detail === "string" && detail.startsWith(STOP_REFUSED_PREFIX)) {
+    return `You may not stop this run: ${detail.slice(STOP_REFUSED_PREFIX.length)}.`;
+  }
+  return fallback;
+}
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("agentRunConsole", (opts) => ({
@@ -83,6 +114,7 @@ document.addEventListener("alpine:init", () => {
     // hx-headers, which is HTMX-only). Defaults keep the component working
     // if a caller omits them (the button just stays hidden / inert).
     agentName: (opts && opts.agentName) || "",
+    rememberRun: !!(opts && opts.rememberRun),
     csrfToken: (opts && opts.csrfToken) || "",
     cancelUrlTemplate: (opts && opts.cancelUrlTemplate) || "",
     // Operator-cancelled: set once the BFF proxy confirms the transition
@@ -116,8 +148,60 @@ document.addEventListener("alpine:init", () => {
       }
       if (frame && typeof frame.run_id === "string" && !this.runId) {
         this.runId = frame.run_id;
+        this.rememberRunInAddress();
+      }
+      if (kind === "end") {
+        this.onEnd(frame);
+        return;
       }
       this.appendEntry(kind, frame);
+    },
+
+    // Put ``?run=<id>`` in the page address, so a reload follows this run
+    // (the console then reads its saved events) instead of showing an
+    // empty form. Only for a run this page started.
+    rememberRunInAddress() {
+      if (!this.rememberRun || !window.history || !window.history.replaceState) {
+        return;
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", this.runId);
+      window.history.replaceState(window.history.state, "", url.toString());
+    },
+
+    // The ``end`` frame: the run reached its end status. A run that saved
+    // a final or error event already shows its pill. A run that stopped
+    // without one (a crash, a restart, a lost lease) is "unfinished"; its
+    // transcript ends with the last saved event. MEHO never adds an
+    // ending the run did not make.
+    onEnd(frame) {
+      if (!this.finalStatus && !this.cancelled) {
+        if (frame.status === "cancelled") {
+          this.cancelled = true;
+        } else {
+          this.finalStatus = frame.state === "unfinished" ? "unfinished" : frame.status || "";
+        }
+        if (frame.state === "unfinished") {
+          const last = frame.last_seq ? "#" + frame.last_seq : "none";
+          this.entries.push({
+            kind: "unfinished",
+            title: "run stopped without a final event",
+            body: "Last saved event: " + last + ". Run status: " + (frame.status || "unknown") + ".",
+          });
+        }
+      }
+      this.closeStream();
+    },
+
+    // Text for an event whose data the caller may not read.
+    hiddenBody(frame) {
+      if (frame.withheld) {
+        return "Only the person who started this run can read this event.";
+      }
+      if (frame.quarantined) {
+        return "The secret check was not sure about this event. Only a tenant admin can read it.";
+      }
+      return "";
     },
 
     // Map a parsed frame onto the transcript entry shape the template
@@ -162,7 +246,8 @@ document.addEventListener("alpine:init", () => {
       if (frame && frame.status === "awaiting_approval") {
         this.awaitingApproval = true;
       }
-      this.entries.push({ kind: kind, title: title, body: body });
+      const hidden = this.hiddenBody(frame || {});
+      this.entries.push({ kind: kind, title: title, body: hidden || body });
     },
 
     // Pretty-print a JSON-able payload for the transcript body. A string
@@ -262,7 +347,7 @@ document.addEventListener("alpine:init", () => {
         return;
       }
       if (response.status === 403) {
-        this.cancelError = "You do not have permission to stop this run.";
+        this.cancelError = await stopRefusedText(response);
         return;
       }
       this.cancelError = "Could not stop the run. Refresh and try again.";
@@ -312,6 +397,9 @@ document.addEventListener("alpine:init", () => {
       if (this.cancelled) {
         return "cancelled";
       }
+      if (this.finalStatus === "unfinished") {
+        return "unfinished";
+      }
       if (this.finalStatus) {
         return "complete";
       }
@@ -325,6 +413,9 @@ document.addEventListener("alpine:init", () => {
       if (this.cancelled) {
         return "bg-base-300";
       }
+      if (this.finalStatus === "unfinished") {
+        return "bg-warning";
+      }
       if (this.finalStatus) {
         return "bg-success";
       }
@@ -335,6 +426,9 @@ document.addEventListener("alpine:init", () => {
     },
 
     finalBadgeClass() {
+      if (this.finalStatus === "unfinished") {
+        return "badge-warning";
+      }
       return this.finalStatus === "succeeded" ? "badge-success" : "badge-error";
     },
 
@@ -348,6 +442,8 @@ document.addEventListener("alpine:init", () => {
           return "badge-success";
         case "error":
           return "badge-error";
+        case "unfinished":
+          return "badge-warning";
         default:
           return "badge-outline";
       }

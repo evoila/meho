@@ -128,6 +128,49 @@ func TestListRefusesAnUnknownState(t *testing.T) {
 	}
 }
 
+func TestListSendsTheTimeWindow(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{summary("inside")}, "next_cursor": nil})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	opts := listOptions{
+		Since: "2026-11-02T00:00:00Z", Until: "2026-11-09T00:00:00+01:00", Limit: 50, BackplaneOverride: srv.URL,
+	}
+	if err := runList(cmd, opts); err != nil {
+		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
+	}
+	if strings.Join(got, ",") != "2026-11-02T00:00:00Z,2026-11-09T00:00:00+01:00" {
+		t.Fatalf("since,until = %q", got)
+	}
+	if !strings.Contains(stdout.String(), "inside") {
+		t.Fatalf("out = %q", stdout.String())
+	}
+}
+
+func TestListRefusesABadTimeWindow(t *testing.T) {
+	for _, opts := range []listOptions{
+		{Since: "2026-11-02T00:00:00", Limit: 10},
+		{Until: "last week", Limit: 10},
+		{Since: "2026-11-09T00:00:00Z", Until: "2026-11-02T00:00:00Z", Limit: 10},
+	} {
+		cmd, _, stderr := newCmd(t, "")
+		if err := runList(cmd, opts); err == nil {
+			t.Fatalf("%+v: want an error", opts)
+		}
+		if !strings.Contains(stderr.String(), "--since") && !strings.Contains(stderr.String(), "--until") {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	}
+}
+
 func TestShowWithoutTheRightIsInsufficientRole(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {
@@ -173,6 +216,72 @@ func TestShowPrintsFilesAndQuarantine(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("missing %q in %q", want, stdout.String())
 		}
+	}
+	if strings.Contains(stdout.String(), "mcp sessions") {
+		t.Errorf("shows mcp sessions with none linked: %q", stdout.String())
+	}
+}
+
+func TestShowPrintsTheLinkedMcpSessions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {
+		body := summary("abc")
+		body["files"] = map[string]any{}
+		body["uploads"] = []any{}
+		body["mcp_sessions"] = []any{
+			map[string]any{"mcp_session_id": "66666666-6666-6666-6666-666666666666", "work_ref": "CHG-7"},
+			map[string]any{"mcp_session_id": "77777777-7777-7777-7777-777777777777", "work_ref": nil},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	if err := runShow(cmd, "abc", false, srv.URL); err != nil {
+		t.Fatalf("runShow: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{
+		"mcp sessions (2):",
+		"66666666-6666-6666-6666-666666666666  work ref CHG-7",
+		"77777777-7777-7777-7777-777777777777  work ref -",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+// With AUDIT_SESSION_LINKS off the server leaves mcp_sessions out. The
+// --json output must leave it out too, not print "mcp_sessions": null.
+func TestShowJSONKeepsAFieldTheServerLeavesOut(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sessions/abc", func(w http.ResponseWriter, _ *http.Request) {
+		body := summary("abc")
+		body["files"] = map[string]any{}
+		body["uploads"] = []any{}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedToken(t, srv.URL)
+
+	cmd, stdout, stderr := newCmd(t, "")
+	if err := runShow(cmd, "abc", true, srv.URL); err != nil {
+		t.Fatalf("runShow: %v; stderr=%s", err, stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v; %q", err, stdout.String())
+	}
+	if _, ok := got["mcp_sessions"]; ok {
+		t.Errorf("--json added mcp_sessions the server left out: %q", stdout.String())
+	}
+	if got["session_id"] != "abc" {
+		t.Errorf("session_id = %v; want abc", got["session_id"])
 	}
 }
 

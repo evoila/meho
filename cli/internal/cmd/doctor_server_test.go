@@ -249,7 +249,7 @@ func TestDoctor_ServerLayer_LaptopUnchanged(t *testing.T) {
 		// The report the doctor built before the server layer existed:
 		// the offline layer, then the skipped authenticated layer.
 		before := &doctorReport{}
-		runOfflineChecks(before, opts, deps)
+		runOfflineChecks(context.Background(), before, opts, deps)
 		skip := doctorCheck{Layer: layerAuthed, Name: "authenticated layer", Status: doctorSkip,
 			Detail: "skipped: no usable backplane URL", Hint: "run `meho login <url>` or pass --backplane <url>"}
 		if noNetwork {

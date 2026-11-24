@@ -11,9 +11,13 @@
 // The first member of this tree is `admin keycloak bootstrap-clients`
 // (G0.9.1-T11, #791): provisions the public CLI device-code client +
 // the public MCP client + their 6 protocol mappers + 4 default client
-// scopes + the five MEHO role groups + an admin user against a Keycloak
+// scopes + the three MEHO role groups + an admin user against a Keycloak
 // realm, idempotently. The verb encodes the 5-step recipe documented
 // in deploy/values-examples/README.md § Auth onramp recipe.
+//
+// One verb tree is different: `admin tools` (sign out one tool of a
+// person) runs through the backplane like every operation, so the call
+// waits for approval and is audited.
 //
 // Future admin verbs (rotating chart-managed secrets, seeding initial
 // tenants in MEHO's own DB, etc.) live here too — anything that the
@@ -25,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/cmd/admin/keycloak"
+	"github.com/evoila/meho/cli/internal/cmd/admin/tools"
 )
 
 // NewRootCmd returns the `meho admin` parent command, ready for
@@ -40,9 +45,12 @@ func NewRootCmd() *cobra.Command {
 			"operator credentials. Unlike the rest of the meho CLI, " +
 			"these verbs do not dispatch through the backplane — they " +
 			"provision the substrate the backplane needs to function " +
-			"(public Keycloak clients, initial users, etc.).",
+			"(public Keycloak clients, initial users, etc.). " +
+			"One exception: `admin tools` runs through the backplane " +
+			"like every operation, so its calls wait for approval.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(keycloak.NewRootCmd())
+	cmd.AddCommand(tools.NewRootCmd())
 	return cmd
 }

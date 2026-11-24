@@ -25,6 +25,14 @@ Two response shapes from one handler:
   naturally (the documented "stop returning the polling element" pattern,
   https://htmx.org/docs/#polling) -- no JS, no 286-response plumbing.
 
+The full page also lists the run's saved events (a hosted run saves each
+turn, tool call, tool result and its final answer or error while it runs,
+:mod:`meho_backplane.session_store.hosted_runs`), read once with an audit
+row (``sessions.run_events.read``). A run that stopped without a final
+event shows "unfinished" and ends with its last saved event. The status
+panel poll does not read the events again. A live run links to the run
+console, which follows its events as they are saved.
+
 Read at ``operator`` role via the in-process
 :class:`~meho_backplane.agent.invocation.AgentInvoker` (the same ``poll``
 the Bearer ``GET /api/v1/agents/runs/{handle}`` route uses). Tenant scoping
@@ -50,6 +58,7 @@ from meho_backplane.agent.invocation import (
     AgentRunNotFoundError,
     get_agent_invoker,
 )
+from meho_backplane.agent.run_events import RunEventsView, read_run_events
 from meho_backplane.auth.operator import Operator
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -87,10 +96,30 @@ def _pretty_json(value: dict[str, object] | None) -> str | None:
     return json.dumps(value, indent=2, sort_keys=True, default=str)
 
 
+def _events_context(view: RunEventsView) -> dict[str, object]:
+    """Project the saved events onto the template's ``run_events`` shape."""
+    return {
+        "state": view.state,
+        "events": [
+            {
+                "seq": event.seq,
+                "kind": event.kind,
+                "at": event.created_at,
+                "data_json": _pretty_json(event.data) if event.data else None,
+                "withheld": event.withheld,
+                "quarantined": event.quarantined and not event.data,
+            }
+            for event in view.events
+        ],
+        "last_seq": view.events[-1].seq if view.events else None,
+    }
+
+
 def _build_context(
     detail: dict[str, object],
     *,
     csrf_token: str,
+    events: RunEventsView | None = None,
 ) -> dict[str, object]:
     """Assemble the detail-page / status-panel template context."""
     return {
@@ -100,6 +129,7 @@ def _build_context(
         "output_json": _pretty_json(detail.get("output")),  # type: ignore[arg-type]
         "poll_interval_seconds": _POLL_INTERVAL_SECONDS,
         "csrf_token": csrf_token,
+        "run_events": _events_context(events) if events is not None else None,
     }
 
 
@@ -132,12 +162,13 @@ def build_runs_detail_router() -> APIRouter:
             ) from exc
         detail = project_detail_to_view(view)
         csrf_token = mint_csrf_token(str(session_ctx.session_id))
-        context = _build_context(detail, csrf_token=csrf_token)
-        template_name = (
-            "agents/runs/_status_panel.html"
-            if _is_htmx_request(request)
-            else "agents/runs/detail.html"
-        )
+        if _is_htmx_request(request):
+            template_name = "agents/runs/_status_panel.html"
+            context = _build_context(detail, csrf_token=csrf_token)
+        else:
+            template_name = "agents/runs/detail.html"
+            events = await read_run_events(operator, handle, audit_path=request.url.path)
+            context = _build_context(detail, csrf_token=csrf_token, events=events)
         response = get_templates().TemplateResponse(request, template_name, context)
         response.set_cookie(
             key=CSRF_COOKIE_NAME,

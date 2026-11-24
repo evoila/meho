@@ -57,6 +57,7 @@ __all__ = [
     "register_governed_subops",
     "registered_governed_subop_surfaces",
     "reset_governed_subop_registry",
+    "steps_declared",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -174,6 +175,15 @@ def composites_without_declared_steps(composite_op_ids: Iterable[str]) -> list[s
     )
 
 
+def steps_declared(composite_op_id: str) -> bool:
+    """Say whether *composite_op_id* declared its steps, or declared it has none.
+
+    The up-front step check of an agent call refuses a multi-step
+    operation that changes something and declared neither (#6298).
+    """
+    return composite_op_id in _REGISTRY or composite_op_id in _NO_STEPS
+
+
 def classify_subop_grantability(op_id: str) -> SubopGrantability:
     """Return whether *op_id* is grantable, and why not when it is not.
 
@@ -184,14 +194,30 @@ def classify_subop_grantability(op_id: str) -> SubopGrantability:
     identically to how it would be refused at grant-create time. Op-id only
     here (no descriptor lookup): a configured pattern or a vendor delete
     action name such as ``POST:/VirtualMachine/{moId}/Destroy_Task`` (#4632).
+    A child that reads, writes or makes a credential is never grantable
+    either (:func:`~meho_backplane.operations.service_grants.credential_grant_reason`,
+    by op id: a step has no stored row). The one exception is in sandbox
+    mode, for a child a connector marked with
+    :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`: a
+    delete grant covers it, so it is grantable there.
     The caller layers a best-effort descriptor ``safety_level`` on top. On
     an instance in sandbox mode (#4622) a delete-shaped child is grantable
     (with a delete grant, made in the web console), so it is not flagged.
     """
-    from meho_backplane.operations.service_grants import delete_shaped_refusal_reason
+    from meho_backplane.operations.service_grants import (
+        _sandbox_delete_exception,
+        credential_grant_reason,
+        delete_shaped_refusal_reason,
+    )
     from meho_backplane.sandbox_mode import sandbox_mode_active
     from meho_backplane.settings import get_settings
 
+    credential = credential_grant_reason(op_id)
+    if credential is not None:
+        if _sandbox_delete_exception(op_id, None, None):
+            # A delete grant, made in the web console, covers this step.
+            return SubopGrantability(op_id=op_id, grantable=True, ungrantable_reason=None)
+        return SubopGrantability(op_id=op_id, grantable=False, ungrantable_reason=credential)
     reason = delete_shaped_refusal_reason(
         op_id, get_settings().service_grant_delete_shaped_patterns
     )

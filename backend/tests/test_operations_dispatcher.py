@@ -42,7 +42,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -1225,6 +1225,69 @@ async def test_no_connector_error_names_target_product_not_connector_id(
     assert result.extras["version"] is None
 
 
+async def test_no_connector_error_names_the_probe_again_fix_for_old_openbao_target(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An OpenBao target probed before 0.47 is stored as ``vault`` 2.x.
+
+    No connector serves it, and the error names the fix. The resolver test
+    in ``test_connectors_vault_version_ranges.py`` covers the target after a
+    probe that finds ``openbao``.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="GET:/v1/openbao-hint",
+        source_kind="ingested",
+        method="GET",
+        path="/v1/openbao-hint",
+        handler_ref=None,
+        summary="vault op",
+        description="Ingested op under product vault.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    target = _FakeTarget(product="vault", version="2.7.1", name="bao-one")
+    target.fingerprint = SimpleNamespace(version="2.7.1", product="vault")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="GET:/v1/openbao-hint",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    assert "meho targets probe -- bao-one" in result.error
+    assert result.extras["error_code"] == "no_connector"
+    assert "meho targets probe -- bao-one" in result.extras["hint"]
+
+
 # ---------------------------------------------------------------------------
 # #4139: an op that needs a target and got none says so in one clear line
 # ---------------------------------------------------------------------------
@@ -1391,7 +1454,7 @@ async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
     label (with the resolver's exception message in
     ``extras["exception_message"]``) so operators see the upstream
     diagnosis, matching ``signals 7`` and ``8`` of
-    ``claude-rdc-hetzner-dc#697``.
+    a consumer dogfood report.
     """
     # Register a typed op for a product, but DON'T register a
     # connector class for it — the resolver must miss.
@@ -1434,8 +1497,8 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
 ) -> None:
     """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
 
-    Mirrors the live ``rdc-rke2-infra-k8s`` shape from
-    ``claude-rdc-hetzner-dc#697`` signal 8: the Kubernetes connector
+    Mirrors a live Kubernetes target shape from
+    a consumer dogfood report, signal 8: the Kubernetes connector
     self-registers under ``('k8s', '', '')`` (v1) AND ``('k8s',
     '1.x', 'k8s')`` (v2), the tie-break ladder treats both as
     equally specific (both have ``supported_version_range=None``),
@@ -3398,6 +3461,10 @@ async def test_dispatch_pending_caution_op_no_permission_row(
         assert pending_row is not None
         assert pending_row.status == "pending"
         assert pending_row.op_id == "vault.kv.caution"
+        # The result carries the id of the committed approval.request row.
+        assert result.audit_id is not None
+        assert result.audit_id == pending_row.request_audit_id
+        assert await fresh.get(AuditLog, result.audit_id) is not None
 
         # The op itself did not execute → no audit row on its own path.
         op_rows = (
@@ -3503,6 +3570,80 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     assert by_path["vault.kv.autoexec"].event_class == "operation_execution"
     assert by_path["vault.kv.deny"].event_class == "policy_decision"
     assert by_path["approval.request"].event_class == "policy_decision"
+
+    # #6044: POLICY_ENGINE_SHADOW is off, so no row names a policy rule.
+    for row in by_path.values():
+        assert (row.policy_rule, row.policy_version) == (None, None)
+    assert (parked_request.policy_rule, parked_request.policy_version) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_audit_rows_name_the_shadow_rule_when_the_switch_is_on(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6044: with POLICY_ENGINE_SHADOW on, each row names the evaluator's rule.
+
+    The rule is marked as not deciding: ``(shadow)`` on the audit row,
+    ``decided: false`` on the approval request. Today's verdicts stay.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    get_settings.cache_clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    for op_id, safety in (("vault.kv.autoexec", "safe"), ("vault.kv.needsapproval", "caution")):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id=op_id,
+            handler=_module_handler_returning_dict,
+            summary=f"{safety} op.",
+            description=f"A {safety} operation.",
+            parameter_schema={"type": "object"},
+            safety_level=safety,
+            when_to_use=None,
+            embedding_service=stub_embedding_service,
+        )
+    target = _FakeTarget(product="vault")
+
+    auto = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.autoexec",
+        target=target,
+        params={},
+    )
+    assert auto.status == "ok", auto.error
+    parked = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.needsapproval",
+        target=target,
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+
+    async with get_sessionmaker()() as fresh:
+        by_path = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars().all()}
+        parked_request = await fresh.get(
+            ApprovalRequest, UUID(parked.extras["approval_request_id"])
+        )
+        assert parked_request is not None
+
+    auto_row = by_path["vault.kv.autoexec"]
+    assert auto_row.policy_decision == "auto-execute"
+    assert auto_row.policy_rule == "default:person.safe (shadow)"
+    assert auto_row.policy_version is None
+    request_row = by_path["approval.request"]
+    assert request_row.policy_decision == "needs-approval"
+    assert request_row.policy_rule is not None
+    assert request_row.policy_rule.endswith(" (shadow)")
+    rule = parked_request.policy_rule
+    assert rule is not None
+    assert rule["decided"] is False
+    assert request_row.policy_rule == f"{rule['source']}:{rule['rule_id']} (shadow)"
+    assert parked_request.policy_version is None
 
 
 async def _register_human_op(
@@ -3853,6 +3994,58 @@ async def test_park_without_builder_uses_identifier_default(
             "preview_reason": "connector_did_not_populate",
         }
         assert "preview" not in row.proposed_effect
+
+
+@pytest.mark.asyncio
+async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A preview build that raises still stores the op's risk level and class."""
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.failing_preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op whose preview build fails.",
+        description="Parks for approval; the preview build raises.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    with patch(
+        "meho_backplane.operations.dispatcher.build_proposed_effect",
+        new_callable=AsyncMock,
+        side_effect=RecursionError("too deep"),
+    ):
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.failing_preview_op",
+            target=target,
+            params={"note": "x"},
+        )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    async with get_sessionmaker()() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        assert row.proposed_effect == {
+            "op_id": "vault.kv.failing_preview_op",
+            "connector_id": "vault-1.x",
+            "target_id": str(target.id),
+            "op_class": "other",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_failed": True,
+        }
 
 
 @pytest.mark.asyncio
@@ -4287,6 +4480,48 @@ async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
 
 
 @pytest.mark.asyncio
+async def test_composite_step_row_names_the_step_rule_and_the_parent_keeps_its_own(
+    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6044: the step gate binds the step's rule only for its own rows.
+
+    With POLICY_ENGINE_SHADOW on, the step's ``denied`` row names the rule
+    the evaluator matched for the step; the parent's row names the parent's.
+    """
+    from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
+
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    get_settings.cache_clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _seed_gated_composite(
+        stub_embedding_service.encode_one.return_value,
+        op_id="vault.composite.reports_refused_step",
+        handler="_module_composite_handler_reports_refused_step",
+    )
+    _register_refusing_preflight("vault.kv.gated_step")
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.reports_refused_step",
+            target=_FakeTarget(product="vault"),
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "ok", result.error
+    step_rows = await _audit_rows("vault.kv.gated_step")
+    parent_rows = await _audit_rows("vault.composite.reports_refused_step")
+    assert len(step_rows) == 1
+    assert len(parent_rows) == 1
+    assert step_rows[0].policy_rule is not None
+    assert step_rows[0].policy_rule.endswith(" (shadow)")
+    assert parent_rows[0].policy_rule == "default:person.safe (shadow)"
+    assert step_rows[0].policy_rule != parent_rows[0].policy_rule
+
+
+@pytest.mark.asyncio
 async def test_composite_with_refused_step_writes_one_denied_audit_row(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -4666,3 +4901,43 @@ async def test_dispatch_ingested_write_with_person_token_waits(
         params=params,
     )
     assert result.status == "awaiting_approval", result.error
+
+
+def test_isolate_global_registries_restores_safety_floors() -> None:
+    """The autouse isolation fixture restores the connector safety floors.
+
+    Connector floors register on import. A test that empties the floor store
+    (as a registry-clearing test does) must not strip every other connector's
+    floors for the rest of the worker. Drive the conftest fixture by hand so
+    the assertion sees the state after its teardown.
+    """
+    from meho_backplane.operations.ingest import safety_floors
+    from tests import conftest
+
+    isolate_gen_fn = cast(
+        "Callable[[], Iterator[None]]",
+        conftest._isolate_global_registries.__wrapped__,  # type: ignore[attr-defined]
+    )
+    marker = ("isolation-test-product", "isolation-test-impl")
+    safety_floors.register_ingest_safety_floor(
+        product=marker[0], impl_id=marker[1], floor=lambda _impl, proto: proto
+    )
+    before = dict(safety_floors._FLOORS)
+    try:
+        gen = isolate_gen_fn()
+        next(gen)  # setup: snapshot
+
+        safety_floors._FLOORS.clear()
+        safety_floors.register_ingest_safety_floor(
+            product="other-product", impl_id="other-impl", floor=lambda _impl, proto: proto
+        )
+
+        with pytest.raises(StopIteration):
+            next(gen)  # teardown: restore
+
+        assert dict(safety_floors._FLOORS) == before
+        assert marker in safety_floors._FLOORS
+        assert ("other-product", "other-impl") not in safety_floors._FLOORS
+    finally:
+        safety_floors._FLOORS.clear()
+        safety_floors._FLOORS.update(before)

@@ -5,8 +5,8 @@
 
 MEHO's built-in Keycloak (the subchart's realm file plus the bootstrap
 Job's realm stage, as in ``test_keycloak_role_groups_e2e.py``) federates a
-real OpenLDAP. The five top-level MEHO role groups keep carrying the
-``tenant_id`` / ``tenant_role`` / ``approver`` attributes; the realm's User
+real OpenLDAP. The three top-level MEHO role groups keep carrying the
+``tenant_id`` / ``tenant_role`` attributes; the realm's User
 Attribute mappers (``aggregate.attrs=false``) find them through the
 person's groups and their parent groups
 (``docs/decisions/login-role-groups.md``).
@@ -16,7 +16,7 @@ users and groups subtree) in the same realm:
 
 A. **Same names.** The directory has groups named exactly like MEHO's
    (``MEHO-Operators`` ...). One ``group-ldap-mapper`` (READ_ONLY, Groups
-   Path ``/``, no mapped group attributes, no dropping, a filter on the five
+   Path ``/``, no mapped group attributes, no dropping, a filter on the three
    names) matches them to OUR groups by name: no duplicates after a group
    sync or a login, our attributes stay, and the unrelated ``staff`` group
    is not imported.
@@ -89,9 +89,7 @@ _MEHO_GROUPS = list(_ROLE_GROUPS)
 _RENAMED = {
     "SG-MEHO-Read": "MEHO-Readers",
     "SG-MEHO-Ops": "MEHO-Operators",
-    "SG-MEHO-SAOps": "MEHO-SA-Operators",
     "SG-MEHO-Admin": "MEHO-Admins",
-    "SG-MEHO-Approve": "MEHO-Approvers",
 }
 _DIRECTORY_GROUP = {meho: sg for sg, meho in _RENAMED.items()}
 _TENANT_CLAIMS = ("tenant_id", "tenant_role", "approver")
@@ -489,7 +487,8 @@ async def test_a_directory_member_gets_the_groups_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
     assert operator.platform_admin is False
 
 
@@ -645,7 +644,8 @@ async def test_b_directory_member_gets_the_parent_groups_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    # MEHO reads MEHO-Approvers as Readers: the claim does not set the flag.
+    assert operator.approver is False
     assert operator.platform_admin is False
 
 

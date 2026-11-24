@@ -79,7 +79,7 @@ from meho_backplane.checks.schemas import (
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult
-from meho_backplane.op_classes import is_safe_write
+from meho_backplane.op_classes import call_always_waits, is_safe_write
 from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
@@ -92,6 +92,7 @@ __all__ = [
     "SensorIdentitySubForbiddenError",
     "SensorNameConflictError",
     "SensorOperationNotFoundError",
+    "SensorRequiresNoPersonError",
     "SensorRequiresReadOperationError",
     "SensorRequiresSafeOperationError",
     "SensorResultsCursorError",
@@ -188,6 +189,25 @@ class SensorRequiresReadOperationError(SensorRequiresSafeOperationError):
             f"operation {op_id!r} on connector {connector_id!r} is a write "
             f"(safety_level={safety_level!r}, but it changes the target); a Sensor "
             "may reference only reads (it is evaluated unattended)",
+        )
+
+
+class SensorRequiresNoPersonError(SensorRequiresSafeOperationError):
+    """Raised when a Sensor's call waits for a person on every call.
+
+    A ``safe`` read can still wait for a person because of what it reads,
+    for example a ``proxmox.api.get`` of a file inside a guest
+    (:func:`meho_backplane.op_classes.call_always_waits`). A Sensor runs with
+    no person, so such a call is refused like a non-read. Same error code
+    and status as the parent class.
+    """
+
+    def __init__(self, connector_id: str, op_id: str, safety_level: str) -> None:
+        super().__init__(connector_id, op_id, safety_level)
+        self.args = (
+            f"operation {op_id!r} on connector {connector_id!r} with these params "
+            "waits for a person on every call; a Sensor runs with no person, so it "
+            "may reference only calls that run at once",
         )
 
 
@@ -411,9 +431,11 @@ async def _lock_and_require_operation(
 def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None:
     """Refuse a Sensor whose op is not ``safe``, or is a ``safe`` write.
 
-    Raises :class:`SensorRequiresSafeOperationError` for a non-safe op and
+    Raises :class:`SensorRequiresSafeOperationError` for a non-safe op,
     :class:`SensorRequiresReadOperationError` for a safe op its connector
-    marks as a safe write (:func:`~meho_backplane.op_classes.is_safe_write`).
+    marks as a safe write (:func:`~meho_backplane.op_classes.is_safe_write`)
+    and :class:`SensorRequiresNoPersonError` for a call that waits for a
+    person on every call (:func:`~meho_backplane.op_classes.call_always_waits`).
     """
     if descriptor.safety_level != "safe":
         raise SensorRequiresSafeOperationError(
@@ -421,6 +443,10 @@ def _require_read(payload: SensorCreate, descriptor: EndpointDescriptor) -> None
         )
     if is_safe_write(payload.op_id):
         raise SensorRequiresReadOperationError(
+            payload.connector_id, payload.op_id, descriptor.safety_level
+        )
+    if call_always_waits(payload.op_id, payload.params):
+        raise SensorRequiresNoPersonError(
             payload.connector_id, payload.op_id, descriptor.safety_level
         )
 

@@ -39,7 +39,10 @@ func newOverridesCmd() *cobra.Command {
 			"Each row shows the connector, the operation, the risk level and\n" +
 			"approval that apply in the row's scope (the value in code with every\n" +
 			"change there), the scope (a tenant's id, or `install` for the whole\n" +
-			"install), who made the change, when, and the reason. Remove a row\n" +
+			"install), who made the change, when, and the reason. With the\n" +
+			"POLICY_CLASSIFICATION setting on, the values include the\n" +
+			"classification, and two more columns name the category and the\n" +
+			"entry that decided them. Remove a row\n" +
 			"with `meho connector remove-override`.\n\n" +
 			"--reduced-approval lists only the operations a platform admin turned\n" +
 			"approval off for, where approval is still off: the report\n" +
@@ -121,8 +124,20 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 	if len(rows) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s\n",
+	// With classification on (#6038) each row also names its category and
+	// the entry that decided the values; with it off the table is as before.
+	classified := false
+	for _, row := range rows {
+		if row.RuleRef != nil {
+			classified = true
+		}
+	}
+	header := fmt.Sprintf("%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s",
 		"connector_id", "op_id", "risk", "approval", "scope", "who", "when", "reason")
+	if classified {
+		header += "\tcategory\tsource"
+	}
+	fmt.Fprintln(w, header)
 	for _, row := range rows {
 		risk := "(code)"
 		if row.SafetyLevel != nil {
@@ -144,7 +159,7 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 		if row.TenantId != nil {
 			scope = row.TenantId.String()
 		}
-		fmt.Fprintf(w, "%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s\n",
+		line := fmt.Sprintf("%-24s %-36s %-11s %-9s %-36s %-20s %-16s %s",
 			truncate(row.ConnectorId, 24),
 			truncate(row.OpId, 36),
 			risk,
@@ -154,5 +169,12 @@ func printOverridesTable(w io.Writer, reducedApproval bool, rows []api.Operation
 			row.SetAt.UTC().Format("2006-01-02 15:04"),
 			reason,
 		)
+		if classified {
+			line += "\t" + valueOr(row.Category, "-") + "\t" + valueOr(row.RuleRef, "-")
+			if row.AlwaysWait != nil && *row.AlwaysWait {
+				line += " (always waits)"
+			}
+		}
+		fmt.Fprintln(w, line)
 	}
 }

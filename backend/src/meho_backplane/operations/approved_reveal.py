@@ -16,9 +16,12 @@ person who asked:
   So the answer to the approving person holds no secret value.
 * The operation runs when the person who asked fetches the value
   (:func:`fetch_approved_reveal`): ``POST /api/v1/approvals/{id}/reveal``,
-  the "Show value" button of the Vault console, or
-  ``meho secret read --approval <id>``. The value goes only to that person,
-  in that one answer.
+  the "Show value" button of the Vault console,
+  ``meho secret read --approval <id>``, or, with ``MCP_REVEAL_FETCH`` on,
+  ``call_operation`` with ``approval_request_id`` on MCP
+  (:mod:`meho_backplane.mcp.tools._call_operation_reveal`). The value goes
+  only to that person, in that one answer, and the answer says
+  ``Cache-Control: no-store`` (:mod:`meho_backplane.no_store`).
 * The fetch works once, and only within
   ``APPROVAL_REVEAL_FETCH_WINDOW_SECONDS`` (15 minutes by default) after the
   approval. The one-resumer claim makes the second fetch fail.
@@ -39,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -51,6 +55,7 @@ __all__ = [
     "fetch_approved_reveal",
     "is_secret_reveal",
     "is_write_reveal",
+    "refuse_reveal_outside_limit",
     "result_waiting_for_requester",
     "reveal_fetch_window",
     "without_secret_values",
@@ -114,6 +119,11 @@ def reveal_fetch_window() -> timedelta:
 def result_waiting_for_requester(request: ApprovalRequest) -> OperationResult:
     """The answer to an approve of a reveal: approved, nothing ran, no value."""
     minutes = max(1, int(reveal_fetch_window().total_seconds()) // 60)
+    mcp_way = (
+        f"`call_operation` with `approval_request_id: {request.id}` on MCP, "
+        if get_settings().mcp_reveal_fetch
+        else ""
+    )
     return OperationResult(
         status=WAITING_FOR_REQUESTER,
         op_id=request.op_id,
@@ -126,8 +136,8 @@ def result_waiting_for_requester(request: ApprovalRequest) -> OperationResult:
                 f"Approved. The operation did not run. It runs once, when the person "
                 f"who asked gets the value, within {minutes} minutes: "
                 f"`POST /api/v1/approvals/{request.id}/reveal`, "
-                f"`meho secret read --approval {request.id}`, or the 'Show value' "
-                f"button in the console."
+                f"`meho secret read --approval {request.id}`, {mcp_way}or the "
+                f"'Show value' button in the console."
             ),
         },
     )
@@ -185,6 +195,49 @@ def _check_fetch(request: ApprovalRequest, *, now: datetime) -> None:
             "params_changed",
             "The stored request no longer matches the approved one. Send the request again.",
         )
+
+
+async def refuse_reveal_outside_limit(operator: Operator, request_id: uuid.UUID) -> bool:
+    """True when the bound connector limit refuses the fetch of *request_id*.
+
+    The check is
+    :func:`~meho_backplane.operations._target_connector_limit.stored_request_outside_limit`.
+    A refused try writes one ``approval.reveal`` audit row with the outcome
+    ``connector_not_allowed`` and runs nothing. A request that is not in the
+    caller's tenant is not refused here: the fetch answers it as not found.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditEventClass
+    from meho_backplane.operations._target_connector_limit import stored_request_outside_limit
+    from meho_backplane.operations.approval_queue import (
+        ApprovalNotFoundError,
+        _write_audit_row,
+        get_request,
+    )
+    from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED
+
+    async with get_sessionmaker()() as session:
+        try:
+            request = await get_request(
+                session, tenant_id=operator.tenant_id, request_id=request_id
+            )
+        except ApprovalNotFoundError:
+            return False
+        if not await stored_request_outside_limit(operator, request):
+            return False
+        await _write_audit_row(
+            session,
+            audit_id=uuid.uuid4(),
+            event_class=AuditEventClass.APPROVAL_DECISION,
+            operator=operator,
+            request=request,
+            path="approval.reveal",
+            status_code=_REFUSED_STATUS_CODE,
+            duration_ms=0.0,
+            extra_payload={"outcome": CONNECTOR_NOT_ALLOWED},
+        )
+        await session.commit()
+    return True
 
 
 async def fetch_approved_reveal(
@@ -249,4 +302,8 @@ async def fetch_approved_reveal(
             "already_used",
             "The value of this request was already fetched. Send the request again.",
         )
+    if result.status == "ok":
+        # The answer holds the value. The dispatcher marks a revealed read,
+        # but not an operation that makes a new credential, so mark it here.
+        mark_answer_holds_secret()
     return result

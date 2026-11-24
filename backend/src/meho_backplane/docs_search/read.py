@@ -53,6 +53,19 @@ raises :class:`~meho_backplane.docs_search.CollectionNotReadyError` (retry
 later), and a backend that is down raises
 :class:`~meho_backplane.auth.corpus.CorpusUnavailable`, as on search.
 
+Filter values with spaces at their ends
+=======================================
+
+The faces build the scope with
+:func:`~meho_backplane.docs_search.build_docs_scope`, which strips
+``product`` and ``version``, so a handle from ``search_docs`` reads with
+the stripped values. A wiki hit of ``search_knowledge`` is searched with the
+caller's values unchanged (``meho_backplane.kb.wiki_search``), so its handle
+is bound to them. A face passes the unchanged values as ``exact_scope``
+(:func:`exact_read_scope`): when the backend refuses the handle with the
+stripped values, :func:`read_docs` tries once more with the unchanged ones.
+With ``KB_WIKI_FILTERED_SEARCH`` off there is no such second try.
+
 What is never logged
 ====================
 
@@ -66,12 +79,19 @@ caller id.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from meho_backplane.auth.corpus import CorpusReadError, ReadDisclosure, ReadMode, ReadReason
+from meho_backplane.auth.corpus import (
+    CorpusReadError,
+    ReadDisclosure,
+    ReadMode,
+    ReadReason,
+    UpstreamRead,
+)
 from meho_backplane.docs_search.backends import resolve_backend
 from meho_backplane.docs_search.citation_links import public_source_url
 from meho_backplane.docs_search.collection_access import (
@@ -81,13 +101,16 @@ from meho_backplane.docs_search.collection_access import (
     resolve_entitled_ready_collection,
 )
 from meho_backplane.docs_search.service import forwarded_scope
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from meho_backplane.auth.operator import Operator
     from meho_backplane.docs_collections import DocCollection
-    from meho_backplane.docs_search.service import DocsScope
+    from meho_backplane.docs_search.service import DocsScope, ForwardedScope
 
 __all__ = [
     "DOCS_SOURCE_NOT_FOUND",
@@ -98,6 +121,7 @@ __all__ = [
     "DocsReadRateLimitedError",
     "DocsReadResult",
     "DocsReadSearchAgainError",
+    "exact_read_scope",
     "read_docs",
     "resolve_readable_collection",
 ]
@@ -217,6 +241,7 @@ async def read_docs(
     before: int = 1,
     after: int = 1,
     cursor: str | None = None,
+    exact_scope: DocsScope | None = None,
 ) -> DocsReadResult:
     """Read around a hit in *collection*, named by its *read_handle*.
 
@@ -241,6 +266,7 @@ async def read_docs(
         before: Chunks before the hit for ``around``, 0 to 3.
         after: Chunks after the hit for ``around``, 0 to 3.
         cursor: A ``next`` / ``up`` cursor from an earlier reply, or ``None``.
+        exact_scope: :func:`exact_read_scope`, tried when *scope* is refused.
 
     Raises:
         DocsReadNotFoundError: the collection does not offer read, or the
@@ -260,32 +286,44 @@ async def read_docs(
         )
         raise DocsReadNotFoundError()
 
-    forwarded = forwarded_scope(scope, resolved.ref)
-    try:
-        upstream = await resolved.backend.read(
-            operator,
-            read_handle,
-            backend_ref=resolved.ref,
-            mode=mode,
-            before=before,
-            after=after,
-            cursor=cursor,
-            filters=dict(forwarded.filters) or None,
-        )
-    except CorpusReadError as exc:
-        _log.info(
-            "docs_read_refused",
-            operator_sub=operator.sub,
-            collection_key=scope.collection_key,
-            reason=exc.kind,
-        )
-        if exc.kind == CorpusReadError.KIND_SEARCH_AGAIN:
-            raise DocsReadSearchAgainError() from exc
-        if exc.kind == CorpusReadError.KIND_RATE_LIMITED:
-            raise DocsReadRateLimitedError(exc.retry_after) from exc
-        raise DocsReadNotFoundError() from exc
+    read = partial(
+        resolved.backend.read,
+        operator,
+        read_handle,
+        backend_ref=resolved.ref,
+        mode=mode,
+        before=before,
+        after=after,
+        cursor=cursor,
+    )
+    upstream, forwarded = await _read_upstream(
+        read,
+        forwarded_scope(scope, resolved.ref),
+        forwarded_scope(exact_scope, resolved.ref) if exact_scope else None,
+        operator_sub=operator.sub,
+        collection_key=scope.collection_key,
+    )
 
-    result = DocsReadResult(
+    result = _projected(upstream)
+    _log.info(
+        "docs_read_completed",
+        operator_sub=operator.sub,
+        collection_key=scope.collection_key,
+        mode=result.mode,
+        disclosure=result.disclosure,
+        reason=result.reason,
+        located=result.located,
+        truncated=result.truncated,
+        has_next=result.next is not None,
+        text_chars=len(result.text) if result.text is not None else 0,
+        scope_forwarded=forwarded.mode,
+    )
+    return result
+
+
+def _projected(upstream: UpstreamRead) -> DocsReadResult:
+    """The backend's reply with a public source link, never a storage path."""
+    return DocsReadResult(
         mode=upstream.mode,
         text=upstream.text,
         title=upstream.title,
@@ -301,17 +339,62 @@ async def read_docs(
         next=upstream.next,
         up=upstream.up,
     )
-    _log.info(
-        "docs_read_completed",
-        operator_sub=operator.sub,
-        collection_key=scope.collection_key,
-        mode=result.mode,
-        disclosure=result.disclosure,
-        reason=result.reason,
-        located=result.located,
-        truncated=result.truncated,
-        has_next=result.next is not None,
-        text_chars=len(result.text) if result.text is not None else 0,
-        scope_forwarded=forwarded.mode,
-    )
-    return result
+
+
+async def _read_upstream(
+    read: Callable[..., Awaitable[UpstreamRead]],
+    forwarded: ForwardedScope,
+    exact: ForwardedScope | None,
+    *,
+    operator_sub: str,
+    collection_key: str,
+) -> tuple[UpstreamRead, ForwardedScope]:
+    """Call *read* with the filters of *forwarded*, and the filters used.
+
+    On "not found", reads once more with *exact* when it sends other filters:
+    a wiki hit is bound to the unchanged values (module docstring). A refusal
+    becomes the matching :class:`DocsReadError`.
+    """
+    try:
+        try:
+            return await read(filters=dict(forwarded.filters) or None), forwarded
+        except CorpusReadError as exc:
+            if (
+                exact is None
+                or exact.filters == forwarded.filters
+                or exc.kind != CorpusReadError.KIND_NOT_FOUND
+            ):
+                raise
+            return await read(filters=dict(exact.filters) or None), exact
+    except CorpusReadError as exc:
+        _log.info(
+            "docs_read_refused",
+            operator_sub=operator_sub,
+            collection_key=collection_key,
+            reason=exc.kind,
+        )
+        if exc.kind == CorpusReadError.KIND_SEARCH_AGAIN:
+            raise DocsReadSearchAgainError() from exc
+        if exc.kind == CorpusReadError.KIND_RATE_LIMITED:
+            raise DocsReadRateLimitedError(exc.retry_after) from exc
+        raise DocsReadNotFoundError() from exc
+
+
+def exact_read_scope(
+    scope: DocsScope, product: str | None, version: str | None
+) -> DocsScope | None:
+    """Return *scope* with the caller's *product* and *version* unchanged.
+
+    ``None`` when they equal the stripped values in *scope*, so there is
+    nothing else to try. A blank value counts as absent, as in
+    :func:`~meho_backplane.docs_search.build_docs_scope`. Also ``None`` with
+    ``KB_WIKI_FILTERED_SEARCH`` off: only that switch makes wiki hits with
+    unchanged values, so a read then makes one request, as before.
+    """
+    if not get_settings().kb_wiki_filtered_search:
+        return None
+    exact_product = product if product and product.strip() else None
+    exact_version = version if version and version.strip() else None
+    if (exact_product, exact_version) == (scope.product, scope.version):
+        return None
+    return scope.model_copy(update={"product": exact_product, "version": exact_version})

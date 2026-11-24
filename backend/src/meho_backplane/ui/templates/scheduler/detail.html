@@ -20,6 +20,8 @@
   "UTC" suffix is accurate on both the PostgreSQL (tz-aware) and SQLite
   (naive round-trip) paths.
 -#}
+
+{% from "_components.html" import badge %}
 {% extends "base.html" %}
 
 {% block page_title %}Scheduled trigger &middot; MEHO Operator Console{% endblock %}
@@ -33,11 +35,11 @@
 
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div class="space-y-1">
-      <a href="/ui/scheduler" class="link link-hover text-sm opacity-70">&larr; Scheduler</a>
+      <a href="/ui/scheduler" class="link link-hover text-sm text-muted">&larr; Scheduler</a>
       <h1 class="text-xl font-semibold flex items-center gap-3">
-        <span class="badge badge-ghost">{{ trigger.kind }}</span>
+        {{ badge(trigger.kind, variant="quiet", size="md") }}
         <span class="badge {{ trigger.status_badge }}">{{ trigger.status }}</span>
-        <span class="font-mono text-sm opacity-70">{{ trigger.id }}</span>
+        <span class="font-mono text-sm text-muted">{{ trigger.id }}</span>
       </h1>
     </div>
     {% if can_cancel %}
@@ -52,7 +54,7 @@
         Cancel trigger
       </button>
     {% elif is_terminal %}
-      <span class="text-xs opacity-60">
+      <span class="text-xs text-subtle">
         This trigger is terminal ({{ trigger.status }}) and cannot be cancelled.
       </span>
     {% endif %}
@@ -64,33 +66,37 @@
       <div class="card-body">
         <h2 class="card-title text-base">Schedule</h2>
         <dl class="grid grid-cols-[10rem_1fr] gap-y-2 text-sm">
-          <dt class="opacity-60">Kind</dt>
+          <dt class="text-subtle">Kind</dt>
           <dd>{{ trigger.kind }}</dd>
 
           {% if trigger.kind == "cron" %}
-            <dt class="opacity-60">Cron expression</dt>
+            <dt class="text-subtle">Cron expression</dt>
             <dd class="font-mono">{{ trigger.cron_expr }}</dd>
-            <dt class="opacity-60">Timezone</dt>
+            <dt class="text-subtle">Timezone</dt>
             <dd>{{ trigger.timezone }}</dd>
           {% elif trigger.kind == "one_off" %}
-            <dt class="opacity-60">Fire at</dt>
+            <dt class="text-subtle">Fire at</dt>
             <dd>{% if trigger.fire_at %}<time datetime="{{ trigger.fire_at.isoformat() }}">{{ trigger.fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}—{% endif %}</dd>
           {% else %}
-            <dt class="opacity-60">Event filter</dt>
+            {% if trigger.starts_on %}
+              <dt class="text-subtle">Starts on</dt>
+              <dd>{{ trigger.starts_on }}</dd>
+            {% endif %}
+            <dt class="text-subtle">Event filter</dt>
             <dd>
               {% if trigger.event_filter_json %}
                 <pre class="bg-base-200 rounded p-2 text-xs overflow-x-auto">{{ trigger.event_filter_json }}</pre>
               {% else %}
-                <span class="opacity-40">—</span>
+                <span class="text-subtle">—</span>
               {% endif %}
             </dd>
           {% endif %}
 
-          <dt class="opacity-60">Next fire</dt>
-          <dd>{% if trigger.next_fire_at %}<time datetime="{{ trigger.next_fire_at.isoformat() }}">{{ trigger.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">— (no future fire)</span>{% endif %}</dd>
+          <dt class="text-subtle">Next fire</dt>
+          <dd>{% if trigger.next_fire_at %}<time datetime="{{ trigger.next_fire_at.isoformat() }}">{{ trigger.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="text-subtle">— (no future fire)</span>{% endif %}</dd>
 
-          <dt class="opacity-60">Last fired</dt>
-          <dd>{% if trigger.last_fired_at %}<time datetime="{{ trigger.last_fired_at.isoformat() }}">{{ trigger.last_fired_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">— (never)</span>{% endif %}</dd>
+          <dt class="text-subtle">Last fired</dt>
+          <dd>{% if trigger.last_fired_at %}<time datetime="{{ trigger.last_fired_at.isoformat() }}">{{ trigger.last_fired_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="text-subtle">— (never)</span>{% endif %}</dd>
 
           {# Skip state (#2327): a non-zero skip_count means the scheduler
              is skipping this trigger every tick without firing it. Shown
@@ -98,18 +104,18 @@
              card stays uncluttered; a parked trigger's reason explains the
              pause. #}
           {% if trigger.skip_count and trigger.skip_count > 0 %}
-            <dt class="opacity-60">Skips</dt>
+            <dt class="text-subtle">Skips</dt>
             <dd>
-              <span class="badge badge-warning badge-sm">{{ trigger.skip_count }} consecutive</span>
+              {{ badge(trigger.skip_count ~ " consecutive", variant="warning") }}
             </dd>
-            <dt class="opacity-60">Skip reason</dt>
+            <dt class="text-subtle">Skip reason</dt>
             <dd class="font-mono text-xs">{{ trigger.last_skip_reason or "—" }}</dd>
-            <dt class="opacity-60">Last skipped</dt>
-            <dd class="text-xs">{% if trigger.last_skipped_at %}<time datetime="{{ trigger.last_skipped_at.isoformat() }}">{{ trigger.last_skipped_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">—</span>{% endif %}</dd>
+            <dt class="text-subtle">Last skipped</dt>
+            <dd class="text-xs">{% if trigger.last_skipped_at %}<time datetime="{{ trigger.last_skipped_at.isoformat() }}">{{ trigger.last_skipped_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="text-subtle">—</span>{% endif %}</dd>
           {% elif trigger.last_skip_reason %}
             {# skip_count reset to 0 by a later fire, but the last cause is
                retained on a parked row -- keep the reason visible. #}
-            <dt class="opacity-60">Last skip reason</dt>
+            <dt class="text-subtle">Last skip reason</dt>
             <dd class="font-mono text-xs">{{ trigger.last_skip_reason }}</dd>
           {% endif %}
         </dl>
@@ -121,39 +127,39 @@
       <div class="card-body">
         <h2 class="card-title text-base">Governance</h2>
         <dl class="grid grid-cols-[10rem_1fr] gap-y-2 text-sm">
-          <dt class="opacity-60">Agent</dt>
+          <dt class="text-subtle">Agent</dt>
           <dd>
             {% if trigger.agent_name %}
               {{ trigger.agent_name }}
             {% else %}
-              <span class="opacity-50">(definition deleted)</span>
+              <span class="text-subtle">(definition deleted)</span>
             {% endif %}
-            <span class="font-mono text-xs opacity-50 block">{{ trigger.agent_definition_id }}</span>
+            <span class="font-mono text-xs text-subtle block">{{ trigger.agent_definition_id }}</span>
           </dd>
 
-          <dt class="opacity-60">In-flight policy</dt>
+          <dt class="text-subtle">In-flight policy</dt>
           <dd>{{ trigger.in_flight_policy }}</dd>
 
           {# identity_sub governs who the run impersonates -- read-only,
              advanced (Initiative #1824 keeps it read-mostly). #}
-          <dt class="opacity-60">Run identity</dt>
+          <dt class="text-subtle">Run identity</dt>
           <dd class="font-mono text-xs">{{ trigger.identity_sub }}</dd>
 
-          <dt class="opacity-60">Created by</dt>
+          <dt class="text-subtle">Created by</dt>
           <dd class="font-mono text-xs">{{ trigger.created_by_sub }}</dd>
 
-          <dt class="opacity-60">Change ticket</dt>
+          <dt class="text-subtle">Change ticket</dt>
           <dd>
             {% if trigger.work_ref %}
-              <span class="badge badge-outline badge-sm font-mono">{{ trigger.work_ref }}</span>
+              {{ badge(trigger.work_ref, variant="outline", class="font-mono") }}
             {% else %}
-              <span class="opacity-40">—</span>
+              <span class="text-subtle">—</span>
             {% endif %}
           </dd>
 
-          <dt class="opacity-60">Created</dt>
+          <dt class="text-subtle">Created</dt>
           <dd class="text-xs">{% if trigger.created_at %}<time datetime="{{ trigger.created_at.isoformat() }}">{{ trigger.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% endif %}</dd>
-          <dt class="opacity-60">Updated</dt>
+          <dt class="text-subtle">Updated</dt>
           <dd class="text-xs">{% if trigger.updated_at %}<time datetime="{{ trigger.updated_at.isoformat() }}">{{ trigger.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% endif %}</dd>
         </dl>
       </div>
@@ -167,7 +173,7 @@
       {% if trigger.inputs_json %}
         <pre class="bg-base-200 rounded p-3 text-xs overflow-x-auto">{{ trigger.inputs_json }}</pre>
       {% else %}
-        <p class="text-sm opacity-60">No inputs configured for this trigger.</p>
+        <p class="text-sm text-subtle">No inputs configured for this trigger.</p>
       {% endif %}
     </div>
   </div>
@@ -182,7 +188,7 @@
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body">
         <h2 class="card-title text-base">Recent fires</h2>
-        <p class="text-sm opacity-70">
+        <p class="text-sm text-muted">
           Runs dispatched under this trigger share its change ticket. View
           the work_ref-correlated agent runs:
         </p>

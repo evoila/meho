@@ -5,8 +5,8 @@
 
 Covers :func:`meho_backplane.operations.ingest.jobs.run_ingest_job`'s
 reconciliation of a background pipeline run into the in-memory job row,
-with the dispatchability postcondition (G0.24 /
-claude-rdc-hetzner-dc#1136) front and centre:
+with the dispatchability postcondition (G0.24)
+front and centre:
 
 * A pipeline that returns a dispatchable result flips the job to
   ``succeeded``.
@@ -216,7 +216,7 @@ async def test_idempotent_zero_insert_rerun_succeeds() -> None:
 async def test_persisted_but_invisible_run_degrades() -> None:
     """Rows persisted but unresolvable by the dispatch surface ⇒ ``degraded``.
 
-    The exact claude-rdc-hetzner-dc#1136 mis-keyed-product symptom:
+    The exact mis-keyed-product symptom a consumer reported:
     ``inserted_count > 0`` yet the dispatch/query probe
     (``connector_exists`` under the parser-derived key) returns
     ``False``. The job must end ``degraded`` carrying the structured

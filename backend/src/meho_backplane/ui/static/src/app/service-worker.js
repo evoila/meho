@@ -15,25 +15,36 @@
 // * Shell files are loaded from MEHO first, so a new release shows at
 //   once; the cached copy is used only when MEHO cannot be reached.
 // * Every other request is left to the browser, untouched.
+// * A push message (web_push/send.py) shows a notification. Its data is
+//   only a title, a body, a tag and the approvals page address. A message
+//   with the same tag replaces the one before it. A click opens only an
+//   address on this MEHO.
 (function () {
   "use strict";
 
+  // Bump the version when a cached shell file changes in a way an
+  // offline user must see. The browser installs a new worker only when
+  // this file's bytes change, and the offline page is only ever served
+  // from the cache, so without a bump an installed app keeps the old
+  // offline page. v2: the offline page follows the computer's light or
+  // dark setting (#6823); v1 held the light-only page.
   var CACHE_PREFIX = "meho-shell-";
-  var CACHE_NAME = CACHE_PREFIX + "v1";
+  var CACHE_NAME = CACHE_PREFIX + "v2";
   var OFFLINE_URL = "/ui/static/src/pwa/offline.html";
   var SHELL_URLS = [
     OFFLINE_URL,
     "/ui/static/src/pwa/manifest.webmanifest",
     "/ui/static/dist/tailwind.css",
-    "/ui/static/src/app/theme.js",
+    "/ui/static/brand/evoila-daisyui.css",
+    "/ui/static/brand/evoila-fonts.css",
     "/ui/static/src/brand/favicon.svg",
     "/ui/static/src/brand/icon-192.png",
     "/ui/static/src/brand/icon-512.png",
     "/ui/static/src/brand/icon-maskable-512.png",
     "/ui/static/src/brand/apple-touch-icon.png",
-    "/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2",
-    "/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2",
-    "/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2",
+    "/ui/static/fonts/rubik-latin-var.woff2",
+    "/ui/static/fonts/lato-latin-400.woff2",
+    "/ui/static/fonts/ibm-plex-mono-latin-400.woff2",
   ];
 
   // True only for a file of the app shell. The one check that decides
@@ -125,8 +136,60 @@
     else if (route === "shell") event.respondWith(loadShell(event.request));
   });
 
-  // Read by the unit test (backend/tests/test_ui_pwa.py).
+  var APPROVALS_URL = "/ui/approvals";
+  var ICON_URL = "/ui/static/src/brand/icon-192.png";
+
+  // Only a page on this MEHO; anything else opens the approvals page. The
+  // browser's URL parser reads the address, so the origin check sees what
+  // openWindow would open.
+  function safeUrl(value) {
+    if (typeof value !== "string" || value.charAt(0) !== "/") return APPROVALS_URL;
+    var url;
+    try {
+      url = new URL(value, self.location.origin);
+    } catch (e) {
+      return APPROVALS_URL;
+    }
+    if (url.origin !== self.location.origin) return APPROVALS_URL;
+    return url.pathname + url.search + url.hash;
+  }
+
+  // The notification for one push message. A message that cannot be read
+  // still shows a plain notification: the browser asks for one per push.
+  function notificationFor(data) {
+    var message = data && typeof data === "object" ? data : {};
+    return {
+      title: typeof message.title === "string" ? message.title : "MEHO",
+      options: {
+        body: typeof message.body === "string" ? message.body : "",
+        tag: typeof message.tag === "string" ? message.tag : "approval",
+        icon: ICON_URL,
+        data: { url: safeUrl(message.url) },
+      },
+    };
+  }
+
+  self.addEventListener("push", function (event) {
+    var data = null;
+    try {
+      data = event.data ? event.data.json() : null;
+    } catch (e) {
+      data = null;
+    }
+    var note = notificationFor(data);
+    event.waitUntil(self.registration.showNotification(note.title, note.options));
+  });
+
+  self.addEventListener("notificationclick", function (event) {
+    event.notification.close();
+    var url = safeUrl(event.notification.data && event.notification.data.url);
+    event.waitUntil(self.clients.openWindow(url));
+  });
+
+  // Read by the unit tests (backend/tests/test_ui_pwa.py, test_web_push_send.py).
   self.mehoServiceWorker = {
+    notificationFor: notificationFor,
+    safeUrl: safeUrl,
     CACHE_NAME: CACHE_NAME,
     OFFLINE_URL: OFFLINE_URL,
     SHELL_URLS: SHELL_URLS,

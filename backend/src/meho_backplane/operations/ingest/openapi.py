@@ -46,11 +46,11 @@ re-read — so a stored descriptor validates params standalone. A nested
 ref to a component the spec never defines fails the ingest with
 :exc:`InvalidSchemaError` (same posture as a dangling top-level ref);
 before #3095 it was stored silently and crashed dispatch with an
-unhandled ``PointerToNowhere``. ``response_schema`` is deliberately
-**not** bundled: nothing validates against it at dispatch (its only
-consumer is the JSONFlux reducer, which never resolves refs), and
-bundling it would multiply storage for the large recursive response
-types the vCenter / NSX specs declare.
+unhandled ``PointerToNowhere``. ``response_schema`` gets the same bundle
+(#6485), so a connector's safety floor sees the shared schemas of the answer, for example a
+``password`` field inside a ``Client`` schema. A ref to a component the
+spec never defines is left as it is in the answer schema: nothing
+validates against it at dispatch, so it must not fail the ingest.
 
 Known limitation: when an operation declares two parameters with the
 same ``name`` in different ``in`` locations (e.g. a ``cluster`` path
@@ -70,7 +70,7 @@ import ipaddress
 import json
 import re
 import socket
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -130,6 +130,7 @@ __all__ = [
     "parse_openapi",
     "parse_openapi_with_provenance",
     "read_spec_info_version",
+    "register_spec_path_refusal",
 ]
 
 #: Prefix of the audit label the catalog shipped-spec on-ramp assigns
@@ -178,7 +179,7 @@ def classify_spec_origin(spec_path_or_uri: str, content: str | None) -> str:
       (``file:///`` / ``docs:`` / a vendor ``https`` URL reused as the
       label): an operator-uploaded spec.
 
-    The ``spec:`` label is a MEHO-internal convention the catalog route
+    The ``spec:`` label is an internal convention the catalog route
     assigns, not operator input on the inline on-ramp, so it is a sound
     discriminator for record-and-surface provenance.
     """
@@ -486,8 +487,9 @@ def parse_openapi(
             OpenAPI 3.0/3.1 Specification schema, the URI scheme is
             not ``https``, or the resolved destination is a
             private/loopback/link-local/reserved address.
-        UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
-            document references a cross-document ``$ref``.
+        UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, the
+            document references a cross-document ``$ref``, or a check of
+            :func:`register_spec_path_refusal` refuses its paths.
         UpstreamNotSpecError: HTTP fetch succeeded (2xx) but the
             response's ``Content-Type`` declared a non-spec media type
             (e.g. ``text/html`` from a developer-portal landing page).
@@ -535,6 +537,41 @@ def parse_openapi_with_provenance(
     return protos, provenance
 
 
+#: A check that gets the paths of an API file and returns a refusal text or ``None``.
+SpecPathRefusal = Callable[[Sequence[str]], str | None]
+
+_SPEC_PATH_REFUSALS: list[SpecPathRefusal] = []
+
+
+def register_spec_path_refusal(check: SpecPathRefusal) -> None:
+    """Run *check* on the paths of every API file the parser reads.
+
+    *check* gets each path of the file that has at least one operation,
+    with the relative server base already in front. When it returns a
+    text, the parser refuses the whole file with
+    :exc:`UnsupportedSpecError` and that text. The dry run, the ingest and
+    the start check of the shipped files all use this parser. Safe to call
+    twice with the same check.
+    """
+    if check not in _SPEC_PATH_REFUSALS:
+        _SPEC_PATH_REFUSALS.append(check)
+
+
+def _refuse_spec_paths(paths: dict[str, Any], server_base: str) -> None:
+    """Raise :exc:`UnsupportedSpecError` when a registered check refuses the paths."""
+    folded = [
+        _fold_server_base(server_base, key)
+        for key, item in paths.items()
+        if isinstance(key, str)
+        and isinstance(item, dict)
+        and any(verb in _VERBS and isinstance(op, dict) for verb, op in item.items())
+    ]
+    for check in _SPEC_PATH_REFUSALS:
+        refusal = check(folded)
+        if refusal is not None:
+            raise UnsupportedSpecError(refusal)
+
+
 def _project_spec_bytes_to_protos(
     spec_bytes: bytes,
     *,
@@ -559,6 +596,7 @@ def _project_spec_bytes_to_protos(
 
     components = _require_spec_mapping(spec.get("components") or {}, "components")
     server_base = _server_base_path(spec.get("servers"))
+    _refuse_spec_paths(paths, server_base)
 
     return list(
         _iter_operations(
@@ -701,8 +739,7 @@ def _screen_fetch_host(hostname: str) -> list[str]:
     resolver, which dials one of the returned addresses). Resolving once
     and connecting to that same answer is what closes the check/use gap:
     without pinning, httpx re-resolves the name at connect time and a
-    resolver that has since moved the name into private space is followed
-    (evoila-bosnia/meho-internal#275).
+    resolver that has since moved the name into private space is followed.
 
     Fails **closed**, unlike the target guard: an unresolvable name is
     rejected here (the ingest path has no split-horizon fail-open case),
@@ -843,7 +880,7 @@ def _fetch_spec_bytes(spec_path_or_uri: str) -> bytes:
 
     current_url = spec_path_or_uri
     # Pin the fetch to a guard-validated address at the socket boundary
-    # (evoila-bosnia/meho-internal#275): the guard above (and per redirect
+    #: the guard above (and per redirect
     # hop below) screens the name, but httpx would otherwise re-resolve it
     # at connect time. The pinning transport re-screens inside
     # ``connect_tcp`` and dials only an address from that same resolution,
@@ -1253,6 +1290,7 @@ def _build_proto(
     op_id = f"{method}:{path}"
     _assert_json_serializable(op_id=op_id, field="parameter_schema", schema=parameter_schema)
     if response_schema is not None:
+        _bundle_response_components(response_schema, component_schemas)
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
@@ -1443,6 +1481,23 @@ def _build_parameter_schema(
         schema=schema, component_schemas=component_schemas, path=path, method=method
     )
     return schema
+
+
+def _bundle_response_components(
+    response_schema: dict[str, object], component_schemas: dict[str, Any]
+) -> None:
+    """Bundle the shared schemas the answer schema uses, so a safety floor can read them.
+
+    A nested ref to a component the spec never defines is left as it is,
+    and every shared schema that does resolve is still bundled: an answer
+    schema is never validated at dispatch, so it must not fail an ingest
+    that worked before.
+    """
+    closure = _collect_component_schema_closure(
+        response_schema, component_schemas, skip_unresolved=True
+    )
+    if closure:
+        response_schema["components"] = {"schemas": closure}
 
 
 def _attach_component_closure(

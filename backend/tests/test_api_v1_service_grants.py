@@ -246,7 +246,7 @@ def test_operator_creates_selector_grant(client: TestClient) -> None:
             "op_id": "vmware.composite.vm.create",
             "connector_id": "vmware-rest-9.0",
             "target_product": "vmware",
-            "target_name_pattern": "esx-dc*",
+            "target_name_pattern": "esx-example*",
             "reason": "authorise runtime-created ESXi appliances",
         }
         created = client.post(_BASE, headers=headers, json=body)
@@ -254,11 +254,11 @@ def test_operator_creates_selector_grant(client: TestClient) -> None:
         payload = created.json()
         assert payload["target_id"] is None
         assert payload["target_product"] == "vmware"
-        assert payload["target_name_pattern"] == "esx-dc*"
+        assert payload["target_name_pattern"] == "esx-example*"
 
         shown = client.get(f"{_BASE}/{payload['id']}", headers=headers)
         assert shown.status_code == 200
-        assert shown.json()["target_name_pattern"] == "esx-dc*"
+        assert shown.json()["target_name_pattern"] == "esx-example*"
 
 
 def test_create_rejects_target_id_with_selector(client: TestClient) -> None:

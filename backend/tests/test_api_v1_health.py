@@ -56,6 +56,7 @@ import respx
 import structlog
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
+from structlog.tracebacks import ExceptionDictTransformer
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -284,7 +285,8 @@ def _configure_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # Same as production: no frame locals in the log line.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -389,6 +391,7 @@ def test_happy_path_returns_full_federation_response(
         "approval_custody",
         "vault_tenant_scope",
         "mcp",
+        "policy",
     ]
     assert all({"name", "configured", "missing_env"} == set(entry) for entry in features)
     # #4830: the approval key comes from the test env (conftest), so pin the
@@ -434,7 +437,7 @@ def test_happy_path_returns_full_federation_response(
             "tenant_role": "operator",
             "tenants": [],
         },
-        "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
+        "vault": {"reachable": True, "read_ok": True, "detail": "version=11", "checked": True},
         # #4830: the probe's revisions ride along so an upgrade can be
         # confirmed from ``meho status``.
         "db": {"migrated": True, "revision": head, "head": head, "detail": f"revision={head}"},

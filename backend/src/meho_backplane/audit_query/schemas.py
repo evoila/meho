@@ -58,9 +58,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from meho_backplane.db.models import AuditEventClass
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "AuditEntry",
@@ -120,6 +121,13 @@ class AuditQueryFilters(BaseModel):
     # returns a trace for. ``False`` keeps the other rows. ``None`` (the
     # default) applies no filter.
     has_trace: bool | None = None
+    # Rows the audit writer marked (#6452). ``full_row_lost=True`` keeps only
+    # the short rows (the database refused the full row); ``text_changed=True``
+    # keeps only the rows where a character or a number was replaced so the
+    # table could store it. ``False`` keeps the other rows. ``None`` (the
+    # default) applies no filter.
+    full_row_lost: bool | None = None
+    text_changed: bool | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 
@@ -145,7 +153,7 @@ class AuditEntry(BaseModel):
     * ``agent_session_id`` ← ``audit_log.agent_session_id`` (MCP session; #1009)
     * ``work_ref`` ← ``audit_log.work_ref`` (external change-ticket reference;
       work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat
-      ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.
+      ``work_ref`` filter on :class:`AuditQueryFilters` takes the whole id (see its field).
     * ``principal_name`` ← ``payload['principal_name']`` when set. The MCP
       audit-write helper (``write_mcp_audit_row``) populates it from
       ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain
@@ -190,6 +198,12 @@ class AuditEntry(BaseModel):
     # the verdict directly instead of joining ``method``+``path`` + parsing
     # ``payload``.
     policy_decision: str | None
+    # The policy rule that matched the call and the policy file version
+    # (#6044), from ``audit_log.policy_rule`` / ``policy_version``. A rule
+    # that ends with ``(shadow)`` did not decide: the policy evaluator ran
+    # in shadow mode. ``None`` when the switch was off or no gate ran.
+    policy_rule: str | None = None
+    policy_version: int | None = None
     # What kind of accountable event the row records (#3733), from the real
     # ``audit_log.event_class`` column. Rows written before the column
     # existed read as ``legacy_request``.
@@ -202,7 +216,22 @@ class AuditEntry(BaseModel):
     # the real ``audit_log.actor_sub`` column, and the agent's name from it.
     actor_sub: str | None = None
     actor_name: str | None = None
+    # The id of the login that a secret store accepted for the call (``meho``
+    # when the store saw MEHO's own identity), from ``audit_log.secret_read_as``.
+    # ``None`` when the call read no secret. An answer carries the field only
+    # while ``AUDIT_SECRET_READ_AS`` is on (see ``_hide_secret_read_as``).
+    secret_read_as: str | None = None
     broadcast_event_id: uuid.UUID | None
+
+    @model_serializer(mode="wrap")
+    def _hide_secret_read_as(self, handler):  # type: ignore[no-untyped-def]
+        """Leave ``secret_read_as`` out of an answer while the switch is off."""
+        # No annotations on purpose: a return type would replace the answer's
+        # schema in the API file with a plain object.
+        data = handler(self)
+        if not get_settings().audit_secret_read_as:
+            data.pop("secret_read_as", None)
+        return data
 
 
 class ReplayNode(AuditEntry):

@@ -22,13 +22,10 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, RunApproval
-from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
+from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
-from meho_backplane.operations.service_grants import (
-    caller_address_grant_reason,
-    delete_grant_reason,
-)
+from meho_backplane.operations.service_grants import never_covered_reason
 
 __all__ = ["consult_and_record_run_approval"]
 
@@ -73,16 +70,15 @@ def _target_fields(target: Any) -> tuple[uuid.UUID | None, str | None]:
 
 
 def _never_covered(descriptor: EndpointDescriptor) -> bool:
-    from meho_backplane.settings import get_settings
+    """True when no run approval covers *descriptor*.
 
-    if (
-        is_root_shell(descriptor.op_id)
-        or needs_per_call_approval(descriptor.op_id)
-        or caller_address_grant_reason(descriptor) is not None
-    ):
-        return True
-    patterns = get_settings().service_grant_delete_shaped_patterns
-    return delete_grant_reason(descriptor.op_id, patterns, descriptor) is not None
+    The rule of a standing grant (:func:`never_covered_reason`), plus an
+    operation that runs a command as root on the host.
+    """
+    never = never_covered_reason(descriptor)
+    if never is not None and never[0] == "credential":
+        _log.info("run_approval_refused_credential", op_id=descriptor.op_id, reason=never[1])
+    return never is not None or is_root_shell(descriptor.op_id)
 
 
 async def _find_covering(
@@ -142,8 +138,9 @@ async def consult_and_record_run_approval(
     for approval and that no standing grant covers. The run reference is
     the request's ``Meho-Work-Ref``; a call without one is never covered.
     An operation with a delete sign, one that connects to an address the
-    caller gives, one that runs a command as root on the host, or one a
-    connector marks for per-call approval, is never covered.
+    caller gives, one that runs a command as root on the host, one a
+    connector marks for per-call approval, or one that reads, writes or
+    makes a credential, is never covered.
 
     On a hit with ``record=True`` it writes one ``approval.decision`` audit
     row (same shape as a standing grant use) in its own committed
@@ -210,7 +207,7 @@ async def _record_use(
     """
     from meho_backplane.operations._audit import (
         parent_audit_id_var,
-        resolve_agent_session_id,
+        resolve_audit_session_id,
     )
     from meho_backplane.request_usage.collector import current_request_id
 
@@ -238,7 +235,7 @@ async def _record_use(
                 tenant_id=operator.tenant_id,
                 target_id=target_id,
                 parent_audit_id=parent_audit_id_var.get(),
-                agent_session_id=resolve_agent_session_id(),
+                agent_session_id=resolve_audit_session_id(),
                 method="APPROVAL",
                 path="approval.decision",
                 status_code=200,

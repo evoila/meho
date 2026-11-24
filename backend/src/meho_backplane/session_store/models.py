@@ -12,6 +12,12 @@
   tail starts, how many bytes it adds, and the size and hash of the whole
   file after this upload. A retry of an older upload matches one of these
   states and changes nothing.
+* :class:`AgentSessionEvent` -- one saved event of a hosted agent run,
+  in order (:mod:`.hosted_runs`).
+* :class:`AgentSessionLink` -- one MCP session whose calls are in an
+  uploaded session (:mod:`.audit_links`).
+* :class:`AgentSessionAuditLink` -- one audit row of a ``meho`` CLI command
+  in an uploaded session (:mod:`.audit_links`).
 * :class:`AgentSessionRetention` -- the retention period a tenant set.
 """
 
@@ -29,6 +35,9 @@ from meho_backplane.db.models import Base
 
 __all__ = [
     "SESSION_STATES",
+    "AgentSessionAuditLink",
+    "AgentSessionEvent",
+    "AgentSessionLink",
     "AgentSessionRecord",
     "AgentSessionRetention",
     "AgentSessionUpload",
@@ -81,6 +90,64 @@ class AgentSessionUpload(Base):
     redactions: Mapped[int] = mapped_column(Integer, nullable=False)
     files: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentSessionEvent(Base):
+    """One saved event of a hosted agent run (migration ``0162``).
+
+    ``record_id`` is the run's session record; its id is the run id.
+    ``seq`` counts from 1 in the order the run made the events. ``data``
+    is the event after the secret check.
+    """
+
+    __tablename__ = "agent_session_event"
+
+    record_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(), ForeignKey("agent_session_record.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+    quarantined: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    redactions: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentSessionLink(Base):
+    """One MCP session whose calls are in an uploaded session (migration ``0181``).
+
+    ``mcp_session_id`` is the ``agent_session_id`` of the audit rows of those
+    calls. ``work_ref`` is the newest work reference (ticket id) on them, or
+    ``None``.
+    """
+
+    __tablename__ = "agent_session_link"
+
+    record_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(), ForeignKey("agent_session_record.id", ondelete="CASCADE"), primary_key=True
+    )
+    mcp_session_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    work_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentSessionAuditLink(Base):
+    """One audit row of a ``meho`` CLI command in an uploaded session (migration ``0181``).
+
+    A CLI row carries the ``meho login`` session id, which many agent
+    sessions share. So each row links on its own, not by its session id.
+    """
+
+    __tablename__ = "agent_session_audit_link"
+
+    record_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(), ForeignKey("agent_session_record.id", ondelete="CASCADE"), primary_key=True
+    )
+    audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AgentSessionRetention(Base):

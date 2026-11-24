@@ -115,7 +115,7 @@ from meho_backplane.mcp.tools import memory as _memory_tools  # noqa: F401
 from meho_backplane.mcp.tools import operations as _operations_tools  # noqa: F401
 from meho_backplane.mcp.tools import result_query as _result_query_tools  # noqa: F401
 from meho_backplane.mcp.tools import topology as _topology_tools  # noqa: F401
-from meho_backplane.mcp.tools.connector_admin import list_connector_rows
+from meho_backplane.mcp.tools.connector_admin import keep_connector_rows, list_connector_rows
 
 __all__ = [
     "CONNECTOR_LIST",
@@ -300,18 +300,14 @@ def keep_allowed_connectors(
     the agent is shown only the connectors it may call (#4233). When a
     ``target_fit`` summary had rows and none of them is allowed, the summary
     says ``no_connector``: no connector this agent may use fits the target.
+    A ``product_filter`` block keeps only the products of the allowed rows
+    (:func:`~meho_backplane.mcp.tools._connector_product_filter.keep_allowed_product_filter`).
+    The filter itself is shared with the MCP tool profiles
+    (:func:`~meho_backplane.mcp.tools.connector_admin.keep_connector_rows`).
     """
-    rows = result.get("connectors", [])
-    kept = [r for r in rows if r.get("connector_id") in allowed_connectors]
-    narrowed = {**result, "connectors": kept}
-    target_fit = result.get("target_fit")
-    if target_fit is not None and rows and not kept:
-        narrowed["target_fit"] = {
-            **target_fit,
-            "result": "no_connector",
-            "hint": _NO_ALLOWED_CONNECTOR_HINT,
-        }
-    return narrowed
+    return keep_connector_rows(
+        result, allowed_connectors, no_connector_hint=_NO_ALLOWED_CONNECTOR_HINT
+    )
 
 
 async def _hosted_status(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:

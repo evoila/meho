@@ -14,6 +14,8 @@
   HTMX wiring: the page-level ``hx-headers`` directive echoes the CSRF
   token for the edit / toggle / delete state-changing requests.
 -#}
+
+{% from "_components.html" import button %}
 {% extends "base.html" %}
 
 {% block page_title %}Agent: {{ agent.name }} &middot; MEHO Operator Console{% endblock %}
@@ -39,8 +41,11 @@
   {# Body slot -- full agent projection. #}
   {% include "agents/_detail_body.html" %}
 
-  {# Mount point for HTMX-loaded modals (edit, delete). #}
-  <div id="agents-modal-container"></div>
+  {# Mount point for HTMX-loaded modals (edit, delete). A refused create or
+     edit answers 422; the hx-on handler swaps that answer in, but only
+     MEHO's own form (an HTML answer). A JSON 422 from the field length
+     check is not swapped, so the open form and its text stay. #}
+  <div id="agents-modal-container" hx-on::before-swap="if (event.detail.requestConfig && ['post', 'patch'].includes(event.detail.requestConfig.verb) && event.detail.xhr.status === 422 && (event.detail.xhr.getResponseHeader('Content-Type') || '').startsWith('text/html')) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 
   {# Disable-confirm modal -- native ``<dialog>``. Confirming POSTs the
      toggle with ``enabled=false`` and HX-Redirects back to the detail
@@ -50,13 +55,13 @@
       <div class="modal-box">
         <h3 class="font-semibold text-lg">Disable agent
           <span class="font-mono">{{ agent.name }}</span>?</h3>
-        <p class="text-sm py-2 opacity-80">
+        <p class="text-sm py-2 text-muted">
           A disabled agent stays defined but cannot be run. Re-enable it
           any time from this page.
         </p>
         <div class="modal-action">
           <form method="dialog">
-            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+            {{ button("Cancel", variant="quiet", type="submit") }}
           </form>
           <button
             type="button"

@@ -152,7 +152,7 @@
          UTC so the conversion is visible, not silent (#2339). #}
       <div x-show="kind === 'one_off'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Fire at <span class="opacity-60 font-normal">(your local time)</span></span>
+          <span class="text-sm font-medium">Fire at <span class="text-subtle font-normal">(your local time)</span></span>
           <input
             type="datetime-local"
             name="fire_at"
@@ -163,7 +163,7 @@
           />
           <span
             id="scheduler-fire-at-hint"
-            class="text-xs opacity-60"
+            class="text-xs text-subtle"
             data-fire-at-hint
             aria-live="polite"
           >Enter your local wall-clock time — it is converted to UTC on submit.</span>
@@ -171,9 +171,50 @@
       </div>
 
       {# ---------- event fields ---------- #}
-      <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
+      <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3" x-data="{ startOn: 'sensor' }">
         <label class="flex flex-col gap-1">
-          <span class="text-sm font-medium">Event filter <span class="opacity-60 font-normal">(JSON object)</span></span>
+          <span class="text-sm font-medium">Start on</span>
+          <select name="start_on" class="select select-bordered select-sm w-full" x-model="startOn" aria-label="Start on">
+            <option value="sensor">Sensor</option>
+            <option value="dashboard">Dashboard</option>
+            <option value="custom">Custom filter</option>
+          </select>
+        </label>
+        {% for pick_kind, pick_label in (("sensor", "Sensor"), ("dashboard", "Dashboard")) %}
+        <div x-show="startOn === '{{ pick_kind }}'" x-cloak class="space-y-2">
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">{{ pick_label }}</span>
+            <select
+              name="check_source_ref"
+              class="select select-bordered select-sm w-full"
+              x-bind:disabled="startOn !== '{{ pick_kind }}'"
+              aria-label="{{ pick_label }}"
+            >
+              <option value="any" selected>Any {{ pick_label|lower }}</option>
+              {% for choice in check_choices[pick_kind] %}
+                <option value="{{ choice.id }}">{{ choice.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="label cursor-pointer justify-start gap-2">
+            <input
+              type="checkbox"
+              name="only_worsening"
+              value="true"
+              class="checkbox checkbox-sm"
+              x-bind:disabled="startOn !== '{{ pick_kind }}'"
+            />
+            <span class="text-sm">Only when it gets worse</span>
+          </label>
+        </div>
+        {% endfor %}
+        {% if not check_events_on %}
+        <div x-show="startOn !== 'custom'" x-cloak role="alert" class="alert alert-warning text-xs">
+          <span>{{ check_events_off_notice }}</span>
+        </div>
+        {% endif %}
+        <label class="flex flex-col gap-1" x-show="startOn === 'custom'" x-cloak>
+          <span class="text-sm font-medium">Event filter <span class="text-subtle font-normal">(JSON object)</span></span>
           <textarea
             name="event_filter"
             class="textarea textarea-bordered textarea-sm font-mono w-full"
@@ -192,10 +233,10 @@
       <label class="flex flex-col gap-1">
         <span class="text-sm font-medium">
           Run inputs (JSON object)<span
-            class="opacity-60 font-normal"
+            class="text-subtle font-normal"
             x-show="kind !== 'event'"
           > — required, must render a prompt</span><span
-            class="opacity-60 font-normal"
+            class="text-subtle font-normal"
             x-cloak
             x-show="kind === 'event'"
           > — optional</span>
@@ -228,13 +269,12 @@
       </fieldset>
 
       <label class="flex flex-col gap-1">
-        <span class="text-sm font-medium">Change ticket <span class="opacity-60 font-normal">(work_ref, optional)</span></span>
+        <span class="text-sm font-medium">Change ticket <span class="text-subtle font-normal">(work_ref, optional)</span></span>
         <input
           type="text"
           name="work_ref"
           class="input input-bordered input-sm font-mono w-full"
           placeholder="gh:evoila/meho#1826"
-          maxlength="256"
           aria-label="Change ticket reference"
         />
       </label>

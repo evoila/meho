@@ -73,8 +73,10 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    CheckSourceNotFoundError,
     SchedulerAdminService,
 )
+from meho_backplane.work_ref import WORK_REF_FILTER_DESCRIPTION, WorkRefFilter
 
 __all__ = ["router"]
 
@@ -121,7 +123,10 @@ async def list_triggers(
     offset: int = Query(default=0, ge=0),
     kind: KindFilter | None = Query(default=None),
     status: StatusFilter | None = Query(default=None),
-    work_ref: str | None = Query(default=None),
+    work_ref: Annotated[
+        WorkRefFilter | None,
+        Query(description=WORK_REF_FILTER_DESCRIPTION),
+    ] = None,
     tenant_filter: UUID | None = Query(default=None),
 ) -> ScheduledTriggerListResponse:
     """List scheduled triggers for the operator's tenant, newest-first.
@@ -133,8 +138,8 @@ async def list_triggers(
     id (or omitting the filter) is always allowed.
 
     ``work_ref`` (optional, work_ref I3-T3 #1663) narrows to triggers
-    carrying that exact change-ticket reference -- the tenant-scoped
-    exact-match driven by ``scheduled_trigger_tenant_work_ref_idx``.
+    carrying that ticket id (whole id, see the work_ref parameter) -- the
+    tenant-scoped match driven by ``scheduled_trigger_tenant_work_ref_idx``.
     """
     target_tenant = authorize_tenant_scope(operator, tenant_filter)
     structlog.contextvars.bind_contextvars(
@@ -200,6 +205,11 @@ async def create_trigger(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="agent_definition_not_found",
+        ) from exc
+    except CheckSourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="check_source_not_found",
         ) from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
     return entry

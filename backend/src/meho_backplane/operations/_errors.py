@@ -35,25 +35,35 @@ handling.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
 
+from meho_backplane.auth.tenant_admins import NEEDS_SECOND_ADMIN
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
+from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.connectors.base import (
+    ConnectorOwnMessage,
+    ConnectorResourceNotFoundError,
+    ConnectorUpstreamError,
+)
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
+    AGENT_STEPS_NOT_DECLARED,
     READ_SCOPE_DENIED,
     deny_reason_code,
     is_agent_no_grant,
 )
 from meho_backplane.operations.uncertain_outcome import (
+    LOGIN_ENDED_ADVICE,
     UNCERTAIN_ADVICE,
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
@@ -66,6 +76,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
+    "MESSAGE_SOURCE_KEY",
+    "MESSAGE_SOURCE_MEHO",
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
@@ -74,13 +86,15 @@ __all__ = [
     "result_ambiguous_target",
     "result_audit_commit_failed",
     "result_awaiting_approval",
-    "result_composite_resume_multi_gate_unsupported",
+    "result_composite_resume_read_not_sent",
     "result_composite_resume_repeats_write",
     "result_composite_resume_state_missing",
+    "result_composite_resume_step_outcome_unknown",
     "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
+    "result_connector_http_410",
     "result_connector_http_422",
     "result_connector_not_found",
     "result_connector_package_not_installed",
@@ -148,6 +162,12 @@ _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 #: :mod:`meho_backplane.operations._vendor_text`).
 UPSTREAM_SAID: Final = " Upstream said: "
 VAULT_SAID: Final = " Vault said: "
+
+#: ``extras`` key and value that say: the ``exception_message`` is a sentence
+#: MEHO or a connector wrote itself (the error type has the
+#: :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark).
+MESSAGE_SOURCE_KEY: Final = "message_source"
+MESSAGE_SOURCE_MEHO: Final = "meho"
 
 
 def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
@@ -573,6 +593,7 @@ def result_no_connector(
     version: str | None,
     duration_ms: float,
     exception_message: str | None = None,
+    hint: str | None = None,
 ) -> OperationResult:
     """Resolver miss -- no registered impl for *(product, version)*.
 
@@ -597,6 +618,9 @@ def result_no_connector(
     The argument is optional for backward compatibility with call sites
     that pre-date the resolver-helper unification — they pass through
     the bare ``(product, version)`` form and ``extras`` omits the field.
+
+    ``hint`` is a fixed sentence that names the fix for a known cause. It
+    is added to the error text and to ``extras["hint"]``.
     """
     extras: dict[str, Any] = {
         "error_code": "no_connector",
@@ -605,10 +629,14 @@ def result_no_connector(
     }
     if exception_message is not None:
         extras["exception_message"] = _sanitize_free_text(exception_message)
+    error = f"no_connector: no implementation for product={product!r} version={version!r}"
+    if hint is not None:
+        extras["hint"] = hint
+        error = f"{error}; {hint}"
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"no_connector: no implementation for product={product!r} version={version!r}",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
     )
@@ -724,7 +752,9 @@ def result_denied(
     or :data:`READ_SCOPE_DENIED_CODE` when the reason starts with that
     code (the gate's stable marker for a read-scope refusal), or
     ``agent_no_grant`` when an agent has no grant and the
-    ``AGENT_GRANT_REQUIRED`` switch is on (#6189).
+    ``AGENT_GRANT_REQUIRED`` switch is on (#6189), or
+    ``agent_steps_not_declared`` when an agent calls a multi-step operation
+    whose steps are not declared and the switch is on (#6298).
 
     ``reason_code`` says which rule refused the call
     (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
@@ -737,6 +767,8 @@ def result_denied(
         error_code = READ_SCOPE_DENIED_CODE
     elif is_agent_no_grant(reason):
         error_code = AGENT_NO_GRANT
+    elif reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
+        error_code = AGENT_STEPS_NOT_DECLARED
     return OperationResult(
         status="denied",
         op_id=op_id,
@@ -891,59 +923,143 @@ def result_audit_commit_failed(
     )
 
 
-def result_composite_resume_multi_gate_unsupported(
-    *,
-    composite_op_id: str,
-    approved_op_id: str,
-    blocked_op_id: str,
+def result_audit_row_invalid(
+    op_id: str,
+    field: str,
+    reason: str,
     duration_ms: float,
 ) -> OperationResult:
-    """Fail-closed abort of a composite resume that would open a second gate (#3351).
+    """The audit row of this call could not be stored, so the call was not sent.
 
-    Returned by
-    :func:`~meho_backplane.operations.composite.enforce_subop_policy` when,
-    during the approval-resume re-entry of a parent composite, a governed
-    sub-op **other** than the approved one reaches ``NEEDS_APPROVAL``. The
-    resume mechanism (#3351) clears exactly one approved sub-op and re-runs
-    the whole composite under the approving reviewer, relying on every other
-    governed sub-op being ``dangerous`` + ``requires_approval=False`` so the
-    reviewer auto-executes them in one pass. A sub-op that a reviewer would
-    *not* auto-execute (``destructive`` / ``requires_approval=True``) would
-    have to park a second request, whose own resume re-enters the composite
-    from the top and re-executes every earlier governed leg — there is no
-    completed-leg guard — silently double-executing writes. No shipped
-    composite hits this (all governed sub-ops satisfy the invariant); this
-    fails closed so a future connector author who breaks the invariant gets a
-    loud, distinct refusal instead of duplicate side effects.
-
-    ``op_id`` is set to the parent ``composite_op_id`` (the entity the resume
-    was re-entering); ``extras`` names the ``approved_op_id`` that cleared and
-    the ``blocked_op_id`` that would have parked, plus a ``remediation`` that
-    points the author at the unsupported multi-gate shape.
+    MEHO checks the values of the audit row before it sends a call to the
+    target (:func:`~meho_backplane.operations.audit_row_precheck.audit_row_problem`).
+    When one value can never be stored, the call is refused here: nothing
+    went to the target and no approval request was made. *field* names the
+    value, never its content. Compare ``audit_commit_failed``: there the call
+    ran and the outcome is unknown.
     """
+    remediation = f"Nothing was sent to the target. Fix the value of {field} and call again."
     return OperationResult(
         status="error",
-        op_id=composite_op_id,
+        op_id=op_id,
         error=(
-            f"composite_resume_multi_gate_unsupported: resuming composite "
-            f"{composite_op_id!r} (approved sub-op {approved_op_id!r}) hit a second "
-            f"governed sub-op {blocked_op_id!r} that requires its own approval; this "
-            f"re-entry mechanism supports only one governed gate per composite and "
-            f"aborts rather than re-run the earlier legs on a second resume"
+            f"audit_row_invalid: the audit record of this call could not be saved "
+            f"because {field} {reason}. The operation did not run."
         ),
         duration_ms=duration_ms,
         extras={
-            "error_code": "composite_resume_multi_gate_unsupported",
+            "error_code": "audit_row_invalid",
+            "field": field,
+            "reason": reason,
+            "execution_outcome": "not_started",
+            "remediation": remediation,
+        },
+    )
+
+
+def result_composite_resume_step_outcome_unknown(
+    *,
+    composite_op_id: str,
+    step_op_id: str,
+    duration_ms: float,
+    waiting_op_id: str | None = None,
+) -> OperationResult:
+    """Stop of a composite's run after an approval at a step whose end is not known.
+
+    Returned when the run after an approval reaches a step that the earlier
+    run started but MEHO has no stored end or result for
+    (:mod:`~meho_backplane.operations.composite_steps`): a step checked only
+    by :func:`~meho_backplane.operations.composite.enforce_subop_policy`,
+    whose own call MEHO does not see, a step that raised, or a step whose
+    result could not be kept. MEHO does not know if the step's change
+    happened, so it does not send it again and the run stops here.
+
+    With *waiting_op_id*, the step *waiting_op_id* was about to wait for
+    approval while the step *step_op_id* of the same run has no stored end.
+    The run after that approval could only stop at *step_op_id*, so MEHO asks
+    no person and stops at once.
+    """
+    if waiting_op_id is None:
+        error = (
+            f"composite_resume_step_outcome_unknown: the run of {composite_op_id!r} after "
+            f"the approval reached the step {step_op_id!r}, which the earlier run started; "
+            "MEHO has no stored end for it, so it did not send it again and the run stopped"
+        )
+    else:
+        error = (
+            f"composite_resume_step_outcome_unknown: the step {waiting_op_id!r} of "
+            f"{composite_op_id!r} needs approval, but MEHO has no stored end for the earlier "
+            f"step {step_op_id!r}; the run after an approval would stop there, so MEHO asked "
+            "for no approval and the run stopped"
+        )
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=error,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_step_outcome_unknown",
             "composite_op_id": composite_op_id,
-            "approved_op_id": approved_op_id,
-            "blocked_op_id": blocked_op_id,
+            "blocked_op_id": step_op_id,
+            "execution_outcome": "uncertain",
+            "retry": False,
             "remediation": (
-                "a composite whose resume can re-park (a governed sub-op that a "
-                "reviewer does not auto-execute — safety_level=destructive or "
-                "requires_approval=True) is unsupported by the #3351 composite-child "
-                "resume path; keep every governed sub-op dangerous + "
-                "requires_approval=False, or add a completed-leg guard before "
-                "introducing a second gate"
+                f"Check on the target whether the step {step_op_id!r} made its change, "
+                "then finish the work by hand or start a new run."
+            ),
+        },
+    )
+
+
+def result_composite_resume_read_not_sent(
+    *,
+    composite_op_id: str,
+    step_op_id: str,
+    duration_ms: float,
+    waiting_op_id: str | None = None,
+) -> OperationResult:
+    """Stop of a composite's run at a step that reads a credential.
+
+    A run after an approval sends a credential read of the earlier run again
+    only when the read is on the short list of reads that change nothing and
+    its policy lets it go ahead with no person
+    (:mod:`~meho_backplane.operations.composite_steps`). Returned when the
+    read is not on that list, when its policy now says something else (it
+    must wait, or it is denied), or when a person approved the read in the
+    earlier run. MEHO does not send the read, and the run stops here.
+
+    With *waiting_op_id*, the step *waiting_op_id* was about to wait for
+    approval after such a read *step_op_id*. The run after that approval
+    would stop at the read, so MEHO asks no person and stops at once.
+    """
+    if waiting_op_id is None:
+        error = (
+            f"composite_resume_read_not_sent: the run of {composite_op_id!r} after the "
+            f"approval reached the step {step_op_id!r}, which reads a credential; MEHO sends "
+            "such a read again only when it changes nothing and its policy lets it go ahead "
+            "with no person, so it did not send it and the run stopped"
+        )
+    else:
+        error = (
+            f"composite_resume_read_not_sent: the step {waiting_op_id!r} of "
+            f"{composite_op_id!r} needs approval, but the earlier step {step_op_id!r} reads a "
+            "credential that the run after an approval would not send again (a person "
+            "approved it, or it may change something), so MEHO asked for no approval and "
+            "the run stopped"
+        )
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=error,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_read_not_sent",
+            "composite_op_id": composite_op_id,
+            "blocked_op_id": step_op_id,
+            "retry": False,
+            "remediation": (
+                f"Check what the steps before {step_op_id!r} changed, then start a new run "
+                f"of {composite_op_id!r} or finish the work by hand."
             ),
         },
     )
@@ -979,22 +1095,25 @@ def result_composite_resume_repeats_write(
     blocked_op_id: str,
     duration_ms: float,
 ) -> OperationResult:
-    """Refusal of an earlier write during a resume that must skip it (#4217).
+    """Refusal of an earlier step during a resume that must skip it.
 
-    Returned by
-    :func:`~meho_backplane.operations.composite.enforce_subop_policy` while a
-    composite resumes an approved step marked ``after_main_effect``: the
-    resume must go straight to that step, so a governed write before it
-    that is not itself ``after_main_effect`` is a write the first run already
-    did. It is refused before it runs, whatever the policy verdict.
+    Returned while a composite's run after an approval has not reached the
+    approved step yet. Every step before it is a step the earlier run did:
+    it comes back from the stored steps
+    (:mod:`~meho_backplane.operations.composite_steps`). A governed step
+    that is not among them, and is not itself ``after_main_effect``, is not
+    one the approver's run may add, so it is refused before it runs,
+    whatever the policy verdict. A ``dispatch_child`` step is refused the
+    same way, except while the approved step is ``after_main_effect``: such
+    a composite continues at that step on its own.
     """
     return OperationResult(
         status="error",
         op_id=composite_op_id,
         error=(
             f"composite_resume_repeats_write: resuming composite {composite_op_id!r} "
-            f"for the approved step {approved_op_id!r} reached the earlier write "
-            f"{blocked_op_id!r}; it did not run, because the first run already did it"
+            f"for the approved step {approved_op_id!r} reached the earlier step "
+            f"{blocked_op_id!r}, which is not a stored step of the earlier run; it did not run"
         ),
         duration_ms=duration_ms,
         extras={
@@ -1010,12 +1129,12 @@ def result_announce_required(op_id: str, remediation: str, duration_ms: float) -
     """Opt-in announce gate rejected the call before execution (#3133).
 
     Returned when a tenant has enabled the announce gate
-    (:mod:`meho_backplane.broadcast.announce_gate`) and a write-class op
-    of ``caution`` safety or higher was dispatched without an active
-    announce claim covering it. This is a policy rejection, **not** a
-    NEEDS_APPROVAL path -- there is no durable approval row and no
-    four-eyes queue; the caller self-remediates by announcing intent and
-    retrying.
+    (:mod:`meho_backplane.broadcast.announce_gate`) and a caller that is
+    not a person dispatched a write-class op of ``caution`` safety or higher without an
+    active announce claim covering it. A person never gets it (#3762).
+    This is a policy rejection, **not** a NEEDS_APPROVAL path -- there is
+    no durable approval row and no four-eyes queue; the caller
+    self-remediates by announcing intent and retrying.
 
     The ``remediation`` string is agent-readable and names
     ``meho_broadcast_announce`` so an agent can resolve the refusal
@@ -1134,6 +1253,9 @@ def result_awaiting_approval(
     duration_ms: float,
     *,
     reused: bool = False,
+    audit_id: uuid.UUID | None = None,
+    note: str | None = None,
+    already_approved: bool = False,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -1157,6 +1279,24 @@ def result_awaiting_approval(
     existing request back instead of a new one. It adds
     ``extras["approval_request_reused"] = True``; the key is absent
     otherwise, so a new park's envelope is unchanged.
+
+    *audit_id* is the id of the committed ``approval.request`` audit row
+    of the pending request (its ``request_audit_id``). It becomes the
+    result's ``audit_id`` receipt. ``None`` when the caller has no row id.
+
+    *note* (#6641) is a sentence the person must read about the wait, for
+    example that no other admin of the tenant could approve a change of
+    rights (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
+    is added to ``error`` and kept in ``extras["approval_note"]``; the key is
+    absent without a note.
+
+    *already_approved* is ``True`` when a retry with the same key got back a
+    request that a person already approved. The ``error`` text then says
+    that the request is already approved. A *note* leaves out the sentence
+    :data:`~meho_backplane.auth.tenant_admins.NEEDS_SECOND_ADMIN`, which is
+    false for an approved request, and keeps the rest, in ``error`` and in
+    ``extras["approval_note"]``. ``status`` and the ``extras`` keys stay the
+    same.
     """
     extras: dict[str, Any] = {
         "error_code": "awaiting_approval",
@@ -1164,12 +1304,20 @@ def result_awaiting_approval(
     }
     if reused:
         extras["approval_request_reused"] = True
+    error = f"awaiting_approval: {op_id!r} requires approval before execution"
+    if already_approved:
+        error = f"awaiting_approval: the approval request {approval_request_id} is already approved"
+        note = note and note.removeprefix(NEEDS_SECOND_ADMIN).lstrip()
+    if note:
+        extras["approval_note"] = note
+        error = f"{error}. {note}"
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
-        error=f"awaiting_approval: {op_id!r} requires approval before execution",
+        error=error,
         duration_ms=duration_ms,
         extras=extras,
+        audit_id=audit_id,
     )
 
 
@@ -1516,6 +1664,11 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if isinstance(exc, ConnectorOwnMessage) and not isinstance(
+        exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
+    ):
+        # The text of these two holds the URL or the vendor's words, mark or not.
+        extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
@@ -2171,8 +2324,7 @@ def result_connector_http_403(
     accepted/required permissions -- into an opaque
     ``connector_error: HTTPStatusError`` with only the httpx status
     line, the actionable detail buried in
-    ``extras["exception_message"]`` (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    ``extras["exception_message"]`` (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 403 means the
     upstream refused the call, not a transport fault. Most often the
@@ -2249,8 +2401,7 @@ def result_connector_http_422(
     ``connector_error: HTTPStatusError`` with only the httpx status line,
     the actionable detail buried in ``extras["exception_message"]``. That
     bare shape is exactly what slowed the diagnosis of the
-    requestBody-mangling bug T5 #1656 (consumer
-    ``claude-rdc-hetzner-dc#1138``).
+    requestBody-mangling bug T5 #1656 (consumer feedback).
 
     The cause is kept **connector-agnostic**: any upstream 422 means the
     upstream parsed the request and rejected its *content*, not transport
@@ -2286,6 +2437,46 @@ def result_connector_http_422(
         "http_status": 422,
         "upstream_message": upstream_message,
         "validation_errors": validation_errors,
+    }
+    _add_upstream_fault(extras, response)
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_http_410(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector got an upstream **410 Gone** on dispatch.
+
+    A product answers 410 when its version has removed the API the call
+    named. The cause is the same for every connector, so the ``error``
+    says it plainly and tails the product's own message when it sent one.
+    ``extras`` carries ``http_status`` (always ``410``) and
+    ``upstream_message``.
+    """
+    response = exc.response
+    upstream_message = _http_upstream_message(response)
+    summary = (
+        "connector_http_410: this product version no longer has this API "
+        "(HTTP 410 Gone). The product understood the call and says the API "
+        "was removed. Use a different operation for this product version, "
+        "or check the version catalog of the connector. See "
+        "docs/codebase/error-message-shape.md for the dispatch error "
+        "convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_http_410",
+        "http_status": 410,
+        "upstream_message": upstream_message,
     }
     _add_upstream_fault(extras, response)
     return OperationResult(
@@ -2402,6 +2593,30 @@ def _auth_scheme_remediation(target_name: str | None) -> str:
     )
 
 
+#: A clause that tells the reader to try the call again ("..., then retry.").
+_RETRY_CLAUSE_RE: Final = re.compile(
+    r",?\s+(?:and\s+)?then\s+(?:retry|try again|call again)\b[^.]*", re.IGNORECASE
+)
+#: A sentence that tells the reader to try the call again ("Try again.").
+_RETRY_SENTENCE_RE: Final = re.compile(
+    r"(?<!not )\b(?:retry|try again|call again)\b", re.IGNORECASE
+)
+_SENTENCE_SPLIT_RE: Final = re.compile(r"(?<=[.!?])\s+")
+
+
+def _without_retry_advice(text: str) -> str:
+    """Return *text* without any advice to send the call again.
+
+    Used for a change whose outcome is unknown: the change may already be
+    made, so the only advice is to check the target and make a new request.
+    A "then retry" clause is cut, and a sentence that still asks for a
+    retry is left out.
+    """
+    text = _RETRY_CLAUSE_RE.sub("", text)
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    return " ".join(s for s in sentences if not _RETRY_SENTENCE_RE.search(s))
+
+
 #: Shared doc-reference tail every ``connector_auth_failed`` summary ends with.
 _AUTH_FAILED_DOC_TAIL = (
     "See docs/architecture/connector-auth.md for the connector auth contract "
@@ -2417,6 +2632,7 @@ def _auth_failed_summary(
     remediation: str,
     relogin: Literal["not_available", "attempted_failed", "reestablished"],
     over_http: bool,
+    session_ended: bool = False,
 ) -> str:
     """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
 
@@ -2435,13 +2651,21 @@ def _auth_failed_summary(
       "already re-logged-in and retried once" sentence lives here alone.
     * ``call`` -- a connector rejected a normal call on a live session with
       an auth/permission fault that a fresh login cannot fix (#3566), so no
-      re-login was tried.
+      re-login was tried. With *session_ended* (the cause
+      ``session_ended_<status>_not_resent``) the summary says first that the
+      login session ended and that MEHO did not send the operation again.
 
     *status_label* is ``HTTP <status>`` when the connector got a real HTTP
     status, else ``cause <cause>``. With ``over_http=False`` (a database
     login, for example) the establish text says that the system refused
     the login, not that an HTTP login was rejected (#6154).
     """
+    if stage == "call" and session_ended:
+        return (
+            f"connector_auth_failed: the login session ended ({status_label}) "
+            f"for {host}, and MEHO did not send the operation again. "
+            f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
+        )
     if stage == "call":
         return (
             f"connector_auth_failed: the upstream rejected this call with an "
@@ -2493,8 +2717,15 @@ def result_connector_auth_failed(
     duration_ms: float,
     *,
     relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
+    changes_target: bool = False,
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
+
+    *changes_target* is ``True`` for an operation that may change the target.
+    When the refusal came after the change was sent (any stage but
+    ``establish``), the result carries ``execution_outcome: uncertain`` and
+    ``retry: False`` with the advice that a person checks the target first.
+    A refused login (stage ``establish``) stays a plain failure.
 
     T5 (#1804) of the G0.26 v0.16.0 dogfood-hardening Initiative (#1800),
     the auth-class sibling of :func:`result_connector_http_403` (#1649)
@@ -2625,6 +2856,9 @@ def result_connector_auth_failed(
         remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
+    uncertain = changes_target and stage != "establish"
+    if uncertain:
+        remediation = _without_retry_advice(remediation)
     # #6154: a connector that does not use HTTP (a database login, for
     # example) still passes a status code; the text then names its own
     # cause instead of an HTTP status it never got.
@@ -2636,7 +2870,10 @@ def result_connector_auth_failed(
         remediation=remediation,
         relogin=relogin,
         over_http=over_http,
+        session_ended=cause.startswith("session_ended_"),
     )
+    if uncertain:
+        summary = _without_retry_advice(summary)
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {
@@ -2653,6 +2890,14 @@ def result_connector_auth_failed(
     if upstream_response is not None:
         _add_upstream_fault(extras, upstream_response)
     _add_attached_upstream_fault(extras, exc)
+    if uncertain:
+        extras["execution_outcome"] = UNCERTAIN_OUTCOME
+        extras["retry"] = False
+        if LOGIN_ENDED_ADVICE not in remediation:
+            remediation = f"{remediation} {LOGIN_ENDED_ADVICE}"
+            extras["remediation"] = remediation
+        if LOGIN_ENDED_ADVICE not in summary:
+            summary = f"{summary} {LOGIN_ENDED_ADVICE}"
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -2660,6 +2905,27 @@ def result_connector_auth_failed(
         duration_ms=duration_ms,
         extras=extras,
     )
+
+
+#: HTTP methods with which hvac changes a secret.
+_VAULT_WRITE_METHODS = frozenset({"PUT", "POST", "PATCH", "DELETE"})
+
+
+def _vault_path_of(exc: BaseException) -> str | None:
+    """Return the Vault API path hvac names in *exc*, without the address.
+
+    hvac keeps the full request URL (``https://<vault>/v1/<path>``) on
+    ``exc.url``. Only ``<path>`` is returned, so an answer can name the
+    refused path without the Vault address. ``None`` when there is no URL.
+    """
+    url = getattr(exc, "url", None)
+    if not isinstance(url, str) or not url:
+        return None
+    path = urlsplit(url).path
+    if path.startswith("/v1/"):
+        path = path[len("/v1/") :]
+    path = path.strip("/")
+    return path or None
 
 
 def result_connector_vault_forbidden(
@@ -2671,55 +2937,78 @@ def result_connector_vault_forbidden(
 ) -> OperationResult:
     """Vault denied a read/write with **permission denied** during dispatch.
 
-    #2091 (Initiative #2150), the Vault-authorization sibling of
-    :func:`result_connector_http_403` (#1649) and
-    :func:`result_connector_auth_failed` (#1804). A dispatch whose
-    credential resolution reads the target's ``secret_ref`` from Vault
-    under the operator's identity
-    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`)
-    surfaces an out-of-subtree ref as :exc:`hvac.exceptions.Forbidden` —
-    Vault's opaque ``permission denied``. Routing it through
-    :func:`result_connector_error` flattened that into
-    ``connector_error: Forbidden`` with the cause buried in
-    ``extras["exception_message"]``, reading exactly like a missing
-    Vault grant — and the first instinct (widen the deploy-owned
-    ``meho-mcp`` Vault policy) is the wrong fix: the policy is re-applied
-    on every deploy, and the design stores a target's credential at the
-    per-tenant path ``tenants/<tenant_id>/<name>`` (#1723).
+    The Vault-authorization sibling of :func:`result_connector_http_403`
+    and :func:`result_connector_auth_failed`. The policy MEHO reads Vault
+    with is deploy-owned and re-applied on every upgrade, so every shape
+    warns against widening it. Three shapes:
 
-    Two message shapes, keyed on whether the dispatch carried a target
-    with a configured ``secret_ref``:
-
-    * **credential resolution** (``target.secret_ref`` set) — names the
-      target's ``secret_ref``, states the likely cause (the ref is
-      outside the operator's readable per-tenant subtree), names the
-      canonical convention and the exact *expected_secret_ref* the
-      caller derived (:func:`~meho_backplane.connectors.vault.tenant_paths.tenant_secret_ref`),
-      and carries the stage-the-credential remediation plus the explicit
-      "do NOT widen the Vault policy" warning.
+    * **the target's own ref** (*exc* is
+      :exc:`~meho_backplane.connectors._shared.vault_creds.TargetSecretForbiddenError`,
+      raised by the shared credential loader) — names the target and its
+      ``secret_ref`` (taken from *exc*). When the ref is the default path
+      MEHO builds from the target name (*expected_secret_ref*), the answer
+      says so and advises a path MEHO may read plus
+      ``meho targets update <name> --secret-ref <path>``. Otherwise it
+      names the likely out-of-subtree cause and the expected path. The
+      answer holds no hvac text and no Vault address: ``extras`` has no
+      ``exception_message`` and the ``error`` has no ``Vault said:`` tail.
+    * **another path on a target with a ``secret_ref``** (a plain hvac
+      ``Forbidden``, for example a handler that reads a second Vault
+      path) — does not blame the target's ``secret_ref``. It names the
+      refused path (``extras.refused_path``, the path only, never the
+      Vault address) and holds no hvac text either.
     * **no target / no ref** (a typed ``vault.*`` op denied by the Vault
-      ACL itself) — a generic Vault-authorization cause naming the
-      operator-identity read and the tenant-scope convention, without
-      fabricating a ``secret_ref`` diagnosis that does not apply.
+      ACL itself) — a generic Vault-authorization cause, tailed with
+      hvac's text as ``Vault said: ...`` and kept in
+      ``extras.exception_message`` (capped at :data:`_EXC_MESSAGE_CAP`).
 
     ``target`` is typed :class:`typing.Any` because the dispatcher
     threads the live ORM/duck-typed target (or ``None``) through; only
     ``.name`` / ``.secret_ref`` are read, with ``getattr`` guards so any
     target shape degrades gracefully inside the never-raises error path.
-    The hvac exception text (``permission denied, on GET <url>``) names
-    only the operator-supplied path — no secret material — and tails the
-    operator-facing string under the :data:`_EXC_MESSAGE_CAP` discipline.
-    ``extras`` carries the machine-usable fields (``error_code`` /
-    ``secret_ref`` / ``expected_secret_ref`` / ``exception_class`` /
-    ``exception_message``) so an agent can branch without re-parsing the
-    text, per the #1141 convention.
+    ``extras`` always carries ``error_code`` / ``secret_ref`` /
+    ``secret_ref_derived`` / ``expected_secret_ref`` / ``exception_class``
+    so an agent can branch without re-parsing the text.
     """
-    msg = str(exc)
-    if len(msg) > _EXC_MESSAGE_CAP:
-        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
-    secret_ref = getattr(target, "secret_ref", None)
-    target_name = getattr(target, "name", None) or "the target"
-    if secret_ref:
+    own_ref = isinstance(exc, TargetSecretForbiddenError)
+    if isinstance(exc, TargetSecretForbiddenError):
+        secret_ref: Any = exc.secret_ref
+        target_name = exc.target_name
+        # The stable class name of the Vault answer, not the loader's wrapper.
+        exception_class = type(exc.__cause__ or exc).__name__
+    else:
+        secret_ref = getattr(target, "secret_ref", None)
+        target_name = getattr(target, "name", None) or "the target"
+        exception_class = type(exc).__name__
+    # Call-time import: ``tenant_paths`` pulls in the Vault ops module.
+    from meho_backplane.connectors.vault.tenant_paths import secret_ref_matches
+
+    derived = secret_ref_matches(str(secret_ref) if secret_ref else None, expected_secret_ref)
+    extras: dict[str, Any] = {
+        "error_code": "connector_vault_forbidden",
+        "secret_ref": secret_ref,
+        "secret_ref_derived": derived,
+        "expected_secret_ref": expected_secret_ref,
+        "exception_class": exception_class,
+    }
+    if own_ref and derived:
+        summary = (
+            f"connector_vault_forbidden: Vault denied the credential read for "
+            f"{target_name} (permission denied). The secret_ref {secret_ref!r} "
+            f"is the default path MEHO builds from the target name. MEHO set it "
+            f"when the target was added without a secret_ref, or a person set "
+            f"the same path. This install does not let MEHO read that path. To "
+            f"fix, store the credential at another path MEHO may read (not "
+            f"{secret_ref!r}), then run "
+            f"`meho targets update {target_name} --secret-ref <path>` and "
+            f"retry. Do NOT widen the backplane's Vault policy — it is "
+            f"deploy-owned and re-applied on every upgrade. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the "
+            f"namespace convention and "
+            f"docs/codebase/error-message-shape.md for the dispatch error "
+            f"convention."
+        )
+    elif own_ref:
         expected_clause = (
             f"stage the credential at {expected_secret_ref!r} on the 'secret' mount "
             if expected_secret_ref is not None
@@ -2732,9 +3021,32 @@ def result_connector_vault_forbidden(
             f"per-tenant subtree — the canonical layout stores a target's "
             f"credential at 'tenants/<tenant_id>/<name>' (#1723, enforced by "
             f"the rendered VAULT_KV_TENANT_SCOPE_PREFIX). To fix, "
-            f"{expected_clause}and update the target's secret_ref, then "
+            f"{expected_clause}or at another path MEHO may read, and update "
+            f"the target's secret_ref "
+            f"(`meho targets update {target_name} --secret-ref <path>`), then "
             f"retry. Do NOT widen the backplane's Vault policy — it is "
             f"deploy-owned and re-applied on every upgrade. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the "
+            f"namespace convention and "
+            f"docs/codebase/error-message-shape.md for the dispatch error "
+            f"convention."
+        )
+    elif secret_ref:
+        refused_path = _vault_path_of(exc)
+        extras["refused_path"] = refused_path
+        refused = repr(refused_path) if refused_path else "a Vault path"
+        # hvac keeps the request method on the error: PUT, POST, PATCH and
+        # DELETE change a secret, the rest read it.
+        method = str(getattr(exc, "method", None) or "").upper()
+        action = "write" if method in _VAULT_WRITE_METHODS else "read"
+        summary = (
+            f"connector_vault_forbidden: Vault refused to {action} {refused} for "
+            f"this operation on {target_name} (permission denied). This is not "
+            f"the target's own secret_ref: the operation {action}s a second Vault "
+            f"path, and this install does not let MEHO {action} it. Check the path "
+            f"the operation names (for example in its parameters) and use a "
+            f"path MEHO may {action}. Do NOT widen the backplane's Vault policy — "
+            f"it is deploy-owned and re-applied on every upgrade. See "
             f"docs/codebase/connectors-vault-tenant-scope.md for the "
             f"namespace convention and "
             f"docs/codebase/error-message-shape.md for the dispatch error "
@@ -2754,22 +3066,20 @@ def result_connector_vault_forbidden(
             "docs/codebase/error-message-shape.md for the dispatch error "
             "convention."
         )
-    if msg:
-        # hvac renders Forbidden as "permission denied, on GET <url>" —
-        # the URL is the operator-supplied path, never secret material.
-        summary = f"{summary}{VAULT_SAID}{msg}"
+        # Target-less denial: the raw Vault text is the only detail.
+        msg = str(exc)
+        if len(msg) > _EXC_MESSAGE_CAP:
+            msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+        if msg:
+            # hvac renders Forbidden as "permission denied, on GET <url>".
+            summary = f"{summary}{VAULT_SAID}{msg}"
+        extras["exception_message"] = msg
     return OperationResult(
         status="error",
         op_id=op_id,
         error=summary,
         duration_ms=duration_ms,
-        extras={
-            "error_code": "connector_vault_forbidden",
-            "secret_ref": secret_ref,
-            "expected_secret_ref": expected_secret_ref,
-            "exception_class": type(exc).__name__,
-            "exception_message": msg,
-        },
+        extras=extras,
     )
 
 
@@ -2925,7 +3235,9 @@ def result_write_capability_denied(
     reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
     ride in ``extras`` next to the ``doc_ref`` for the write policy. The
     ``reason`` may hold a probe exception class or a target lookup problem,
-    so it goes through :func:`_sanitize_free_text`.
+    so it goes through :func:`_sanitize_free_text`. A check that is not a
+    Vault check sets ``remediation`` (the next step) and ``doc_ref``; without
+    them the text points at the Vault write policy.
     """
     path = preflight.get("path")
     granted = list(preflight.get("granted") or [])
@@ -2937,11 +3249,20 @@ def result_write_capability_denied(
         detail += f" (needs {required}, has {granted})"
     if reason:
         detail += f" (check result: {reason})"
+    # A check of another vendor names its own next step and doc.
+    remediation = preflight.get("remediation")
+    doc_ref = preflight.get("doc_ref")
+    if not isinstance(remediation, str) or not remediation:
+        remediation = (
+            f"Add the write grant (see {_VAULT_WRITE_POLICY_DOC} section 6), "
+            "then call the operation again."
+        )
+    if not isinstance(doc_ref, str) or not doc_ref:
+        doc_ref = f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface"
     summary = (
         f"write_capability_denied: the identity this write runs under cannot "
         f"perform it{detail}. MEHO did not create an approval request, because "
-        f"the write would fail after approval. Add the write grant (see "
-        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+        f"the write would fail after approval. {remediation}"
     )
     return OperationResult(
         status="denied",
@@ -2954,7 +3275,7 @@ def result_write_capability_denied(
             "granted": granted,
             "required": required,
             "reason": reason,
-            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
+            "doc_ref": doc_ref,
         },
     )
 
@@ -2991,12 +3312,40 @@ _TLS_REMEDIATION_LAST_RESORT: str = (
     "tls_ca_pin above."
 )
 
+#: A target that already has ``tls_ca_pin`` must not be told to set one
+#: (#3867). The pin no longer matches what the host presents, typically
+#: because the host certificate was re-issued (for example by the VMCA of
+#: the vCenter the host joined).
+_TLS_REMEDIATION_STALE_PIN: str = (
+    "This target already has tls_ca_pin, but the pin no longer matches the "
+    "certificate the host presents now -- the pin is stale. The host "
+    "certificate was probably re-issued. Check the presented certificate "
+    "below, then re-pin on purpose: set tls_ca_pin to the CA that issued "
+    "it. For an ESXi host or a vCenter whose certificates come from the "
+    "VMCA, pin the VMCA root CA, not the host certificate, so the next "
+    "re-issue does not break the target again."
+)
+
+
+def _stale_pin_extras(presented: Mapping[str, str] | None) -> dict[str, Any]:
+    """The presented leaf, or a note that it could not be read."""
+    if presented is None:
+        return {"presented_certificate": None}
+    return {
+        "presented_certificate": {
+            "issuer": _sanitize_free_text(presented["issuer"]),
+            "subject": _sanitize_free_text(presented["subject"]),
+            "sha256": presented["sha256"],
+        }
+    }
+
 
 def result_connector_tls_verify_failed(
     op_id: str,
     exc: BaseException,
     target: Any,
     duration_ms: float,
+    presented: Mapping[str, str] | None = None,
 ) -> OperationResult:
     """Connector dispatch failed TLS certificate verification.
 
@@ -3033,6 +3382,8 @@ def result_connector_tls_verify_failed(
     """
     msg = _sanitize_free_text(str(exc))
     host = getattr(target, "host", None) or "the target host"
+    if getattr(target, "tls_ca_pin", None):
+        return _result_stale_pin(op_id, msg, exc, host, duration_ms, presented)
     summary = (
         f"connector_tls_verify_failed: TLS certificate verification failed "
         f"for {host}. The socket opened and the host answered, but its "
@@ -3055,6 +3406,45 @@ def result_connector_tls_verify_failed(
             "remediation_secure": _TLS_REMEDIATION_SECURE,
             "remediation_ca_pin": _TLS_REMEDIATION_CA_PIN,
             "remediation_last_resort": _TLS_REMEDIATION_LAST_RESORT,
+        },
+    )
+
+
+def _result_stale_pin(
+    op_id: str,
+    msg: str,
+    exc: BaseException,
+    host: str,
+    duration_ms: float,
+    presented: Mapping[str, str] | None,
+) -> OperationResult:
+    """The ``connector_tls_verify_failed`` answer for a target with a pin."""
+    if presented is None:
+        shown = "meho could not read the certificate the host presents."
+    else:
+        shown = (
+            f"The host presents a certificate issued by {presented['issuer']} "
+            f"for {presented['subject']} (SHA-256 {presented['sha256']})."
+        )
+    summary = (
+        f"connector_tls_verify_failed: TLS certificate verification failed "
+        f"for {host}. {_TLS_REMEDIATION_STALE_PIN} {shown} See "
+        f"docs/codebase/error-message-shape.md for the dispatch error "
+        f"convention."
+    )
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_tls_verify_failed",
+            "host": host,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+            "pin_stale": True,
+            "remediation_stale_pin": _TLS_REMEDIATION_STALE_PIN,
+            **_stale_pin_extras(presented),
         },
     )
 

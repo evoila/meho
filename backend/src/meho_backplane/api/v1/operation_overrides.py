@@ -62,6 +62,10 @@ async def load_override_rows(
             reason=row.reason,
             set_by_sub=row.set_by_sub,
             set_at=row.set_at,
+            category=policy.category,
+            labels=dict(policy.labels),
+            always_wait=policy.always_wait,
+            rule_ref=policy.rule_ref,
         )
         for row, policy in rows
     ]
@@ -78,6 +82,8 @@ async def list_operation_overrides(
     platform admin turned off and where approval is still off. Each row
     names the connector, the operation, the risk level and approval that
     apply in the row's scope, the scope, who set it, when, and the reason.
+    With the ``POLICY_CLASSIFICATION`` switch on, the values include the
+    classification, and ``rule_ref`` names the entry that decided it.
     """
     return OperationOverrideList(
         overrides=await load_override_rows(operator, reduced_approval=reduced_approval)

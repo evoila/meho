@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/dispatch"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // Aliases + binding to the shared dispatch core (cli/internal/dispatch).
@@ -59,18 +60,18 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	dispatch.WriteErrorTrailer(w, r)
 }
 
-// fallbackResultRender dumps the result envelope verbatim when the
-// typed per-verb decode fails.
+// fallbackResultRender prints the result envelope when the typed
+// per-verb decode fails. Control characters in it show as escapes.
 func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
 	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
-		fmt.Fprintln(w, pretty)
+		fmt.Fprintln(w, output.SafeLines(pretty))
 		return
 	}
-	fmt.Fprintln(w, string(r.Result))
+	fmt.Fprintln(w, output.SafeLines(string(r.Result)))
 }
 
 // decodeRowsResult decodes the canonical `{"rows": [...], "total": N}`

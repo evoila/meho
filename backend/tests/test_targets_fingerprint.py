@@ -79,6 +79,7 @@ from ._oidc_jwt_helpers import (
     public_jwks,
 )
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._rest_write_helpers import run_writes_at_once
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -121,7 +122,7 @@ def _build_app() -> FastAPI:
     app.add_middleware(AuditMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(targets_router)
-    return app
+    return run_writes_at_once(app)
 
 
 @pytest.fixture
@@ -260,11 +261,11 @@ async def test_orm_round_trip_new_columns() -> None:
     # Insert with both fields NULL — the default for additive migrations.
     await _insert_target(
         tenant_id=tenant_id,
-        name="rdc-vault",
+        name="example-vault",
         product="vault",
         host="vault.corp.internal",
     )
-    fetched = await _fetch_target_by_name(tenant_id, "rdc-vault")
+    fetched = await _fetch_target_by_name(tenant_id, "example-vault")
     assert fetched is not None
     assert fetched.fingerprint is None
     assert fetched.preferred_impl_id is None
@@ -283,13 +284,13 @@ async def test_orm_round_trip_new_columns() -> None:
     }
     await _insert_target(
         tenant_id=tenant_id,
-        name="rdc-k8s",
+        name="example-k8s",
         product="kubernetes",
         host="kubernetes.corp.internal",
         fingerprint=fingerprint_dict,
         preferred_impl_id="kubernetes-py-1.28",
     )
-    fetched = await _fetch_target_by_name(tenant_id, "rdc-k8s")
+    fetched = await _fetch_target_by_name(tenant_id, "example-k8s")
     assert fetched is not None
     assert fetched.fingerprint == fingerprint_dict
     assert fetched.preferred_impl_id == "kubernetes-py-1.28"

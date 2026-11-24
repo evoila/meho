@@ -49,7 +49,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
-_TARGET_NAME = "rdc-keycloak-encoding-test"
+_TARGET_NAME = "keycloak-encoding-test"
 _KC_HOST = "keycloak-encoding.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _ADMIN_TOKEN = "kc-admin-token-encoding"
@@ -139,7 +139,7 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
     """keycloak_client_get with a traversal id issues a request under realms/{managed_realm}.
 
     Uses an httpx MockTransport to capture the built request URL and assert
-    that the path stays confined to ``/admin/realms/evba/clients/`` with the
+    that the path stays confined to ``/admin/realms/example/clients/`` with the
     traversal chars percent-encoded, not resolved as ``..`` segments.
     """
 
@@ -157,7 +157,7 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.port = 443
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
-    target_stub.extras = {}
+    target_stub.extras = {"managed_realm": "example"}
     # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
     # Protocol spec does not auto-expose annotation-only attributes, so set
     # them explicitly or target_cache_key raises AttributeError.
@@ -170,14 +170,14 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
         # The traversal-encoded path should be what reaches the transport.
-        encoded_path = f"/admin/realms/evba/clients/{_TRAVERSAL_ENCODED}"
+        encoded_path = f"/admin/realms/example/clients/{_TRAVERSAL_ENCODED}"
         route = mock.get(encoded_path).respond(
             200, json={"id": _CLIENT_UUID, "clientId": "meho-backplane"}
         )
 
         result = await keycloak_client_get(connector, _OPERATOR, target_stub, {"id": _TRAVERSAL_ID})
 
-    # The route was called — meaning the path stayed under realms/evba/clients/
+    # The route was called — meaning the path stayed under realms/example/clients/
     # with the traversal chars encoded, and was NOT resolved as ../../ by httpx.
     assert route.called, f"Expected GET {encoded_path} to be called; traversal id was not encoded."
     assert result["client"]["id"] == _CLIENT_UUID
@@ -202,7 +202,7 @@ async def test_role_mapping_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.port = 443
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
-    target_stub.extras = {}
+    target_stub.extras = {"managed_realm": "example"}
     # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
     # Protocol spec does not auto-expose annotation-only attributes, so set
     # them explicitly or target_cache_key raises AttributeError.
@@ -213,7 +213,7 @@ async def test_role_mapping_get_encodes_traversal_id_in_request_path() -> None:
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
-        encoded_path = f"/admin/realms/evba/users/{_TRAVERSAL_ENCODED}/role-mappings"
+        encoded_path = f"/admin/realms/example/users/{_TRAVERSAL_ENCODED}/role-mappings"
         route = mock.get(encoded_path).respond(
             200, json={"realmMappings": [], "clientMappings": {}}
         )
@@ -270,10 +270,10 @@ async def _seed_encoding_target() -> TargetORM:
             host=_KC_HOST,
             port=443,
             fqdn=None,
-            secret_ref="rdc-hetzner-dc/keycloak/admin",
+            secret_ref="example-site/keycloak/admin",
             auth_model="shared_service_account",
             vpn_required=False,
-            extras={},
+            extras={"managed_realm": "example"},
             fingerprint={"version": "26.0.5"},
             notes="seeded by test_connectors_keycloak_path_encoding",
         )
@@ -379,7 +379,7 @@ async def test_schema_gate_accepts_valid_uuid(
         mock.post("/realms/master/protocol/openid-connect/token").respond(
             200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
-        mock.get(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(
+        mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(
             200, json={"id": _CLIENT_UUID, "clientId": "meho-backplane"}
         )
 
@@ -431,48 +431,78 @@ def test_uuid_pattern_rejects_non_uuid_strings() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
-    """Verify quote_segment is imported and called in both handler modules.
+def test_handlers_pass_raw_values_and_fill_path_encodes_them() -> None:
+    """Every value is encoded once, by ``fill_path``; the handlers pass raw values.
 
-    This is the programmatic equivalent of acceptance criterion 2's grep:
-    ``grep -rn 'quote' backend/src/meho_backplane/connectors/keycloak/``
-
-    Uses exact call-site counts (not >=) so that any future addition or removal
-    of a call site triggers an explicit review.  Current counts:
-
-    * ops_read: 5 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``
-      + ``keycloak_role_users`` (role name → path segment, #2843) +
-      ``keycloak_group_list`` (parent_id) + ``keycloak_group_member_list``
-      (group UUID) — the last two added by #3280.
-    * ops_write: 7 sites — ``keycloak_client_update``, ``keycloak_protocol_mapper_create``,
-      ``keycloak_user_password_reset``, ``keycloak_role_mapping_add``,
-      ``keycloak_realm_update`` (the realm name and the new realm name), and
-      ``keycloak_user_logout`` (user UUID, #3851).
-    * ops_write_groups: 6 sites (#3280) — ``keycloak_group_create`` (parent_id),
-      ``keycloak_group_update_attributes`` (group UUID), and
-      ``keycloak_group_member_add`` / ``_remove`` (user UUID + group UUID each).
+    A handler that encoded a value itself would encode it twice (``%2F``
+    becomes ``%252F``). So no module of the Keycloak connector, also a new
+    one, calls ``quote_segment`` inside a ``fill_path`` call.
     """
-    import inspect
+    import ast
+    from pathlib import Path
 
-    import meho_backplane.connectors.keycloak.ops_read as ops_read_mod
-    import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
-    import meho_backplane.connectors.keycloak.ops_write_groups as ops_write_groups_mod
+    import meho_backplane.connectors.keycloak as keycloak_pkg
+    from meho_backplane.connectors.keycloak._paths import _USER_PATH, fill_path
 
-    expected_counts = {
-        ops_read_mod: 5,
-        ops_write_mod: 7,
-        ops_write_groups_mod: 6,
-    }
-    for mod, expected in expected_counts.items():
-        source = inspect.getsource(mod)
-        # quote_segment must be imported.
-        assert "quote_segment" in source, (
-            f"quote_segment not found in {mod.__name__} — path-segment encoding is missing"
+    def _name(call: ast.Call) -> str:
+        func = call.func
+        return func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+
+    offenders: list[str] = []
+    for path in sorted(Path(keycloak_pkg.__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and _name(node) == "fill_path":
+                offenders.extend(
+                    f"{path.name}:{inner.lineno}"
+                    for inner in ast.walk(node)
+                    if isinstance(inner, ast.Call) and _name(inner) == "quote_segment"
+                )
+    assert offenders == []
+    assert (
+        fill_path(_USER_PATH, {"realm": "a.b", "user-id": "../x"})
+        == "/admin/realms/a%2Eb/users/%2E%2E%2Fx"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_user_check_sends_a_user_id_encoded_once() -> None:
+    """A user id with a ``/`` reaches Keycloak as ``%2F``, never as ``%252F``.
+
+    Every Keycloak user write reads its user through ``read_user_for_write``,
+    so this one call covers the path of all of them.
+    """
+    from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
+
+    async def _stub_loader(
+        _target: KeycloakTargetLike, _operator: Operator
+    ) -> KeycloakAdminCredentials:
+        return KeycloakClientCredentials(client_id="meho-admin", client_secret="stub-secret")
+
+    connector = KeycloakConnector(credentials_loader=_stub_loader)
+    target_stub = MagicMock(spec=KeycloakTargetLike)
+    target_stub.name = "encoding-test-target"
+    target_stub.host = _KC_HOST
+    target_stub.port = 443
+    target_stub.secret_ref = "stub/secret"
+    target_stub.auth_model = "shared_service_account"
+    target_stub.extras = {"managed_realm": "example"}
+    target_stub.id = uuid.UUID(int=0xCF)
+    target_stub.tenant_id = uuid.UUID(int=0)
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 300}
         )
-        # Exact call-site count — regression guard against silently adding/removing sites.
-        call_count = source.count("quote_segment(")
-        assert call_count == expected, (
-            f"quote_segment() called {call_count} time(s) in {mod.__name__}, "
-            f"expected exactly {expected}. Update this assertion if a new call site "
-            "is intentionally added or removed."
+        route = mock.get("/admin/realms/example/users/a%2Fb").respond(
+            200, json={"id": "a/b", "username": "alice"}
         )
+        found = await read_user_for_write(
+            connector, _OPERATOR, target_stub, {"id": "a/b"}, op_id="keycloak.user.update"
+        )
+
+    assert route.call_count == 1
+    assert route.calls.last.request.url.raw_path == b"/admin/realms/example/users/a%2Fb"
+    assert found.path == "/admin/realms/example/users/a%2Fb"
+    assert found.user["username"] == "alice"
+
+    await connector.aclose()

@@ -98,6 +98,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit import _REPLAY_ROW_CAP, _count_session_rows
 from meho_backplane.audit_query import (
+    AuditEntry,
     AuditQueryFilters,
     AuditQueryResult,
     DurationParseError,
@@ -110,11 +111,14 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
+from meho_backplane.audit_query.approval_payload import approval_payload_view
 from meho_backplane.auth.client_identity import via_label
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import load_trace
+from meho_backplane.operations._audit import payload_session_from_client
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
@@ -124,6 +128,11 @@ from meho_backplane.ui.auth.session_ref import session_ref
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
+from meho_backplane.ui.routes.audit.op_class_badges import (
+    OP_CLASS_BADGE_CLASSES,
+    OP_CLASS_FILTER_OPTIONS,
+)
+from meho_backplane.ui.routes.audit.stored_session import drawer_rights, stored_session_context
 from meho_backplane.ui.routes.audit.trace_pane import project_trace
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
@@ -132,11 +141,13 @@ from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     is_aggregate_only,
     resolve_op_id,
 )
-from meho_backplane.ui.routes.broadcast.feed import (
-    OP_CLASS_BADGE_CLASSES,
-    OP_CLASS_FILTER_OPTIONS,
+from meho_backplane.ui.routes.work_ref_form import (
+    filter_work_ref,
+    mark_work_ref_refused,
+    refused_filter_text,
 )
 from meho_backplane.ui.templating import get_templates
+from meho_backplane.work_ref import WorkRefError
 
 __all__ = ["build_audit_router"]
 
@@ -328,11 +339,10 @@ async def _run_query(filters: AuditQueryFilters, *, tenant_id: uuid.UUID) -> Aud
 
 
 def _badge_class(op_class: str) -> str:
-    """Return the DaisyUI badge variant for *op_class* (broadcast palette).
+    """Return the DaisyUI badge variant for *op_class*.
 
-    Reuses the broadcast :data:`OP_CLASS_BADGE_CLASSES` map so audit rows
-    colour-code identically to live-feed rows; an op_class outside the closed
-    vocabulary falls back to ``badge-ghost`` (the broadcast default).
+    Reads :data:`OP_CLASS_BADGE_CLASSES`; an op_class outside the closed
+    vocabulary falls back to ``badge-ghost``.
     """
     return OP_CLASS_BADGE_CLASSES.get(op_class, "badge-ghost")
 
@@ -342,6 +352,15 @@ def _tenant_label(tenant_name: str | None, tenant_id: uuid.UUID | None) -> str:
     if tenant_name:
         return tenant_name
     return str(tenant_id) if tenant_id is not None else "-"
+
+
+def _is_agent_session(row: AuditEntry) -> bool:
+    """Return True when the row's session id is an agent run or an MCP session.
+
+    A session id the CLI sent for its login session (payload key
+    ``session_from_client``) is not an agent session.
+    """
+    return row.agent_session_id is not None and not payload_session_from_client(row.payload)
 
 
 def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str, object]]:
@@ -373,6 +392,7 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
                 str(row.agent_session_id) if row.agent_session_id is not None else None
             ),
             "replay_enabled": is_admin and row.agent_session_id is not None,
+            "agent_session": _is_agent_session(row),
         }
         for row in result.rows
     ]
@@ -416,13 +436,14 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
             str(node.agent_session_id) if node.agent_session_id is not None else None
         ),
         "replay_enabled": is_admin and node.agent_session_id is not None,
+        "agent_session": _is_agent_session(node),
         "depth": node.depth,
         "children": [_project_replay_node(child, is_admin=is_admin) for child in node.children],
     }
 
 
 async def _build_drawer_context(
-    db_session: AsyncSession, row: AuditLog, *, is_admin: bool
+    db_session: AsyncSession, row: AuditLog, *, is_admin: bool, may_read_sessions: bool
 ) -> dict[str, object]:
     """Assemble the row-detail drawer context for one ``audit_log`` row.
 
@@ -442,7 +463,8 @@ async def _build_drawer_context(
     via :func:`~meho_backplane.ui.references.resolve_audit_references`. The
     replay deep-link inside it is enabled only when the session lifted to
     ``tenant_admin`` (``is_admin``) and the row carries an
-    ``agent_session_id``.
+    ``agent_session_id``. The "Stored session" part shows only when
+    *may_read_sessions* is true and the row belongs to a stored session.
     """
     op_id = resolve_op_id(row)
     op_class = classify_op(op_id)
@@ -452,7 +474,13 @@ async def _build_drawer_context(
     request_payload = (
         {}
         if aggregate_only
-        else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
+        else {
+            k: v
+            for k, v in approval_payload_view(
+                method=row.method, operator_sub=row.operator_sub, payload=row.payload
+            ).items()
+            if k not in INTERNAL_PAYLOAD_KEYS
+        }
     )
     references = await resolve_audit_references(
         db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin
@@ -500,6 +528,9 @@ async def _build_drawer_context(
         "references": references,
         # The login client and channel of the row (AUDIT_CLIENT_IDENTITY).
         "via_label": via_label(row.payload),
+        # The login the secret store accepted (AUDIT_SECRET_READ_AS).
+        "secret_read_as": row.secret_read_as if get_settings().audit_secret_read_as else None,
+        "stored_session": await stored_session_context(db_session, row, may_read=may_read_sessions),
     }
 
 
@@ -523,8 +554,10 @@ async def _resolve_deep_link_drawer(
     row = await fetch_audit_row(db_session, tenant_id=session.tenant_id, audit_id=audit_id)
     if row is None:
         return None
-    is_admin = await is_ui_tenant_admin(session)
-    return await _build_drawer_context(db_session, row, is_admin=is_admin)
+    is_admin, may_read_sessions = await drawer_rights(session)
+    return await _build_drawer_context(
+        db_session, row, is_admin=is_admin, may_read_sessions=may_read_sessions
+    )
 
 
 async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
@@ -648,6 +681,7 @@ async def _build_results_context(
     agent_session_id: uuid.UUID | None = None,
     event_class: str = "",
     include_counts: bool = True,
+    work_ref_error: str | None = None,
 ) -> dict[str, object]:
     """Assemble the context shared by the full page + the results fragment.
 
@@ -664,7 +698,8 @@ async def _build_results_context(
     ``event_class`` filters on one class (#3733); an unknown value is an
     inline filter error, never a 500. ``include_counts`` adds the per-class
     counters (#3747) for the same filters; the "Load more" append skips
-    them because it renders rows only.
+    them because it renders rows only. ``work_ref_error`` (a refused ticket
+    id) is an inline filter error too, and the caller answers 422.
     """
     is_admin = await is_ui_tenant_admin(session)
     context: dict[str, object] = {
@@ -689,6 +724,9 @@ async def _build_results_context(
         "class_counts": [],
         "class_counts_since": None,
     }
+    if work_ref_error is not None:
+        context["filter_error"] = work_ref_error
+        return context
     if event_class and event_class not in _EVENT_CLASS_LABELS:
         context["filter_error"] = f"Unknown event class '{event_class}'."
         return context
@@ -769,7 +807,7 @@ async def _results_handler(
     result_status: str = Query(default="", max_length=16),
     since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    work_ref: str = Query(default=""),
     cursor: str | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
@@ -793,6 +831,7 @@ async def _results_handler(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown audit results partial '{partial}'.",
         )
+    checked_work_ref, work_ref_error = _check_work_ref(work_ref)
     context = await _build_results_context(
         session,
         target=target,
@@ -802,18 +841,37 @@ async def _results_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=work_ref,
+        work_ref=checked_work_ref,
         cursor=cursor,
         agent_session_id=agent_session_id,
         event_class=event_class,
         include_counts=partial != _RESULTS_PARTIAL_ROWS,
+        work_ref_error=work_ref_error,
     )
     template = (
         "audit/_results_rows_oob.html"
-        if partial == _RESULTS_PARTIAL_ROWS
+        if partial == _RESULTS_PARTIAL_ROWS and work_ref_error is None
         else "audit/_results.html"
     )
-    return get_templates().TemplateResponse(request, template, context)
+    response = get_templates().TemplateResponse(request, template, context)
+    if work_ref_error is not None and partial == _RESULTS_PARTIAL_ROWS:
+        # The "Load more" button appends into the rows list; the refused
+        # answer is the whole results block, so it replaces that block instead.
+        mark_work_ref_refused(response, retarget="#audit-results", reswap="innerHTML")
+    elif work_ref_error is not None:
+        mark_work_ref_refused(response)
+    return response
+
+
+def _check_work_ref(raw: str) -> tuple[str, str | None]:
+    """The ticket id search value to use, and the refusal text when it is refused.
+
+    A refused value is kept as typed, so the form shows it again.
+    """
+    try:
+        return filter_work_ref(raw) or "", None
+    except WorkRefError as exc:
+        return raw, refused_filter_text(exc)
 
 
 async def _page_handler(
@@ -825,7 +883,7 @@ async def _page_handler(
     result_status: str = Query(default="", max_length=16),
     since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    work_ref: str = Query(default=""),
     audit_id: uuid.UUID | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
     event_class: str = Query(default="", max_length=32),
@@ -852,6 +910,7 @@ async def _page_handler(
     lands on that one session's rows -- the over-cap fallback's whole point
     -- rather than the unfiltered tenant-wide list.
     """
+    checked_work_ref, work_ref_error = _check_work_ref(work_ref)
     context = await _build_results_context(
         session,
         target=target,
@@ -861,10 +920,11 @@ async def _page_handler(
         result_status=result_status,
         since=since,
         until=until,
-        work_ref=work_ref,
+        work_ref=checked_work_ref,
         cursor=None,
         agent_session_id=agent_session_id,
         event_class=event_class,
+        work_ref_error=work_ref_error,
     )
     csrf_token = mint_csrf_token(str(session.session_id))
     context["page_title"] = "Audit"
@@ -882,6 +942,8 @@ async def _page_handler(
         samesite="strict",
         path="/ui",
     )
+    if work_ref_error is not None:
+        mark_work_ref_refused(response)
     return response
 
 
@@ -929,8 +991,10 @@ async def _drawer_handler(
             {"audit_id": str(audit_id)},
             status_code=404,
         )
-    is_admin = await is_ui_tenant_admin(session)
-    context = await _build_drawer_context(db_session, row, is_admin=is_admin)
+    is_admin, may_read_sessions = await drawer_rights(session)
+    context = await _build_drawer_context(
+        db_session, row, is_admin=is_admin, may_read_sessions=may_read_sessions
+    )
     return get_templates().TemplateResponse(request, "audit/_drawer.html", context)
 
 

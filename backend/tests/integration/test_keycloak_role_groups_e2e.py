@@ -5,25 +5,32 @@
 
 The Keycloak subchart imports
 ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` and the realm
-stage of the ``bootstrap`` Job makes the first two people (as in
+stage of the ``bootstrap`` Job makes the first admin (as in
 ``test_core_keycloak_realm_import.py`` and ``test_core_bootstrap_keycloak.py``).
 Against that real Keycloak:
 
-1. A new person in exactly one of the five role groups logs in and gets
+1. A new person in exactly one of the three role groups logs in and gets
    that group's ``tenant_id``, ``tenant_role`` and ``approver``; the
    backplane's own JWT check accepts the token with the same role.
 2. Once the person leaves the group, the next login has no ``tenant_id``
    and MEHO answers ``401 missing_tenant_claim``. A refresh of the session
    from before the change loses the claim too: Keycloak runs the client's
    mappers again on every refresh, with the person's current groups.
-3. The first admin is in MEHO-Admins and MEHO-Platform-Admins; the second
-   person is in MEHO-SA-Operators, which is ``operator``, so the approvals
-   plane lets them decide the admin's requests. (The full ask-and-approve
-   path through the REST API runs on the built-in realm in
+3. The first admin is in MEHO-Admins and MEHO-Platform-Admins, and the
+   realm has no approver login and no MEHO-SA-Operators or MEHO-Approvers
+   group. A person in MEHO-Operators clears the approvals plane. (The full
+   ask-and-approve path through the REST API runs on the built-in realm in
    ``test_core_bootstrap_keycloak.py``.)
+4. The team groups of the policy file's bindings, set up as
+   ``docs-site/install/keycloak-realm.md`` says (full group paths on, the
+   ``meho-groups`` mapper): a person only in the sub-group
+   ``/MEHO-Operators/Network`` gets the full path in ``groups``, the group
+   attribute in ``meho_groups`` and the tenant and role of the parent
+   group, and a binding by path and one by attribute both match. The test
+   puts the client's mappers back when it is done.
 
 The login is the password grant on ``meho-cli``, switched on by this test
-only (people use the device flow); the client's mappers are untouched.
+only (people use the device flow).
 
 It uses the subchart's image (``MEHO_TEST_CORE_KEYCLOAK_IMAGE`` for a
 mirror) and skips when Docker is missing.
@@ -45,7 +52,7 @@ import pytest
 from fastapi import HTTPException
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, RoleGroup, TenantRole
 from meho_backplane.auth.rbac import require_approvals_access
 from meho_backplane.core.keycloak import (
     ADMIN_SECRET_ENV,
@@ -54,6 +61,7 @@ from meho_backplane.core.keycloak import (
     HttpAdmin,
     finish_realm,
 )
+from meho_backplane.policy.bindings import bind, bindings_from_document, token_groups
 from meho_backplane.settings import get_settings
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 from tests.integration.test_core_bootstrap_keycloak import _FakeStore, _plan
@@ -74,13 +82,12 @@ _TENANT_ID = "6b0d7c55-41a8-4b52-9a8e-2f3c1d0e9a77"
 _BACKPLANE_AUDIENCE = "meho-backplane"
 _LOGIN_CLIENT = "meho-cli"
 
-# The five role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The three role groups and what a member must get (docs/decisions/login-role-groups.md).
+# The second value says whether the token carries the `approver` claim.
 _ROLE_GROUPS = {
     "MEHO-Readers": (TenantRole.READ_ONLY, False),
     "MEHO-Operators": (TenantRole.OPERATOR, False),
-    "MEHO-SA-Operators": (TenantRole.OPERATOR, False),
     "MEHO-Admins": (TenantRole.TENANT_ADMIN, False),
-    "MEHO-Approvers": (TenantRole.READ_ONLY, True),
 }
 
 
@@ -93,8 +100,6 @@ class _Site:
     headers: Callable[[], dict[str, str]]
     admin_username: str
     admin_password: str
-    approver_username: str
-    approver_password: str
 
     @property
     def admin_url(self) -> str:
@@ -300,8 +305,6 @@ def site() -> Iterator[_Site]:
             headers=headers,
             admin_username=first_login["admin_username"],
             admin_password=first_login["admin_password"],
-            approver_username=first_login["approver_username"],
-            approver_password=first_login["approver_password"],
         )
         _allow_password_grant_on_cli(site)
         yield site
@@ -333,7 +336,8 @@ async def test_member_of_one_group_gets_its_tenant_and_role(
     operator = await _verify(site, access_token, monkeypatch)
     assert str(operator.tenant_id) == _TENANT_ID
     assert operator.tenant_role is want_role
-    assert operator.approver is want_approver
+    assert operator.approver is False
+    assert operator.self_approver is False
     assert operator.platform_admin is False
 
 
@@ -387,17 +391,22 @@ async def test_leaving_the_group_removes_the_tenant_from_new_logins_and_refreshe
     assert str(refused.value.detail).startswith("missing_tenant_claim"), refused.value.detail
 
 
-# --- 3. The two people the setup makes ---------------------------------------
+# --- 3. The one person the setup makes ---------------------------------------
 
 
-async def test_first_admin_and_second_person_get_their_groups_and_roles(
+async def test_first_admin_gets_its_groups_and_the_realm_has_no_approver_login(
     site: _Site, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert _user_groups(site, site.admin_username) == {"MEHO-Admins", "MEHO-Platform-Admins"}
-    assert _user_groups(site, site.approver_username) == {"MEHO-SA-Operators"}
+    users = httpx.get(f"{site.admin_url}/users", headers=site.headers()).json()
+    assert site.admin_username in {user["username"] for user in users}
+    assert "approver" not in {user["username"] for user in users}
+    groups = {
+        g["name"] for g in httpx.get(f"{site.admin_url}/groups", headers=site.headers()).json()
+    }
+    assert not groups & {"MEHO-SA-Operators", "MEHO-Approvers"}
 
     _finish_first_login(site, site.admin_username)
-    _finish_first_login(site, site.approver_username)
 
     admin_token = _password_login(site, site.admin_username, site.admin_password)
     admin = await _verify(site, admin_token["access_token"], monkeypatch)
@@ -406,13 +415,123 @@ async def test_first_admin_and_second_person_get_their_groups_and_roles(
     assert admin.platform_admin is True
     assert admin.approver is False
 
-    approver_token = _password_login(site, site.approver_username, site.approver_password)
-    approver = await _verify(site, approver_token["access_token"], monkeypatch)
-    assert str(approver.tenant_id) == _TENANT_ID
-    assert approver.tenant_role is TenantRole.OPERATOR
-    assert approver.platform_admin is False
-    assert approver.approver is False
-    assert approver.sub != admin.sub, "two people"
-    # ``operator`` clears the approvals plane, so the second person can decide
-    # the first admin's requests (the self-approval refusal is per ``sub``).
-    assert require_approvals_access(approver) is approver
+
+async def test_a_member_of_operators_clears_the_approvals_plane(
+    site: _Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, password = _add_person(site, "plane-operator", "MEHO-Operators")
+
+    token = _password_login(site, "plane-operator", password)["access_token"]
+    operator = await _verify(site, token, monkeypatch)
+
+    assert require_approvals_access(operator) is operator
+
+
+# --- 4. Team groups for the policy file's bindings ----------------------------
+
+_TEAM_ATTRIBUTE = "tenant-a-network"
+
+
+def _cli_mappers_url(site: _Site) -> str:
+    client = httpx.get(
+        f"{site.admin_url}/clients", headers=site.headers(), params={"clientId": _LOGIN_CLIENT}
+    ).json()[0]
+    return f"{site.admin_url}/clients/{client['id']}/protocol-mappers/models"
+
+
+def _set_full_group_path(site: _Site, on: bool) -> None:
+    url = _cli_mappers_url(site)
+    mapper = next(
+        m for m in httpx.get(url, headers=site.headers()).json() if m["name"] == "groups-claim"
+    )
+    mapper["config"]["full.path"] = "true" if on else "false"
+    httpx.put(f"{url}/{mapper['id']}", headers=site.headers(), json=mapper).raise_for_status()
+
+
+def _add_meho_groups_mapper(site: _Site) -> str:
+    """The ``meho-groups`` mapper of the docs; returns its id."""
+    url = _cli_mappers_url(site)
+    httpx.post(
+        url,
+        headers=site.headers(),
+        json={
+            "name": "meho-groups",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-usermodel-attribute-mapper",
+            "config": {
+                "user.attribute": "meho_group",
+                "claim.name": "meho_groups",
+                "jsonType.label": "String",
+                "multivalued": "true",
+                "aggregate.attrs": "true",
+                "access.token.claim": "true",
+                "id.token.claim": "false",
+                "userinfo.token.claim": "false",
+            },
+        },
+    ).raise_for_status()
+    mappers = httpx.get(url, headers=site.headers()).json()
+    return str(next(m["id"] for m in mappers if m["name"] == "meho-groups"))
+
+
+def _add_team_group(site: _Site) -> str:
+    """The sub-group ``/MEHO-Operators/Network`` with a ``meho_group`` value; its id."""
+    parent = _group_id(site, "MEHO-Operators")
+    httpx.post(
+        f"{site.admin_url}/groups/{parent}/children",
+        headers=site.headers(),
+        json={"name": "Network", "attributes": {"meho_group": [_TEAM_ATTRIBUTE]}},
+    ).raise_for_status()
+    children = httpx.get(
+        f"{site.admin_url}/groups/{parent}/children", headers=site.headers()
+    ).json()
+    return str(next(g["id"] for g in children if g["name"] == "Network"))
+
+
+async def test_a_person_only_in_a_team_group_gets_the_claims_bindings_match(
+    site: _Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    team = _add_team_group(site)
+    user_id, password = _add_person(site, "network-member", "MEHO-Readers")
+    httpx.delete(
+        f"{site.admin_url}/users/{user_id}/groups/{_group_id(site, 'MEHO-Readers')}",
+        headers=site.headers(),
+    ).raise_for_status()
+    httpx.put(
+        f"{site.admin_url}/users/{user_id}/groups/{team}", headers=site.headers()
+    ).raise_for_status()
+    assert _user_groups(site, "network-member") == {"Network"}
+
+    _set_full_group_path(site, True)
+    mapper = _add_meho_groups_mapper(site)
+    try:
+        access_token = _password_login(site, "network-member", password)["access_token"]
+    finally:
+        httpx.delete(
+            f"{_cli_mappers_url(site)}/{mapper}", headers=site.headers()
+        ).raise_for_status()
+        _set_full_group_path(site, False)
+
+    claims = _claims(access_token)
+    assert claims.get("groups") == ["/MEHO-Operators/Network"]
+    assert claims.get("meho_groups") == [_TEAM_ATTRIBUTE]
+    # The tenant and the role come from the parent group.
+    assert claims.get("tenant_id") == _TENANT_ID
+    assert claims.get("tenant_role") == "operator"
+    assert claims.get("meho_tenants") == [f"{_TENANT_ID}:main:Operators"]
+    assert token_groups(claims) == (
+        frozenset({"/MEHO-Operators/Network"}),
+        frozenset({_TEAM_ATTRIBUTE}),
+    )
+
+    operator = await _verify(site, access_token, monkeypatch)
+    assert operator.tenant_role is TenantRole.OPERATOR
+    for match in ({"group": "/MEHO-Operators/Network"}, {"attribute": _TEAM_ATTRIBUTE}):
+        entries = bindings_from_document(
+            {"bindings": [{"match": match, "kind": "SA-Operators", "categories": ["network"]}]}
+        )
+        bound = bind(operator, claims, entries)
+        assert bound.bound_kind is RoleGroup.OPERATORS, match
+        assert bound.bound_categories == frozenset({"network"})
+    short = {"match": {"group": "/Network"}, "kind": "SA-Operators", "categories": ["*"]}
+    assert bind(operator, claims, bindings_from_document({"bindings": [short]})).bound_kind is None

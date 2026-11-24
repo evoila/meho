@@ -1686,3 +1686,120 @@ async def test_preview_unknown_op_has_no_verdict(
     assert envelope["status"] == "error"
     assert "safety_level" not in envelope
     assert "policy_verdict" not in envelope
+
+
+# ---------------------------------------------------------------------------
+# policy_rule and approvers, with POLICY_ENGINE_SHADOW on (#6045)
+# ---------------------------------------------------------------------------
+
+
+def _shadow(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true" if on else "false")
+    get_settings.cache_clear()
+
+
+async def _preview_gh_write(operator: Operator) -> dict[str, Any]:
+    return await preview_dispatch(
+        operator=operator,
+        connector_id="gh-rest-3",
+        op_id=_GH_ISSUE_OP,
+        target=_FakeTarget(name="gh-prod"),
+        params=dict(_GH_ISSUE_PARAMS),
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_has_no_policy_rule_or_approvers_with_the_switch_off(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off (the default), the preview answer is exactly as before."""
+    _shadow(monkeypatch, on=False)
+    await _seed_ingested_write(
+        session=session,
+        stub_embedding_service=stub_embedding_service,
+        safety_level="caution",
+        requires_approval=False,
+    )
+    envelope = await _preview_gh_write(_make_operator())
+    assert envelope["policy_verdict"] == "needs-approval"
+    assert "policy_rule" not in envelope
+    assert "approvers" not in envelope
+
+
+@pytest.mark.asyncio
+async def test_preview_names_the_rule_and_who_may_approve_a_waiting_call(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token call of a caution op waits: the rule says why, and the groups who approve."""
+    _shadow(monkeypatch, on=True)
+    await _seed_ingested_write(
+        session=session,
+        stub_embedding_service=stub_embedding_service,
+        safety_level="caution",
+        requires_approval=False,
+    )
+    envelope = await _preview_gh_write(_make_operator())
+    await _assert_no_audit_rows(_GH_ISSUE_OP)
+    assert envelope["policy_verdict"] == "needs-approval"
+    assert envelope["policy_rule"] == {
+        "source": "floor",
+        "rule_id": "token_runs_only_safe",
+        "text": envelope["policy_rule"]["text"],
+        "decided": False,
+    }
+    assert envelope["approvers"] == [
+        "MEHO-Operators",
+        "MEHO-Admins",
+    ]
+    # Advisory fields: the binding hash stays what it was.
+    _shadow(monkeypatch, on=False)
+    assert (await _preview_gh_write(_make_operator()))["preview_hash"] == envelope["preview_hash"]
+
+
+@pytest.mark.asyncio
+async def test_preview_of_a_call_that_runs_has_no_approvers(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _shadow(monkeypatch, on=True)
+    await _seed_ingested_write(
+        session=session,
+        stub_embedding_service=stub_embedding_service,
+        safety_level="caution",
+        requires_approval=False,
+    )
+    envelope = await _preview_gh_write(_make_operator().model_copy(update={"web_session": True}))
+    assert envelope["policy_verdict"] == "auto-execute"
+    assert envelope["policy_rule"]["rule_id"] == "person.web.caution"
+    assert envelope["approvers"] == []
+
+
+@pytest.mark.asyncio
+async def test_preview_policy_rule_is_null_when_the_evaluator_fails(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed evaluator gives no rule, never a wrong one; the verdict stays today's."""
+    from meho_backplane.policy import shadow
+
+    async def _broken(**_: Any) -> Any:
+        raise RuntimeError("evaluator broke")
+
+    _shadow(monkeypatch, on=True)
+    monkeypatch.setattr(shadow, "evaluate_call", _broken)
+    await _seed_ingested_write(
+        session=session,
+        stub_embedding_service=stub_embedding_service,
+        safety_level="caution",
+        requires_approval=False,
+    )
+    envelope = await _preview_gh_write(_make_operator())
+    assert envelope["policy_verdict"] == "needs-approval"
+    assert envelope["policy_rule"] is None
+    assert envelope["approvers"][0] == "MEHO-Operators"

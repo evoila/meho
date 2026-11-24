@@ -580,7 +580,17 @@ def test_corpus_search_card_header_prefers_upstream_title() -> None:
     body = response.text
     # The human title is the link text; the raw document_id is not the header.
     assert "Quiescing VM Snapshots" in body
-    assert ">vsphere-snapshots<" not in body
+    # Scoped to the card heading on purpose. The id is *expected* elsewhere on
+    # the card: when a title heads it, ``_results.html`` deliberately surfaces
+    # the demoted id as a "Document id" badge so provenance stays visible. A
+    # bare `">vsphere-snapshots<" not in body` therefore asserts the opposite
+    # of the template's documented behaviour, and only passed because that
+    # badge used to be written across three lines -- the newlines, not the
+    # markup, kept the string from matching.
+    heading = re.search(r'<h3[^>]*class="card-title[^"]*"[^>]*>(.*?)</h3>', body, re.S)
+    assert heading, "the result card lost its heading"
+    assert "Quiescing VM Snapshots" in heading.group(1)
+    assert "vsphere-snapshots" not in heading.group(1)
 
 
 def _render_results(**context: object) -> str:
@@ -737,7 +747,7 @@ def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:
                 chunk_id="kb-1",
                 document_id="broadcom-kb-414551",
                 content="vCenter scaling maximums.",
-                source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+                source_url="gs://example-corpus/kb/broadcom-kb/articles/41/414551.html",
                 score=0.9,
             ),
         ]
@@ -780,14 +790,12 @@ def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
         tenant_id=_TENANT_A,
         capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
     )
-    community_url = (
-        "gs://meho-knowledge-vmware-corpus/community/williamlam/blog/quiesce-snapshots.md"
-    )
+    community_url = "gs://example-corpus/community/example-author/blog/quiesce-snapshots.md"
     result = DocsSearchResult(
         chunks=[
             _chunk(
                 chunk_id="comm-1",
-                document_id="williamlam-quiesce",
+                document_id="example-author-quiesce",
                 content="Community guidance on quiescing snapshots.",
                 source_url=community_url,
                 score=0.7,
@@ -814,7 +822,7 @@ def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
     assert 'href="gs://' not in body
     # The label is rendered (document id fallback) and the raw path is shown
     # as provenance text (not a link).
-    assert "williamlam-quiesce" in body
+    assert "example-author-quiesce" in body
     assert community_url in body
 
 

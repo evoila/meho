@@ -46,16 +46,17 @@ Background dispatch (#2642)
 ===========================
 
 WIF configured but an **empty** ``operator.raw_jwt`` — a background sensor
-evaluation, the topology-refresh scheduler, runbook verify dispatch, a
-legacy connector ``execute()`` shim — falls back to the SA-direct path
+evaluation, the topology-refresh scheduler, a legacy connector
+``execute()`` shim — falls back to the SA-direct path
 rather than failing closed (``_select_auth_path``, logged as
 ``auth_path="sa_direct_fallback"``). The shared loader used to reject such a
 call before dispatch, which on a GCP-native install blocked a read the pod's
 own identity could have served and left every credentialed Sensor stuck at
-``unknown``. Each backend now owns that precondition, and this backend has a
-deployment identity to fall back on. Note the relaxation is not scoped to
-the check-runner: it applies to every system-initiated caller with an empty
-``raw_jwt`` on a GSM deploy.
+``unknown``. A runbook check step is not such a call: it runs with the
+token of the caller who advances the run. Each backend now owns that
+precondition, and this backend has a deployment identity to fall back on.
+Note the relaxation is not scoped to the check-runner: it applies to every
+system-initiated caller with an empty ``raw_jwt`` on a GSM deploy.
 
 Connector ``probe()`` / ``fingerprint()`` are **not** in that set.
 :func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`
@@ -119,6 +120,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from meho_backplane.auth.secret_read_as import (
+    MEHO_OWN_IDENTITY,
+    record_caller_secret_read,
+    record_secret_read_as,
+)
 from meho_backplane.connectors._shared.credential_backend import (
     CredentialsReadError,
     register_credential_backend,
@@ -436,8 +442,8 @@ def _select_auth_path(
 
     The third case is the one that matters. A system-initiated read (a
     background sensor evaluation with no check-runner principal configured,
-    the topology-refresh scheduler, runbook verify dispatch, a legacy
-    ``execute()`` shim) carries ``raw_jwt=""``, so there is nothing to
+    the topology-refresh scheduler, a legacy ``execute()`` shim) carries
+    ``raw_jwt=""``, so there is nothing to
     federate with — but a deployment whose pod carries an ambient GCP
     identity (GKE Workload Identity, a mounted SA) can still read Secret
     Manager under it. Failing such a read closed bought nothing: it is not a
@@ -573,6 +579,12 @@ class GcpSecretManagerBackend:
             active_wif,
         )
 
+        # The store saw the caller's login on the federated path, and MEHO's own
+        # identity on the direct path.
+        if active_wif is not None:
+            record_caller_secret_read(operator)
+        else:
+            record_secret_read_as(MEHO_OWN_IDENTITY)
         secret_data = _decode_payload(
             payload_bytes,
             field=field,

@@ -1,0 +1,16 @@
+# Wanted changes from the base branch for the approval table job.
+# One entry for each change, with a one-line reason. Only the entries that a
+# pull request adds count: each must match a change of that pull request, or
+# the job fails. Entries that are already on the base branch approve nothing
+# and never fail the job, so they can stay after the merge.
+# The file is read by a small script without a YAML library, so keep this shape:
+#
+# approved:
+#   - op_id: vault.kv.put
+#     connector_id: vault-1.x
+#     change: lowered_level
+#     reason: one line that says why the change is wanted
+#
+# "change" is one of: lowered_level, lost_approval, lost_never,
+# left_credential, removed.
+approved: []

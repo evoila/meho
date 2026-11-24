@@ -6005,6 +6005,48 @@ group rules (only a MEHO-Admin approves their own delete).
 
 Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
 
+## The approval table
+
+`backend/tests/snapshots/approval_table.json` lists every built-in typed
+operation of this repository, one row each, sorted by operation id and then
+connector id. A row has the operation id, the connector id, the op class,
+the risk level, whether the call needs approval, and why no grant can cover
+it (the kind from `never_covered_reason`, or `null`). It is the built-in
+default only: no install override, no tenant policy row, no connector
+package outside this repository, no operation made from an API file at run
+time. Any change of a class, a level or an approval then shows in the diff
+of this file.
+
+- **The test.** `backend/tests/test_approval_table_snapshot.py` registers all
+  typed operations (as `test_credential_calls_always_wait.py` does), builds
+  the table with `backend/tests/approval_table.py` and compares it with the
+  file. On a difference it names the new, removed and changed rows.
+- **Write the file again.** From `backend/`:
+  `MEHO_WRITE_APPROVAL_TABLE=1 uv run pytest -o tmp_path_retention_policy=failed tests/test_approval_table_snapshot.py`.
+  Commit the file.
+- **The CI job.** The step "Judge the approval table against the base
+  branch" of the job "Secret hiding compared with the base branch" runs
+  `scripts/ci/approval_table_judge.py` on the table of the base branch and
+  the table of the pull request. Both the script and the base table are read
+  from the base branch, so a pull request cannot weaken the rule that
+  judges it. It runs no code of the pull request. When the base has no
+  script or no table yet, it prints so and passes. The job is not a required
+  check.
+- **What fails.** An operation that gets a lower risk level (`destructive` >
+  `dangerous` > `caution` > `safe`); loses "needs approval"; loses "no grant
+  can cover it"; moves from `credential_read`, `credential_write` or
+  `credential_mint` to another class; or is removed. A new row passes, and
+  so does a change to more approval or a higher level.
+- **List a wanted change.** Add one entry for each change, with a one-line
+  reason, to `backend/tests/snapshots/approval_table_approved.yaml`:
+  `op_id`, `connector_id`, `change` (`lowered_level`, `lost_approval`,
+  `lost_never`, `left_credential` or `removed`) and `reason`. Only entries
+  that the pull request adds count. An entry that matches no change is
+  stale and fails the job. An entry already on the base branch approves
+  nothing and never fails.
+- **The judge tests.** `backend/tests/test_approval_table_judge.py` runs the
+  judge on hand-made table pairs.
+
 ## References
 
 - `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + add-on step events (`record_approval_step_event`) + park-time `expires_at` stamping and `expire_stale_requests` coalesce (#2322).

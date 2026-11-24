@@ -71,15 +71,21 @@ With the switch **on**:
 
 - The runner's list holds one item for each active sensor with its name.
   `check_ref` is the sensor id. The item carries the sensor's interval or
-  cron schedule, and the runner runs it only when it is due, also from its
-  cached list. The central check loop does not run these sensors.
+  cron schedule and its next due time. The runner runs it only when it is
+  due, also from its cached list, on its first poll and after a restart. So
+  a new sensor waits one full interval for its first run, as in the central
+  pod. `meho sensor run` makes it due at once. The central check loop does
+  not run these sensors.
+- Only a runner of this MEHO version, or a later one, gets these items. An
+  older runner gets none, and its checks turn `unknown` until you update it.
 - Only an operation the runner can run unattended is allowed: a `safe` read
   with a handler on the runner that needs no approval. Create and edit refuse
   any other operation (`sensor_runner_op_unsupported`). When an operator
   later makes the operation wait for approval, MEHO takes the check off the
   runner's list.
-- The runner sends the answer of the operation. MEHO reads the sensor's rule
-  on that answer and sets the state. The runner never sends a state.
+- The runner sends the answer of the operation, also a list. MEHO reads the
+  sensor's rule on that answer and sets the state. The runner never sends a
+  state.
 - The check shows on the dashboard, sends mails on a change and on recovery,
   and can start the investigator, like a central check. The dashboard row
   says "runs at: runner `<name>`".
@@ -93,12 +99,13 @@ With the switch **on**:
   clean-up job removed the stored copy. A result that was posted before (a
   re-post from the disk spool) is not counted again.
 - Each result is counted on its own, in the order of the batch. A critical
-  reading and a recovery in one batch send both mails.
+  reading and a recovery send both mails, in one batch or in two.
 - A refused login on the runner counts toward the same pause as on a central
   check: after a few in a row (`SENSOR_AUTH_FAILURE_PARK_THRESHOLD`), MEHO
   pauses the check and the runner stops calling the target.
-- Answers and error texts get the same secret cleanup as a central check
-  before they reach the check's history.
+- Answers and error texts get the same secret cleanup as a central check.
+  The runner cleans them before it sends them or keeps them in its retry
+  file, and MEHO cleans them again before it stores them.
 - An answer over 256 KB, or a batch over 4 MB, gives the check the state
   `unknown` with the reason "answer too large".
 - When the runner stops reporting, its checks get the state `unknown`. They

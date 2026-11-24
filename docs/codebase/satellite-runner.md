@@ -697,7 +697,9 @@ marker + audit trail only; the flip is observable on the
 
 ### Checks that run at a site (`RUNNER_CHECKS_ENABLED`)
 
-Off by default. Off: `POST /api/v1/checks/results` only stores the rows, the
+Off by default. The switch changes the input of the MCP tool
+`meho_sensor_create`, so `GET /version` lists it under `agent_switches`.
+Off: `POST /api/v1/checks/results` only stores the rows, the
 runner's list holds only the hand-written items, a dead runner flips only
 `stale_at`, and `runner_name` is refused on a Sensor create.
 
@@ -712,35 +714,64 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   a person. Else the item is dropped with a warning; hand-written items use
   the same check. Create, edit and the Dashboard file import refuse such an
   op for a bound Sensor (`checks/runner_binding.py::require_runner_can_run`).
+  The Dashboard file import lists every such Sensor in one answer.
+- **Only to a runner that can schedule.** The runner names what it can do in
+  the `X-MEHO-Runner-Features` header (`wire.FEATURES_HEADER`); a current
+  runner sends `scheduled-checks`. `GET /api/v1/checks/assignment` adds the
+  Sensor items only for a runner that names it. An older runner gets none and
+  MEHO logs `assignment_sensor_items_withheld`; its checks turn `unknown`
+  until it is updated. The word needs no wire version bump.
 - **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
-  `timezone`. The runner keeps the last run time per `check_ref`
-  (`runner/loop.py::RunnerState.last_run`) and runs a scheduled item only
-  when it is due, from a fresh or a cached assignment. A hand-written item
-  has no schedule and runs on every tick.
+  `timezone`, and `next_due_at`: the Sensor's `next_fire_at`. The runner
+  keeps the last run time per `check_ref`
+  (`runner/loop.py::RunnerState.last_run`). It runs an item once
+  `next_due_at` has come, when it has not run it since that time: also on
+  its first poll and after a restart, so a new Sensor waits one interval
+  and a nightly check never runs at noon. `meho sensor run` sets
+  `next_fire_at` to now, and a waiting state change pulls it to
+  `retry_backoff_seconds` after the reading; the new value reaches the
+  runner with its next list. Until a new due time arrives, the runner
+  repeats the item on its own interval or cron schedule, from a fresh or a
+  cached assignment. A hand-written item has no schedule and runs on every
+  tick.
 - **Results.** `api/v1/checks.py::post_results` first locks the runner's
   assignment row (`gateway/repository.py::lock_assignment_row`), clears the
   stale marker and commits. It screens the batch
   (`gateway/runner_checks.py::screen_batch`), then `ingest_and_count` takes
   the results one at a time, in batch order, each in its own transaction:
-  lock the row, store the result (`ingest_new_results`), count it, commit,
-  then `after_commit` (pause mail, `investigate_on_transition`). So a
-  critical reading and a recovery in one batch both reach the notifier. A
+  lock the row, take the time of the count, clean the result, store it
+  (`ingest_new_results`), count it, claim its Dashboard edge
+  (`checks/investigate.py::claim_transitions`) in the same transaction,
+  commit, then `after_commit` (pause mail, `send_claimed_transitions`: mails
+  and investigator). The edge is claimed before any other writer can see the
+  reading, so a critical reading and a later recovery, in one batch or two,
+  both reach the notifier. When the claim fails, it is logged and
+  `after_commit` runs `investigate_on_transition` instead. A
   result counts only when `check_ref` is the id of an **active Sensor of this
   runner in this tenant** and `op_id` is the Sensor's op. Else it is stored,
   logged (`runner_result_not_in_list`) and counted as `not_in_list`.
-- **The rule runs at the centre.** The runner sends `result` only. MEHO
-  cleans it like a central answer (`apply_connector_boundary_redaction`, then
-  the default view `hide_secret_values`) and reads the Sensor's assertion on
-  it. A runner status other than `ok` reads `unknown` (`runner_refused`,
-  `runner_error`); the error text goes through the dispatcher's free-text
-  cleanup (`_sanitize_free_text`: redacted, then cut to 256 characters).
+- **The rule runs at the centre.** The runner sends `result` only: an
+  object, or a list for an op that answers with a list. Both sides clean it
+  like a central answer (`runner/result_clean.py::clean_result`:
+  `apply_connector_boundary_redaction`, then the default view
+  `hide_secret_values`; the error text through `_sanitize_free_text`,
+  redacted, then cut to 256 characters). The runner cleans the result of a
+  Sensor item before it posts it or writes it to its retry file; MEHO cleans
+  it again before it stores the row. MEHO reads the Sensor's assertion on
+  the stored, cleaned answer. A runner status other than `ok` reads
+  `unknown` (`runner_refused`, `runner_error`). A hand-written item still
+  sends only an object, since an older central MEHO accepts no list.
 - **Refused logins.** The runner sets `RunnerResult.error_code =
-  "connector_auth_failed"` when a handler raises `ConnectorAuthError`. The
+  "connector_auth_failed"` by the dispatcher's rule: a handler raises
+  `ConnectorAuthError`, or an `httpx.HTTPStatusError` with a status that
+  `is_auth_failed_status` counts (`401`, `440`). The
   centre counts it with `checks/auth_park.py::count_auth_outcome`, like a
   central check, pauses the Sensor at `SENSOR_AUTH_FAILURE_PARK_THRESHOLD`
   and sends the pause mail. A paused Sensor leaves the runner's list.
-- **Time.** The time of a counted result is `received_at` (central clock),
-  plus one microsecond per result of the same batch. `RunnerResult.produced_at`
+- **Time.** The time of a counted result is the central clock, read after
+  the runner's row lock is held, and always later than the Sensor's
+  `last_evaluated_at`. So a batch that waited for the lock never counts a
+  reading at a time before one another batch already counted. `RunnerResult.produced_at`
   (the runner clock) is compared only with `sensor.runner_produced_at`, the
   runner time of the last counted result. A `produced_at` later than
   `received_at` is refused: not stored, outcome `future_time`, and named in
@@ -753,8 +784,9 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   one step across concurrent batches; the Sensor is read fresh
   (`populate_existing`) under the lock. A re-posted `result_uid` is a
   duplicate and is never counted.
-- **Next due time.** Each counted result moves `next_fire_at` to
-  `received_at + interval`, so the rollup derives `unknown` for a check whose
+- **Next due time.** Each counted result moves `next_fire_at` to the time of
+  the count plus the interval (or the next cron match), and to at most
+  `retry_backoff_seconds` after it while a state change waits, so the rollup derives `unknown` for a check whose
   runner stops reporting even before the sweeper flips it.
 - **Size.** 256 KB for one answer (compact JSON), 4 MB for a batch. An
   answer over the cap is stored without payload (`error = "answer too
@@ -764,7 +796,7 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   `last_seen_at` again (a runner that reported since the candidate query is
   left alone), flip `stale_at`, record `unknown` (`runner_stale`) on each
   active Sensor `retry_times + 1` times so the confirmation gate passes,
-  commit, then hand the Sensors to the transition detector. If the marking
+  claim each Sensor's Dashboard edge, commit, then send the claimed mails. If the marking
   fails, the flip rolls back with it and the next sweep tries again. A
   Sensor bind creates an empty assignment row (`ensure_assignment_row`) so
   the sweeper watches a runner that has only Sensors. The next accepted

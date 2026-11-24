@@ -769,6 +769,9 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
+_UNPARSEABLE_LOCATION = "<unparseable-location>"
+
+
 def _origin_and_path(url: httpx.URL) -> str:
     """Return ``scheme://host[:port]/path`` -- query, fragment, and userinfo dropped.
 
@@ -781,20 +784,20 @@ def _origin_and_path(url: httpx.URL) -> str:
 
 
 def _scrub_location_header(location: str | None) -> str | None:
-    """Scrub a raw ``Location`` header the same way :func:`_origin_and_path` does.
+    """Reduce a raw ``Location`` header to its host name for a log line.
 
-    The refused cross-origin redirect destination is attacker-chosen and may
-    itself carry a secret in its own query string (or userinfo), so the header
-    is reduced to ``scheme://host[:port]/path`` before it reaches a log line.
-    A relative or absolute ``Location`` both parse; a value ``httpx`` cannot
-    parse is logged as a placeholder rather than verbatim.
+    The header comes from the vendor system. A log line shows it as the host
+    name only, or as one fixed mark when there is no host name to show (a
+    relative address, or a value ``httpx`` cannot parse). It never shows the
+    path, the query, the fragment or the user part.
     """
     if location is None:
         return None
     try:
-        return _origin_and_path(httpx.URL(location))
+        host = httpx.URL(location).host
     except httpx.InvalidURL:
-        return "<unparseable-location>"
+        return _UNPARSEABLE_LOCATION
+    return host or _UNPARSEABLE_LOCATION
 
 
 class _SameOriginRedirectClient(httpx.AsyncClient):
@@ -864,11 +867,8 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 logger.warning(
                     "connector_redirect_not_followed_cross_origin",
                     method=request.method,
-                    # Scheme+host+path only: a guest-transfer / session URL
-                    # carries a one-time ticket in its query string, so the
-                    # full URL must never land in a log line. The refused
-                    # (attacker-chosen) Location destination is scrubbed the
-                    # same way -- its own query could carry a secret too.
+                    # The own URL is logged as scheme, host and path. The
+                    # vendor's Location is logged as its host name only.
                     from_url=_origin_and_path(request.url),
                     location=_scrub_location_header(response.headers.get("Location")),
                 )

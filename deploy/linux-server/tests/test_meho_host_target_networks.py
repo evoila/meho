@@ -278,10 +278,17 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
             "a flow mapping": f'{{config: {{targetSsrfAllowlist: "{LIST}"}}}}\n',
             "a top-level key with a value": 'logLevel: "DEBUG"\n',
         }
-        for name, block in blocks.items():
+        files = {name: place_values() + block for name, block in blocks.items()}
+        lines = (place_values() + target_block()).splitlines(keepends=True)
+        # Valid YAML too: the top-level mapping is indented.
+        files["indented top-level keys"] = "".join(
+            line if line.startswith("#") else f"  {line}" for line in lines
+        )
+        files["every line indented"] = "".join(f"  {line}" for line in lines)
+        for name, content in files.items():
             for value in (LIST, "none"):
-                with self.subTest(block=name, value=value):
-                    self.host.host_file(VALUES_PATH, place_values() + block)
+                with self.subTest(file=name, value=value):
+                    self.host.host_file(VALUES_PATH, content)
                     before = self.files()
 
                     result = self.run_command(value)

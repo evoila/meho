@@ -363,9 +363,10 @@ too. Output that is not this JSON gives one red doctor line. See
    `lib/core.sh` writes it, or removes it for `none`. The block runs from
    its heading to the next top-level line. A record without the new line
    afterwards is not in the form `install.sh` writes, and neither is a
-   values file with a top-level line other than a comment or a plain
-   heading such as `ingress:` (for example a quoted `"config":`), or a
-   `config` block with any other line than the list (another key, an
+   values file with an indented line before its first heading (an
+   indented top-level mapping), a top-level line other than a comment or
+   a plain heading such as `ingress:` (for example a quoted `"config":`),
+   or a `config` block with any other line than the list (another key, an
    empty line, a comment, or a value on the heading). Then the new files
    are removed and the command stops with a `[FAIL]` line. Otherwise both files move into
    place, mode 0600.

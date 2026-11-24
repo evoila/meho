@@ -1307,22 +1307,27 @@ record_with_target_networks() {
 # render_target_values in lib/core.sh writes it, or without the block for
 # an empty list. The block runs from its heading to the next top-level
 # line. Exit code 3 when the file is not in the form that install.sh
-# writes: every top-level line is a comment or a plain heading such as
-# "ingress:", and the config block holds the heading "config:" and then
-# only the list line. Any other line, for example a quoted heading
-# ("config":), another key or an empty line in the config block, means
-# that install.sh did not write the file, and a rewrite could break it.
+# writes: the top-level keys start at the start of the line, so no
+# indented line comes before the first heading; every top-level line is a
+# comment or a plain heading such as "ingress:"; and the config block
+# holds the heading "config:" and then only the list line. Any other line,
+# for example a quoted heading ("config":), an indented top-level mapping,
+# or another key or an empty line in the config block, means that
+# install.sh did not write the file, and a rewrite could break it.
 values_with_target_networks() {
     awk -v list="$2" '
         /^config:/ {
             if ($0 != "config:") foreign = 1
             in_config = 1
+            heading = 1
             next
         }
         in_config && /^[^[:space:]#]/ { in_config = 0 }
         in_config && /^  targetSsrfAllowlist: "[^"]*"$/ { next }
         in_config { foreign = 1; next }
         /^[^[:space:]#]/ && !/^[A-Za-z][A-Za-z0-9]*:$/ { foreign = 1 }
+        /^[^[:space:]#]/ { heading = 1 }
+        /^[[:space:]]/ && !heading { foreign = 1 }
         { print }
         END {
             if (foreign) exit 3

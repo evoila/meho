@@ -525,8 +525,9 @@ async def mark_runner_sensors_unknown(
     A Sensor that confirms a change only after a few readings gets as many
     ``unknown`` readings, so a stale runner never leaves a check green. The
     next due time of each Sensor stays, so a runner that comes back runs
-    the check at its scheduled time. The Dashboard edge of each Sensor is claimed in the same transaction. Does
-    not commit. The caller holds the lock of the runner's assignment row.
+    the check at its scheduled time. The Dashboard edge of each Sensor is
+    claimed in the same transaction. Does not commit. The caller holds the
+    lock of the runner's assignment row.
     """
     sensors = (
         (

@@ -714,7 +714,8 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   a person. Else the item is dropped with a warning; hand-written items use
   the same check. Create, edit and the Dashboard file import refuse such an
   op for a bound Sensor (`checks/runner_binding.py::require_runner_can_run`).
-  The Dashboard file import lists every such Sensor in one answer.
+  The Dashboard file import lists every such Sensor in one answer, together
+  with the other problems of the file.
 - **Only to a runner that can schedule.** The runner names what it can do in
   the `X-MEHO-Runner-Features` header (`wire.FEATURES_HEADER`); a current
   runner sends `scheduled-checks`. `GET /api/v1/checks/assignment` adds the
@@ -722,7 +723,8 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   MEHO logs `assignment_sensor_items_withheld`; its checks turn `unknown`
   until it is updated. The word needs no wire version bump.
 - **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
-  `timezone`, and `next_due_at`: the Sensor's `next_fire_at`. The runner
+  `timezone`, and `next_due_at`: the Sensor's `next_fire_at` (or its
+  `created_at` when it has none), always in UTC. The runner
   keeps the last run time per `check_ref`
   (`runner/loop.py::RunnerState.last_run`). It runs an item once
   `next_due_at` has come, when it has not run it since that time: also on
@@ -745,8 +747,12 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   commit, then `after_commit` (pause mail, `send_claimed_transitions`: mails
   and investigator). The edge is claimed before any other writer can see the
   reading, so a critical reading and a later recovery, in one batch or two,
-  both reach the notifier. When the claim fails, it is logged and
-  `after_commit` runs `investigate_on_transition` instead. A
+  both reach the notifier. The claim reads the Dashboard and its members
+  again after it takes the Dashboard lock, so two runners that change
+  checks on one Dashboard each claim their own change. When a claim
+  fails, the whole transaction rolls back (state, stored result, the
+  claims of the other Dashboards) and the post fails, so the runner sends
+  the result again. A
   result counts only when `check_ref` is the id of an **active Sensor of this
   runner in this tenant** and `op_id` is the Sensor's op. Else it is stored,
   logged (`runner_result_not_in_list`) and counted as `not_in_list`.
@@ -796,7 +802,9 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   `last_seen_at` again (a runner that reported since the candidate query is
   left alone), flip `stale_at`, record `unknown` (`runner_stale`) on each
   active Sensor `retry_times + 1` times so the confirmation gate passes,
-  claim each Sensor's Dashboard edge, commit, then send the claimed mails. If the marking
+  claim each Sensor's Dashboard edge, commit, then send the claimed mails.
+  The marking keeps each Sensor's `next_fire_at`, so a runner that comes
+  back runs the check at its scheduled time. If the marking
   fails, the flip rolls back with it and the next sweep tries again. A
   Sensor bind creates an empty assignment row (`ensure_assignment_row`) so
   the sweeper watches a runner that has only Sensors. The next accepted

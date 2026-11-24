@@ -2899,8 +2899,11 @@ second `approval.request` row:
   first call. `parent_audit_id` is the first call's `approval.request` row.
 - The answer's `audit_id` is the id of this new row.
 
-A retry with the same key writes no such row: it gets the first call's
-`approval.request` row as its `audit_id`, as before. A key that is different from the key of the waiting request does
+With `APPROVAL_RETRY_OWN_AUDIT_ROW` off (the default), a retry with the same
+key writes no such row, and its `audit_id` is the first call's
+`approval.request` row. With `APPROVAL_RETRY_OWN_AUDIT_ROW` on, a retry with
+the same key also writes this row, and its `audit_id` is this row.
+A key that is different from the key of the waiting request does
 not matter. MEHO keeps that other key in the table `approval_request_key`
 (one row per key, linked to the request; migration `0183`). The key lookup
 (`_find_idempotent_request`) reads it too, so a later retry with that key

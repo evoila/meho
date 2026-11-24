@@ -86,7 +86,7 @@ import hashlib
 import os
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import httpx
@@ -489,7 +489,32 @@ _inside_stop_safe: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-async def _run_stop_safe[T](work: Callable[[], Awaitable[T]]) -> T:
+#: Marks a read whose scope was stopped before the work returned.
+_NO_ANSWER: Any = object()
+
+
+async def _close_when_done(
+    task: asyncio.Future[Any], discard: Callable[[Any], Awaitable[None]]
+) -> None:
+    """Wait for a read the caller no longer waits for, then close its answer."""
+    await asyncio.wait({task})
+    if task.cancelled() or task.exception() is not None:
+        return
+    result = task.result()
+    if result is not _NO_ANSWER:
+        await discard(result)
+
+
+def _keep_until_done(task: asyncio.Future[Any]) -> None:
+    _stopped_reads.add(task)
+    task.add_done_callback(_stopped_read_done)
+
+
+async def _run_stop_safe[T](
+    work: Callable[[], Awaitable[T]],
+    *,
+    discard: Callable[[T], Awaitable[None]] | None = None,
+) -> T:
     """Run *work* so that a stop cannot cut the close of an answer.
 
     httpcore closes an answer or a connection inside ``AsyncShieldCancellation``.
@@ -499,33 +524,63 @@ async def _run_stop_safe[T](work: Callable[[], Awaitable[T]]) -> T:
     inside an anyio cancel scope. A stop on the caller cancels that scope,
     which respects httpcore's shield, and the close runs to its end. Then
     the caller gets the stop (``CancelledError``) as before.
+
+    The work can also end with an answer just before the stop reaches the
+    caller. The caller then never gets that answer, so *discard* (when given)
+    closes it in its own task.
     """
     if _inside_stop_safe.get():
         return await work()
     scope = anyio.CancelScope()
 
-    async def _inside_scope() -> T | None:
+    async def _inside_scope() -> Any:
         # The task runs in a copy of the caller's context, so this stays inside it.
         _inside_stop_safe.set(True)
-        result: T | None = None
         with scope:
-            result = await work()
-        return result
+            return await work()
+        return _NO_ANSWER
 
-    task: asyncio.Future[T | None] = asyncio.ensure_future(_inside_scope())
-    _stopped_reads.add(task)
-    task.add_done_callback(_stopped_read_done)
+    task: asyncio.Future[Any] = asyncio.ensure_future(_inside_scope())
+    _keep_until_done(task)
     try:
         # Not asyncio.shield: it logs an error when the read fails after a stop.
         await asyncio.wait({task})
     except asyncio.CancelledError:
         scope.cancel()
-        await asyncio.wait({task}, timeout=_STOP_CLOSE_LIMIT_S)
+        waited = task
+        if discard is not None:
+            # Started before any await, so a second stop cannot skip it.
+            waited = asyncio.ensure_future(_close_when_done(task, discard))
+            _keep_until_done(waited)
+        await asyncio.wait({waited}, timeout=_STOP_CLOSE_LIMIT_S)
         raise
     result = task.result()
-    if result is None:
+    if result is _NO_ANSWER:
         raise RuntimeError("the read ended without an answer")
-    return result
+    return cast("T", result)
+
+
+class _StopSafeCloseStream(httpx.AsyncByteStream):
+    """Close a streamed answer through :func:`_run_stop_safe`.
+
+    The caller of ``client.stream(...)`` closes the answer in its own task,
+    after ``send`` returned. A stop during that close would leave the
+    connection open, so the close runs in a protected task too.
+    """
+
+    def __init__(self, inner: httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._inner:
+            yield chunk
+
+    async def aclose(self) -> None:
+        await _run_stop_safe(self._inner.aclose)
+
+
+async def _close_answer(response: httpx.Response) -> None:
+    await response.aclose()
 
 
 async def _stream_capped_json_response(
@@ -766,7 +821,14 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # Every request of the pooled client passes here, also a direct
         # ``client.request(...)``: a stop cannot cut the close of an answer
         # (after a time limit, or of a 3xx before the next hop).
-        return await _run_stop_safe(lambda: self._send_same_origin(request, stream, auth))
+        # A streamed answer is closed later by the caller; that close is
+        # protected too.
+        response = await _run_stop_safe(
+            lambda: self._send_same_origin(request, stream, auth), discard=_close_answer
+        )
+        if stream and isinstance(response.stream, httpx.AsyncByteStream):
+            response.stream = _StopSafeCloseStream(response.stream)
+        return response
 
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any

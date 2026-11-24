@@ -1501,6 +1501,22 @@ async def _dispatch_mcp_request(
             f"invalid request: {exc.error_count()} validation error(s)",
         )
 
+    # #3696: the body is fully read here, so the watcher can notice a
+    # caller that disconnects. It watches until the answer is sent, also
+    # when the answer is one of the refusals below.
+    await until_sent.enter_async_context(_watch_call(request, jrpc))
+    response = await _dispatch_parsed(request, jrpc, payload, operator)
+    # Let a disconnect that the server noticed before the send reach the
+    # watcher. After the send the server reports a disconnect for every
+    # answer, so the watcher must see this one first.
+    await asyncio.sleep(0)
+    return response
+
+
+async def _dispatch_parsed(
+    request: Request, jrpc: JsonRpcRequest, payload: dict[str, Any], operator: Operator
+) -> Response:
+    """Check the parsed request, run its handler and return the answer."""
     protocol_error = _validate_protocol_version_header(request, jrpc.method, payload)
     if protocol_error is not None:
         return protocol_error
@@ -1535,10 +1551,6 @@ async def _dispatch_mcp_request(
     # resource template once the handler has matched one. An unregistered
     # method is not in the route catalog, so it is stored as unmatched.
     note_request_route(f"method:{jrpc.method}")
-    # #3696: the body is fully read here, so the watcher can notice a
-    # caller that disconnects while a long tool call runs. It watches until
-    # the answer is sent.
-    await until_sent.enter_async_context(_watch_call(request, jrpc))
     response = await _dispatch_no_store(jrpc, is_notification, operator)
     issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return await _audit_session_open(request, jrpc, operator, response, issued=issued)

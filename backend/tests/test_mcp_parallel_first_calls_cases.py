@@ -433,3 +433,67 @@ async def test_client_that_leaves_during_the_send_leaves_the_log_line(
     assert line["reason"] == "caller_gone"
     assert line["tool"] == "list_targets"
     assert line["session"] is None
+
+
+@pytest.mark.usefixtures("_login")
+async def test_client_gone_when_the_handler_returns_leaves_the_log_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server notes the disconnect as the handler returns, before the watcher ran."""
+    gone = asyncio.Event()
+    written: list[Any] = []
+
+    async def _answers(*_args: Any) -> dict[str, Any]:
+        # Like the server: the connection is marked closed in the same turn.
+        gone.set()
+        return {}
+
+    async def _send(message: Any) -> None:
+        # Like the server: nothing is written once the client has gone.
+        if not gone.is_set():
+            written.append(message)
+
+    async def _disconnect() -> dict[str, Any]:
+        await gone.wait()
+        return {"type": "http.disconnect"}
+
+    monkeypatch.setitem(mcp_server._DISPATCH, "tools/call", _answers)
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        await asyncio.wait_for(
+            _post_to_app(tool_call("list_targets"), _send, _disconnect, None), 10
+        )
+
+    assert written == []
+    [line] = _lines(logs)
+    assert line["reason"] == "caller_gone"
+    assert line["tool"] == "list_targets"
+
+
+@pytest.mark.usefixtures("_login")
+async def test_cancel_while_a_refusal_is_sent_writes_the_log_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal for a missing session id is an answer too; a cancel during its send is logged."""
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+    sending = asyncio.Event()
+
+    async def _send(message: Any) -> None:
+        if message["type"] == "http.response.body":
+            sending.set()
+            await _wait_for_ever()
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        task = asyncio.create_task(
+            _post_to_app(tool_call("list_targets"), _send, _wait_for_ever, None)
+        )
+        await asyncio.wait_for(sending.wait(), 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    get_settings.cache_clear()
+
+    [line] = _lines(logs)
+    assert line["reason"] == "cancelled"
+    assert line["tool"] == "list_targets"
+    assert line["session"] is None

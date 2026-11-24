@@ -2572,9 +2572,12 @@ first 8 characters (also in the `mcp_session_id` field, which holds the full
 id on other lines), the JSON-RPC method, the tool name (for `tools/call`),
 and the reason: `cancelled`, or `caller_gone` when the client had already
 left. A cancel is raised again after the line. The line is written by
-`_watch_call` in `mcp/server.py`. It watches from the moment the request is
-read until the answer is sent, so it also covers the steps after the handler
-(for example the audit row of a new session). The older
+`_watch_call` in `mcp/server.py`. It watches from the moment the JSON-RPC
+request is parsed until the answer is sent. So it also covers the refusals
+before the handler (protocol version, session id, no tenant chosen) and the
+steps after it (for example the audit row of a new session). Right before the
+answer is sent, the route yields once to the event loop. A disconnect that the
+server noticed just before the send then reaches the watcher. The older
 `caller_gone_during_request` line has the same form as before; on `/mcp` it
 now covers the same time.
 

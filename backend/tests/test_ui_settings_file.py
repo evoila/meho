@@ -477,11 +477,10 @@ def test_the_preview_names_each_target_the_file_adds_or_changes(
     notes = re.findall(
         r"<div[^>]*data-settings-console-only>\s*<span>(.*?)</span>", preview.text, re.S
     )
+    console = "MEHO accepts this change only from a person in the web console."
     assert notes == [
-        "`spec.tenants[0].targets[0]` changes the target `app-01`. "
-        "MEHO accepts this change only from a person in the web console.",
-        "`spec.tenants[0].targets[1]` adds the target `app-02`. "
-        "MEHO accepts this change only from a person in the web console.",
+        f"`spec.tenants[0].targets[0]` changes the target `app-01`. {console}",
+        f"`spec.tenants[0].targets[1]` adds the target `app-02`. {console}",
     ]
     assert 'data-action="settings-apply"' in preview.text
 

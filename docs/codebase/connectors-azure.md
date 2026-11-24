@@ -2137,7 +2137,8 @@ the mixin to its own.
   `-<first 8 characters of the key's SHA-256>`, so each key has its own
   record, and a retry with the same key uploads nothing while that record is
   there.
-  A job that stays in `WaitingForBlobUpload` also needs a new key.
+  A job in `WaitingForBlobUpload` may still get its file; a new key is only
+  for a person who wants another import of the same file.
 - A lost answer or a 5xx on the upload is not an error: the call follows the
   job (`outcome: upload_unconfirmed`). The upload is sent in one request,
   whatever the answer: no new login after a 401, and no wait and second try
@@ -2186,8 +2187,8 @@ SHA-256, size and row count.
 - Not proven yet, to check in the lab: that CSV import works through the API
   without the portal; what the import site needs in its `PUT` body (MEHO
   sends the project's region only); whether importing the same file again
-  updates or duplicates machines (MEHO already refuses a repeat of the same
-  file unless a new `repeat_key` is set); whether the group type `Import` is
+  updates or duplicates machines (while MEHO's record of a file is there, it
+  does not upload the same file again unless a new `repeat_key` is set); whether the group type `Import` is
   needed for imported servers; the exact upload host.
 
 ### Not in this group yet

@@ -97,8 +97,10 @@ _IMPORT_GUIDANCE: Final[dict[str, Any]] = {
         "project: do not send the file again. After a lost answer, tell the person and call "
         "azure.migrate.job.list first. While the record of the first call is there, the same "
         "call finds the first job by the file's SHA-256 and uploads nothing. "
-        "If the job of earlier_upload_waiting still waits for its file after some minutes, "
-        "the file did not arrive: send the call again with a new repeat_key. Set a new "
+        "If the job of earlier_upload_waiting still waits for its file, tell the person and "
+        "keep reading that job with azure.migrate.job.list: its outcome is not known yet. "
+        "Set a new repeat_key only when the person wants another import of the same file. "
+        "Set a new "
         "repeat_key also to import the same file on purpose, or when an error says Azure no "
         "longer has the job of an earlier upload. Report bad_rows "
         "to the person: those servers were not imported. Then call azure.migrate.machine.list "
@@ -119,9 +121,10 @@ _JOB_LIST_GUIDANCE: Final[dict[str, Any]] = {
     ),
     "next_step": (
         "State Completed, CompletedWithWarnings or CompletedWithErrors means the job ended; "
-        "InProgress or WaitingForBlobUpload means it did not. A job that still waits for its "
-        "file after some minutes got none: tell the person; to send the file again, call "
-        "azure.migrate.import.start with a new repeat_key. An error that says the site is "
+        "InProgress or WaitingForBlobUpload means it did not. A job in WaitingForBlobUpload "
+        "may still get its file: tell the person and read the job again with "
+        "azure.migrate.job.list. Call azure.migrate.import.start with a new repeat_key only "
+        "when the person wants another import of the same file. An error that says the site is "
         "not found means no import was started for this project."
     ),
     "result_objects": {"objects": {"omissions": ["count", "items"], "state_counts": []}},

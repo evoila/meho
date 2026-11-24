@@ -19,18 +19,23 @@ Steps for one result batch (see :func:`screen_batch` and
    reason ``answer too large``.
 3. Store and count the results one at a time, in batch order, each in its own
    transaction. A result that was stored before is a duplicate and is never
-   counted again.
+   counted again. The answer and the error text are cleaned of secret values
+   before the result is stored (:func:`~meho_backplane.runner.result_clean.clean_result`).
 4. Count each new result whose ``check_ref`` is an active Sensor of this
    runner in this tenant. Any other ``check_ref`` stays stored, is not
    counted and is logged. A result without a runner time is stored, not
    counted. A result whose runner time is not later than the last counted
    one of the Sensor is dropped, also after the clean-up job removed the
    stored copy of that one.
-5. After each commit, the transition detector runs for that result, so a
-   critical reading followed by a recovery in one batch sends both mails.
+5. In the same transaction, the Dashboard edge of the new state is claimed
+   (:func:`~meho_backplane.checks.investigate.claim_transitions`). After the
+   commit, its mails go out and the investigator can start. A critical
+   reading followed by a recovery, in one batch or in two, sends both mails.
 
-The time of a counted result is the time MEHO received it. The runner time is
-used only to refuse a time in the future and to drop an old result.
+The time of a counted result is the time MEHO counts it, taken after the
+runner's lock is held. So a batch that waited for the lock never counts a
+reading at a time before a reading another batch counted. The runner time
+is used only to refuse a time in the future and to drop an old result.
 
 Each transaction first locks the runner's assignment row
 (:func:`~meho_backplane.gateway.repository.lock_assignment_row`). Two batches
@@ -51,7 +56,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -66,16 +71,21 @@ from meho_backplane.checks.auth_park import (
 )
 from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.checks.events import publish_sensor_changed, publish_sensor_parked
-from meho_backplane.checks.investigate import investigate_on_transition, is_worsening
+from meho_backplane.checks.investigate import (
+    TransitionClaims,
+    claim_transitions,
+    investigate_on_transition,
+    is_worsening,
+    send_claimed_transitions,
+)
 from meho_backplane.checks.park_notify import ParkNotice, schedule_sensor_parked_notification
-from meho_backplane.checks.repository import record_sensor_result
+from meho_backplane.checks.repository import accelerate_sensor_next_fire, record_sensor_result
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus
 from meho_backplane.gateway.repository import ingest_new_results, lock_assignment_row
 from meho_backplane.metrics import RUNNER_CHECK_RESULTS_TOTAL
 from meho_backplane.operations._errors import _sanitize_free_text
-from meho_backplane.operations._secret_values import hide_secret_values
-from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
+from meho_backplane.runner.result_clean import clean_result
 from meho_backplane.runner.wire import RefusedResult, RunnerResult
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.settings import get_settings
@@ -106,11 +116,17 @@ _FUTURE_TIME = "future_time"
 
 @dataclass(frozen=True, slots=True)
 class CountedSensor:
-    """A Sensor whose state a result just set; see :func:`after_commit`."""
+    """A Sensor whose state a result just set; see :func:`after_commit`.
+
+    ``claims`` holds the Dashboard edges claimed in the transaction that set
+    the state. ``None`` when that claim failed: then :func:`after_commit`
+    runs the transition detector instead.
+    """
 
     sensor_id: uuid.UUID
     acknowledgement_expired: bool
     park_notice: ParkNotice | None = None
+    claims: TransitionClaims | None = None
 
 
 @dataclass(slots=True)
@@ -195,38 +211,52 @@ def _outcome_for(
 ) -> AssertionOutcome:
     """Read the Sensor's rule on the runner's answer. Never raises.
 
-    The answer gets the same secret cleanup as the answer of a central check:
-    the connector boundary redaction, then the default view that hides
-    secret-named fields. Error text is redacted and shortened like the error
-    text of a central call.
+    *item* was cleaned of secret values before it was stored
+    (:func:`_cleaned`), so the rule reads the same view as the rule of a
+    central check.
     """
     if too_large:
         return _unknown(_ANSWER_TOO_LARGE, max_bytes=RESULT_MAX_BYTES)
     if item.status != "ok" or item.result is None:
-        extra: dict[str, object] = {"runner_error": _sanitize_free_text(item.error or "")}
+        extra: dict[str, object] = {"runner_error": item.error or ""}
         if item.error_code == AUTH_FAILED_ERROR_CODE:
             extra["error_code"] = AUTH_FAILED_ERROR_CODE
         return _unknown(f"runner_{item.status}", **extra)
     try:
-        redacted = apply_connector_boundary_redaction(
-            item.result,
-            connector_id=sensor.connector_id,
-            tenant=str(sensor.tenant_id),
-            op=sensor.op_id,
-        ).redacted
-        shown = hide_secret_values(sensor.op_id, redacted, raw=item.result)
         spec = AssertionSpec.model_validate(sensor.assertion)
-        return evaluate_assertion(spec, shown, now=received_at)
+        return evaluate_assertion(spec, item.result, now=received_at)
     except Exception as exc:
         return _unknown("assertion_evaluation_error", error=_sanitize_free_text(str(exc)))
 
 
-def _advance_next_fire(sensor: Sensor, evaluated_at: datetime) -> None:
-    """Move the next due time after *evaluated_at*, so the dashboard sees a live check."""
+def _cleaned(item: RunnerResult, sensor: Sensor | None, tenant_id: uuid.UUID) -> RunnerResult:
+    """*item* with secret values taken out of its answer and error text."""
+    return clean_result(
+        item,
+        connector_id=sensor.connector_id if sensor is not None else None,
+        tenant=str(tenant_id),
+    )
+
+
+async def _advance_next_fire(session: AsyncSession, sensor: Sensor, evaluated_at: datetime) -> None:
+    """Move the next due time after *evaluated_at*; the runner reads it from its list.
+
+    While a state change waits for its confirming readings, the next due
+    time is at most ``retry_backoff_seconds`` away, like in the central
+    check loop.
+    """
     if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
         sensor.next_fire_at = next_fire_after(sensor.cron_expr, evaluated_at, sensor.timezone)
     elif sensor.interval_seconds is not None:
         sensor.next_fire_at = evaluated_at + timedelta(seconds=sensor.interval_seconds)
+    if sensor.pending_state is not None:
+        await session.flush()
+        await accelerate_sensor_next_fire(
+            session,
+            sensor.id,
+            not_later_than=evaluated_at + timedelta(seconds=sensor.retry_backoff_seconds),
+        )
+        await session.refresh(sensor, attribute_names=["next_fire_at"])
 
 
 async def _runner_sensor(
@@ -278,7 +308,7 @@ async def _record(
         evaluated_at=evaluated_at,
         record_history=settings.checks_evidence_retention_days > 0,
     )
-    _advance_next_fire(sensor, evaluated_at)
+    await _advance_next_fire(session, sensor, evaluated_at)
     if settings.checks_agent_events and recorded.changed:
         await publish_sensor_changed(
             session,
@@ -345,18 +375,62 @@ async def _count_auth(
     )
 
 
+async def _claim(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    counted: CountedSensor,
+    now: datetime,
+) -> CountedSensor:
+    """Claim the Dashboard edges of *counted* in the open transaction.
+
+    A failed claim is logged and leaves ``claims`` empty, so
+    :func:`after_commit` runs the transition detector after the commit.
+    """
+    try:
+        claims = await claim_transitions(
+            session,
+            sensor_id=counted.sensor_id,
+            tenant_id=tenant_id,
+            now=now,
+            acknowledgement_expired=counted.acknowledgement_expired,
+        )
+    except Exception:
+        _log.warning(
+            "runner_check_transition_claim_failed",
+            sensor_id=str(counted.sensor_id),
+            exc_info=True,
+        )
+        return counted
+    return replace(counted, claims=claims)
+
+
+def _evaluation_time(sensor: Sensor, now: datetime) -> datetime:
+    """*now*, or just after the Sensor's last counted time when *now* is not later."""
+    last = sensor.last_evaluated_at
+    if last is not None and now <= _as_utc(last):
+        return _as_utc(last) + timedelta(microseconds=1)
+    return now
+
+
 async def _count_one(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     runner_name: str,
+    sensor: Sensor | None,
     item: RunnerResult,
     too_large: bool,
     received_at: datetime,
     evaluated_at: datetime,
 ) -> CountedSensor | None:
-    """Count one newly stored result, or return ``None`` when it does not count."""
-    sensor = await _runner_sensor(session, tenant_id=tenant_id, runner_name=runner_name, item=item)
+    """Count one newly stored result, or return ``None`` when it does not count.
+
+    *sensor* is the Sensor of this runner that *item* names
+    (:func:`_runner_sensor`), read after the runner's lock was taken.
+    *evaluated_at* is the time taken under that lock; it is moved just
+    after the Sensor's last counted time when it is not later.
+    """
     if sensor is None:
         _count("not_in_list")
         _log.warning(
@@ -383,15 +457,12 @@ async def _count_one(
     outcome = _outcome_for(sensor, item, too_large=too_large, received_at=received_at)
     _count("too_large" if too_large else "counted")
     sensor.runner_produced_at = produced_at
+    evaluated_at = _evaluation_time(sensor, evaluated_at)
     counted = await _record(session, sensor, outcome, evaluated_at)
     notice = await _count_auth(session, sensor, item, evaluated_at)
-    if notice is None:
-        return counted
-    return CountedSensor(
-        sensor_id=counted.sensor_id,
-        acknowledgement_expired=counted.acknowledgement_expired,
-        park_notice=notice,
-    )
+    if notice is not None:
+        counted = replace(counted, park_notice=notice)
+    return await _claim(session, tenant_id=tenant_id, counted=counted, now=evaluated_at)
 
 
 async def ingest_and_count(
@@ -404,31 +475,38 @@ async def ingest_and_count(
     """Store and count *screened* one result at a time; return ``(accepted, duplicates)``.
 
     Each result gets its own transaction: lock the runner's assignment row,
-    store the result, count it, commit. Then :func:`after_commit` runs for
-    it. When a result fails, the ones before it stay stored and counted, and
-    a re-post of the batch skips them as duplicates.
+    take the time of the count, clean the result, store it, count it, claim
+    its Dashboard edge, commit. Then :func:`after_commit` runs for it. When a
+    result fails, the ones before it stay stored and counted, and a re-post
+    of the batch skips them as duplicates.
     """
     sessionmaker = get_sessionmaker()
     accepted = 0
-    for index, item in enumerate(screened.results):
+    for item in screened.results:
         counted: CountedSensor | None = None
         async with sessionmaker() as session:
             await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+            # Taken under the lock: a batch that waited for it never counts a
+            # reading at a time before one another batch already counted.
+            evaluated_at = datetime.now(UTC)
+            sensor = await _runner_sensor(
+                session, tenant_id=tenant_id, runner_name=runner_name, item=item
+            )
+            cleaned = _cleaned(item, sensor, tenant_id)
             stored = await ingest_new_results(
-                session, tenant_id=tenant_id, runner_name=runner_name, results=[item]
+                session, tenant_id=tenant_id, runner_name=runner_name, results=[cleaned]
             )
             if stored:
                 accepted += 1
-                # Results of one batch get times a microsecond apart, so the
-                # guard against a repeat in record_sensor_result keeps each.
                 counted = await _count_one(
                     session,
                     tenant_id=tenant_id,
                     runner_name=runner_name,
-                    item=item,
+                    sensor=sensor,
+                    item=cleaned,
                     too_large=item.result_uid in screened.too_large,
                     received_at=received_at,
-                    evaluated_at=received_at + timedelta(microseconds=index),
+                    evaluated_at=evaluated_at,
                 )
             await session.commit()
         if counted is not None:
@@ -446,7 +524,8 @@ async def mark_runner_sensors_unknown(
     """Set the state of every active Sensor of a stale runner to ``unknown``.
 
     A Sensor that confirms a change only after a few readings gets as many
-    ``unknown`` readings, so a stale runner never leaves a check green. Does
+    ``unknown`` readings, so a stale runner never leaves a check green. The
+    Dashboard edge of each Sensor is claimed in the same transaction. Does
     not commit. The caller holds the lock of the runner's assignment row.
     """
     sensors = (
@@ -466,24 +545,38 @@ async def mark_runner_sensors_unknown(
     outcome = _unknown("runner_stale", runner=runner_name)
     for sensor in sensors:
         last: CountedSensor | None = None
+        evaluated_at = now
         for step in range(sensor.retry_times + 1):
-            last = await _record(session, sensor, outcome, now + timedelta(microseconds=step))
+            evaluated_at = _evaluation_time(sensor, now + timedelta(microseconds=step))
+            last = await _record(session, sensor, outcome, evaluated_at)
         if last is not None:
-            marked.append(last)
+            marked.append(
+                await _claim(session, tenant_id=tenant_id, counted=last, now=evaluated_at)
+            )
     return marked
 
 
 async def after_commit(tenant_id: uuid.UUID, counted: list[CountedSensor]) -> None:
-    """Send the pause mails and run the transition detector (mails, investigator).
+    """Send the pause mails and the claimed Dashboard mails; start the investigator.
 
-    Call after the transaction that set the states has committed. The
-    detector never raises.
+    Call after the transaction that set the states has committed. A Sensor
+    whose claim failed gets the transition detector instead. Never raises.
     """
     for entry in counted:
         if entry.park_notice is not None:
             schedule_sensor_parked_notification(entry.park_notice)
-        await investigate_on_transition(
-            sensor_id=entry.sensor_id,
-            tenant_id=tenant_id,
-            acknowledgement_expired=entry.acknowledgement_expired,
-        )
+        if entry.claims is None:
+            await investigate_on_transition(
+                sensor_id=entry.sensor_id,
+                tenant_id=tenant_id,
+                acknowledgement_expired=entry.acknowledgement_expired,
+            )
+            continue
+        try:
+            await send_claimed_transitions(tenant_id, entry.claims)
+        except Exception:
+            _log.warning(
+                "runner_check_transition_send_failed",
+                sensor_id=str(entry.sensor_id),
+                exc_info=True,
+            )

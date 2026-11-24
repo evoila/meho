@@ -219,6 +219,7 @@ async def materialize_assignment(
     runner_name: str,
     principal: wire.RunnerPrincipal,
     runner_package_set: str,
+    runner_features: frozenset[str] = frozenset(),
 ) -> wire.RunnerAssignment:
     """Materialise the runner's stored document into the versioned wire shape.
 
@@ -228,6 +229,12 @@ async def materialize_assignment(
     for a connector package op when *runner_package_set* (the digest the
     runner sent) differs from central's own (#5038). The returned
     ``assignment_version`` is the content digest over the surviving items.
+
+    With ``RUNNER_CHECKS_ENABLED`` on, the Sensors bound to the runner are
+    added, but only when *runner_features* (what the runner named in its
+    request) holds :data:`~meho_backplane.runner.wire.FEATURE_SCHEDULED_CHECKS`.
+    An older runner would run them on every poll, so it gets none of them
+    and a warning is logged.
     """
     row = await repository.get_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
     raw_items: list[dict[str, Any]] = list(row.items) if row is not None else []
@@ -242,7 +249,16 @@ async def materialize_assignment(
             work_items.append(work_item)
 
     if get_settings().runner_checks_enabled:
-        for sensor in await _active_runner_sensors(session, tenant_id, runner_name):
+        sensors = await _active_runner_sensors(session, tenant_id, runner_name)
+        if sensors and wire.FEATURE_SCHEDULED_CHECKS not in runner_features:
+            _log.warning(
+                "assignment_sensor_items_withheld",
+                reason="runner_cannot_schedule",
+                runner=runner_name,
+                sensors=len(sensors),
+            )
+            sensors = []
+        for sensor in sensors:
             sensor_item = await _materialize_sensor(
                 session, tenant_id=tenant_id, sensor=sensor, principal=principal
             )
@@ -430,10 +446,15 @@ async def _materialize_sensor(
 
 
 def _sensor_schedule(sensor: Sensor) -> dict[str, Any]:
-    """The cadence of *sensor* as work item fields, so the runner runs it only when due."""
+    """The cadence and next due time of *sensor* as work item fields.
+
+    The runner runs the item only when it is due. A Sensor without a stored
+    due time is due at once (its create time is in the past).
+    """
+    due = {"next_due_at": sensor.next_fire_at or sensor.created_at}
     if sensor.cadence_kind == SensorCadenceKind.CRON.value and sensor.cron_expr:
-        return {"cron_expr": sensor.cron_expr, "timezone": sensor.timezone}
-    return {"interval_seconds": sensor.interval_seconds}
+        return {**due, "cron_expr": sensor.cron_expr, "timezone": sensor.timezone}
+    return {**due, "interval_seconds": sensor.interval_seconds}
 
 
 def _sensor_target_name(sensor: Sensor) -> str | None:

@@ -104,6 +104,7 @@ async def _assignment_refs() -> list[str]:
             runner_name="runner-a",
             principal=_principal(),
             runner_package_set=wire_empty_digest(),
+            runner_features=frozenset({wire.FEATURE_SCHEDULED_CHECKS}),
         )
     return [item.check_ref for item in assignment.items]
 
@@ -314,6 +315,11 @@ async def test_runner_answers_and_errors_get_the_secret_cleanup(
     assert error_row.last_state == "unknown"
     assert "hunter2xyz" not in str(error_row.last_evidence)
 
+    async with get_sessionmaker()() as session:
+        stored = (await session.execute(select(RunnerCheckResult))).scalars().all()
+    assert len(stored) == 2
+    assert all("hunter2xyz" not in f"{row.result_payload} {row.error}" for row in stored)
+
 
 # ---------------------------------------------------------------------------
 # Runner time
@@ -383,18 +389,22 @@ async def test_a_result_read_after_a_newer_one_committed_is_dropped(switch_on: N
             assert row is not None
             row.runner_produced_at = now
             await second.commit()
+        item = wire.RunnerResult(
+            result_uid="late",
+            check_ref=str(sensor_id),
+            op_id=_OP_SAFE,
+            status="ok",
+            result={"count": 50},
+            produced_at=now - timedelta(seconds=1),
+        )
         counted = await runner_checks._count_one(
             first,
             tenant_id=_TENANT,
             runner_name="runner-a",
-            item=wire.RunnerResult(
-                result_uid="late",
-                check_ref=str(sensor_id),
-                op_id=_OP_SAFE,
-                status="ok",
-                result={"count": 50},
-                produced_at=now - timedelta(seconds=1),
+            sensor=await runner_checks._runner_sensor(
+                first, tenant_id=_TENANT, runner_name="runner-a", item=item
             ),
+            item=item,
             too_large=False,
             received_at=now,
             evaluated_at=now,
@@ -586,6 +596,7 @@ async def test_sensor_items_carry_the_check_schedule(switch_on: None) -> None:
             runner_name="runner-a",
             principal=_principal(),
             runner_package_set=wire_empty_digest(),
+            runner_features=frozenset({wire.FEATURE_SCHEDULED_CHECKS}),
         )
     items = {item.check_ref: item for item in assignment.items}
     assert items[str(every_minute)].interval_seconds == 60

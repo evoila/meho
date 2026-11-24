@@ -572,6 +572,7 @@ async def test_switch_off_assignment_has_no_sensor_items_and_stale_runner_is_not
             runner_name="runner-a",
             principal=principal,
             runner_package_set=wire_empty_digest(),
+            runner_features=frozenset({wire.FEATURE_SCHEDULED_CHECKS}),
         )
     assert assignment.items == []
     assert (await _sensor(sensor_id)).last_state == "ok"
@@ -608,6 +609,7 @@ async def test_runner_list_has_one_item_per_active_sensor_of_the_runner(switch_o
             runner_name="runner-a",
             principal=principal,
             runner_package_set=wire_empty_digest(),
+            runner_features=frozenset({wire.FEATURE_SCHEDULED_CHECKS}),
         )
     assert [item.check_ref for item in assignment.items] == [str(mine)]
     item = assignment.items[0]

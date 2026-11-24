@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Final
 
 import structlog
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi import status as http_status
 from fastapi.responses import Response
 
@@ -158,13 +158,16 @@ async def get_assignment(
     wire_version: Annotated[str, _runner_wire_version],
     package_set: Annotated[str, _runner_package_set],
     known_version: Annotated[str | None, Query()] = None,
+    features: Annotated[str | None, Header(alias=wire.FEATURES_HEADER)] = None,
 ) -> wire.RunnerAssignment | Response:
     """Return runner *runner*'s versioned assignment (runner-authenticated).
 
     A runner may fetch only its own assignment
     (:func:`assert_runner_scope`). A runner on another wire version gets a
     409 that names both versions. Work for a connector package is left out
-    when the runner's package set differs from central's (#5038).
+    when the runner's package set differs from central's (#5038). The work
+    of a counted check goes only to a runner that names
+    ``scheduled-checks`` in its ``X-MEHO-Runner-Features`` header.
     ``known_version`` matching the current
     content digest yields ``304 Not Modified`` (empty body); the runner
     keeps its cache.
@@ -188,6 +191,9 @@ async def get_assignment(
             runner_name=runner,
             principal=_principal_from_operator(operator),
             runner_package_set=package_set,
+            runner_features=frozenset(
+                word.strip() for word in (features or "").split(",") if word.strip()
+            ),
         )
     if known_version is not None and known_version == assignment.assignment_version:
         return Response(status_code=http_status.HTTP_304_NOT_MODIFIED)

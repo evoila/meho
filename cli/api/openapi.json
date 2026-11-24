@@ -11468,7 +11468,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038).\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038). The work\nof a counted check goes only to a runner that names\n``scheduled-checks`` in its ``X-MEHO-Runner-Features`` header.\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -11489,6 +11489,16 @@
               "type": "string",
               "nullable": true,
               "title": "Known Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Features",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Features"
             }
           },
           {
@@ -42702,8 +42712,16 @@
             "title": "Status"
           },
           "result": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
             "nullable": true,
             "title": "Result"
           },
@@ -42829,6 +42847,12 @@
             "type": "string",
             "nullable": true,
             "title": "Timezone"
+          },
+          "next_due_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Due At"
           }
         },
         "type": "object",

@@ -1,25 +1,29 @@
 """A stop during the close of an answer leaves no connection open (loopback).
 
-The shared HTTP client reads each answer in a stream. Leaving the stream
-closes the answer. A request can hit its time limit and start to close, and a
-stop from outside can then cut that close. These tests run many rounds of this
-against a local stand-in server and then check three things:
+The shared HTTP client closes an answer when a request hits its time limit,
+and on a 3xx answer before the next hop. A stop from outside can come during
+that close. These tests run many rounds of this against a local stand-in
+server. A hook in the network layer signals when the close starts and holds
+it until the stop is sent, so the stop lands in the close in every round.
+Then the tests check:
 
+* the caller got the stop in every round,
 * the server holds no connection open,
-* the client's pool has no connection checked out,
+* the client's pool has no active connection and no waiting request,
 * a normal request on the same client gets an answer at once.
 
-A second test does the same for a 3xx answer that the redirect client closes
-before the next hop. In every round the caller must still get the stop.
+The cases: a streamed read after a time limit, a direct ``client.request``
+after a time limit, and the close of a 3xx answer before the next hop.
 """
 
 from __future__ import annotations
 
 import asyncio
-import random
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+import httpcore
 import httpx
 import pytest
 
@@ -41,7 +45,6 @@ class _StallServer:
     def __init__(self) -> None:
         self.open_connections = 0
         self.accepted = 0
-        self.rounds_seen: set[int] = set()
         self._server: asyncio.Server | None = None
 
     @property
@@ -68,8 +71,6 @@ class _StallServer:
             while True:
                 head = await reader.readuntil(b"\r\n\r\n")
                 path = head.split(b" ", 2)[1]
-                if b"round=" in path:
-                    self.rounds_seen.add(int(path.split(b"round=")[1]))
                 path = path.split(b"?")[0]
                 if path == b"/ok":
                     writer.write(
@@ -97,12 +98,82 @@ class _StallServer:
             writer.close()
 
 
-def _pool_checked_out(client: httpx.AsyncClient) -> int:
+class _CloseHook:
+    """Signal when an armed close starts, and hold it until the stop is sent."""
+
+    def __init__(self) -> None:
+        self.armed = False
+        self.fired = 0
+        self.started = asyncio.Event()
+        self.stop_sent = asyncio.Event()
+
+    def arm(self) -> None:
+        self.armed = True
+        self.started.clear()
+        self.stop_sent.clear()
+
+    async def on_close(self) -> None:
+        if not self.armed:
+            return
+        self.armed = False
+        self.fired += 1
+        self.started.set()
+        async with asyncio.timeout(5):
+            await self.stop_sent.wait()
+
+
+class _HoldingStream(httpcore.AsyncNetworkStream):
+    def __init__(self, inner: httpcore.AsyncNetworkStream, hook: _CloseHook) -> None:
+        self._inner = inner
+        self._hook = hook
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return await self._inner.read(max_bytes, timeout)
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        await self._inner.write(buffer, timeout)
+
+    async def aclose(self) -> None:
+        await self._hook.on_close()
+        await self._inner.aclose()
+
+    async def start_tls(self, *args: Any, **kwargs: Any) -> httpcore.AsyncNetworkStream:
+        return _HoldingStream(await self._inner.start_tls(*args, **kwargs), self._hook)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class _HoldingBackend(httpcore.AsyncNetworkBackend):
+    """Wrap the client's own network layer, so every connection close runs the hook."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend, hook: _CloseHook) -> None:
+        self._inner = inner
+        self._hook = hook
+
+    async def connect_tcp(self, *args: Any, **kwargs: Any) -> httpcore.AsyncNetworkStream:
+        return _HoldingStream(await self._inner.connect_tcp(*args, **kwargs), self._hook)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def _pool(client: httpx.AsyncClient) -> Any:
+    return client._transport._pool  # type: ignore[attr-defined]
+
+
+def _pool_active(client: httpx.AsyncClient) -> int:
     """Count pooled connections that are open and not idle (test-only peek)."""
-    pool: Any = client._transport._pool  # type: ignore[attr-defined]
-    return sum(1 for c in pool.connections if not c.is_idle() and not c.is_closed()) + len(
-        pool._requests
-    )
+    return sum(1 for c in _pool(client).connections if not c.is_idle() and not c.is_closed())
+
+
+def _pool_waiting(client: httpx.AsyncClient) -> int:
+    """Count requests the pool still holds (test-only peek)."""
+    return len(_pool(client)._requests)
+
+
+def _pool_idle(client: httpx.AsyncClient) -> int:
+    return sum(1 for c in _pool(client).connections if c.is_idle() and not c.is_closed())
 
 
 class _PlainHttpConnector(_ConcreteHttpConnector):
@@ -112,52 +183,51 @@ class _PlainHttpConnector(_ConcreteHttpConnector):
         return f"http://{target.host}:{target.port}"
 
 
-def _pool_idle(client: httpx.AsyncClient) -> int:
-    pool: Any = client._transport._pool  # type: ignore[attr-defined]
-    return sum(1 for c in pool.connections if c.is_idle() and not c.is_closed())
-
-
 async def _ok(client: httpx.AsyncClient) -> None:
     resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(5.0))
     assert resp.status_code == 200
 
 
-async def _run_rounds(path: str, *, read_timeout: float | None, spread: float) -> None:
+_Call = Callable[[httpx.AsyncClient, str, Any], Awaitable[httpx.Response]]
+
+
+async def _streamed(client: httpx.AsyncClient, url: str, timeout: Any) -> httpx.Response:
+    return await _read_capped_json_response(client, "GET", url, timeout=timeout)
+
+
+async def _direct(client: httpx.AsyncClient, url: str, timeout: Any) -> httpx.Response:
+    return await client.request("GET", url, timeout=timeout)
+
+
+async def _run_rounds(call: _Call, path: str, *, read_timeout: float | None) -> None:
     server = _StallServer()
     await server.start()
     conn = _PlainHttpConnector()
     client = await conn._http_client(_make_target(host="127.0.0.1", port=server.port))
-    rng = random.Random(6821)
+    hook = _CloseHook()
+    _pool(client)._network_backend = _HoldingBackend(_pool(client)._network_backend, hook)
+    timeout: Any = httpx.USE_CLIENT_DEFAULT
+    if read_timeout is not None:
+        timeout = httpx.Timeout(connect=5.0, read=read_timeout, write=5.0, pool=5.0)
     stops_seen = 0
-    time_limit_first = 0
     try:
         for round_no in range(_ROUNDS):
             # Two idle connections, so the round dials no new connection: a
             # stop during a dial is not the case under test.
             await asyncio.gather(*(_ok(client) for _ in range(2)))
-            kwargs: dict[str, Any] = {}
-            if read_timeout is not None:
-                kwargs["timeout"] = httpx.Timeout(
-                    connect=5.0, read=read_timeout, write=5.0, pool=5.0
-                )
-            task = asyncio.ensure_future(
-                _read_capped_json_response(client, "GET", f"{path}?round={round_no}", **kwargs)
-            )
-            # Stop only after the server has read the request: the connection is
-            # then set up, and the stop lands while the answer is read or closed.
+            hook.arm()
+            task = asyncio.ensure_future(call(client, f"{path}?round={round_no}", timeout))
             async with asyncio.timeout(10):
-                while round_no not in server.rounds_seen:
-                    await asyncio.sleep(0)
-            await asyncio.sleep(rng.random() * spread)
+                await hook.started.wait()
+            # The close has started and waits for this stop.
             task.cancel()
+            hook.stop_sent.set()
             try:
                 await task
             except asyncio.CancelledError:
                 stops_seen += 1
-            except httpx.TimeoutException:
-                # The time limit ended the call before the stop came, so there
-                # was nothing left to stop.
-                time_limit_first += 1
+        assert hook.fired == _ROUNDS
+        assert stops_seen == _ROUNDS
         # Let the server see the closes. Idle keep-alive connections stay open on
         # both sides on purpose; any other open connection is a leak.
         idle = _pool_idle(client)
@@ -166,16 +236,12 @@ async def _run_rounds(path: str, *, read_timeout: float | None, spread: float) -
                 break
             await asyncio.sleep(0.01)
         assert server.open_connections == idle
-        assert _pool_checked_out(client) == 0
+        assert _pool_active(client) == 0
+        assert _pool_waiting(client) == 0
         started = time.monotonic()
         resp = await _read_capped_json_response(client, "GET", "/ok", timeout=httpx.Timeout(1.0))
         assert resp.status_code == 200
         assert time.monotonic() - started < 1.0
-        # Every round ended in the stop, or in the time limit that came first.
-        assert stops_seen + time_limit_first == _ROUNDS
-        assert stops_seen > _ROUNDS // 2
-        if read_timeout is None:
-            assert stops_seen == _ROUNDS
     finally:
         await conn.aclose()
         await server.stop()
@@ -186,7 +252,15 @@ async def test_stop_during_close_after_time_limit_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds("/slow", read_timeout=0.002, spread=0.003)
+    await _run_rounds(_streamed, "/slow", read_timeout=0.002)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_close_of_direct_request_leaves_nothing_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    await _run_rounds(_direct, "/slow", read_timeout=0.002)
 
 
 @pytest.mark.asyncio
@@ -194,4 +268,4 @@ async def test_stop_during_close_of_redirect_answer_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
-    await _run_rounds("/redirect", read_timeout=None, spread=0.004)
+    await _run_rounds(_streamed, "/redirect", read_timeout=None)

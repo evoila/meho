@@ -12,9 +12,16 @@ under the lock once the winner commits. It must look the key up again and
 return the winner's replacement, not the expired row it read first: the
 client would otherwise hold an id that can no longer be approved.
 
+Every call with a key takes the lock of that key first
+(``pg_advisory_xact_lock``), so the second call looks the key up only after
+the first one committed. A helper lets each retry wait a short time after
+its first key lookup for the other one: the two meet there when the lock is
+missing, and the test then shows two requests.
+
 A third race is two retries whose key a request of other people behind
-the login holds. Each gets its own request beside the holder; the holder
-row is locked first, so the two end with one new request.
+the login holds. Each gets its own request beside the holder; the two end
+with one new request. A fourth one rejects the holder while the first
+retry stores its request: the second retry still gets that request.
 
 The second race is a late retry against an approve. The approve locks the
 row before the deadline and commits while the retry waits for the lock.
@@ -32,6 +39,8 @@ Postgres and runs the two retries on two connections, mirroring the sibling
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -51,7 +60,11 @@ from meho_backplane.db.models import (
     AuditLog,
 )
 from meho_backplane.operations._validate import compute_params_hash
-from meho_backplane.operations.approval_queue import approve_request, create_pending_request
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    create_pending_request,
+    reject_request,
+)
 from tests._people_behind_helpers import give_known_person
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
@@ -121,6 +134,31 @@ async def _submit(*, expires_at: datetime | None = None) -> ApprovalRequest:
     return request
 
 
+def _wait_for_the_other_after_the_first_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let each of two retries wait up to two seconds after its first key lookup.
+
+    Without the key lock both retries look the key up before either stores a
+    request, and they meet here. With the lock the second retry waits for the
+    first one's commit before its lookup, so the first one waits here alone
+    until the time is up.
+    """
+    real_find = approval_queue_module._find_idempotent_request
+    lookups = {"n": 0}
+    both_looked = asyncio.Event()
+
+    async def _find_then_wait(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        found = await real_find(*args, **kwargs)
+        lookups["n"] += 1
+        if lookups["n"] == 2:
+            both_looked.set()
+        elif lookups["n"] == 1:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_looked.wait(), timeout=2)
+        return found
+
+    monkeypatch.setattr(approval_queue_module, "_find_idempotent_request", _find_then_wait)
+
+
 async def _audit_rows(path: str, request_id: uuid.UUID) -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         rows = (await session.execute(select(AuditLog).where(AuditLog.path == path))).scalars()
@@ -134,30 +172,15 @@ async def test_two_retries_on_an_overdue_request_both_get_the_replacement(
 ) -> None:
     """Two concurrent late retries end with one replacement that both callers get.
 
-    Both retries read the overdue row before either locks it (a barrier after
-    the first key lookup pins that order). The winner expires the row, parks
-    the replacement and commits. The loser's ``FOR UPDATE`` re-read then
-    misses, so it looks the key up again and gets the replacement as a
-    reused request. Neither caller gets the expired id. One expiry, one new
+    The winner takes the key lock, expires the row, parks the replacement
+    and commits. The other retry then looks the key up and gets the
+    replacement as a reused request. Neither caller gets the expired id. One expiry, one new
     request, one audit row each.
     """
     past = datetime.now(UTC) - timedelta(hours=1)
     overdue = await _submit(expires_at=past)
 
-    barrier = asyncio.Barrier(2)
-    real_find = approval_queue_module._find_idempotent_request
-    lookups = {"n": 0}
-
-    async def _find_then_wait_for_the_other(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
-        found = await real_find(*args, **kwargs)
-        lookups["n"] += 1
-        if lookups["n"] <= 2:
-            await barrier.wait()
-        return found
-
-    monkeypatch.setattr(
-        approval_queue_module, "_find_idempotent_request", _find_then_wait_for_the_other
-    )
+    _wait_for_the_other_after_the_first_lookup(monkeypatch)
 
     one, two = await asyncio.gather(_submit(), _submit())
 
@@ -262,10 +285,9 @@ async def test_two_retries_beside_a_holder_of_other_people_get_one_request(
 
     The key is held by a request asked with person-a behind the login. Both
     retries run with person-b behind it, so neither may get that request.
-    A barrier after the first key lookup makes both miss before either
-    inserts. Both inserts hit the unique index, both lock the holder row,
-    and the second one, once it gets the lock, finds the first one's new
-    request through its linked key.
+    The first one stores its own request with the key in its linked row.
+    The second one waits for the key lock, then finds that request through
+    the linked key.
     """
     behind = {"subs": ["person-a"]}
 
@@ -276,20 +298,7 @@ async def test_two_retries_beside_a_holder_of_other_people_get_one_request(
     holder = await _submit()
     behind["subs"] = ["person-b"]
 
-    barrier = asyncio.Barrier(2)
-    real_find = approval_queue_module._find_idempotent_request
-    lookups = {"n": 0}
-
-    async def _find_then_wait_for_the_other(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
-        found = await real_find(*args, **kwargs)
-        lookups["n"] += 1
-        if lookups["n"] <= 2:
-            await barrier.wait()
-        return found
-
-    monkeypatch.setattr(
-        approval_queue_module, "_find_idempotent_request", _find_then_wait_for_the_other
-    )
+    _wait_for_the_other_after_the_first_lookup(monkeypatch)
 
     one, two = await asyncio.wait_for(asyncio.gather(_submit(), _submit()), timeout=20)
 
@@ -322,4 +331,86 @@ async def test_two_retries_beside_a_holder_of_other_people_get_one_request(
         assert [(link.approval_request_id, link.idempotency_key) for link in links] == [
             (one.id, _KEY)
         ]
+    assert len(await _audit_rows("approval.request", one.id)) == 1
+
+
+@_skip_no_docker
+async def test_a_holder_rejected_while_two_retries_run_leaves_one_request(
+    pg_engine: None,  # noqa: F811 — fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two retries end with one new request when the holder is rejected in between.
+
+    The key is held by a request asked with person-a behind the login; both
+    retries run with person-b behind it. The first retry looks the key up,
+    finds nothing it may get, and tries to store its request: the holder
+    still has the key. A reviewer rejects the holder right after that retry
+    looked the key up again and before it stores its request. The
+    second retry then gets the first one's request, and only that request
+    can be approved.
+    """
+    behind = {"subs": ["person-a"]}
+
+    async def _people(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [{"sub": sub, "name": None, "why": "agent_owner"} for sub in behind["subs"]]
+
+    monkeypatch.setattr(approval_queue_module, "find_people_behind", _people)
+    holder = await _submit()
+    behind["subs"] = ["person-b"]
+
+    real_find = approval_queue_module._find_idempotent_request
+    real_insert = approval_queue_module._insert_idempotent_request
+    storing: contextvars.ContextVar[bool] = contextvars.ContextVar("storing", default=False)
+    lookups = {"n": 0}
+    both_looked = asyncio.Event()
+    rejected = asyncio.Event()
+
+    async def _reject_holder() -> None:
+        async with get_sessionmaker()() as session:
+            await reject_request(session, holder.id, operator=_reviewer())
+            await session.commit()
+        rejected.set()
+
+    async def _find_then_reject(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        found = await real_find(*args, **kwargs)
+        lookups["n"] += 1
+        if lookups["n"] == 1:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_looked.wait(), timeout=2)
+        else:
+            both_looked.set()
+        if storing.get() and found is None and not rejected.is_set():
+            # The insert met the holder and looked the key up again.
+            await _reject_holder()
+        return found
+
+    async def _store(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        token = storing.set(True)
+        try:
+            return await real_insert(*args, **kwargs)
+        finally:
+            storing.reset(token)
+
+    monkeypatch.setattr(approval_queue_module, "_find_idempotent_request", _find_then_reject)
+    monkeypatch.setattr(approval_queue_module, "_insert_idempotent_request", _store)
+
+    one, two = await asyncio.wait_for(asyncio.gather(_submit(), _submit()), timeout=20)
+
+    assert rejected.is_set()
+    assert one.id == two.id
+    assert one.id != holder.id
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalRequest).where(ApprovalRequest.tenant_id == _TENANT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {row.id: row.status for row in rows} == {
+            holder.id: ApprovalRequestStatus.REJECTED.value,
+            one.id: ApprovalRequestStatus.PENDING.value,
+        }
     assert len(await _audit_rows("approval.request", one.id)) == 1

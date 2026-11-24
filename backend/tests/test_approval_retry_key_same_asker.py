@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,7 +30,15 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestKey
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
-from meho_backplane.operations.approval_queue import SelfApprovalForbiddenError, approve_request
+from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_queue import (
+    IdempotencyKeyConflictError,
+    SelfApprovalForbiddenError,
+    approve_request,
+    create_pending_request,
+    reject_request,
+)
 from meho_backplane.settings import get_settings
 from tests.test_destructive_preview_binding import _operator
 
@@ -300,3 +309,90 @@ async def test_the_same_login_as_another_kind_gets_its_own_request(
 
     assert as_service != as_person
     assert [row.principal_kind for row in await _rows()] == ["user", "service"]
+
+
+async def _park(
+    operator: Operator,
+    *,
+    target_id: uuid.UUID | None = None,
+    params: dict[str, Any] | None = None,
+    reveal_secret: bool = False,
+) -> ApprovalRequest:
+    """Park a request with the shared key straight through ``create_pending_request``."""
+    call_params = params if params is not None else {"name": "web-01"}
+    target = SimpleNamespace(id=target_id) if target_id is not None else None
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=operator,
+            connector_id="gh-rest-3",
+            op_id="POST:/vms",
+            target=target,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            idempotency_key=_KEY,
+            reveal_secret=reveal_secret,
+            proposed_effect={"safety_level": "caution"},
+        )
+        await session.commit()
+    return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked_otherwise", ["reveal_secret", "people_behind"])
+@pytest.mark.parametrize("other_call", ["target", "params", "work_ref"])
+async def test_a_retry_asked_another_way_for_another_call_is_refused(
+    monkeypatch: pytest.MonkeyPatch, asked_otherwise: str, other_call: str
+) -> None:
+    """The same key with another call is refused, also when it is asked another way."""
+    _behind(monkeypatch, {"agent:nightly": ["person-a"]})
+    first = await _park(_agent())
+
+    retry: dict[str, Any] = {}
+    if asked_otherwise == "reveal_secret":
+        retry["reveal_secret"] = True
+    else:
+        _behind(monkeypatch, {"agent:nightly": ["person-b"]})
+    if other_call == "target":
+        retry["target_id"] = uuid.uuid4()
+    elif other_call == "params":
+        retry["params"] = {"name": "web-02"}
+    token = work_ref_var.set("change-ticket-2") if other_call == "work_ref" else None
+    try:
+        with pytest.raises(IdempotencyKeyConflictError) as refused:
+            await _park(_agent(), **retry)
+    finally:
+        if token is not None:
+            work_ref_var.reset(token)
+
+    assert refused.value.request_id == first.id
+    assert [(row.id, row.status, row.idempotency_key) for row in await _rows()] == [
+        (first.id, "pending", _KEY)
+    ]
+    async with get_sessionmaker()() as session:
+        assert list((await session.execute(select(ApprovalRequestKey))).scalars()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_a_linked_key_refuses_another_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request that keeps the key in its linked row refuses another call too."""
+    _behind(monkeypatch, {"agent:nightly": ["person-a"]})
+    first = await _park(_agent())
+    _behind(monkeypatch, {"agent:nightly": ["person-b"]})
+    second = await _park(_agent())
+    assert second.id != first.id
+    async with get_sessionmaker()() as session:
+        await reject_request(session, first.id, operator=_person("reviewer"))
+        await session.commit()
+
+    _behind(monkeypatch, {"agent:nightly": ["person-c"]})
+    with pytest.raises(IdempotencyKeyConflictError) as refused:
+        await _park(_agent(), target_id=uuid.uuid4())
+
+    assert refused.value.request_id == second.id
+    assert [(row.id, row.status) for row in await _rows()] == [
+        (first.id, "rejected"),
+        (second.id, "pending"),
+    ]

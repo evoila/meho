@@ -2756,7 +2756,11 @@ for approval.
   any of them differs, the call is refused with `status="denied"` and
   `extras.error_code="idempotency_key_conflict"`, and
   `extras.approval_request_id` names the request that holds the key. Nothing
-  is parked. The refusal writes a `denied` audit row.
+  is parked. The refusal writes a `denied` audit row. This holds for every
+  live request the key gets back, in its own column or in
+  `approval_request_key`, also for one asked another way
+  (`_refuse_key_held_for_another_call`). A `pending` request past its
+  deadline does not count.
 - **When the key is free again.** A `rejected` or `expired` request no
   longer holds its key, so the same key parks a new request. An `approved`
   request keeps its key even after it ran: a retry then returns the request
@@ -2869,15 +2873,23 @@ idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
 The losing insert runs in a savepoint (`_insert_idempotent_request`). When
 the index refuses it, the savepoint rolls back and the winner's row is
 returned the same way as a normal retry. When the index refuses it
-because a request asked another way holds the key, MEHO locks that
-holder row (`_lock_key_holder`, `SELECT ... FOR UPDATE`), looks the key up
-again, and only then stores the new request with the key in
-`approval_request_key`. So two such calls at the same moment end with one
-new request: the second one waits for the lock and then finds the first
-one's request through the linked key.
+because a request asked another way holds the key, MEHO stores the new
+request with the key in `approval_request_key`.
 
-Two late retries can also race to expire the same overdue request. Only one
-gets the row lock. When the other's locked re-read finds no `pending` row,
+Before it looks a key up, every call with a key takes the lock of that key
+for its login (`_take_idempotency_key_lock`, `pg_advisory_xact_lock` on the
+tenant, the login and the key; PostgreSQL frees it at commit or rollback).
+So two calls with the same key never look it up and store a request at the
+same moment. The second one looks the key up only after the first one
+committed, and finds the request the first one stored or linked. This holds
+also when the request that held the key is rejected or expires in between.
+SQLite (the unit tests) has no such lock.
+
+Two late retries can also race to expire the same overdue request. The key
+lock makes the second one wait, and it then finds the replacement. An
+approve or reject takes no key lock, so a row can still change under a
+retry: the retry and the approve both want the row lock, and only one gets
+it first. When the retry's locked re-read finds no `pending` row,
 the row changed under it: another retry expired it and parked a replacement,
 or a sweep, reject or approve got there first. `_resolve_idempotent_request`
 then looks the key up again and returns what holds it now, for example the
@@ -2889,7 +2901,8 @@ it. With the cached `pending` state it would try to expire the row again,
 miss again, and never return.
 `tests/integration/test_approval_idempotent_retry_pg.py` runs these races
 (two late retries; a late retry against an approve; two retries beside a
-holder asked another way) on a real Postgres.
+holder asked another way; the same two retries with the holder rejected in
+between) on a real Postgres.
 
 **What does not change.** The lookup runs inside `create_pending_request`,
 after every park gate in `_handle_needs_approval`. So a retry still goes

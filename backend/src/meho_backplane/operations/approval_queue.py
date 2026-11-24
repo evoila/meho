@@ -76,7 +76,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1159,21 +1159,19 @@ class _Asker:
         )
 
 
-async def _find_idempotent_request(
+async def _key_holders(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     principal_sub: str,
     idempotency_key: str,
-    asker: _Asker,
-) -> ApprovalRequest | None:
-    """Return the live request that holds *idempotency_key* for this caller.
+) -> list[ApprovalRequest]:
+    """Return every live request of this login that *idempotency_key* gets back.
 
     Scoped to the tenant **and** the principal, so a key never matches
-    another tenant's or another requester's request. A request counts only
-    when *asker* asked it: the same kind of login, the same people behind
-    the login and the same choice to reveal secret values. A request asked
-    otherwise is not returned, so the call gets its own request.
+    another tenant's or another requester's request. The request that holds
+    the key in its own column comes first, then the requests the key is
+    linked to (:class:`ApprovalRequestKey`), newest first.
 
     ``populate_existing`` refreshes a row the session already holds. The
     retry loop in :func:`_resolve_idempotent_request` calls this again after
@@ -1181,9 +1179,8 @@ async def _find_idempotent_request(
     another connection. Without the refresh the session would keep the
     cached ``pending`` state, treat the row as overdue again, and loop.
 
-    A key linked to a request (:class:`ApprovalRequestKey`), by a same-call
-    reuse or by a call that got its own request for a key another request
-    holds, gets that request back too.
+    A key is linked to a request by a same-call reuse, or by a call that
+    got its own request for a key another request holds.
     """
     live_for_caller = (
         ApprovalRequest.tenant_id == tenant_id,
@@ -1202,11 +1199,65 @@ async def _find_idempotent_request(
         .order_by(ApprovalRequest.created_at.desc())
         .execution_options(populate_existing=True)
     )
+    found: list[ApprovalRequest] = []
     for stmt in (held, linked):
-        for found in (await session.execute(stmt)).scalars():
-            if asker.asked(found):
-                return found
-    return None
+        found.extend((await session.execute(stmt)).scalars())
+    return found
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    asker: _Asker,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this caller.
+
+    A request of :func:`_key_holders` counts only when *asker* asked it: the
+    same kind of login, the same people behind the login and the same
+    choice to reveal secret values. A request asked otherwise is not
+    returned, so the call gets its own request.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    return next((found for found in holders if asker.asked(found)), None)
+
+
+async def _refuse_key_held_for_another_call(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+    is_this_call: Callable[[ApprovalRequest], bool],
+) -> None:
+    """Refuse the call when *idempotency_key* gets back a request of another call.
+
+    Runs when no request asked the same way holds the key. A request asked
+    another way (:class:`_Asker`) that holds the key for the same call lets
+    this call get its own request. One that holds it for another call
+    (*is_this_call* is false) refuses it, the same as for a request asked
+    the same way. A ``pending`` request past its deadline does not count.
+
+    Raises:
+        IdempotencyKeyConflictError: a live request of another call holds
+            the key.
+    """
+    holders = await _key_holders(
+        session,
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        idempotency_key=idempotency_key,
+    )
+    for holder in holders:
+        if not _is_overdue_pending(holder) and not is_this_call(holder):
+            raise IdempotencyKeyConflictError(holder.id)
 
 
 async def _link_reuse_key(
@@ -1386,15 +1437,14 @@ def _reuse_idempotent_request(
     compared too, so two runs under different change tickets never share
     one request.
     """
-    same_call = (
-        existing.op_id == op_id
-        and existing.connector_id == connector_id
-        and existing.target_id == target_id
-        and params_hash_matches(params, existing.params_hash)
-        and existing.preview_hash == preview_hash
-        and existing.work_ref == work_ref_var.get()
-    )
-    if not same_call:
+    if not _is_same_keyed_call(
+        existing,
+        op_id=op_id,
+        connector_id=connector_id,
+        target_id=target_id,
+        params=params,
+        preview_hash=preview_hash,
+    ):
         raise IdempotencyKeyConflictError(existing.id)
     _log().info(
         "approval_request_reused",
@@ -1406,6 +1456,30 @@ def _reuse_idempotent_request(
     )
     existing._reused = True  # type: ignore[attr-defined]
     return existing
+
+
+def _is_same_keyed_call(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params: dict[str, Any],
+    preview_hash: str | None,
+) -> bool:
+    """True when *existing* was asked for this call: what a retry key compares.
+
+    The same operation, connector, target, params (:func:`params_hash_matches`),
+    ``preview_hash`` and ``work_ref``.
+    """
+    return (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and params_hash_matches(params, existing.params_hash)
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
 
 
 async def _insert_idempotent_request(
@@ -1421,25 +1495,15 @@ async def _insert_idempotent_request(
     The index also refuses the insert when a request of another *asker*
     holds the key (:func:`_find_idempotent_request` does not return it).
     Then *request* keeps the key in :class:`ApprovalRequestKey` instead of
-    its own column. The holder is locked first, so two such calls that race
-    end with one request: the second one finds the first one's request.
+    its own column. The caller holds the key lock
+    (:func:`_take_idempotency_key_lock`), so a second call with this key
+    looks it up only after this one commits, and finds this request.
     """
     try:
         async with session.begin_nested():
             session.add(request)
             await session.flush()
     except IntegrityError:
-        existing = await _find_idempotent_request(
-            session,
-            tenant_id=request.tenant_id,
-            principal_sub=request.principal_sub,
-            idempotency_key=idempotency_key,
-            asker=asker,
-        )
-        if existing is not None:
-            return existing
-        if not await _lock_key_holder(session, request, idempotency_key):
-            raise
         existing = await _find_idempotent_request(
             session,
             tenant_id=request.tenant_id,
@@ -1456,25 +1520,20 @@ async def _insert_idempotent_request(
     return None
 
 
-async def _lock_key_holder(
-    session: AsyncSession, request: ApprovalRequest, idempotency_key: str
-) -> bool:
-    """Lock the live request that holds *idempotency_key* in its own column.
+async def _take_idempotency_key_lock(
+    session: AsyncSession, *, tenant_id: uuid.UUID, principal_sub: str, idempotency_key: str
+) -> None:
+    """Take the lock of one retry key of one login, until the transaction ends.
 
-    Same tenant and login as *request*. ``False`` when no live request
-    holds the key.
+    Every call with a retry key takes it before it looks the key up. So two
+    calls with the same key never look it up and store a request at the same
+    moment: the second one looks the key up only after the first one
+    committed, and finds the request the first one stored or linked. That
+    holds also when the request that held the key is decided in between.
     """
-    stmt = (
-        select(ApprovalRequest.id)
-        .where(
-            ApprovalRequest.tenant_id == request.tenant_id,
-            ApprovalRequest.principal_sub == request.principal_sub,
-            ApprovalRequest.idempotency_key == idempotency_key,
-            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
-        )
-        .with_for_update()
+    await take_approval_lock(
+        session, "idempotency-key", f"{tenant_id}\0{principal_sub}\0{idempotency_key}"
     )
-    return (await session.execute(stmt)).first() is not None
 
 
 #: The acting identity for every expiry: the sweeper and the late-retry path
@@ -2041,6 +2100,12 @@ async def create_pending_request(
     asker = _Asker(principal_kind, behind_subs(people_behind), reveal_secret)
 
     if idempotency_key is not None:
+        await _take_idempotency_key_lock(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+        )
         live, expired_request = await _resolve_idempotent_request(
             session,
             tenant_id=operator.tenant_id,
@@ -2050,6 +2115,20 @@ async def create_pending_request(
         )
         if live is not None:
             return _reuse(live)
+        await _refuse_key_held_for_another_call(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+            is_this_call=lambda held: _is_same_keyed_call(
+                held,
+                op_id=op_id,
+                connector_id=connector_id,
+                target_id=target_id,
+                params=params,
+                preview_hash=preview_hash,
+            ),
+        )
 
     if _same_call_reuse_applies(run_id, resume_parent, requester):
         same_call = await _find_same_call_pending_request(

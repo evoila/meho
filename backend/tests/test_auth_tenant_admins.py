@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MEHO says when a change of rights needs a second admin (#6641).
+"""MEHO says when a change of rights in its own login realm needs a platform admin.
 
 :func:`tenant_admin_ids` counts the admins of a tenant against a small fake
 Keycloak (respx). A count MEHO is not sure of is ``None`` and never gives a
-warning. The answer to a change of rights in a tenant with one admin holds
-the sentence; with two admins, or when the count is not known, the answer
-is unchanged. ``/api/v1/health`` reports the count.
+warning. The answer to a change of rights in MEHO's own login realm, asked
+by the only admin of the tenant, holds the note; with two admins, when the
+count is not known, and for a change in another realm, the answer is
+unchanged. ``/api/v1/health`` reports the count.
 """
 
 from __future__ import annotations
@@ -26,15 +27,17 @@ from meho_backplane.auth import tenant_admins
 from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.tenant_admins import (
+    LOGIN_REALM_APPROVER,
     ONLY_ONE_ADMIN,
     RIGHTS_CHANGE_GUIDE_URL,
     admin_count,
     only_admin_note,
     tenant_admin_ids,
 )
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.operations import dispatcher, grant_approval
 from meho_backplane.operations._errors import result_awaiting_approval
+from meho_backplane.operations.approval_queue import rights_change_note
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.templating import get_templates
@@ -48,6 +51,22 @@ _OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-000000006642")
 _ADMIN_A = "user-admin-a"
 _ADMIN_B = "user-admin-b"
 _RIGHTS_OP = "demo.rights.change"
+#: The whole note, word for word.
+_FULL_NOTE = (
+    "This change is in MEHO's own login realm, so a platform admin must approve it. "
+    "You can approve it yourself only if you are a platform admin and asked for it in the "
+    "web console. MEHO found no other admin in this tenant. See "
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+    "#changes-of-rights-need-another-admin"
+)
+
+
+def _grant_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make :data:`_RIGHTS_OP` a change of rights of one login, as a Keycloak write is."""
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
+    monkeypatch.setattr(
+        grant_approval, "_GRANT_OPS", {_RIGHTS_OP: grant_approval._GrantOp(("user",), ())}
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -195,7 +214,7 @@ async def test_a_service_account_in_the_admin_group_does_not_count() -> None:
         assert await admin_count(_TENANT) == 1
         tenant_admins._kept.clear()
         note = await only_admin_note(_TENANT, _ADMIN_A)
-    assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert note == _FULL_NOTE
 
 
 async def test_the_service_account_prefix_follows_the_setting(
@@ -301,12 +320,16 @@ def _known(monkeypatch: pytest.MonkeyPatch, ids: set[str] | None) -> None:
     monkeypatch.setattr(tenant_admins, "_read", read)
 
 
-async def test_the_note_for_the_only_admin_holds_the_sentence_and_the_link(
+async def test_the_note_for_the_only_admin_holds_the_sentences_and_the_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _known(monkeypatch, {_ADMIN_A})
     note = await only_admin_note(_TENANT, _ADMIN_A.upper())
-    assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert (
+        note
+        == _FULL_NOTE
+        == f"{LOGIN_REALM_APPROVER} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -357,7 +380,7 @@ def _descriptor() -> EndpointDescriptor:
 
 
 async def _ask(monkeypatch: pytest.MonkeyPatch, op_id: str = _RIGHTS_OP) -> Any:
-    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
+    _grant_op(monkeypatch)
     operator = Operator(
         sub=_ADMIN_A,
         raw_jwt="<jwt>",
@@ -385,8 +408,10 @@ async def test_the_only_admin_asks_for_a_change_of_rights_and_reads_the_sentence
     _known(monkeypatch, {_ADMIN_A})
     result = await _ask(monkeypatch)
     assert result.status == "awaiting_approval"
-    assert ONLY_ONE_ADMIN in (result.error or "")
-    assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert result.error == (
+        f"awaiting_approval: {_RIGHTS_OP!r} requires approval before execution. {_FULL_NOTE}"
+    )
+    assert result.extras["approval_note"] == _FULL_NOTE
     assert result.extras["approval_request_id"]
 
 
@@ -408,6 +433,39 @@ async def test_a_request_that_is_no_change_of_rights_gets_no_note(
     result = await _ask(monkeypatch, op_id="demo.vm.restart")
     assert result.status == "awaiting_approval"
     assert "approval_note" not in result.extras
+
+
+def _request(op_id: str, grant: dict[str, Any] | None) -> ApprovalRequest:
+    preview: dict[str, Any] = {} if grant is None else {"grant": grant}
+    return ApprovalRequest(
+        id=uuid.uuid4(),
+        tenant_id=_TENANT,
+        principal_sub=_ADMIN_A,
+        op_id=op_id,
+        params={"user": "someone"},
+        proposed_effect={"op_id": op_id, "preview": preview},
+        rights_change=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("op_id", "grant", "has_note"),
+    [
+        (_RIGHTS_OP, {"login_realm": True}, True),
+        (_RIGHTS_OP, None, True),
+        (_RIGHTS_OP, {"login_realm": False}, False),
+        ("policy.apply", None, False),
+        ("policy.classify", None, False),
+    ],
+    ids=["login-realm", "realm-fact-missing", "another-realm", "policy-apply", "policy-classify"],
+)
+async def test_the_note_shows_only_for_a_change_of_rights_in_the_login_realm(
+    monkeypatch: pytest.MonkeyPatch, op_id: str, grant: dict[str, Any] | None, has_note: bool
+) -> None:
+    _grant_op(monkeypatch)
+    _known(monkeypatch, {_ADMIN_A})
+    note = await rights_change_note(_request(op_id, grant))
+    assert note == (_FULL_NOTE if has_note else None)
 
 
 async def test_a_failed_note_read_still_waits_for_approval(
@@ -436,7 +494,7 @@ async def test_a_failed_note_read_still_waits_for_approval(
 async def test_a_step_of_a_multi_step_operation_gets_the_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
+    _grant_op(monkeypatch)
     _known(monkeypatch, {_ADMIN_A})
     operator = Operator(
         sub=_ADMIN_A,
@@ -456,8 +514,8 @@ async def test_a_step_of_a_multi_step_operation_gets_the_note(
     )
     assert result is not None
     assert result.status == "awaiting_approval"
-    assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-    assert ONLY_ONE_ADMIN in (result.error or "")
+    assert result.extras["approval_note"] == _FULL_NOTE
+    assert _FULL_NOTE in (result.error or "")
 
 
 # --- /api/v1/health -------------------------------------------------------------------
@@ -490,7 +548,7 @@ async def test_health_reports_the_count(
 
 # --- the console shows the note -------------------------------------------------------
 
-_NOTE = f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+_NOTE = _FULL_NOTE
 
 
 def _waiting(note: str | None) -> dict[str, Any]:

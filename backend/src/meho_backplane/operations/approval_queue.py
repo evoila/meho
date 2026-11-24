@@ -188,6 +188,7 @@ from meho_backplane.operations.grant_approval import (
     check_rights_change_approval,
     grant_audit_fields,
     grant_changed_since_request,
+    grant_facts,
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
@@ -2367,17 +2368,26 @@ async def create_pending_request(
 
 
 async def rights_change_note(request: ApprovalRequest) -> str | None:
-    """The note for a change of rights that no other admin could approve (#6641).
+    """The note for a waiting change of rights in MEHO's own login realm.
 
-    The request is stored all the same, so an admin added later can still
-    approve it. ``None`` for any other request, when another admin could
-    approve, and when MEHO cannot count the admins
-    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+    There a platform admin must approve it, and the person who asked
+    approves it only as a platform admin who asked in the web console. The
+    note shows when the person who asked is the only admin of the tenant
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). The request
+    is stored all the same, so an admin added later can still approve it.
+
+    The realm comes from the same facts the approve uses
+    (:func:`~meho_backplane.operations.grant_approval.grant_facts`): a
+    missing realm fact counts as the login realm. ``None`` for every other
+    request (another realm, ``policy.apply``, ``policy.classify``), when
+    another admin is found, when the person who asked is not an admin, and
+    when MEHO cannot count the admins.
 
     The note is extra help only. When reading it fails, the answer is
     ``None`` and the request still waits for approval as stored.
     """
-    if not is_rights_change(request):
+    facts = grant_facts(request)
+    if facts is None or not facts.login_realm:
         return None
     try:
         return await only_admin_note(request.tenant_id, request.principal_sub)

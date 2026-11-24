@@ -1656,8 +1656,13 @@ through the same `is_rights_change` check, so an upgrade weakens nothing.
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
-**A tenant with one admin (#6641).** There, nobody can approve that
-admin's change of rights. MEHO says so; it builds no exception.
+**A tenant with one admin, and a change in MEHO's own login realm.** In
+MEHO's own login realm a platform admin must approve a waiting change of
+rights. The person who asked approves it only as a platform admin who asked
+in the web console. So when the person who asked is the only admin of the
+tenant, nobody else in the tenant can approve it. MEHO says so; it builds no
+exception. Outside that realm the person who asked approves the waiting
+change in the web console, so MEHO shows no note there.
 
 - `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
   Keycloak admin client: the enabled members of every group (at any level)
@@ -1673,19 +1678,41 @@ admin's change of rights. MEHO says so; it builds no exception.
   known" never gives a warning.
 - At request time, `rights_change_note` in `operations/approval_queue.py`
   runs after the request and its approval step event are saved (the
-  dispatcher and the composite step), outside the `try` that answers
-  "denied". A failed read of the note gives no note; the call still waits
-  for approval. When the requester is the only admin, the answer gets
-  `extras.approval_note`: "This change needs a second admin to approve it.
-  This tenant has only one admin." and a link to the approvals guide. The
-  note is added to `error` too. The request is still stored, so an admin
+  dispatcher, the composite step and the MCP read of an own request),
+  outside the `try` that answers "denied". It gives a note only when both
+  are true:
+  - the request is a change of rights in MEHO's own login realm, by the
+    facts the approve uses: `grant_facts(request)` is not `None` and its
+    `login_realm` is true. A card without the realm fact counts as the
+    login realm, as in the approve;
+  - `only_admin_note(tenant_id, requester_sub)` in `auth/tenant_admins.py`
+    finds that the person who asked is the only admin of the tenant.
+
+  Every other request gives no note: a change in another realm,
+  `policy.apply` and `policy.classify` (they have no realm), two or more
+  admins, a count that is not known, and a request whose asker is not an
+  admin (an Operator, an agent or a service login). A failed read of the
+  note gives no note; the call still waits for approval. The note is in
+  `extras.approval_note` and at the end of `error`: "This change is in
+  MEHO's own login realm, so a platform admin must approve it. You can
+  approve it yourself only if you are a platform admin and asked for it
+  in the web console. MEHO found no other admin in this tenant." and a
+  link to the approvals guide. The request is still stored, so an admin
   added later can approve it. `meho operation call` prints the note under
   the parked hint. The web console shows it in the waiting answer of the
   Keycloak pages, the operation run window, and the classify page.
 - `/api/v1/health` and `meho_status` report the count in
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
-  admin": a warning with the same sentence for one admin, ok for two or
-  more, and no line when the count is not known or the backplane is older.
+  admin". For one admin it warns "This tenant has only one admin. Some
+  changes of rights in MEHO's own login realm need a platform admin other
+  than the person who asked." Its fix says "add a second platform admin in
+  Keycloak (in MEHO-Platform-Admins)" with the guide link. Two or more
+  admins give an ok line. When the count is not known or the backplane is
+  older, there is no line.
+- The fix of the `meho doctor` line "approval sign-in" says who runs
+  `keycloak.authflow.ensure_approval_flow`: a platform admin in the web
+  console runs it at once; asked with a token, it waits and a second
+  platform admin approves it.
 
 ## The "may I approve this?" answer (#3329)
 
@@ -2821,11 +2848,12 @@ for approval.
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
   secret value. When the request has the rights note (a change of rights in
-  a tenant with one admin), the note follows this text. On an approved
-  request, the note leaves out "This change needs a second admin to approve
-  it." and keeps "This tenant has only one admin." and the guide link, also
-  in `extras.approval_note`. A retry of a waiting request keeps the text
-  "requires approval before execution" and the full note.
+  MEHO's own login realm, asked by the only admin of the tenant), the note
+  follows this text. On an approved request, the note keeps only "MEHO
+  found no other admin in this tenant." and the guide link, also in
+  `extras.approval_note`: the part about who must approve is left out. A
+  retry of a waiting request keeps the text "requires approval before
+  execution" and the full note.
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be

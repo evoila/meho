@@ -22,4 +22,4 @@ When the appliance is ready, the steps after the install are the same
 as for every form. Start with
 [the setup page and the settings file](setup-page.md).
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. In MEHO's own login realm, a change asked with a token, the command line, MCP or an agent, a change of the approval sign-in or of most realm settings, and a move of a secret into your own password need a platform admin other than you. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).

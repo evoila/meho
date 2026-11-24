@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Count the admins who could approve a change of rights in one tenant (#6641).
+"""Count the admins of one tenant, for the note on a change of rights.
 
-A change of rights waits until another admin of the tenant approves it
-(:meth:`~meho_backplane.auth.operator.Operator.may_approve_rights_change`):
-a person with the ``tenant_admin`` role there, or a platform admin. The
-person who asked never approves it. So a tenant with one admin can never
-approve that admin's change of rights.
+In MEHO's own login realm, a change of rights waits for a platform admin.
+The person who asked approves it only when they are a platform admin and
+asked for it in the web console
+(:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
+So when the person who asked is the only admin of the tenant, nobody else in
+the tenant can approve it. Outside that realm, the person who asked approves
+the change in the web console, so it needs no other admin.
 
 MEHO stores no list of people. :func:`tenant_admin_ids` reads them from
 MEHO's own sign-in realm with the backplane's Keycloak admin client
@@ -30,8 +32,13 @@ The answer is ``None`` ("not known") when MEHO cannot count:
   member (for example the people come from a company login MEHO cannot read).
 
 "Not known" never gives a warning. Only a count MEHO is sure of does:
-:func:`only_admin_note` at request time and the doctor line of ``meho
-doctor`` (``approvals.rights_change_admins`` in ``/api/v1/health``).
+
+* :func:`only_admin_note` at request time. The caller
+  (:func:`~meho_backplane.operations.approval_queue.rights_change_note`)
+  asks for it only for a change of rights in MEHO's own login realm;
+* the doctor line of ``meho doctor`` (``approvals.rights_change_admins`` in
+  ``/api/v1/health``), which warns that some changes of rights in that realm
+  need a platform admin other than the person who asked.
 
 An answer is kept for :data:`_KEEP_S` seconds per tenant (a failed read for
 :data:`_KEEP_FAILED_S` seconds), so the health answer, which is called
@@ -57,7 +64,7 @@ from meho_backplane.auth.operator import RoleGroup, TenantRole
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
-    "NEEDS_SECOND_ADMIN",
+    "LOGIN_REALM_APPROVER",
     "ONLY_ONE_ADMIN",
     "RIGHTS_CHANGE_GUIDE_URL",
     "admin_count",
@@ -65,11 +72,16 @@ __all__ = [
     "tenant_admin_ids",
 ]
 
-#: The first sentence of :data:`ONLY_ONE_ADMIN`. It is false for an approved request.
-NEEDS_SECOND_ADMIN: Final[str] = "This change needs a second admin to approve it."
+#: Who approves a waiting change of rights in MEHO's own login realm: the first
+#: part of the note. An answer about an approved request leaves it out.
+LOGIN_REALM_APPROVER: Final[str] = (
+    "This change is in MEHO's own login realm, so a platform admin must approve it. "
+    "You can approve it yourself only if you are a platform admin and asked for it "
+    "in the web console."
+)
 
-#: The sentence a person reads when no other admin could approve their change.
-ONLY_ONE_ADMIN: Final[str] = f"{NEEDS_SECOND_ADMIN} This tenant has only one admin."
+#: The sentence a person reads when MEHO found no other admin in the tenant.
+ONLY_ONE_ADMIN: Final[str] = "MEHO found no other admin in this tenant."
 
 #: The guide part that explains who approves a change of rights.
 RIGHTS_CHANGE_GUIDE_URL: Final[str] = (
@@ -240,17 +252,20 @@ async def tenant_admin_ids(
 
 
 async def admin_count(tenant_id: uuid.UUID) -> int | None:
-    """How many admins could approve a change of rights in the tenant; ``None`` when not known."""
+    """How many admins the tenant has (tenant and platform admins); ``None`` when not known."""
     ids = await tenant_admin_ids(tenant_id)
     return None if ids is None else len(ids)
 
 
 async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
-    """The note for a change of rights that no other admin could approve, else ``None``.
+    """The note for a waiting change of rights in MEHO's own login realm, else ``None``.
 
-    ``None`` too when the count is not known: then MEHO says nothing new.
+    The note shows only when *requester_sub* is the only admin of the tenant.
+    The caller asks only for a change of rights in MEHO's own login realm.
+    ``None`` when another admin is found, when the person who asked is not
+    an admin, and when the count is not known: then MEHO says nothing new.
     """
     ids = await tenant_admin_ids(tenant_id)
     if ids is None or ids - {requester_sub.casefold()}:
         return None
-    return f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    return f"{LOGIN_REALM_APPROVER} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

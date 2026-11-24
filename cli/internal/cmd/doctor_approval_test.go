@@ -134,22 +134,22 @@ func TestSecondAdminCheck(t *testing.T) {
 	count := func(n int) *api.HealthResponse {
 		return &api.HealthResponse{Approvals: &api.ApprovalsStatus{RightsChangeAdmins: &n}}
 	}
-	t.Run("one admin warns with the sentence and the link", func(t *testing.T) {
+	t.Run("one admin warns with the full texts", func(t *testing.T) {
 		r := &doctorReport{}
 		addSecondAdminCheck(r, count(1))
 		c := findCheck(t, r, secondAdminCheckName)
 		if c.Layer != layerAuthed || c.Status != doctorWarn {
 			t.Errorf("layer/status = %s/%s, want %s/%s", c.Layer, c.Status, layerAuthed, doctorWarn)
 		}
-		want := "This change needs a second admin to approve it. This tenant has only one admin."
+		want := "This tenant has only one admin. Some changes of rights in MEHO's own login realm " +
+			"need a platform admin other than the person who asked."
 		if c.Detail != want {
 			t.Errorf("detail = %q, want %q", c.Detail, want)
 		}
-		if !strings.Contains(c.Hint, rightsChangeGuide) {
-			t.Errorf("hint %q does not link %s", c.Hint, rightsChangeGuide)
-		}
-		if !strings.Contains(c.Hint, "MEHO-Admins or MEHO-Platform-Admins") {
-			t.Errorf("hint %q does not name the admin groups", c.Hint)
+		wantHint := "add a second platform admin in Keycloak (in MEHO-Platform-Admins); see " +
+			"https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
+		if c.Hint != wantHint {
+			t.Errorf("hint = %q, want %q", c.Hint, wantHint)
 		}
 		if doctorExitCode(r) != 0 {
 			t.Errorf("exit code = %d, want 0: the line is a warning", doctorExitCode(r))
@@ -159,13 +159,13 @@ func TestSecondAdminCheck(t *testing.T) {
 		r := &doctorReport{}
 		addSecondAdminCheck(r, count(2))
 		c := findCheck(t, r, secondAdminCheckName)
-		if c.Status != doctorOK || c.Detail != "2 admins in this tenant" {
-			t.Errorf("status/detail = %s/%q, want ok with 2 admins", c.Status, c.Detail)
+		if c.Status != doctorOK || c.Detail != "2 admins in this tenant" || c.Hint != "" {
+			t.Errorf("status/detail/hint = %s/%q/%q, want ok with 2 admins", c.Status, c.Detail, c.Hint)
 		}
 	})
 	for name, h := range map[string]*api.HealthResponse{
-		"older backplane":       {},
-		"no count in the block": {Approvals: &api.ApprovalsStatus{}},
+		"older backplane":             {},
+		"count not known (no number)": {Approvals: &api.ApprovalsStatus{}},
 	} {
 		t.Run(name+" gives no line", func(t *testing.T) {
 			r := &doctorReport{}
@@ -174,5 +174,17 @@ func TestSecondAdminCheck(t *testing.T) {
 				t.Errorf("got a line: %v", r.Checks)
 			}
 		})
+	}
+}
+
+// The fix of the approval flow line says who runs keycloak.authflow.ensure_approval_flow
+// and who approves it when it waits.
+func TestApprovalFlowFixSaysWhoRunsAndApprovesIt(t *testing.T) {
+	want := "a platform admin runs the operation keycloak.authflow.ensure_approval_flow " +
+		"on the Keycloak target in the web console; asked with a token, a second platform admin " +
+		"approves it; with the built-in Keycloak, `helm upgrade` does it too; see " +
+		"https://evoila.github.io/meho/install/keycloak-realm/#add-the-approval-flow-to-a-running-realm-through-meho"
+	if approvalFlowFix != want {
+		t.Errorf("approvalFlowFix = %q, want %q", approvalFlowFix, want)
 	}
 }

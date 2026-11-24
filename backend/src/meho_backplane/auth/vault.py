@@ -30,6 +30,11 @@ event loop responsive. The wrapper helpers
 
 Error mapping:
 
+* Every error here has a message MEHO wrote. The store's own text, its
+  address and its request path never reach the message. They go to the
+  server log (event ``vault_login_failed``, with the address and secrets cut) and to
+  the ``store_text`` / ``request_path`` fields of the error. The client's
+  exception is not chained, so a traceback of these errors does not show it.
 * Vault returns 403 when the JWT is valid but the role denies access
   (or when the role is missing). hvac's adapter raises
   :class:`hvac.exceptions.Forbidden` — surfaced here as
@@ -58,6 +63,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import hvac
@@ -66,6 +72,12 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.store_errors import (
+    log_holds_store_text,
+    store_request_id,
+    store_status,
+    store_text_for_log,
+)
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -88,7 +100,26 @@ class VaultClientError(Exception):
     Vault fails for any reason. Subclasses carry more specific intent;
     callers can catch the base class to surface a single error response
     shape (G2.2-T3 wires this into the ``/api/v1/health`` route).
+
+    The message is always a sentence MEHO wrote. The store's own text and
+    request path stay in ``store_text`` and ``request_path``, for the server
+    log only.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str | None = None,
+        store_status: int | None = None,
+        store_text: str | None = None,
+        request_path: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.store_status = store_status
+        self.store_text = store_text
+        self.request_path = request_path
 
 
 class VaultUnreachableError(VaultClientError):
@@ -155,6 +186,53 @@ def _build_client(settings: Settings, *, token: str | None = None) -> hvac.Clien
     )
 
 
+def _store_request_path(exc: BaseException) -> str | None:
+    """Return the path (never the address) hvac names in *exc*, or ``None``."""
+    url = getattr(exc, "url", None)
+    if not isinstance(url, str) or not url:
+        return None
+    return urlsplit(url).path or None
+
+
+def _login_error(
+    error_class: type[VaultClientError],
+    message: str,
+    exc: BaseException,
+    *,
+    kind: str,
+    role: str,
+    mount_path: str,
+) -> VaultClientError:
+    """Build a login error with a MEHO sentence, and log the store's detail.
+
+    The log event holds the error class, the role, the login mount, the
+    store's request id and the store's text, with the address and secrets cut.
+    Inside :func:`~meho_backplane.auth.store_errors.log_without_store_text`
+    the event has no store text. The returned error carries the detail in
+    fields, never in its message.
+    """
+    store_text = store_text_for_log(exc)
+    request_path = _store_request_path(exc)
+    status = store_status(exc)
+    _log.warning(
+        "vault_login_failed",
+        error_class=type(exc).__name__,
+        kind=kind,
+        role=role,
+        login_mount=mount_path,
+        store_status=status,
+        store_request_id=store_request_id(exc),
+        store_text=store_text if log_holds_store_text() else None,
+    )
+    return error_class(
+        message,
+        kind=kind,
+        store_status=status,
+        store_text=store_text,
+        request_path=request_path,
+    )
+
+
 def _do_jwt_login(client: hvac.Client, *, role: str, jwt: str, mount_path: str) -> None:
     """Synchronously perform ``client.auth.jwt.jwt_login`` and bind the token.
 
@@ -175,7 +253,14 @@ def _do_jwt_login(client: hvac.Client, *, role: str, jwt: str, mount_path: str) 
     try:
         client.auth.jwt.jwt_login(role=role, jwt=jwt, path=mount_path)
     except hvac.exceptions.Forbidden as exc:
-        raise VaultRoleDeniedError(f"vault role denied: {exc}") from exc
+        raise _login_error(
+            VaultRoleDeniedError,
+            "The secret store refused the login.",
+            exc,
+            kind="role_denied",
+            role=role,
+            mount_path=mount_path,
+        ) from None
 
 
 def _do_revoke_self(client: hvac.Client) -> None:
@@ -331,6 +416,41 @@ def _check_shared_role_list(settings: Settings, tenant_id: UUID) -> None:
         )
 
 
+async def _login_or_raise(
+    client: hvac.Client,
+    operator: Operator,
+    *,
+    role: str,
+    mount_path: str,
+) -> None:
+    """Log *client* in with the operator's JWT, or raise a ``VaultClientError``."""
+    try:
+        await _to_thread_jwt_login(
+            client,
+            role=role,
+            jwt=operator.raw_jwt,
+            mount_path=mount_path,
+        )
+    except VaultClientError:
+        # Already a backplane error — propagate verbatim. (Caught by the
+        # subclass check before the base ``VaultError`` branch below.)
+        raise
+    except (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+    ) as exc:
+        raise VaultUnreachableError(f"vault unreachable: {type(exc).__name__}") from None
+    except hvac.exceptions.VaultError as exc:
+        raise _login_error(
+            VaultClientError,
+            "The secret store failed the login.",
+            exc,
+            kind="login_failed",
+            role=role,
+            mount_path=mount_path,
+        ) from None
+
+
 @asynccontextmanager
 async def vault_client_for_operator(
     operator: Operator,
@@ -406,24 +526,12 @@ async def vault_client_for_operator(
     # stands. The Vault *address* stays global — there is one Vault.
     resolved_mount_path = mount_path if mount_path is not None else settings.vault_oidc_mount_path
 
-    try:
-        await _to_thread_jwt_login(
-            client,
-            role=resolved_role,
-            jwt=operator.raw_jwt,
-            mount_path=resolved_mount_path,
-        )
-    except VaultClientError:
-        # Already a backplane error — propagate verbatim. (Caught by the
-        # subclass check before the base ``VaultError`` branch below.)
-        raise
-    except (
-        requests.exceptions.ConnectionError,
-        requests.exceptions.Timeout,
-    ) as exc:
-        raise VaultUnreachableError(f"vault unreachable: {type(exc).__name__}") from exc
-    except hvac.exceptions.VaultError as exc:
-        raise VaultClientError(f"vault error: {type(exc).__name__}: {exc}") from exc
+    await _login_or_raise(
+        client,
+        operator,
+        role=resolved_role,
+        mount_path=resolved_mount_path,
+    )
 
     try:
         yield client

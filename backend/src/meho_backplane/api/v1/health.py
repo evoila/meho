@@ -99,6 +99,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.store_errors import log_without_store_text
 from meho_backplane.auth.tenant_admins import admin_count
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
@@ -757,13 +758,14 @@ async def _probe_vault_federation(
     # The vault.kv.read handler reads the operator JWT from the
     # request-scoped Operator (G0.8-T3 #629), not a target row; the
     # connector is resolved by connector_id, so target is None.
-    result = await dispatch(
-        operator=operator,
-        connector_id="vault-1.x",
-        op_id="vault.kv.read",
-        target=None,
-        params={"path": _FEDERATION_PROOF_PATH},
-    )
+    with log_without_store_text():
+        result = await dispatch(
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.kv.read",
+            target=None,
+            params={"path": _FEDERATION_PROOF_PATH},
+        )
 
     if result.status == "ok":
         # The handler returns ``{"data": <secret>, "version": <int|None>}``;

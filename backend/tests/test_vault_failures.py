@@ -349,9 +349,10 @@ async def test_vault_internal_server_error_during_login_raises_client_error(
     with pytest.raises(VaultClientError) as exc_info:
         async with vault_client_for_operator(_make_operator()):
             pytest.fail("body must not run when login raises")
-    # ``InternalServerError`` is a hvac-side concern; the wrapping
-    # discards the message and surfaces only the class name.
-    assert "InternalServerError" in str(exc_info.value)
+    # The message is a sentence MEHO wrote; the store's text stays in fields.
+    assert str(exc_info.value) == "The secret store failed the login."
+    assert exc_info.value.store_status == 500
+    assert "backend exploded" in (exc_info.value.store_text or "")
 
 
 async def test_vault_login_failure_skips_body_and_skips_revoke(

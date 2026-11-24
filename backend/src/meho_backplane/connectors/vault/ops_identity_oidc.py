@@ -114,13 +114,11 @@ class VaultOidcKeyInUseError(ConnectorUpstreamError):
     first; the dispatcher copies it into the ``connector_error`` extras.
     """
 
-    def __init__(self, key: str, users_kind: str, users: list[str], upstream: str) -> None:
+    def __init__(self, key: str, users_kind: str, users: list[str]) -> None:
         names = ", ".join(users)
-        super().__init__(
-            f"key {key!r} is still used by these {users_kind}: {names}",
-            http_status=400,
-            upstream_message=upstream,
-        )
+        sentence = f"key {key!r} is still used by these {users_kind}: {names}"
+        # The answer shows this sentence in both fields, never the store's words.
+        super().__init__(sentence, http_status=400, upstream_message=sentence)
         self.users_kind = users_kind
         self.users = users
         if users_kind == "roles":
@@ -158,7 +156,7 @@ def _key_in_use_error(
         match = _KEY_IN_USE.search(message.strip())
         if match:
             users = [part.strip() for part in match.group(2).split(",") if part.strip()]
-            return VaultOidcKeyInUseError(name, match.group(1), users, message)
+            return VaultOidcKeyInUseError(name, match.group(1), users)
     return None
 
 

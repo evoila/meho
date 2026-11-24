@@ -35,11 +35,13 @@ from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
+import hvac.exceptions
 import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 from meho_backplane.api.v1.targets import router as targets_router
 from meho_backplane.audit import AuditMiddleware
@@ -396,3 +398,28 @@ async def test_discover_binds_canonical_op_id(client: TestClient) -> None:
     payload = rows[0].payload or {}
     assert payload.get("op_id") == "targets.discover"
     assert payload.get("op_class") == "read"
+
+
+class _StoreFailingConnector(_RaisingConnector):
+    async def list_candidates(
+        self, seed_target: Any | None = None, operator: Any | None = None
+    ) -> list[CandidateHint]:
+        raise hvac.exceptions.InternalServerError(
+            "marker-store-words", method="GET", url="https://vault.test/v1/secret/data/x"
+        )
+
+
+def test_discover_shows_no_store_text_of_a_failed_store_read(client: TestClient) -> None:
+    register_connector_v2(
+        product=_PRODUCT, version="8.0", impl_id="discoverp-store", cls=_StoreFailingConnector
+    )
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router, capture_logs() as logs:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(f"/api/v1/targets/discover?product={_PRODUCT}", headers=_authed(token))
+    assert resp.status_code == 200, resp.text
+    assert "marker-store-words" not in resp.text
+    assert "vault.test" not in resp.text
+    assert "InternalServerError: The secret store returned an error." in resp.text
+    assert [e["event"] for e in logs].count("vault_request_failed") == 1
+    assert "vault.test" not in str(logs)

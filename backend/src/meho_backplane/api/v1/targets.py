@@ -149,6 +149,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sys
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Final, NoReturn
@@ -169,6 +170,7 @@ from meho_backplane.api.v1._wait_for_approval import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
+from meho_backplane.auth.store_errors import has_store_detail, store_text_for_log
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.gsm_creds import (
     ALLOWED_PROJECTS_SETTING,
@@ -198,6 +200,7 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
+from meho_backplane.operations._errors import connector_failure_text
 from meho_backplane.operations._errors_target_secret import target_secret_error_detail
 from meho_backplane.operations._handler_resolve import (
     forget_target_if_changed,
@@ -328,18 +331,14 @@ def _build_fingerprint_failed_detail(
     the convention codified in ``docs/codebase/error-message-shape.md``
     (T11 #1141): a stable ``error`` code, the failing ``connector_id``
     + ``target_name``, the underlying ``exception_class`` /
-    ``exception_message`` (the latter capped to keep credential-stuffed
-    exception strings from leaking unbounded into the response body),
-    and a ``docs`` back-reference for the operator.
+    ``exception_message`` (redacted and capped, and a sentence MEHO wrote
+    for a secret store error, as in ``connector_error``), and a ``docs``
+    back-reference for the operator.
 
-    Pure builder — no I/O, no logging. The caller logs the full
-    exception via :meth:`structlog.stdlib.BoundLogger.exception` so
-    the stacktrace lands in the structured log; only the capped
-    message lands in the response.
+    The caller logs the failure. Only the store's part of it is logged
+    here, by :func:`connector_failure_text`.
     """
-    message = str(exc)
-    if len(message) > _PROBE_EXC_MESSAGE_CAP:
-        message = message[:_PROBE_EXC_MESSAGE_CAP] + "...<truncated>"
+    message = connector_failure_text(exc, op_id="targets.probe", cap=_PROBE_EXC_MESSAGE_CAP)
     return {
         "error": "fingerprint_failed",
         "connector_id": _connector_id_for(cls),
@@ -1404,9 +1403,12 @@ async def discover_targets(
                 product=product,
                 connector=label,
                 tenant_id=str(operator.tenant_id),
-                error=repr(exc),
+                error_class=type(exc).__name__,
+                error=store_text_for_log(exc),
             )
-            skipped.append(SkippedConnector(name=label, reason=f"{type(exc).__name__}: {exc}"))
+            # No cap here: the reason is the connector's whole message.
+            reason = connector_failure_text(exc, op_id=_DISCOVER_OP_ID, cap=sys.maxsize)
+            skipped.append(SkippedConnector(name=label, reason=f"{type(exc).__name__}: {reason}"))
             continue
         if candidates:
             discovered.extend(candidates)
@@ -1449,13 +1451,14 @@ def _raise_fingerprint_failed(
     past the route and surface as FastAPI's bare 500 with a ``text/plain``
     body. Catch + convert to a structured 500 via
     :func:`_build_fingerprint_failed_detail` (the builder mirrors the
-    dispatcher's ``connector_error`` envelope). Full stacktrace lands in
-    the structured log via :meth:`_log.exception`; only the capped
-    exception message reaches the response body.
+    dispatcher's ``connector_error`` envelope). The stacktrace lands in
+    the structured log, except when it would show the secret store's text
+    or address: ``vault_request_failed`` then has the cleaned detail.
     """
     detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
-    _log.exception(
+    _log.error(
         "probe_fingerprint_failed",
+        exc_info=None if has_store_detail(exc) else exc,
         target_id=str(t.id),
         target_name=t.name,
         tenant_id=str(operator.tenant_id),

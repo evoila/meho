@@ -511,18 +511,16 @@ def test_builder_shape_without_expected_ref_falls_back_to_convention() -> None:
     assert out.extras["expected_secret_ref"] is None
 
 
-def test_builder_caps_oversized_message() -> None:
-    """A pathological hvac message is capped on a target-less denial."""
+def test_builder_never_passes_on_an_oversized_store_message() -> None:
+    """A target-less denial shows a MEHO sentence, never the store's text."""
     out = result_connector_vault_forbidden(
         "vault.token.create",
         hvac.exceptions.Forbidden("x" * 400),
         None,
         duration_ms=0.5,
     )
-    message = out.extras["exception_message"]
-    assert isinstance(message, str)
-    assert message.endswith("...<truncated>")
-    assert len(message) == 256 + len("...<truncated>")
+    assert out.extras["exception_message"] == "The secret store refused the request."
+    assert "xxx" not in out.model_dump_json()
 
 
 def test_builder_empty_message_has_no_dangling_tail() -> None:
@@ -573,16 +571,15 @@ def test_write_forbidden_names_path_identity_and_write_stanza() -> None:
     assert "§6.2" in out.error
     assert "Do NOT widen the backplane's shared Vault policy" in out.error
     assert "docs/cross-repo/connector-vault-policy.md" in out.error
-    # hvac tail present.
-    assert "Vault said:" in out.error
-    assert "permission denied" in out.error
+    # The store's own text is not passed on.
+    assert "Vault said:" not in out.error
     # Structured, machine-usable extras.
     assert out.extras["error_code"] == "vault_write_identity_forbidden"
     assert out.extras["path"] == "secret/data/targets/op-x/prod"
     assert out.extras["identity_hint"] == "op-x"
     assert out.extras["doc_ref"].startswith("docs/cross-repo/connector-vault-policy.md")
     assert out.extras["exception_class"] == "Forbidden"
-    assert "permission denied" in out.extras["exception_message"]
+    assert out.extras["exception_message"] == "The secret store refused the request."
 
 
 def test_write_forbidden_delete_names_update_on_delete_path() -> None:
@@ -708,8 +705,8 @@ def test_write_forbidden_omits_target_clause_when_not_passed() -> None:
     assert "'meho-writer'" not in out.error
 
 
-def test_write_forbidden_caps_oversized_message() -> None:
-    """A pathological hvac message is capped like the read sibling."""
+def test_write_forbidden_never_passes_on_an_oversized_store_message() -> None:
+    """A pathological store message is not passed on."""
     from meho_backplane.operations._errors import result_connector_vault_write_forbidden
 
     out = result_connector_vault_write_forbidden(
@@ -718,9 +715,8 @@ def test_write_forbidden_caps_oversized_message() -> None:
         duration_ms=0.5,
         write_path="secret/data/x",
     )
-    message = out.extras["exception_message"]
-    assert isinstance(message, str)
-    assert message.endswith("...<truncated>")
+    assert out.extras["exception_message"] == "The secret store refused the request."
+    assert "xxx" not in out.model_dump_json()
 
 
 def test_write_forbidden_empty_message_has_no_dangling_tail() -> None:

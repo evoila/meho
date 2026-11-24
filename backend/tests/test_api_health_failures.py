@@ -36,6 +36,7 @@ The tests reuse the JWT minting + JWKS-mock helpers from
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +47,7 @@ import pytest
 import requests.exceptions
 import respx
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -440,6 +442,37 @@ def test_valid_jwt_vault_sealed_during_login_returns_200_with_login_failed(
     # Generic VaultClientError surface — not unreachable, not role-denied.
     assert body["vault"]["detail"] is not None
     assert body["vault"]["detail"].startswith("login_failed: VaultClientError")
+
+
+@pytest.mark.parametrize(
+    "store_exc", [hvac.exceptions.Forbidden, hvac.exceptions.InternalServerError]
+)
+def test_a_failed_health_login_logs_no_store_text(
+    http_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    store_exc: type[hvac.exceptions.VaultError],
+) -> None:
+    """A refused or failed store login in the health check logs class names
+    only: ``vault_login_failed`` has no store text."""
+    key = make_rsa_keypair("kid-A")
+    token = mint_token(key)
+    store_words = "STORE-LOGIN-TEXT-MARKER"
+    _install_fake_vault(monkeypatch, login_exc=store_exc(f"{store_words} for this role"))
+
+    with respx.mock as mock_router, capture_logs() as logs:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = http_client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    events = [e for e in logs if e["event"] == "vault_login_failed"]
+    assert len(events) == 1
+    assert events[0]["error_class"] == store_exc.__name__
+    assert events[0]["store_text"] is None
+    assert store_words not in json.dumps(logs, default=str)
+    assert store_words not in response.text
 
 
 def test_valid_jwt_secret_read_denied_returns_200_with_read_failed(

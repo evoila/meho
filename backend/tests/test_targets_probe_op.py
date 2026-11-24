@@ -614,3 +614,60 @@ async def test_a_target_deny_still_stops_the_approved_probe(deny_when: str) -> N
     assert "denied-later" in message
     assert asked == []
     assert await _stored_fingerprint(row.id) is None
+
+
+@pytest.mark.parametrize("surface", ["rest", "op"])
+async def test_a_failed_store_read_in_a_probe_shows_no_store_text(
+    surface: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hvac.exceptions
+
+    store_words = "marker-store-words"
+    password = "made-up-" + "pass-4411"
+    token = "hvs." + "MADEUP" * 5
+    failure = hvac.exceptions.InternalServerError(
+        f"{store_words} password={password} token {token}",
+        method="GET",
+        url="https://vault.test/v1/secret/data/tenants/t/app",
+        json={"request_id": "req-1"},
+    )
+    # The probe reads the store for the secret field map before the connector runs.
+    monkeypatch.setattr(
+        "meho_backplane.targets.secret_field_map.missing_secret_field_map_sources",
+        AsyncMock(side_effect=failure),
+    )
+    asked = _use_connector(_fingerprint())
+    row = await _seed("store-down")
+
+    with structlog.testing.capture_logs() as logs:
+        if surface == "op":
+            result = await _probe("store-down")
+            answer = str(result)
+            assert "fingerprint_failed" in answer
+        else:
+            key = make_rsa_keypair("kid-probe")
+            with respx.mock as mock_router:
+                mock_discovery_and_jwks(mock_router, public_jwks(key))
+                response = TestClient(_build_app()).post(
+                    "/api/v1/targets/store-down/probe",
+                    headers={"Authorization": f"Bearer {_operator_token(key)}"},
+                )
+            assert response.status_code == 500, response.text
+            detail = response.json()["detail"]
+            assert detail["error"] == "fingerprint_failed"
+            assert detail["exception_class"] == "InternalServerError"
+            assert detail["exception_message"] == "The secret store returned an error."
+            answer = response.text
+
+    for hidden in (store_words, "vault.test", password, token):
+        assert hidden not in answer
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert store_words in events[0]["store_text"]
+    assert events[0]["store_request_id"] == "req-1"
+    for hidden in ("vault.test", password, token):
+        assert hidden not in str(logs)
+    failed = [e for e in logs if e["event"] == "probe_fingerprint_failed"]
+    assert [e["exc_info"] for e in failed] == [None]
+    assert asked == []
+    assert await _stored_fingerprint(row.id) is None

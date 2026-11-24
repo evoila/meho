@@ -1,0 +1,1057 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""A secret store error shows the caller no store address and no store text."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import re
+import secrets
+import socket
+import string
+import threading
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
+from unittest.mock import AsyncMock
+
+import hvac.exceptions
+import pytest
+import requests
+import structlog
+from structlog.testing import capture_logs
+
+from meho_backplane.auth import vault as vault_module
+from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.store_errors import (
+    _KNOWN_REASONS,
+    HEADER_ERROR_TEXT,
+    HEADER_ERROR_UNSURE_TEXT,
+    has_store_detail,
+    hide_store_address,
+    log_without_store_text,
+    store_text_for_log,
+)
+from meho_backplane.auth.vault import (
+    VaultClientError,
+    VaultRoleDeniedError,
+    vault_client_for_operator,
+)
+from meho_backplane.connectors._shared.vault_creds import (
+    SecretRefReadError,
+    TargetSecretForbiddenError,
+    TargetSecretNotFoundError,
+)
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.connectors.vault import ops as vault_ops
+from meho_backplane.connectors.vault.ops_identity_oidc import _key_in_use_error
+from meho_backplane.operations import _preview, dispatch, reset_dispatcher_caches
+from meho_backplane.operations._errors import (
+    _sanitize_free_text,
+    result_connector_error,
+    result_connector_vault_forbidden,
+    result_connector_vault_write_forbidden,
+    result_vault_credentials_read_error,
+)
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    build_proposed_effect,
+    preview_failure_reason,
+)
+from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.settings import get_settings
+
+_HOST = "marker-store.invalid"
+_ADDR = f"https://{_HOST}:8200"
+_STORE_TEXT = "marker-store-words"
+_PASSWORD = "made-up-" + "pass-4411"
+_SHORT_PASSWORD = "pw" + "41"
+_TOKEN = "hvs." + "MADEUP" * 5
+_OTHER_TOKEN = "made-up-" + "token-7722"
+#: Made at run time: a token that Requests refuses in a header.
+_HEADER_TOKEN = "hvs." + "".join(secrets.choice(string.ascii_letters) for _ in range(24))
+_SECRET_VALUES = (_PASSWORD, _SHORT_PASSWORD, _TOKEN, _OTHER_TOKEN, _HEADER_TOKEN)
+#: What a store can write: its words, the address and secret values in several shapes.
+_STORE_MESSAGE = (
+    f"{_STORE_TEXT} at {_ADDR}: "
+    f'{{"password": "{_PASSWORD}"}}; password={_SHORT_PASSWORD}; '
+    f"invalid token {_TOKEN}; token: {_OTHER_TOKEN}"
+)
+
+
+@pytest.fixture(autouse=True)
+def _store_address(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", _ADDR)
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _store_error(cls: type[hvac.exceptions.VaultError] = hvac.exceptions.Forbidden) -> Any:
+    return cls(
+        _STORE_MESSAGE,
+        method="GET",
+        url=f"{_ADDR}/v1/secret/data/tenants/t/app",
+        json={"request_id": "req-1"},
+    )
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (_strings(k) + _strings(v))]
+    if isinstance(value, (list, tuple)):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
+def _assert_clean(result: Any) -> None:
+    payload = json.loads(result.model_dump_json())
+    for text in _strings(payload):
+        assert _HOST not in text
+        assert _ADDR not in text
+        assert _STORE_TEXT not in text
+        for value in _SECRET_VALUES:
+            assert value not in text
+
+
+def _assert_log_is_clean(event: Any) -> None:
+    assert _STORE_TEXT in event["store_text"]
+    text = json.dumps(event, default=str)
+    assert _HOST not in text
+    for value in _SECRET_VALUES:
+        assert value not in text
+
+
+class _Target:
+    name = "app"
+    secret_ref = "tenants/t/app"
+
+
+def _builder_results() -> list[Any]:
+    own = TargetSecretForbiddenError(target_name="app", secret_ref="tenants/t/app")
+    own.__cause__ = _store_error()
+    ref_read = SecretRefReadError(
+        param="password_secret_ref", secret_ref="tenants/t/app", cause=_store_error()
+    )
+    return [
+        result_connector_error("op", _store_error(), 1.0),
+        result_connector_error("op", _store_error(hvac.exceptions.InternalServerError), 1.0),
+        result_connector_vault_forbidden("op", own, _Target(), 1.0, expected_secret_ref="x"),
+        result_connector_vault_forbidden("op", _store_error(), _Target(), 1.0),
+        result_connector_vault_forbidden("op", _store_error(), None, 1.0),
+        result_connector_vault_write_forbidden(
+            "vault.kv.put", _store_error(), 1.0, write_path="secret/data/tenants/t/app"
+        ),
+        result_vault_credentials_read_error("op", ref_read, 1.0),
+    ]
+
+
+def test_no_error_builder_shows_the_store_address_or_text() -> None:
+    for result in _builder_results():
+        _assert_clean(result)
+
+
+def test_the_free_text_cleaner_replaces_the_store_address() -> None:
+    cleaned = _sanitize_free_text(f"failed, on GET {_ADDR}/v1/x and {_HOST}:8200 and {_HOST}")
+    assert _HOST not in cleaned
+    assert "<secret store>" in cleaned
+
+
+def test_hide_store_address_keeps_text_without_an_address() -> None:
+    assert hide_store_address("nothing here") == "nothing here"
+
+
+def test_a_one_word_host_is_replaced_only_where_it_is_an_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    for kept in ("vault unreachable", "vault_role is empty", "read vault:tenants/t/app"):
+        assert hide_store_address(kept) == kept
+    for address in ("http://vault/v1/x", "vault:8200", "HTTPConnectionPool(host='vault')"):
+        assert "<secret store>" in hide_store_address(f"failed at {address}")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'namespaces "vault" not found',
+        "permission denied on secret/data/vault/config",
+        "GET https://git.example/team/vault/raw/main failed",
+        "auth/vault-jwt/login",
+    ],
+)
+def test_a_one_word_host_in_a_name_or_path_stays(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    assert _sanitize_free_text(text) == text
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hostname 'vault' doesn't match 'other.example'",
+        "certificate verify failed: Hostname mismatch, certificate is not valid for 'vault'.",
+        "login as meho@vault.",
+    ],
+)
+def test_a_one_word_host_in_a_certificate_error_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    for shown in (
+        hide_store_address(text),
+        _sanitize_free_text(text),
+        store_text_for_log(hvac.exceptions.InvalidRequest(text)),
+    ):
+        assert "<secret store>" in shown
+        assert "'vault'" not in shown
+        assert "@vault" not in shown
+
+
+@pytest.mark.parametrize(
+    ("store_addr", "text"),
+    [
+        ("http://vault:8200", "GET https://vault.other.example/v1/x failed"),
+        ("http://vault:8200", "login as meho@vault.other.example failed"),
+        ("http://vault:8200", "hostname 'vault.other.example' doesn't match 'x'"),
+        ("http://vault:8200", "Failed to resolve 'vault-2.example' (no such host)"),
+        (_ADDR, f"GET https://{_HOST}.other.example/v1/x failed"),
+        ("https://vault", "GET https://vault.other.example/v1/x failed"),
+        ("https://vault", "GET https://vault-2/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example.org/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example-2/v1/x failed"),
+    ],
+)
+def test_a_longer_host_name_that_starts_with_the_store_host_stays(
+    monkeypatch: pytest.MonkeyPatch, store_addr: str, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", store_addr)
+    get_settings.cache_clear()
+    assert hide_store_address(text) == text
+    assert _sanitize_free_text(text) == text
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    ("store_addr", "text"),
+    [
+        ("https://vault", "GET https://vault/v1/x failed"),
+        ("https://vault", "GET https://vault:443/v1/x failed"),
+        ("https://vault.example", "GET https://vault.example/v1/x failed"),
+    ],
+)
+def test_the_store_address_with_the_default_port_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, store_addr: str, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", store_addr)
+    get_settings.cache_clear()
+    host = store_addr.removeprefix("https://")
+    for shown in (hide_store_address(text), _sanitize_free_text(text)):
+        assert "<secret store>" in shown
+        assert host not in shown
+
+
+@pytest.mark.parametrize(
+    "text", ["Failed to resolve 'vault' (no such host)", "login as meho@vault failed"]
+)
+def test_a_one_word_host_after_resolve_or_at_is_replaced(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("VAULT_ADDR", "http://vault:8200")
+    get_settings.cache_clear()
+    for shown in (hide_store_address(text), _sanitize_free_text(text)):
+        assert "<secret store>" in shown
+        assert "vault" not in shown
+
+
+class _FakeJwt:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def jwt_login(self, **_: Any) -> None:
+        raise self.exc
+
+
+class _FakeClient:
+    def __init__(self, exc: Exception) -> None:
+        self.auth = type("A", (), {"jwt": _FakeJwt(exc)})()
+
+
+def _operator() -> Operator:
+    return Operator(
+        sub="op-1",
+        name="Alice",
+        email="alice@example.com",
+        raw_jwt="fake.jwt.value",
+        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_role="operator",
+    )
+
+
+@pytest.mark.parametrize(
+    ("store_exc", "expected_class"),
+    [
+        (hvac.exceptions.Forbidden, VaultRoleDeniedError),
+        (hvac.exceptions.InternalServerError, VaultClientError),
+    ],
+)
+async def test_a_failed_login_gives_a_meho_sentence_and_a_log_event(
+    monkeypatch: pytest.MonkeyPatch,
+    store_exc: type[hvac.exceptions.VaultError],
+    expected_class: type[VaultClientError],
+) -> None:
+    fake = _FakeClient(_store_error(store_exc))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs, pytest.raises(VaultClientError) as caught:
+        async with vault_client_for_operator(_operator()):
+            pytest.fail("body must not run when login raises")
+
+    assert type(caught.value) is expected_class
+    assert _STORE_TEXT not in str(caught.value)
+    assert _HOST not in str(caught.value)
+
+    # The dispatcher answer holds no address and no store text.
+    result = result_connector_error("op", caught.value, 1.0)
+    _assert_clean(result)
+    assert "message_source" not in result.extras
+
+    # The log has the detail, with the address cut.
+    events = [e for e in logs if e["event"] == "vault_login_failed"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["error_class"] == store_exc.__name__
+    assert event["store_request_id"] == "req-1"
+    assert event["role"]
+    assert event["login_mount"]
+    _assert_log_is_clean(event)
+    assert caught.value.store_text == event["store_text"]
+    # A traceback of the login error does not show the client's exception.
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("template", "value"),
+    [
+        ('bad password "{}"', _SHORT_PASSWORD),
+        ("1 error occurred:\n\t* invalid password: {}\n\n", _SHORT_PASSWORD),
+        ("password: {}", _SHORT_PASSWORD),
+        ("client_secret={}", _SHORT_PASSWORD),
+        ("bad token: {} for this mount", "ab12"),
+        ("token='{}'", _SHORT_PASSWORD),
+        ("token={}", "abc"),
+        ("invalid token: {}", "abc"),
+        ("invalid secret: {}", "allletters"),
+        ("error validating token: {}", "abc"),
+    ],
+)
+def test_a_secret_in_the_store_text_is_cut_from_the_log(template: str, value: str) -> None:
+    logged = store_text_for_log(hvac.exceptions.InvalidRequest(template.format(value)))
+    assert value not in logged
+    assert "REDACTED" in logged
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["permission denied", "error validating token", "invalid audience (aud) claim"],
+)
+def test_the_log_keeps_the_stores_diagnosis(text: str) -> None:
+    assert store_text_for_log(hvac.exceptions.Forbidden(text)) == text
+
+
+_WORD_1 = "allletters"
+_WORD_2 = "extra-" + "secret-part"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "invalid token: {} {}",
+        "invalid secret: {} {}",
+        "jwt: {} {}",
+        "api_key = {} {}",
+        "bad token:{}\n{}",
+    ],
+)
+async def test_both_events_withhold_a_short_or_spaced_secret_after_a_label(
+    monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    text = f"{_STORE_TEXT}: " + template.format(_WORD_1, _WORD_2)
+    fake = _FakeClient(hvac.exceptions.InvalidRequest(text))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs:
+        with pytest.raises(VaultClientError) as caught:
+            async with vault_client_for_operator(_operator()):
+                pytest.fail("body must not run when login raises")
+        result_connector_error("op", hvac.exceptions.InvalidRequest(text), 1.0)
+
+    events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+    assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+    for event in events:
+        assert _STORE_TEXT in event["store_text"]
+        assert "REDACTED" in event["store_text"]
+        for word in (_WORD_1, _WORD_2):
+            assert word not in json.dumps(event, default=str)
+            assert word not in str(caught.value.store_text)
+
+
+_PART_1 = "ab" + "41"
+_PART_2 = "cd-" + "tail-9"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        'bad password "{}\\"{}"',
+        'bad password "{}\\\\\\"{}"',
+        "bad password '{}\\'{}'",
+        'bad password "{}"{}"',
+        'bad password "{} {}',
+        'bad password "{}\n{}"',
+        "bad password `{} {}`",
+        'bad password {}"{}',
+        "bad password {}\\{}",
+        'password={} "{}"',
+        "client_secret={} {}",
+        'token: {}"{}',
+        "invalid password: {} {}",
+        '{{"password": "{}\\"{}"}}',
+        '{{\\"password\\": \\"{}\\\\\\"{}\\"}}',
+        '"{}\\"{}" is not a valid password',
+    ],
+)
+async def test_both_events_withhold_a_secret_with_no_sure_end(
+    monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    text = f"{_STORE_TEXT}: " + template.format(_PART_1, _PART_2)
+    fake = _FakeClient(hvac.exceptions.InternalServerError(text))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs:
+        with pytest.raises(VaultClientError) as caught:
+            async with vault_client_for_operator(_operator()):
+                pytest.fail("body must not run when login raises")
+        result_connector_error("op", hvac.exceptions.InternalServerError(text), 1.0)
+
+    events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+    assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+    for event in events:
+        assert _STORE_TEXT in event["store_text"]
+        assert "REDACTED" in event["store_text"]
+        for part in (_PART_1, _PART_2):
+            assert part not in json.dumps(event, default=str)
+            assert part not in str(caught.value.store_text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'unknown role "reader"',
+        "the token doesn't match the claim",
+        "no handler for route secret/data/app",
+    ],
+)
+def test_the_log_keeps_text_with_no_secret_value(text: str) -> None:
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+def test_the_log_takes_empty_and_withholds_oversized_store_text() -> None:
+    assert store_text_for_log(hvac.exceptions.Forbidden()) == ""
+    assert store_text_for_log(hvac.exceptions.Forbidden("x" * 9000)) == "<store text withheld>"
+
+
+def test_a_wrapper_that_repeats_a_store_error_shows_the_meho_sentence() -> None:
+    store = _store_error(hvac.exceptions.InternalServerError)
+    try:
+        try:
+            raise store
+        except hvac.exceptions.VaultError as exc:
+            raise RuntimeError(f"the step failed: {exc}. Check the user") from exc
+    except RuntimeError as exc:
+        wrapped = exc
+    result = result_connector_error("op", wrapped, 1.0)
+    _assert_clean(result)
+    assert result.extras["exception_message"] == (
+        "the step failed: The secret store returned an error.. Check the user"
+    )
+
+
+def test_an_approval_preview_shows_no_store_text() -> None:
+    reason = preview_failure_reason(_store_error(hvac.exceptions.InternalServerError))
+    assert reason == "InternalServerError: The secret store returned an error."
+
+
+def _preview_context(op_id: str) -> PreviewContext:
+    return PreviewContext(
+        descriptor=type("D", (), {"op_id": op_id})(),
+        connector_instance=None,
+        operator=_operator(),
+        target=None,
+        params={},
+    )
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_a_failed_preview_logs_the_store_detail_and_shows_the_sentence(
+    monkeypatch: pytest.MonkeyPatch, wrapped: bool
+) -> None:
+    async def _builder(_ctx: PreviewContext) -> dict[str, Any] | None:
+        store = _store_error(hvac.exceptions.InternalServerError)
+        if wrapped:
+            raise RuntimeError(f"the read failed: {store}") from store
+        raise store
+
+    op_id = "test.preview.store_failure"
+    monkeypatch.setitem(_preview._PREVIEW_BUILDERS, op_id, _builder)
+    with capture_logs() as logs:
+        effect = await build_proposed_effect(_preview_context(op_id))
+
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert "The secret store returned an error." in effect["preview_error"]
+    assert _STORE_TEXT not in json.dumps(effect)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert events[0]["op_id"] == op_id
+    assert events[0]["store_request_id"] == "req-1"
+    assert events[0]["store_status"] == 500
+    _assert_log_is_clean(events[0])
+    others = [e for e in logs if e["event"] != "vault_request_failed"]
+    assert _STORE_TEXT not in json.dumps(others, default=str)
+
+
+async def test_failed_preview_failure_keys_log_the_store_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _builder(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError("no preview")
+
+    def _keys(_ctx: PreviewContext) -> dict[str, Any]:
+        raise _store_error()
+
+    op_id = "test.preview.store_failure_keys"
+    monkeypatch.setitem(_preview._PREVIEW_BUILDERS, op_id, _builder)
+    monkeypatch.setitem(_preview._PREVIEW_FAILURE_KEYS, op_id, _keys)
+    with capture_logs() as logs:
+        effect = await build_proposed_effect(_preview_context(op_id))
+
+    assert effect is not None
+    assert _STORE_TEXT not in json.dumps(effect)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert events[0]["store_request_id"] == "req-1"
+    _assert_log_is_clean(events[0])
+
+
+def test_a_key_in_use_answer_shows_no_store_text() -> None:
+    store = hvac.exceptions.InvalidRequest(
+        errors=['unable to delete key "k" because it is currently referenced by these roles: r1']
+    )
+    error = _key_in_use_error("k", store)
+    assert error is not None
+    result = result_connector_error("op", error, 1.0)
+    assert "currently referenced" not in result.model_dump_json()
+    assert result.extras["upstream_message"] == "key 'k' is still used by these roles: r1"
+
+
+def test_a_caller_can_log_a_store_failure_without_the_store_text() -> None:
+    with capture_logs() as logs, log_without_store_text():
+        result_connector_vault_forbidden("op", _store_error(), None, 1.0)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1
+    assert events[0]["store_text"] is None
+    assert events[0]["store_request_id"] == "req-1"
+    assert _STORE_TEXT not in json.dumps(events, default=str)
+
+
+@pytest.mark.parametrize(
+    "store_exc", [hvac.exceptions.Forbidden, hvac.exceptions.InternalServerError]
+)
+async def test_a_caller_can_log_a_failed_login_without_the_store_text(
+    monkeypatch: pytest.MonkeyPatch, store_exc: type[hvac.exceptions.VaultError]
+) -> None:
+    fake = _FakeClient(_store_error(store_exc))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+
+    with capture_logs() as logs, log_without_store_text(), pytest.raises(VaultClientError):
+        async with vault_client_for_operator(_operator()):
+            pytest.fail("body must not run when login raises")
+
+    events = [e for e in logs if e["event"] == "vault_login_failed"]
+    assert len(events) == 1
+    assert events[0]["store_text"] is None
+    assert events[0]["error_class"] == store_exc.__name__
+    assert _STORE_TEXT not in json.dumps(logs, default=str)
+
+
+def test_the_store_error_builders_set_no_message_source() -> None:
+    for result in _builder_results():
+        assert "message_source" not in result.extras
+
+
+def test_a_refusal_with_no_target_names_the_path_in_the_error_only() -> None:
+    result = result_connector_vault_forbidden("op", _store_error(), None, 1.0)
+    assert result.error is not None
+    assert "'secret/data/tenants/t/app'" in result.error
+    assert set(result.extras) == {
+        "error_code",
+        "secret_ref",
+        "secret_ref_derived",
+        "expected_secret_ref",
+        "exception_class",
+        "exception_message",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Through the dispatcher: each failure path logs the cleaned detail
+# ---------------------------------------------------------------------------
+
+
+class _StoreConnector(Connector):
+    product = "storefail"
+    version = "1.x"
+    impl_id = "storefail"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:  # type: ignore[override]
+        raise NotImplementedError
+
+
+async def _raise_store_failure(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    case = params.get("case", "refused")
+    if case == "login":
+        async with vault_client_for_operator(operator):
+            pytest.fail("body must not run when login raises")
+    if case == "failed":
+        raise _store_error(hvac.exceptions.InternalServerError)
+    if case == "header":
+        raise _header_error(_HEADER_TOKEN + " \n")
+    if case == "own_ref":
+        own = TargetSecretForbiddenError(target_name="app", secret_ref="tenants/t/app")
+        raise own from _store_error()
+    if case == "own_ref_missing":
+        missing = TargetSecretNotFoundError(target_name="app", secret_ref="tenants/t/app")
+        raise missing from _store_error(hvac.exceptions.InvalidPath)
+    if case == "param_ref":
+        cause = _store_error()
+        raise SecretRefReadError(
+            param="password_secret_ref", secret_ref="tenants/t/app", cause=cause
+        ) from cause
+    raise _store_error()
+
+
+@pytest.fixture
+def _clean_dispatcher() -> Iterator[None]:
+    reset_dispatcher_caches()
+    clear_registry()
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.usefixtures("_clean_dispatcher")
+@pytest.mark.parametrize(
+    ("product", "op_id", "case", "code", "status"),
+    [
+        ("storefail", "storefail.item.read", "refused", "connector_vault_forbidden", 403),
+        ("storefail", "storefail.item.read", "own_ref", "connector_vault_forbidden", 403),
+        ("storefail", "storefail.item.read", "own_ref_missing", "target_secret_not_found", 404),
+        ("storefail", "storefail.item.read", "param_ref", "vault_credentials_read_error", 403),
+        ("storefail", "storefail.item.read", "failed", "connector_error", 500),
+        ("vault", "vault.kv.put", "refused", "vault_write_identity_forbidden", 403),
+    ],
+)
+async def test_the_dispatcher_logs_a_failed_store_request_and_answers_clean(
+    product: str, op_id: str, case: str, code: str, status: int
+) -> None:
+    connector = type("_Registered", (_StoreConnector,), {"product": product, "impl_id": product})
+    register_connector_v2(product=product, version="", impl_id="", cls=connector)
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    await register_typed_operation(
+        product=product,
+        version="1.x",
+        impl_id=product,
+        op_id=op_id,
+        handler=_raise_store_failure,
+        summary="Fail at the store.",
+        description="The handler raises a store error.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=service,
+    )
+
+    with capture_logs() as logs:
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=f"{product}-1.x",
+            op_id=op_id,
+            target=None,
+            params={"case": case, "path": "tenants/t/app"},
+        )
+
+    assert result.extras["error_code"] == code, result
+    _assert_clean(result)
+    events = [e for e in logs if e["event"] == "vault_request_failed"]
+    assert len(events) == 1, logs
+    assert events[0]["op_id"] == op_id
+    assert events[0]["store_request_id"] == "req-1"
+    assert events[0]["store_status"] == status
+    _assert_log_is_clean(events[0])
+
+
+@pytest.mark.usefixtures("_clean_dispatcher")
+@pytest.mark.parametrize(
+    "store_exc", [hvac.exceptions.Forbidden, hvac.exceptions.InternalServerError]
+)
+async def test_a_failed_login_through_the_dispatcher_keeps_the_answer_keys(
+    monkeypatch: pytest.MonkeyPatch, store_exc: type[hvac.exceptions.VaultError]
+) -> None:
+    fake = _FakeClient(_store_error(store_exc))
+    monkeypatch.setattr(vault_module, "_build_client", lambda *_a, **_k: fake)
+    register_connector_v2(product="storefail", version="", impl_id="", cls=_StoreConnector)
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    await register_typed_operation(
+        product="storefail",
+        version="1.x",
+        impl_id="storefail",
+        op_id="storefail.item.read",
+        handler=_raise_store_failure,
+        summary="Fail at the store login.",
+        description="The handler raises a store login error.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=service,
+    )
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id="storefail-1.x",
+        op_id="storefail.item.read",
+        target=None,
+        params={"case": "login"},
+    )
+
+    # The same keys as an answer for any other connector error: no message_source.
+    assert set(result.extras) == {"error_code", "exception_class", "exception_message"}
+    assert result.extras["error_code"] == "connector_error"
+    _assert_clean(result)
+
+
+_REASON_WITHHELD_WORDS = "the store gave a reason that MEHO does not log"
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _random_value(length: int) -> str:
+    """A made-up value with a digit in it, so no fixed word of the log holds it."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(length - 1)) + secrets.choice(
+        string.digits
+    )
+
+
+@pytest.mark.parametrize("phrase", sorted(_KNOWN_REASONS))
+def test_the_log_keeps_a_listed_reason_after_token(phrase: str) -> None:
+    text = "error validating token: " + phrase
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "error validating token: invalid audience (aud) claim: "
+        + "audience claim does not match any expected audience",
+        "error validating token: error verifying token signature: oidc: malformed jwt: "
+        + "go-jose/go-jose: compact JWS format must have three parts",
+        "jwt: signature is invalid",
+    ],
+)
+def test_the_log_keeps_joined_listed_reasons(text: str) -> None:
+    assert store_text_for_log(hvac.exceptions.InvalidRequest(text)) == text
+
+
+@pytest.mark.parametrize(
+    ("template", "length"),
+    [
+        ("error validating token: {}", 4),
+        ("error validating token: token is expired {}", 4),
+        ("error validating token: token is expired: {}", 4),
+        ("error validating token: {}: token is expired", 4),
+        ("bad token: {}", 40),
+        ("jwt: eyJ{}", 40),
+        ("error validating token: password={}", 4),
+    ],
+)
+def test_the_log_withholds_a_reason_that_is_not_listed(template: str, length: int) -> None:
+    value = _random_value(length)
+    logged = store_text_for_log(hvac.exceptions.InvalidRequest(template.format(value)))
+    assert value not in logged
+    assert "REDACTED" in logged
+    assert _REASON_WITHHELD_WORDS in logged
+
+
+async def test_both_events_keep_a_listed_reason_and_withhold_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = "error validating token: token is expired"
+    value = _random_value(4)
+    for text in (kept, "error validating token: " + value):
+        fake = _FakeClient(hvac.exceptions.InvalidRequest(text))
+        monkeypatch.setattr(vault_module, "_build_client", lambda *_a, _f=fake, **_k: _f)
+        with capture_logs() as logs:
+            with pytest.raises(VaultClientError):
+                async with vault_client_for_operator(_operator()):
+                    pytest.fail("body must not run when login raises")
+            result_connector_error("op", hvac.exceptions.InvalidRequest(text), 1.0)
+
+        events = [e for e in logs if e["event"] in ("vault_login_failed", "vault_request_failed")]
+        assert [e["event"] for e in events] == ["vault_login_failed", "vault_request_failed"]
+        for event in events:
+            assert value not in json.dumps(event, default=str)
+            if text == kept:
+                assert event["store_text"] == kept
+            else:
+                assert _REASON_WITHHELD_WORDS in event["store_text"]
+
+
+def test_no_listed_reason_holds_a_value_form() -> None:
+    for phrase in _KNOWN_REASONS:
+        assert ":" not in phrase
+        assert "=" not in phrase
+        assert not re.search(r"\d{4,}", phrase)
+        assert not re.search(r"[\"'`]", phrase)
+        assert all(len(word) < 20 for word in phrase.split())
+
+
+class _FailingCapabilities:
+    def __init__(self, exc: Exception) -> None:
+        self.sys = type("S", (), {"get_capabilities": self._raise})()
+        self._exc = exc
+
+    def _raise(self, **_: Any) -> None:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "has_traceback"),
+    [
+        (KeyError("made-up-key"), True),
+        (
+            hvac.exceptions.Forbidden(
+                "permission denied",
+                method="POST",
+                url=f"{_ADDR}/v1/sys/capabilities-self",
+            ),
+            False,
+        ),
+    ],
+)
+async def test_the_preflight_log_has_a_traceback_only_without_store_detail(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception, has_traceback: bool
+) -> None:
+    @contextlib.asynccontextmanager
+    async def _client(*_: Any, **__: Any) -> AsyncIterator[_FailingCapabilities]:
+        yield _FailingCapabilities(exc)
+
+    monkeypatch.setattr(vault_ops, "vault_client_for_target", _client)
+    with capture_logs() as logs:
+        result = await vault_ops.vault_capabilities_preflight(
+            _operator(), "op", [("secret/data/x", frozenset({"create"}))], object()
+        )
+
+    assert result is None
+    (event,) = [e for e in logs if e["event"] == "vault_capability_preflight_failed"]
+    if has_traceback:
+        assert event["exc_info"] is exc
+    else:
+        assert event.get("exc_info") is None
+        assert _HOST not in json.dumps(event, default=str)
+
+
+def _header_error(token: str) -> requests.exceptions.InvalidHeader:
+    try:
+        requests.Request(
+            "GET",
+            "https://example.invalid/v1/sys/capabilities-self",
+            headers={"X-Vault-Token": token},
+        ).prepare()
+    except requests.exceptions.InvalidHeader as exc:
+        return exc
+    raise AssertionError("the request was prepared")
+
+
+def _rendered(event: dict[str, Any]) -> str:
+    """The event as the server log writes it, with any traceback as text."""
+    rendered = structlog.processors.format_exc_info(None, "warning", dict(event))
+    return json.dumps(rendered, default=str)
+
+
+async def test_the_preflight_log_holds_no_token_from_a_header_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "hvs." + _random_value(24) + " \n"
+    exc = _header_error(token)
+    assert token.strip() in str(exc)
+
+    @contextlib.asynccontextmanager
+    async def _client(*_: Any, **__: Any) -> AsyncIterator[_FailingCapabilities]:
+        yield _FailingCapabilities(exc)
+
+    monkeypatch.setattr(vault_ops, "vault_client_for_target", _client)
+    with capture_logs() as logs:
+        result = await vault_ops.vault_capabilities_preflight(
+            _operator(), "op", [("secret/data/x", frozenset({"create"}))], object()
+        )
+
+    assert result is None
+    (event,) = [e for e in logs if e["event"] == "vault_capability_preflight_failed"]
+    assert event.get("exc_info") is None
+    assert event["error_class"] == "InvalidHeader"
+    assert token.strip() not in _rendered(event)
+
+
+@pytest.mark.parametrize("kind", ["requests", "http.client", "wrapped"])
+def test_a_header_error_is_withheld_from_the_log(kind: str) -> None:
+    value = "s." + _random_value(30)
+    exc: BaseException
+    if kind == "requests":
+        exc = _header_error(value + "\r")
+    elif kind == "http.client":
+        exc = ValueError(f"Invalid header value {(value + chr(10)).encode()!r}")
+    else:
+        try:
+            try:
+                raise _header_error(value + "\r")
+            except requests.exceptions.InvalidHeader as inner:
+                raise RuntimeError("the store call failed") from inner
+        except RuntimeError as outer:
+            exc = outer
+    assert has_store_detail(exc)
+    assert value not in store_text_for_log(exc)
+
+
+def _wrapped_header_error() -> BaseException:
+    try:
+        try:
+            raise _header_error(_HEADER_TOKEN + "\r")
+        except requests.exceptions.InvalidHeader as inner:
+            raise RuntimeError(f"the store call failed: {inner}") from inner
+    except RuntimeError as outer:
+        return outer
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_an_answer_for_a_header_error_holds_no_token(wrapped: bool) -> None:
+    exc = _wrapped_header_error() if wrapped else _header_error(_HEADER_TOKEN + " \n")
+    assert _HEADER_TOKEN in str(exc)
+
+    result = result_connector_error("vault.kv.versions", exc, 1.0)
+
+    assert result.extras["exception_message"] == HEADER_ERROR_TEXT
+    _assert_clean(result)
+    reason = preview_failure_reason(exc)
+    assert HEADER_ERROR_TEXT in reason
+    assert _HEADER_TOKEN not in reason
+
+
+@pytest.mark.usefixtures("_clean_dispatcher")
+async def test_a_header_error_through_the_dispatcher_answers_without_the_token() -> None:
+    register_connector_v2(product="storefail", version="", impl_id="", cls=_StoreConnector)
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    await register_typed_operation(
+        product="storefail",
+        version="1.x",
+        impl_id="storefail",
+        op_id="storefail.item.read",
+        handler=_raise_store_failure,
+        summary="Fail with a header error.",
+        description="The handler raises an HTTP header error.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=service,
+    )
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id="storefail-1.x",
+        op_id="storefail.item.read",
+        target=None,
+        params={"case": "header"},
+    )
+
+    assert result.extras["error_code"] == "connector_error", result
+    assert result.extras["exception_message"] == HEADER_ERROR_TEXT
+    _assert_clean(result)
+
+
+def _answer_header_error() -> requests.exceptions.InvalidHeader:
+    """A real header error that Requests raises while it reads the server's answer."""
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+
+        def _answer() -> None:
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 7\r\n\r\nhello"
+                )
+
+        thread = threading.Thread(target=_answer, daemon=True)
+        thread.start()
+        port = server.getsockname()[1]
+        try:
+            requests.post(f"http://127.0.0.1:{port}/v1/secret/data/x", data="{}", timeout=5)
+        except requests.exceptions.InvalidHeader as exc:
+            return exc
+        finally:
+            thread.join(timeout=5)
+    raise AssertionError("the answer was read")
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_header_error_in_the_answer_does_not_say_the_request_was_not_sent(
+    wrapped: bool,
+) -> None:
+    exc: BaseException = _answer_header_error()
+    if wrapped:
+        try:
+            raise RuntimeError("the store call failed") from exc
+        except RuntimeError as outer:
+            exc = outer
+
+    result = result_connector_error("vault.kv.write", exc, 1.0)
+
+    assert result.extras["exception_message"] == HEADER_ERROR_UNSURE_TEXT
+    assert "not sent" not in json.dumps(result.extras, default=str)
+    assert HEADER_ERROR_UNSURE_TEXT in preview_failure_reason(exc)
+    assert has_store_detail(exc)
+
+
+def test_a_traceback_stays_for_an_error_without_a_header() -> None:
+    assert not has_store_detail(KeyError("made-up-key"))
+    assert not has_store_detail(TypeError("unsupported operand"))

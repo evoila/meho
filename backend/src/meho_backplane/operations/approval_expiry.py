@@ -72,6 +72,7 @@ from meho_backplane.operations.approval_queue import (
     expiry_operator,
     record_approval_step_event,
 )
+from meho_backplane.operations.approval_stored_values import expire_unclaimed_approved_requests
 from meho_backplane.settings import get_settings
 from meho_backplane.version import running_release_id
 
@@ -91,7 +92,11 @@ async def _sweep_one_tenant(
     cutoff: datetime,
     default_ttl: timedelta,
 ) -> int:
-    """Expire the past-deadline pending rows for one tenant; return the count.
+    """Expire the past-deadline rows for one tenant; return the count.
+
+    Two kinds of row expire: a ``pending`` row past its deadline, and an
+    ``approved`` row that nobody started within *default_ttl* after its
+    decision (:func:`expire_unclaimed_approved_requests`).
 
     Opens a dedicated session so a failure sweeping this tenant rolls back
     only its own work and is isolated from the rest of the sweep. The
@@ -104,6 +109,12 @@ async def _sweep_one_tenant(
     async with sessionmaker() as session:
         try:
             expired = await expire_stale_requests(
+                session,
+                operator=operator,
+                now=cutoff,
+                default_ttl=default_ttl,
+            )
+            expired += await expire_unclaimed_approved_requests(
                 session,
                 operator=operator,
                 now=cutoff,
@@ -135,7 +146,8 @@ async def sweep_expired_approvals(*, now: datetime | None = None) -> int:
     cadence sleep. Enumerates tenants once, then expires each tenant's
     past-deadline pending rows under a per-tenant system operator, passing
     the configured ``APPROVAL_DEFAULT_TTL`` so legacy null-``expires_at``
-    rows age out via the sweep-time coalesce.
+    rows age out via the sweep-time coalesce. The same TTL, counted from
+    the decision, ends an approved request that nobody started.
     """
     default_ttl = timedelta(seconds=get_settings().approval_default_ttl_seconds)
     cutoff = now or datetime.now(UTC)

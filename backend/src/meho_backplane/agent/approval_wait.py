@@ -295,7 +295,7 @@ def _build_expired_envelope(
     original_envelope: dict[str, Any],
     approval_request_id: uuid.UUID,
 ) -> dict[str, Any]:
-    """Annotate the original envelope when the request expired undecided.
+    """Annotate the original envelope when the request expired without a run.
 
     Same shape as :func:`_build_rejected_envelope`: ``status`` stays
     ``"awaiting_approval"``, ``extras["error_code"] = "approval_expired"`` and
@@ -305,7 +305,7 @@ def _build_expired_envelope(
     annotated = dict(original_envelope)
     annotated["error"] = (
         f"awaiting_approval: approval request {approval_request_id} expired "
-        "before anyone decided. The operation was not run."
+        "and the operation was not run."
     )
     extras = dict(original_envelope.get("extras") or {})
     extras["error_code"] = "approval_expired"
@@ -390,7 +390,9 @@ async def _lost_claim_envelope(
     written by the claim winner) is returned as the outcome, in the same
     reduced envelope shape this waiter returns when it runs the op itself.
     No stored result yet gives the :func:`_build_already_resumed_envelope`
-    answer, which says the outcome is not known here.
+    answer, which says the outcome is not known here. A request that expired
+    before anyone started it (an approved request ends after
+    ``APPROVAL_DEFAULT_TTL``) gives the usual expired answer.
     """
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_queue import get_request
@@ -411,6 +413,11 @@ async def _lost_claim_envelope(
     )
     if stored is not None:
         return dict(stored)
+    if request.status == "expired":
+        return _build_expired_envelope(
+            original_envelope=original_envelope,
+            approval_request_id=approval_request_id,
+        )
     return _build_already_resumed_envelope(
         original_envelope=original_envelope,
         approval_request_id=approval_request_id,

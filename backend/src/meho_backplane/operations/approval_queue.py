@@ -108,7 +108,6 @@ from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
     classify_op,
-    scrub_secret_named_values,
 )
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
@@ -118,7 +117,7 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
-from meho_backplane.op_classes import hidden_stored_param, secret_field_paths
+from meho_backplane.op_classes import hidden_stored_param
 from meho_backplane.operations._audit import (
     SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
@@ -170,6 +169,13 @@ from meho_backplane.operations.approval_resume_checks import (
     park_time_target_hash,
     preview_changed_since_request,
     target_changed_since_request,
+)
+from meho_backplane.operations.approval_secret_values import (
+    CallSecretValues,
+    call_secret_values,
+    call_secret_values_bound,
+    hide_call_secret_values,
+    params_with_call_secrets_hidden,
 )
 from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import (
@@ -2069,17 +2075,22 @@ async def create_pending_request(
     )
     # A call with a secret-named value, or a field its connector marked
     # (declare_secret_field), keeps the real params only in the handoff.
-    # The row keeps the copy with a marker for each secret value.
+    # The row keeps the copy with a marker for each secret value. The same
+    # holds when the params of the parent multi-step operation hold one.
     hidden = (
         params_with_secret_fields_hidden(params, op_id=op_id)
         if not keep_no_params and params is not None
         else None
     )
-    if keep_no_params or hidden:
+    secret_values = call_secret_values(params, op_id=op_id)
+    parent_values = _parent_secret_values(resume_parent)
+    if keep_no_params or hidden or parent_values:
         handoff_payload = {"params": params, "resume_parent": resume_parent}
-        stored_params = None if keep_no_params else hidden
+        stored_params = None if keep_no_params else (hidden or params)
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
+    # The card was built from the real params: it shows no secret value either.
+    proposed_effect = hide_call_secret_values(proposed_effect, secret_values | parent_values)
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -2727,7 +2738,9 @@ def params_with_secret_fields_hidden(
     (``password``, ``licenseKey``, ``client_secret``, ...; the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), so
     a row without such a field is never rewritten. A number under such a
-    name (a PIN, a password sent as a number) is hidden too. The param that
+    name is hidden too when the last word of the name names the secret (a
+    password sent as a number), not when it names a setting of it
+    (``password_max_age_days``). The param that
     *op_id* declared with
     :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
     replaced too, when its check flags the params (the manifest of a
@@ -2738,30 +2751,33 @@ def params_with_secret_fields_hidden(
     """
     if params is None:
         return None
-    hidden, found = scrub_secret_named_values(params, hide_numbers=True)
+    hidden, found = params_with_call_secrets_hidden(params, op_id=op_id)
     name = hidden_stored_param(op_id, params)
     if name is not None:
         hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
-        found = True
-    for path in secret_field_paths(op_id, params):
-        hidden = _with_marker_at(hidden, path)
         found = True
     if not found:
         return None
     return cast(dict[str, Any], hidden)
 
 
-def _with_marker_at(node: Any, path: tuple[str, ...]) -> Any:
-    """A copy of *node* with the value at *path* replaced by the marker.
+def _parent_secret_values(resume_parent: dict[str, Any] | None) -> CallSecretValues:
+    """The secret values in the params of the parent multi-step operation of a step."""
+    if resume_parent is None or not isinstance(resume_parent.get("params"), dict):
+        return CallSecretValues()
+    return call_secret_values(resume_parent["params"], op_id=str(resume_parent.get("op_id")))
 
-    A path that does not lead to a field (an earlier step hid its parent)
-    changes nothing.
+
+def call_secret_values_of_run(
+    request: ApprovalRequest, params: Any, resume_parent: dict[str, Any] | None
+) -> CallSecretValues:
+    """The secret values of an approved run: of its *params*, and of its parent's params.
+
+    The run binds them (:func:`call_secret_values_bound`), so the dispatcher
+    hides each one where the connector sends it back.
     """
-    if not isinstance(node, dict) or path[0] not in node:
-        return node
-    if len(path) == 1:
-        return {**node, path[0]: HIDDEN_PARAM_MARKER}
-    return {**node, path[0]: _with_marker_at(node[path[0]], path[1:])}
+    own = call_secret_values(params if isinstance(params, dict) else None, op_id=request.op_id)
+    return own | _parent_secret_values(resume_parent)
 
 
 def resume_parent_without_inputs(
@@ -3769,9 +3785,13 @@ async def _dispatch_resume_with_bound_context(
     # the only one GET /approvals/{id}/result serves, so the parker owns any
     # result handle this run spills.
     owner_token = handle_owner_sub_var.set(request.principal_sub)
+    # A value the connector sends back (a note it saved) is hidden in the
+    # answer and in the audit row of the run, like in the stored request.
+    secret_values = call_secret_values_of_run(request, effective_params, resume_parent)
     try:
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
+            call_secret_values_bound(secret_values),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
             composite_resume_binding(

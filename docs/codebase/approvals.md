@@ -427,13 +427,29 @@ Two kinds of rows carry a keyed hash of a call's params:
     the row keeps a copy of the params in which each secret value is the
     marker `[REDACTED:param_name]`, so the approval pages keep working. A
     secret value is a value under a secret name, at any depth (the name
-    rule of the broadcast scrub, numbers too), or a value in a field that a
-    connector marked with `declare_secret_field(op_id, *path)`
-    (`op_classes.py`, exported by the connector kit). A marked field is for
+    rule of the broadcast scrub), or a value in a field that a connector
+    marked with `declare_secret_field(op_id, *path)` (`op_classes.py`,
+    exported by the connector kit). A number under a secret name counts
+    only when the last word of the name names the secret (`password`,
+    `api_key`), not a setting of it (`password_max_age_days`,
+    `secret_id_ttl`; `name_ends_in_secret_word`). A marked field is for
     free text that may hold a secret, such as a config text, a note or a
-    command line. The approved run reads the real params from the handoff,
-    once, and checks them against `params_hash`. A call with no secret value
-    is stored and runs as before.
+    command line. A step of a multi-step operation whose parent's params
+    hold a secret value (checked with the parent's op id) keeps the parent
+    only in the handoff too. The approved run reads the real params from
+    the handoff, once, and checks them against `params_hash`; so does the
+    AI agent that waited, for a direct call (`_take_stored_run_input` in
+    `agent/approval_wait.py`), which runs the checked params and not its
+    copy in memory. A call with no secret value is stored and runs as
+    before. Without a valid key a step of a multi-step operation gets the
+    same refusal as a direct call (`result_handoff_key_missing`).
+  - The secret values of such a call also stay out of what was built from
+    the params (`operations/approval_secret_values.py`): the stored card
+    (`proposed_effect`) shows the marker in place of each one, and while
+    the approved call runs, the dispatcher hides each one in the answer, in
+    the stored result and in the audit row of the run (a connector that
+    sends back the note it saved). A text of six letters or more is also
+    cut out of a longer text.
   - For other operations, and for rows stored by an older release, they are
     stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim

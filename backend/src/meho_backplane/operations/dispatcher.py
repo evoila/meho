@@ -483,6 +483,10 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approval_secret_values import (
+    current_call_secret_values,
+    hide_call_secret_values,
+)
 from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
@@ -1186,6 +1190,10 @@ async def _protect_secret_values(
     script: a large text value in the answer takes time to read, and the
     event loop keeps serving other requests meanwhile.
 
+    The default view also hides the secret values of an approved call that
+    waited for approval
+    (:func:`~meho_backplane.operations.approval_secret_values.current_call_secret_values`).
+
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
     the caller saw the value or not. So no secret value is stored in the
@@ -1200,6 +1208,9 @@ async def _protect_secret_values(
     """
     redacted = redaction.redacted
     shown = await asyncio.to_thread(hide_secret_values, op_id, redacted, raw=redaction.raw)
+    # An approved call that waited hides its own secret values here too
+    # (a note the connector saved and sends back).
+    shown = hide_call_secret_values(shown, current_call_secret_values())
     if error_cleanup:
         redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
     if secret_view == "hidden":
@@ -3681,6 +3692,19 @@ async def destructive_binding_evidence(
     return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
 
 
+def result_handoff_key_missing(op_id: str, duration_ms: float) -> OperationResult:
+    """The answer to a call that must wait with its params in the one-time store, without a key.
+
+    The direct call and a step of a multi-step operation give the same answer.
+    """
+    return result_denied(
+        op_id,
+        "credential-write approval custody is unavailable; configure a valid "
+        "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
+        duration_ms,
+    )
+
+
 def _preflight_denied_refusal(
     *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
 ) -> OperationResult | None:
@@ -3986,12 +4010,7 @@ async def _handle_needs_approval(
             duration_ms=duration_ms,
         )
     except ApprovalHandoffKeyError:
-        return result_denied(
-            op_id,
-            "credential-write approval custody is unavailable; configure a valid "
-            "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
-            duration_ms,
-        )
+        return result_handoff_key_missing(op_id, duration_ms)
     except Exception:
         import structlog as _structlog
 

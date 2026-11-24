@@ -501,8 +501,6 @@ async def _resume_approved_or_already_resumed(
     once at first-call time.
     """
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations.approval_handoff import consume as consume_handoff
-    from meho_backplane.operations.approval_handoff import discard as discard_handoff
     from meho_backplane.operations.approval_queue import (
         claim_resume,
         get_request,
@@ -583,21 +581,8 @@ async def _resume_approved_or_already_resumed(
             approval_request_id=approval_request_id,
         )
 
-    # Only the claim winner touches the credential-write custody row. A direct
-    # park discards it: the agent already owns the original inputs in memory.
-    # A composite sub-op park whose row only names the parent consumes it,
-    # because the parent's params live only in the encrypted copy. The
-    # decrypted parent stays in a local and is never written to the ORM row.
-    async with get_sessionmaker()() as session:
-        resume_parent = request.resume_parent
-        if resume_parent is not None and request.execution_handle is not None:
-            handoff = await consume_handoff(
-                session, request.execution_handle, request.id, request.tenant_id
-            )
-            resume_parent = cast("dict[str, Any] | None", handoff.get("resume_parent"))
-        else:
-            await discard_handoff(session, approval_request_id, operator.tenant_id)
-        await session.commit()
+    # Only the claim winner touches the one-time store of the request.
+    resume_parent, call_arguments = await _take_stored_run_input(request, call_arguments)
 
     preview_refusal = await refuse_resume_if_preview_changed(
         operator, request, resolved_target, call_arguments.get("params") or {}
@@ -619,6 +604,44 @@ async def _resume_approved_or_already_resumed(
     # ``failed``. Fail-soft: the dispatch's own audit row already committed.
     await persist_resume_result(approval_request_id, envelope, parked_op_id=request.op_id)
     return envelope
+
+
+async def _take_stored_run_input(
+    request: ApprovalRequest, call_arguments: dict[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Read the one-time store of *request* once; return the parent and the call to run.
+
+    A request without a store entry keeps its stored parent and the agent's
+    call. With an entry, the store is read and emptied. A step of a
+    multi-step operation takes its parent from it, because the parent's
+    params live only there. A direct call runs with the params from the
+    store, not the agent's copy in memory: they are checked against the
+    approved ``params_hash`` first, so the run sends exactly what the person
+    approved. The decrypted values stay in locals and are never written to
+    the row.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._validate import params_hash_matches
+    from meho_backplane.operations.approval_handoff import ApprovalHandoffError
+    from meho_backplane.operations.approval_handoff import consume as consume_handoff
+    from meho_backplane.operations.approval_handoff import discard as discard_handoff
+
+    resume_parent = cast("dict[str, Any] | None", request.resume_parent)
+    async with get_sessionmaker()() as session:
+        if request.execution_handle is None:
+            await discard_handoff(session, request.id, request.tenant_id)
+            await session.commit()
+            return resume_parent, call_arguments
+        handoff = await consume_handoff(
+            session, request.execution_handle, request.id, request.tenant_id
+        )
+        await session.commit()
+    if resume_parent is not None:
+        return cast("dict[str, Any] | None", handoff.get("resume_parent")), call_arguments
+    stored = handoff.get("params")
+    if not isinstance(stored, dict) or not params_hash_matches(stored, request.params_hash):
+        raise ApprovalHandoffError("approval execution payload does not match the approved request")
+    return None, {**call_arguments, "params": stored}
 
 
 async def _redispatch_approved(
@@ -646,18 +669,27 @@ async def _redispatch_approved(
     version no longer fits it.
     """
     from meho_backplane.operations._audit import parent_audit_id_var
-    from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
+    from meho_backplane.operations.approval_queue import (
+        call_secret_values_of_run,
+        composite_resume_binding,
+        requester_of,
+    )
+    from meho_backplane.operations.approval_secret_values import call_secret_values_bound
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
+    secret_values = call_secret_values_of_run(request, call_arguments.get("params"), resume_parent)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        with composite_resume_binding(
-            subop_op_id=request.op_id,
-            subop_params_hash=request.params_hash,
-            resume_parent=resume_parent,
-            requester=requester_of(request),
-            proposed_effect=request.proposed_effect,
-        ) as parent_call:
+        with (
+            call_secret_values_bound(secret_values),
+            composite_resume_binding(
+                subop_op_id=request.op_id,
+                subop_params_hash=request.params_hash,
+                resume_parent=resume_parent,
+                requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
+            ) as parent_call,
+        ):
             if parent_call is None:
                 # ``target`` is cleared so the name is never looked up again;
                 # the target the row saved by id (or ``None`` for a

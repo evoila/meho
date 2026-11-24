@@ -103,6 +103,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
     STEP_DONE_NO_RESULT,
@@ -1124,7 +1125,24 @@ class _GoAhead(enum.Enum):
 # code-quality-allow: the long policy and approval gate of a direct sub-op,
 # kept in one piece; the step record lives in ``enforce_subop_policy`` and
 # ``run_governed_subop`` above.
-async def _gate_subop(
+async def _gate_subop(*, op_id: str, **kwargs: Any) -> OperationResult | _GoAhead:
+    """:func:`_gate_and_park_subop`, with the refusal of a direct call for a missing key.
+
+    A step whose params must wait in the encrypted one-time store, on an
+    install without a valid ``APPROVAL_HANDOFF_ENCRYPTION_KEY``, gets the
+    answer a direct call gets
+    (:func:`~meho_backplane.operations.dispatcher.result_handoff_key_missing`).
+    """
+    from meho_backplane.operations.dispatcher import result_handoff_key_missing
+
+    started = time.monotonic()
+    try:
+        return await _gate_and_park_subop(op_id=op_id, **kwargs)
+    except ApprovalHandoffKeyError:
+        return result_handoff_key_missing(op_id, (time.monotonic() - started) * 1000.0)
+
+
+async def _gate_and_park_subop(
     *,
     operator: Operator,
     connector_id: str,

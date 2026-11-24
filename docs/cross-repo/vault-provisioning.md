@@ -156,15 +156,24 @@ is done, and do the steps in this order:
    policy too (surface 7), and keep its old paths.
 3. Copy each distinct secret once into `secret/tenants/<tenant_id>/`.
    Targets of one tenant that shared a secret point to the same new
-   path. Update the target's `secret_ref` or `provider_secret_ref`. For
-   `provider_secret_ref`, pass every other key of `extras` too, because
-   `meho targets update --extra` replaces the whole map.
-4. Check that MEHO reads the moved secret. Use a check that reads the
-   secret: run a read-only operation on the target (for a moved provider
-   secret, one of the provider plane), or run steps 2 and 3
-   of [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
-   §5 with your own login. `meho targets probe` alone does not prove it,
-   because some connectors probe without a login. For a target that a
+   path. Update the target's `secret_ref` or `provider_secret_ref`.
+   `meho targets list --json` does not show `extras`: read
+   `provider_secret_ref` of each VCF Automation target with
+   `meho targets describe <name> --json`. It is optional, so a target
+   without it has nothing to move. For `provider_secret_ref`, keep every
+   other key of `extras` with its value and type.
+   `meho targets update --extra` replaces the whole map and writes every
+   value as text. When `extras` holds a value that is not text (a
+   boolean, a number, a list or an object), take `extras` from
+   `describe --json`, change only `provider_secret_ref`, and send the
+   full object in one `PATCH /api/v1/targets/<name>` with the body
+   `{"extras": {...}}`.
+4. Check that MEHO reads the moved secret through the target: run a
+   read-only operation on the target, and for a moved provider secret
+   also a read-only operation of the provider plane. A direct Vault read
+   of the new path does not prove that the target points to it, and
+   `meho targets probe` alone does not prove it either, because some
+   connectors probe without a login. For a target that a
    Sensor checks, also check that its next scheduled run shows a real
    state, not `unknown`.
 5. Only then remove the old grants. Without the setup of step 1, each

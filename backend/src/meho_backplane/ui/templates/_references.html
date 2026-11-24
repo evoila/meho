@@ -25,7 +25,7 @@
 
 {%- macro _unresolved(raw) -%}
   <span class="font-mono text-xs break-all" title="{{ raw }}">{{ raw }}</span>
-  <span class="badge badge-ghost badge-xs align-middle opacity-70" title="This id could not be resolved to a named entity (deleted, cross-tenant, or unknown).">unresolved</span>
+  <span class="badge badge-ghost badge-xs align-middle" title="This id could not be resolved to a named entity (deleted, cross-tenant, or unknown).">unresolved</span>
 {%- endmacro -%}
 
 {%- macro what_happened(refs) -%}
@@ -39,7 +39,7 @@
     {% if principal.resolved %}
       <span class="font-medium" title="{{ principal.sub }}">{{ principal.name }}</span>
       {% if principal.email %}
-        <span class="text-xs opacity-60">&lt;{{ principal.email }}&gt;</span>
+        <span class="text-xs text-subtle">&lt;{{ principal.email }}&gt;</span>
       {% endif %}
     {% else %}
       <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded for this row)">{{ principal.sub }}</span>
@@ -65,7 +65,7 @@
 {%- macro subject(ref) -%}
   {%- if ref and ref.resolved -%}
     <span class="font-medium" title="{{ ref.sub }}">{{ ref.name }}</span>
-    <span class="font-mono text-xs opacity-60 break-all">{{ ref.sub }}</span>
+    <span class="font-mono text-xs text-subtle break-all">{{ ref.sub }}</span>
   {%- elif ref -%}
     <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded)">{{ ref.sub }}</span>
   {%- endif -%}
@@ -82,9 +82,9 @@
     {% if operation.group_name %}
       <span class="badge badge-ghost badge-xs" title="Operation group">{{ operation.group_name }}</span>
     {% endif %}
-    <span class="font-mono text-xs opacity-60 break-all">{{ operation.op_id }}</span>
+    <span class="font-mono text-xs text-subtle break-all">{{ operation.op_id }}</span>
     {% if not operation.resolved %}
-      <span class="badge badge-ghost badge-xs opacity-70" title="No connector operation descriptor matched this op id (e.g. a chassis HTTP route or UI view).">no summary</span>
+      <span class="badge badge-ghost badge-xs" title="No connector operation descriptor matched this op id (e.g. a chassis HTTP route or UI view).">no summary</span>
     {% endif %}
   </span>
 {%- endmacro -%}
@@ -100,20 +100,20 @@
   {% elif target.present %}
     {{ _unresolved(target.id) }}
   {% else %}
-    <span class="opacity-50">—</span>
+    <span class="text-subtle">—</span>
   {% endif %}
 {%- endmacro -%}
 
 {%- macro status_badge(status) -%}
   {%- set tone = {"success": "badge-success", "warning": "badge-warning", "error": "badge-error", "neutral": "badge-ghost"} -%}
   <span class="badge badge-sm {{ tone.get(status.tone, 'badge-ghost') }}">{{ status.label }}</span>
-  <span class="font-mono text-xs opacity-60">{{ status.code }}</span>
+  <span class="font-mono text-xs text-subtle">{{ status.code }}</span>
 {%- endmacro -%}
 
 {%- macro timestamp(t) -%}
   <span>
     <time datetime="{{ t.absolute }}">{{ t.display }} UTC</time>
-    <span class="text-xs opacity-60">({{ t.relative }})</span>
+    <span class="text-xs text-subtle">({{ t.relative }})</span>
   </span>
 {%- endmacro -%}
 
@@ -123,7 +123,7 @@
   {% elif work_ref.present %}
     <span class="font-mono text-xs break-all">{{ work_ref.raw }}</span>
   {% else %}
-    <span class="opacity-50">—</span>
+    <span class="text-subtle">—</span>
   {% endif %}
 {%- endmacro -%}
 
@@ -134,7 +134,7 @@
   {% set has_lineage = refs.parent.present or refs.session.present or refs.run.present or surface == "broadcast" %}
   {% if has_lineage %}
     <section aria-label="Lineage">
-      <h3 class="text-sm font-semibold uppercase opacity-60">Lineage</h3>
+      <h3 class="text-sm font-semibold uppercase text-subtle">Lineage</h3>
       <div class="flex flex-wrap items-center gap-1">
         {% if surface == "broadcast" %}
           <a

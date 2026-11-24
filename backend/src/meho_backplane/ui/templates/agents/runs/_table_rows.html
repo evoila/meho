@@ -65,16 +65,16 @@
           {% else %}
             {# Ad-hoc run, or the producing definition was deleted after the
                run: no agent back-link to render (#2472). #}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td><span class="badge badge-ghost badge-sm">{{ row.trigger }}</span></td>
         <td class="text-xs">
           {% if row.model %}
             <span class="font-mono">{{ row.model }}</span>
-            <span class="opacity-50 block">{{ row.provider or "—" }} · {{ row.model_tier }}</span>
+            <span class="text-subtle block">{{ row.provider or "—" }} · {{ row.model_tier }}</span>
           {% else %}
-            <span class="opacity-50">{{ row.model_tier }}</span>
+            <span class="text-subtle">{{ row.model_tier }}</span>
           {% endif %}
         </td>
         <td class="text-xs">{{ row.turns }}</td>
@@ -82,21 +82,21 @@
           {% if row.work_ref %}
             <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
           {% if row.created_at %}
             <span class="text-xs" title="{{ row.created_at.isoformat() }}">{{ _ago(row.created_at) }}</span>
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td class="text-xs">
           {% if row.started_at and row.ended_at %}
             {{ _duration(row.started_at, row.ended_at) }}
           {% else %}
-            <span class="opacity-40">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
@@ -119,7 +119,7 @@
       </tr>
     {% else %}
       <tr>
-        <td colspan="10" class="text-center text-sm opacity-60 py-6">
+        <td colspan="10" class="text-center text-sm text-subtle py-6">
           No agent runs match the current filter.
         </td>
       </tr>

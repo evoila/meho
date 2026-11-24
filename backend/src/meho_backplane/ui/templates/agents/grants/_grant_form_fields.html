@@ -60,7 +60,7 @@
     placeholder="agent-incident-triage"
     aria-describedby="grant-principal-hint"
   />
-  <span id="grant-principal-hint" class="text-xs opacity-60">
+  <span id="grant-principal-hint" class="text-xs text-subtle">
     The JWT ``sub`` of the agent principal this grant applies to.
   </span>
   {{ error_for('principal_sub') }}
@@ -80,7 +80,7 @@
     placeholder="vault.kv.* or *"
     aria-describedby="grant-op-pattern-hint"
   />
-  <span id="grant-op-pattern-hint" class="text-xs opacity-60">
+  <span id="grant-op-pattern-hint" class="text-xs text-subtle">
     fnmatch glob over operation ids. <span class="font-mono">*</span> matches all ops.
   </span>
   {{ error_for('op_pattern') }}
@@ -99,7 +99,7 @@
       placeholder="UUID, * , or blank for any"
       aria-describedby="grant-target-scope-hint"
     />
-    <span id="grant-target-scope-hint" class="text-xs opacity-60">
+    <span id="grant-target-scope-hint" class="text-xs text-subtle">
       A target UUID, <span class="font-mono">*</span>, or blank (= any target).
     </span>
     {{ error_for('target_scope') }}
@@ -121,7 +121,7 @@
         </option>
       {% endfor %}
     </select>
-    <span id="grant-verdict-hint" class="text-xs opacity-60">
+    <span id="grant-verdict-hint" class="text-xs text-subtle">
       <span class="font-mono">deny</span> refuses the op,
       <span class="font-mono">needs-approval</span> parks it for review,
       <span class="font-mono">auto-execute</span> runs it unattended.
@@ -145,7 +145,7 @@
     placeholder="2026-07-01T13:30:00+00:00"
     aria-describedby="grant-expires-hint"
   />
-  <span id="grant-expires-hint" class="text-xs opacity-60">
+  <span id="grant-expires-hint" class="text-xs text-subtle">
     {% if mode == "elevate" %}
       A future, timezone-aware UTC timestamp -- the elevation auto-expires
       then and the principal reverts to its baseline permissions.

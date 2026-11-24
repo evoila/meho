@@ -69,11 +69,11 @@
             <span class="badge badge-ghost badge-sm">never</span>
           {% endif %}
         </td>
-        <td class="text-xs opacity-70">
+        <td class="text-xs text-muted">
           {% if row.aliases %}
             {{ row.aliases | join(", ") }}
           {% else %}
-            <span class="opacity-50">—</span>
+            <span class="text-subtle">—</span>
           {% endif %}
         </td>
         <td>
@@ -83,7 +83,7 @@
           {% if row.vpn_required %}
             <span aria-label="VPN required" title="VPN required">&#x1F512;</span>
           {% else %}
-            <span class="opacity-30" aria-label="Direct access">—</span>
+            <span class="text-subtle" aria-label="Direct access">—</span>
           {% endif %}
         </td>
         <td>
@@ -99,7 +99,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="9" class="text-center text-sm opacity-60 py-6">
+      <td colspan="9" class="text-center text-sm text-subtle py-6">
         No targets match the current filter.
       </td>
     </tr>

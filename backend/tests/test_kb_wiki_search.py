@@ -1734,3 +1734,20 @@ async def test_read_docs_publishes_and_checks_its_128_character_limit(
     assert rest.status_code == 422
     assert rest.json()["detail"][0]["type"] == "string_too_long"
     read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_on_wiki_hits_after_the_last_store_hit_stay() -> None:
+    await _seed_wiki_tenant()
+    chunks = [_WIKI_CHUNK.model_copy(update={"chunk_id": f"wiki-{n}"}) for n in (1, 2, 3)]
+    record = AsyncMock()
+    with (
+        patch.object(get_settings(), "kb_wiki_interleave", True),
+        patch(_RECORD_SEAM, new=record),
+    ):
+        response, _ = await _search(
+            _operator(), store=[_store_hit(slug="store-1")], corpus=_corpus(*chunks)
+        )
+    assert _names(response) == ["store-1", "wiki-1", "wiki-2", "wiki-3"]
+    assert response["delivery"] == "complete"
+    assert [slug for slug, _owner in record.await_args.args[1]] == ["store-1"]

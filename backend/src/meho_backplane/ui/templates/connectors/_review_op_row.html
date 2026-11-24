@@ -74,7 +74,7 @@
   <div class="flex items-start gap-2">
     <span class="font-mono text-xs shrink-0">{{ op.op_id }}</span>
     {% if op.summary %}
-      <span class="text-xs opacity-70 truncate">{{ op.summary }}</span>
+      <span class="text-xs text-muted truncate">{{ op.summary }}</span>
     {% endif %}
     {#- #6038: the category that applies to the viewer's tenant; ``none``
         while the classification switch is off. A change waits for a second
@@ -109,7 +109,7 @@
         hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
         hx-confirm="Change the safety level of {{ op.op_id }}? Relaxing it widens what agents may call without extra gating."
       >
-        <label class="opacity-60" for="safety-{{ row_id }}">safety</label>
+        <label class="text-subtle" for="safety-{{ row_id }}">safety</label>
         <select
           id="safety-{{ row_id }}"
           name="safety_level"
@@ -239,7 +239,7 @@
       Shown only when the tenant set one for this built-in op; without it
       the tenant uses the install default the controls above show. -#}
   {% if op.tenant_enabled is not none %}
-    <div class="text-xs opacity-80" data-op-tenant-setting="{{ 'on' if op.tenant_enabled else 'off' }}">
+    <div class="text-xs text-muted" data-op-tenant-setting="{{ 'on' if op.tenant_enabled else 'off' }}">
       Install default: {{ "on" if op.is_enabled else "off" }}.
       This tenant: {{ "on" if op.tenant_enabled else "off" }}.
     </div>
@@ -256,7 +256,7 @@
         <span class="font-semibold">Heads up:</span>
         {{ warning.message }}
         {% if warning.connector_class %}
-          <span class="opacity-70">(connector: <code>{{ warning.connector_class }}</code>)</span>
+          <span class="text-muted">(connector: <code>{{ warning.connector_class }}</code>)</span>
         {% endif %}
       </span>
     </div>

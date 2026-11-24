@@ -42,7 +42,7 @@
         &larr; Catalog
       </a>
       <h1 class="font-mono text-2xl font-semibold">{{ template.slug }}</h1>
-      <span class="font-mono opacity-60">v{{ template.version }}</span>
+      <span class="font-mono text-subtle">v{{ template.version }}</span>
       {# Header status badge. ``id`` is the hx-swap-oob target the lifecycle
          fragment refreshes after a publish / deprecate action. #}
       {% if template.status == "published" %}
@@ -65,10 +65,10 @@
       {% include "runbooks/_detail_actions.html" %}
       <p class="text-lg">{{ template.title }}</p>
       {% if template.description %}
-        <p class="max-w-3xl opacity-70">{{ template.description }}</p>
+        <p class="max-w-3xl text-muted">{{ template.description }}</p>
       {% endif %}
       {% if template.target_kind %}
-        <p class="text-sm opacity-60">
+        <p class="text-sm text-subtle">
           Target kind: <code class="font-mono">{{ template.target_kind }}</code>
         </p>
       {% endif %}
@@ -123,7 +123,7 @@
     <div class="space-y-4">
       <h2 class="text-xl font-semibold">
         Steps
-        <span class="text-sm font-normal opacity-60">({{ steps_rendered | length }})</span>
+        <span class="text-sm font-normal text-subtle">({{ steps_rendered | length }})</span>
       </h2>
       {% if steps_rendered %}
         <ol class="space-y-4" role="list">
@@ -153,12 +153,12 @@
                 {% if step.type == "operation_call" %}
                   <div class="bg-base-200 rounded-box space-y-1 p-3 text-sm">
                     <div>
-                      <span class="opacity-60">Operation:</span>
+                      <span class="text-subtle">Operation:</span>
                       <code class="font-mono">{{ step.op_id }}</code>
                     </div>
                     {% if step.params %}
                       <div>
-                        <span class="opacity-60">Params:</span>
+                        <span class="text-subtle">Params:</span>
                         <pre class="overflow-x-auto text-xs"><code>{{ step.params | tojson(indent=2) }}</code></pre>
                       </div>
                     {% endif %}
@@ -168,7 +168,7 @@
                 {# Verify gate — confirm prompt OR operation_call match. #}
                 {%- set verify = step.verify -%}
                 <div class="border-base-300 border-t pt-2">
-                  <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-subtle">Verify</p>
                   {% if verify.type == "confirm" %}
                     <p class="text-sm">
                       <span class="badge badge-sm badge-outline mr-1">confirm</span>
@@ -182,12 +182,12 @@
                       </p>
                       {% if verify.params %}
                         <div>
-                          <span class="opacity-60">Params:</span>
+                          <span class="text-subtle">Params:</span>
                           <pre class="overflow-x-auto text-xs"><code>{{ verify.params | tojson(indent=2) }}</code></pre>
                         </div>
                       {% endif %}
                       <div>
-                        <span class="opacity-60">Expect:</span>
+                        <span class="text-subtle">Expect:</span>
                         <pre class="overflow-x-auto text-xs"><code>{{ verify.expect | tojson(indent=2) }}</code></pre>
                       </div>
                     </div>
@@ -200,7 +200,7 @@
       {% else %}
         <div class="card bg-base-100 border-base-300 border shadow-sm">
           <div class="card-body py-8 text-center">
-            <p class="opacity-60">This template has no steps.</p>
+            <p class="text-subtle">This template has no steps.</p>
           </div>
         </div>
       {% endif %}

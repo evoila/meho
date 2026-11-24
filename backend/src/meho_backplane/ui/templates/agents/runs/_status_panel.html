@@ -35,7 +35,7 @@
       <h2 class="card-title text-base flex items-center gap-3">
         <span class="badge {{ run.status_badge }}">{{ run.status }}</span>
         {% if not run.is_terminal %}
-          <span class="text-xs opacity-60" aria-live="polite">
+          <span class="text-xs text-subtle" aria-live="polite">
             live · refreshing every {{ poll_interval_seconds }}s
           </span>
         {% endif %}
@@ -53,14 +53,14 @@
       {% endif %}
 
       <dl class="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
-        <dt class="opacity-60">Turns</dt>
+        <dt class="text-subtle">Turns</dt>
         <dd>{{ run.turns }}</dd>
 
-        <dt class="opacity-60">Provider</dt>
-        <dd>{% if run.provider %}{{ run.provider }}{% else %}<span class="opacity-40">— (not resolved)</span>{% endif %}</dd>
+        <dt class="text-subtle">Provider</dt>
+        <dd>{% if run.provider %}{{ run.provider }}{% else %}<span class="text-subtle">— (not resolved)</span>{% endif %}</dd>
 
-        <dt class="opacity-60">Model</dt>
-        <dd class="font-mono text-xs">{% if run.model %}{{ run.model }}{% else %}<span class="opacity-40">— (not resolved)</span>{% endif %}</dd>
+        <dt class="text-subtle">Model</dt>
+        <dd class="font-mono text-xs">{% if run.model %}{{ run.model }}{% else %}<span class="text-subtle">— (not resolved)</span>{% endif %}</dd>
       </dl>
     </div>
   </div>
@@ -76,9 +76,9 @@
       {% elif output_json %}
         <pre class="bg-base-200 rounded p-3 text-xs overflow-x-auto">{{ output_json }}</pre>
       {% elif run.is_terminal %}
-        <p class="text-sm opacity-60">This run produced no output.</p>
+        <p class="text-sm text-subtle">This run produced no output.</p>
       {% else %}
-        <p class="text-sm opacity-60">No result yet — the run is still in progress.</p>
+        <p class="text-sm text-subtle">No result yet — the run is still in progress.</p>
       {% endif %}
     </div>
   </div>

@@ -72,15 +72,15 @@
             {% if s.is_current %}
               <span class="badge badge-primary badge-sm" data-badge="this-device">This device</span>
             {% endif %}
-            <span class="text-xs opacity-70">
+            <span class="text-xs text-muted">
               last active
               <span title="{{ s.last_seen_at.isoformat() }}">{{ relative_time(s.last_seen_at) }}</span>
             </span>
           </div>
-          <div class="text-xs opacity-70" data-field="session-tenant">
+          <div class="text-xs text-muted" data-field="session-tenant">
             tenant {{ s.tenant_label }}
           </div>
-          <div class="text-xs opacity-55">
+          <div class="text-xs text-subtle">
             created
             <span title="{{ s.created_at.isoformat() }}">{{ s.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
             &middot; expires
@@ -111,7 +111,7 @@
                 out immediately.
               </p>
             {% else %}
-              <p class="py-2 text-sm opacity-80">
+              <p class="py-2 text-sm text-muted">
                 The device using this session will be signed out on its next
                 request.
               </p>
@@ -141,7 +141,7 @@
       </div>
     {% endfor %}
   {% else %}
-    <p class="px-1 py-2 text-sm opacity-60" data-empty="no-sessions">
+    <p class="px-1 py-2 text-sm text-subtle" data-empty="no-sessions">
       No active sessions.
     </p>
   {% endif %}

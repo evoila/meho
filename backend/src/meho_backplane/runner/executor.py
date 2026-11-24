@@ -63,7 +63,7 @@ from meho_backplane.operations._handler_resolve import (
 )
 from meho_backplane.runner.effect_audit import EffectAuditChain
 from meho_backplane.runner.package_set import local_package_set, package_set_mismatch_message
-from meho_backplane.runner.result_clean import clean_result
+from meho_backplane.runner.result_clean import clean_error_text, clean_result
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
@@ -306,11 +306,13 @@ async def _invoke(handler: Callable[..., Awaitable[Any]], item: RunnerWorkItem) 
     try:
         payload = await handler(operator, item.target_descriptor, dict(item.params))
     except Exception as exc:  # a failed check is a result, never a crashed tick
+        # Only the cleaned text goes to the log: the error of a call can hold a secret.
         _log.warning(
             "runner_item_handler_raised",
             op_id=item.op_id,
             check_ref=item.check_ref,
-            exc_info=True,
+            error_type=type(exc).__name__,
+            error=clean_error_text(str(exc)),
         )
         return _result(
             item,

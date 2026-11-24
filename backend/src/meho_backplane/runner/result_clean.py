@@ -18,7 +18,12 @@ from meho_backplane.operations._secret_values import hide_secret_values
 from meho_backplane.redaction.middleware import apply_connector_boundary_redaction
 from meho_backplane.runner.wire import RunnerResult
 
-__all__ = ["clean_result"]
+__all__ = ["clean_error_text", "clean_result"]
+
+
+def clean_error_text(text: str) -> str:
+    """*text* redacted and shortened like the error text of a central call."""
+    return _sanitize_free_text(text)
 
 
 def clean_result(
@@ -35,5 +40,5 @@ def clean_result(
         ).redacted
         update["result"] = hide_secret_values(item.op_id, redacted, raw=item.result)
     if item.error:
-        update["error"] = _sanitize_free_text(item.error)
+        update["error"] = clean_error_text(item.error)
     return item.model_copy(update=update) if update else item

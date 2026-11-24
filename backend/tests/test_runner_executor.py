@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.checks.auth_park import AUTH_FAILED_ERROR_CODE
@@ -431,8 +432,14 @@ async def test_the_answer_and_error_of_a_counted_check_are_cleaned(
         raise RuntimeError('body {"password": "hunter2xyz"} was refused')
 
     _use_handler(monkeypatch, fail)
-    failed = await execute_work_item(_counted_item())
+    with capture_logs() as logs:
+        failed = await execute_work_item(_counted_item())
 
     assert "hunter2xyz" not in ok.model_dump_json()
     assert isinstance(ok.result, dict) and ok.result["count"] == 3
     assert "hunter2xyz" not in failed.model_dump_json()
+    raised = [entry for entry in logs if entry["event"] == "runner_item_handler_raised"]
+    assert len(raised) == 1
+    assert raised[0]["error_type"] == "RuntimeError"
+    assert "exc_info" not in raised[0]
+    assert "hunter2xyz" not in repr(logs)

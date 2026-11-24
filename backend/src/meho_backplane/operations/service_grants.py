@@ -84,7 +84,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from glob import escape as glob_escape
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 from sqlalchemy import func, or_, select, update
@@ -117,6 +117,9 @@ from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
+
+if TYPE_CHECKING:
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 
 __all__ = [
     "CREDENTIAL_CARD_LINE",
@@ -426,6 +429,34 @@ def descriptor_credential_waits(descriptor: EndpointDescriptor) -> bool:
     return credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
 
 
+_PROTO_SAFETY_LEVELS = frozenset({"safe", "caution", "dangerous", "destructive"})
+
+
+def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
+    """Build the ingest shape of a stored row, for the connector's ingest correction.
+
+    A stored risk level outside the four ingest levels is left out (the
+    shape's default is used), so such a row still gets its correction.
+    """
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+
+    level = getattr(descriptor, "safety_level", "safe")
+    return EndpointDescriptorProto(
+        op_id=descriptor.op_id,
+        method=descriptor.method or "",
+        path=descriptor.path or "",
+        summary=getattr(descriptor, "summary", None),
+        description=getattr(descriptor, "description", None),
+        tags=list(getattr(descriptor, "tags", None) or []),
+        parameter_schema=dict(getattr(descriptor, "parameter_schema", None) or {}),
+        response_schema=getattr(descriptor, "response_schema", None),
+        safety_level=cast("SafetyLevel", level if level in _PROTO_SAFETY_LEVELS else "safe"),
+        requires_approval=bool(getattr(descriptor, "requires_approval", False)),
+        op_class=getattr(descriptor, "op_class", None),
+        llm_instructions=getattr(descriptor, "llm_instructions", None),
+    )
+
+
 def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
     """Return ``True`` when a connector marked the call of *descriptor* per call.
 
@@ -433,17 +464,16 @@ def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
     the one the connector's ingest correction gives the same method and path
     (:func:`~meho_backplane.operations.ingest.spec_corrections.apply_spec_correction`).
     So the check reads the op id of the row and the op id the correction
-    gives it. A correction that fails counts the call as marked.
+    gives it. The correction gets the stored fields of the row, the same
+    fields it gets at ingest (:func:`_stored_proto`). A correction that
+    fails counts the call as marked.
     """
     if needs_per_call_approval(descriptor.op_id):
         return True
-    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
     from meho_backplane.operations.ingest.spec_corrections import apply_spec_correction
 
-    proto = EndpointDescriptorProto(
-        op_id=descriptor.op_id, method=descriptor.method or "", path=descriptor.path or ""
-    )
     try:
+        proto = _stored_proto(descriptor)
         corrected = apply_spec_correction(
             product=descriptor.product,
             version=descriptor.version,

@@ -374,6 +374,75 @@ With `KB_SEARCH_PLAIN_SENTENCES` also on, a hit that holds only some
 question words has a word score, so `word_match` is `none` only when no
 passage holds one of the first 32 different words of the question.
 
+### How to change the embedding model
+
+A model change needs more than the setting. Stored vectors keep the model
+that made them until you embed them again. A search compares the vector of
+the question with those stored vectors, so after a change without the
+command below, knowledge, memory and operations search all get worse, and
+MEHO says nothing about it except the warning at start.
+
+1. Set `RETRIEVAL_EMBEDDING_MODEL` to the new model. It must make
+   384-wide vectors: the column is `vector(384)`. Make the model files
+   available (`retrieval.modelCache`) and restart MEHO.
+2. At start MEHO compares the setting with the table `embedding_state`
+   (one row: `model`, `dimension`, `updated_at`; migration `0182` writes the
+   model the install runs at upgrade). On a difference it logs
+   `embedding_model_mismatch` with both names and still starts. Only when
+   the switch `EMBEDDING_MODEL_HEALTH_CHECK` is on (off by default) does it
+   also add the readiness check `embedding_model` with the same text. With
+   the switch off, or when the models match, there is no such check, so the
+   health answer (and the `meho_status` tool) is the same as before.
+   `GET /version` lists the switch with the other agent switches.
+3. In the backplane container run
+   `python -m meho_backplane.retrieval.reembed`. Options: `--dry-run`
+   counts the rows and writes nothing; `--batch-size N` sets the batch
+   (default 50). It prints progress and does three things:
+   - every `documents` row that is not a knowledge passage (knowledge
+     heads, memory rows, other sources) is embedded again from its body;
+   - every knowledge entry goes through the normal write path
+     (`kb/revisions.py`), which rebuilds its passages under the new
+     model's window and with new passage ids. The entry keeps its
+     revision and metadata. The write names the revision it read, so an
+     entry changed or deleted during the run is read again or skipped,
+     never written back with old content;
+   - every `endpoint_descriptor` row is embedded from its stored text. A
+     row with no vector gets one.
+
+   In the first and the third step, each row is read again right before
+   its vector is written. A row whose text changed while it was encoded is
+   encoded again with the new text, and a deleted row is skipped. So an
+   edit made during the run keeps its text, its time and a matching vector.
+
+   No row gets a new `created_at` or `updated_at`. Rebuilt passages take
+   the earliest `created_at` and the latest `updated_at` of the passages
+   they replace. Passages that are not rebuilt keep their own times.
+   Searches that filter by date give the same rows as before.
+
+   A row or entry is tried three times. When it changed during each try,
+   it keeps its old vector. The command still works through every step,
+   then exits with 1 and keeps the old model in `embedding_state`.
+
+   When every row is done, it stores the new model in `embedding_state`.
+4. The command is safe to run twice. If it stops half way or exits with
+   1, run it again; the record stays on the old model until a run ends
+   with every row done. MEHO checks the record only at start, so after a
+   successful run the last line says "Restart MEHO to clear the start
+   warning." Restart MEHO to clear the warning (and, with the switch on,
+   the readiness check).
+
+Turn the switch `EMBEDDING_MODEL_HEALTH_CHECK` on when you change the
+model, and run the re-embed command.
+
+The command runs only inside the backplane container, like the database
+migration. It has no REST route, no CLI verb and no MCP tool, so it writes
+no audit row and checks no role. If it ever gets a route or a verb, it
+needs an audit row per run and a role check.
+
+Searches mix old and new vectors while the command runs, so plan a
+maintenance window. With the shipped default model the command writes the
+same vectors again; nothing at start embeds anything.
+
 ### Agent search runner
 
 A check that asks the knowledge index directly cannot see what MEHO does

@@ -2179,6 +2179,14 @@ input for another use: reading the state of the caller's own approval
 request. When both switches are on, the input has one text that covers
 both. See "Reading the state of your own approval request" below.
 
+A sixth switch changes an answer: `APPROVAL_SAME_CALL_REUSE` (off by
+default). With it on, a call that must wait for approval gets the request
+that already waits, when the same login in the same tenant sent the same
+call. The answer has that request's `approval_request_id` and
+`approval_request_reused: true`, with no key or with a different key. No
+tool and no input changes. See
+[approvals.md](approvals.md#the-same-call-without-the-same-key-approval_same_call_reuse-off-by-default).
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second

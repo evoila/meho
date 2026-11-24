@@ -117,6 +117,47 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+**An approved request that nobody starts ends too.** The same sweep ends
+an `approved` request whose run nobody claimed (`resumed_at` is empty)
+within `APPROVAL_DEFAULT_TTL` after its decision
+(`expire_unclaimed_approved_requests` in
+`operations/approval_stored_values.py`). It moves to `expired` with the
+same decision audit row, and its `expires_at` becomes the end of the time
+it had to start (`decided_at + APPROVAL_DEFAULT_TTL`), so every surface
+shows the usual expired reason. `end_run_input` runs on it: the encrypted
+handoff row is deleted, each secret-named value of the stored params
+is replaced by the marker, and the parent of a step of a multi-step
+operation keeps only its op id (`resume_parent_without_inputs`). A claim of its run after that finds no
+`approved` row and is refused; an agent that still waits for it reads the
+usual expired answer (`approval_expired`). So a stored request keeps the
+values of its call at most `APPROVAL_DEFAULT_TTL` after the decision.
+
+**The start-up clean-up.** At every start, right after the release check
+below, `hide_values_of_requests_that_cannot_run` reads every request that
+is not `pending`, was never started (`resumed_at` is empty) and cannot
+run: a rejected, expired or withdrawn request, and an approved
+request of another release (an approval covers one exact release; without
+a release identity no approved request counts). Each one gets the
+`end_run_input` clean-up: its secret-named values and the param a
+connector hides become the marker, the parent of a step keeps only its
+op id, and its handoff row is deleted. This covers rows stored by an
+older release, for example a `k8s.apply` of a Secret whose manifest is
+still in `params`, or in the params of its parent. An approved request of
+another release also ends as `expired` in the same transaction, with one
+decision audit row and an `approval.expired` step event after the commit.
+The audit row and the request read the same reason: `release_changed`
+while its time to start had not run out, else `deadline_passed` (the audit
+row then has no `reason`). So during a rolling update a MEHO that still
+runs the older release cannot start a request whose inputs are gone: its
+claim finds no `approved` row, and the database refuses any write that
+sets `resumed_at` on a `rejected`, `expired` or `withdrawn` request (the
+CHECK `ck_approval_request_ended_not_started`, migration `0184`). A claim
+of an older release that read the row before the clean-up and writes after
+it fails there. It reads 500 rows per
+transaction, in the order of their id, writes only rows that change, and
+logs the counts (`approval_stored_values_cleaned`). A failure is logged and
+the start goes on.
+
 ## An approval covers one exact release (#5030)
 
 A person approves one exact release of MEHO. When MEHO is updated, every
@@ -149,7 +190,9 @@ the payload. A request already past its deadline expires as the TTL sweep
 would expire it, with no extra reason. This runs whether or not
 `APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
 TTL clean-up. A failure is logged and the start goes on; the check below
-still stops any old approval from running.
+still stops any old approval from running. Right after it, the start-up
+clean-up above ends every approved request of another release that was
+never started, with the same reason.
 
 **Before an approved run.** Both resume paths call
 `approval_queue.refuse_resume_if_release_changed()` before they run
@@ -203,6 +246,9 @@ not stored: only the start-up expiry ends a request before its deadline,
 so an `expired` row with `decided_at < expires_at` expired because the
 release changed. The console modal shows such a request with the time
 the update ended it (`decided_at`), not the deadline it never reached.
+An expired request that was approved first keeps its reviewer. The
+console names that person as the one who approved it: the modal reads
+"Expired · approved by X" and the list row reads "approved by X".
 For a run MEHO refused before it ran, the console says why (MEHO was
 updated, the target changed, the target is gone, or the preview changed),
 that the operation did not run, and that the requester must ask again; it
@@ -370,7 +416,8 @@ Two kinds of rows carry a keyed hash of a call's params:
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
   - A credential write, and a `k8s.apply` whose manifest holds a Secret
-    (the param a connector declares with `declare_hidden_stored_param`),
+    or a secret-looking value (the param a connector declares with
+    `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
@@ -379,7 +426,8 @@ Two kinds of rows carry a keyed hash of a call's params:
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
-    expires (`end_run_input`), each secret-named value in that column (a
+    expires (`end_run_input`, also an approved request that nobody
+    started in time), each secret-named value in that column (a
     password or a licence key inside a deployment spec; the name rule of
     the broadcast scrub) is replaced by the marker `[REDACTED:param_name]`.
     The other fields keep their value. A row without such a field is not
@@ -2771,8 +2819,82 @@ for approval.
   new one.
 - **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
   requesters, or two runs with different `work_ref` values, never share one
-  request. Without a key, nothing changes: every call that waits for
-  approval makes a new request.
+  request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
+  a call with no key makes a new request every time. With it on, see
+  "The same call without the same key" below.
+
+### The same call without the same key (`APPROVAL_SAME_CALL_REUSE`, off by default)
+
+Two agent sessions can ask for the same change with no key, or with keys
+that differ. Without the switch, each call makes its own request and the
+approver sees the same change twice. With the switch on,
+`create_pending_request` looks for a waiting request before it builds a
+new row (`_find_same_call_pending_request`). It reuses the request when all
+of this is the same:
+
+- the tenant and the login (`principal_sub`), so nobody learns about the
+  request of another person;
+- `op_id`, `connector_id`, target, `params_hash`, `preview_hash`,
+  `work_ref` and the `reveal_secret` choice.
+- the kind of login (`principal_kind`: `user`, `agent`, `service` or `runner`).
+  The approval checks read the kind stored on the request. So a call of
+  the same login with another kind gets its own request with its own
+  kind.
+- the people behind the login (`people_behind`, compared by the set of
+  `sub` values, casefolded). The self-approval check reads only the list
+  stored on the request, and the people behind an agent, service or
+  runner login can change between two calls. So a call whose people
+  behind differ gets its own request with its own list. A person's own
+  call has no people behind on either side.
+
+The answer has the same `approval_request_id` and
+`extras.approval_request_reused: true`. No new request row is made, and no
+second `approval.pending` event is sent. The call writes one audit row of
+its own in the same transaction (`_write_reuse_audit_row`). It is not a
+second `approval.request` row:
+
+- `path` is `approval.reuse`, `status_code` is 202 (waits for approval),
+  and `event_class` is `policy_decision`.
+- `payload.approval_request_id` names the reused request.
+- `agent_session_id` is the session of this call, not the session of the
+  first call. `parent_audit_id` is the first call's `approval.request` row.
+- The answer's `audit_id` is the id of this new row.
+
+A retry with the same key writes no such row: it gets the first call's
+`approval.request` row as its `audit_id`, as before. A key that is different from the key of the waiting request does
+not matter. MEHO keeps that other key in the table `approval_request_key`
+(one row per key, linked to the request; migration `0183`). The key lookup
+(`_find_idempotent_request`) reads it too, so a later retry with that key
+gets the same request back, also after the request was approved. The table
+keeps no tenant or login: they come from the request row.
+
+- Only a `pending` request inside its deadline is reused. An approved
+  request may have run, so it is never returned. A rejected, withdrawn,
+  expired or overdue request gives a new one. The lookup expires nothing.
+- Only a direct call is checked. A call inside an agent run, a step of a
+  multi-step operation (both kinds: one sent through `dispatch_child`, and
+  one saved to restart after approval), or a re-run for an earlier
+  requester always gets its own request. A step sent through
+  `dispatch_child` is found by its depth (`composite_depth_var` is not the
+  top level).
+- Only a stored direct request is reused. A stored request of an agent run
+  (`run_id` set) or of a step of a multi-step operation (`resume_parent`
+  set, or `composite_step` not false) is never returned to a direct call:
+  approving it would run that run or that step, not the direct call. Every
+  new request stores `composite_step` (migration `0183`): true for a step
+  sent through `dispatch_child`, false for any other call. A request made
+  before the migration keeps NULL, because it may be a step that was
+  already waiting. The lookup returns only a request marked false, so such
+  an older request is never returned to another call. Its retry with the
+  same key still gets it back.
+- A retry with the same key still gets its request back, also for a step.
+- A late retry with key A can expire its overdue request A and then get a
+  waiting request B of the same call. The answer is B with
+  `approval_request_reused: true`. After commit the dispatcher still
+  publishes `approval.expired` for A, and no second `approval.pending` for
+  B.
+- Two calls that arrive at the same moment each get their own request;
+  there is no database lock for this case.
 
 **Races.** A partial unique index,
 `approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,

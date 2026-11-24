@@ -563,12 +563,13 @@ class Settings(BaseModel):
         384-dim, Apache-2.0, English-optimised, matches v0.1-spec
         L391's chosen model. Operators on non-English tenancies can
         swap via ``RETRIEVAL_EMBEDDING_MODEL`` to another fastembed-
-        supported identifier; **changing the output dimensionality
-        requires a re-embed-everything migration** because the
-        ``documents.embedding`` column is hard-pinned to
-        ``vector(384)`` by migration ``0003``. Swap to a same-
-        dimension model (e.g. a multilingual 384-dim variant) is
-        zero-migration.
+        supported identifier. The ``documents.embedding`` column is
+        hard-pinned to ``vector(384)`` by migration ``0003``, so only a
+        model with 384 dimensions fits. **A model change also needs
+        ``python -m meho_backplane.retrieval.reembed``**: stored vectors
+        stay from the old model until it has run, and until then
+        searches compare new question vectors with old vectors. MEHO
+        logs ``embedding_model_mismatch`` at start while they differ.
     retrieval_model_cache_dir:
         Filesystem path fastembed reads ONNX weights from. Default
         :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`
@@ -1583,6 +1584,16 @@ class Settings(BaseModel):
         the caller's newest Memory notes. When off, none of this is shown.
         It stays off until model tests show it helps. Env
         ``TEAM_KNOWLEDGE_RECALL``.
+    kb_wiki_filtered_search:
+        Off by default. When on, a knowledge search whose only filters are
+        ``product`` and/or ``version`` still searches the tenant's wiki
+        (:func:`meho_backplane.kb.wiki_search.wiki_exact_filters`), and
+        sends them to its index as exact filters. It does so only when the
+        wiki's collection has ``scope_filters`` on; else the wiki is still
+        not searched and the answer says ``filtered``. Any other filter, a
+        time window or scope ``shared`` skips the wiki as before. When off,
+        every filter skips the wiki. It stays off until a measurement shows
+        it helps. Env ``KB_WIKI_FILTERED_SEARCH``.
     kb_wiki_interleave:
         Off by default. When on, ``search_knowledge`` lists the store hits
         and the knowledge repo hits in turns (store 1, knowledge repo 1,
@@ -1642,6 +1653,23 @@ class Settings(BaseModel):
         MCP answer is the same as before. REST, the command line and the
         console always show it. It stays off until model tests show it helps.
         Env ``MCP_APPROVAL_EXIT_CODE``.
+    approval_same_call_reuse:
+        Off by default. When on, a call that must wait for approval gets the
+        request that already waits when the same login in the same tenant
+        already has one for the same call (same operation, connector, target,
+        params, ``preview_hash``, ``work_ref`` and ``reveal_secret`` choice,
+        the same kind of login, and the same people behind the login).
+        The answer has that request's id and ``approval_request_reused: true``.
+        The call writes its own ``approval.reuse`` audit row with the caller's
+        session, and the answer's ``audit_id`` is that row. It works with
+        no ``idempotency_key`` and with a different key. Only a waiting
+        request inside its deadline is reused. A call inside an agent run,
+        a step of a multi-step operation (one sent through
+        ``dispatch_child``, or one saved to restart after approval) and a
+        re-run for an earlier requester always get their own request, and
+        a direct call never gets the request of such a step.
+        When off, every such call makes a new request. Env
+        ``APPROVAL_SAME_CALL_REUSE``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -1879,6 +1907,11 @@ class Settings(BaseModel):
     # with a few key words, and its answer has `word_match` (some / none).
     # Set via ``KB_SEARCH_WORD_HINT``.
     kb_search_word_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Off by default. When on and the stored vectors come from another model
+    # than ``RETRIEVAL_EMBEDDING_MODEL``, the start adds the readiness check
+    # ``embedding_model`` (seen in ``/ready`` and ``meho_status``). The start
+    # warning is logged either way. Set via ``EMBEDDING_MODEL_HEALTH_CHECK``.
+    embedding_model_health_check: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2618,6 +2651,7 @@ class Settings(BaseModel):
         default=False, json_schema_extra=AGENT_FACING
     )
     team_knowledge_recall: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    kb_wiki_filtered_search: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
@@ -2626,6 +2660,7 @@ class Settings(BaseModel):
     mcp_reveal_fetch: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3379,6 +3414,7 @@ def get_settings() -> Settings:
         kb_similar_min_score=float(os.environ.get("KB_SIMILAR_MIN_SCORE", "0.85")),
         kb_similar_check=parse_bool_env(os.environ.get("KB_SIMILAR_CHECK")),
         kb_search_word_hint=parse_bool_env(os.environ.get("KB_SEARCH_WORD_HINT")),
+        embedding_model_health_check=parse_bool_env(os.environ.get("EMBEDDING_MODEL_HEALTH_CHECK")),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -3841,6 +3877,9 @@ def get_settings() -> Settings:
         team_knowledge_recall=parse_bool_env(
             os.environ.get("TEAM_KNOWLEDGE_RECALL"),
         ),
+        kb_wiki_filtered_search=parse_bool_env(
+            os.environ.get("KB_WIKI_FILTERED_SEARCH"),
+        ),
         kb_wiki_interleave=parse_bool_env(
             os.environ.get("KB_WIKI_INTERLEAVE"),
         ),
@@ -3864,6 +3903,9 @@ def get_settings() -> Settings:
         ),
         mcp_approval_exit_code=parse_bool_env(
             os.environ.get("MCP_APPROVAL_EXIT_CODE"),
+        ),
+        approval_same_call_reuse=parse_bool_env(
+            os.environ.get("APPROVAL_SAME_CALL_REUSE"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

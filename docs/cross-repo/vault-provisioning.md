@@ -143,8 +143,9 @@ identity wiring that makes them resolve are in
 give each tenant's callers the group that matches their `tenant_role`.
 
 The per-tenant policy grants only the tenant folders. A target whose
-`secret_ref` points somewhere else (for example under `secret/meho/`)
-needs its secret moved. Keep the old policy and its grants until the move
+`secret_ref`, or for VCF Automation whose `extras.provider_secret_ref`,
+points somewhere else (for example under `secret/meho/`) needs its secret
+moved. Keep the old policy and its grants until the move
 is done, and do the steps in this order:
 
 1. Set up the login of every person and every agent that uses MEHO (the
@@ -153,10 +154,14 @@ is done, and do the steps in this order:
    policy, so each login reads both the old paths and its tenant folder.
    If Sensors check targets, add the new paths to the check runner's
    policy too (surface 7), and keep its old paths.
-3. Copy each secret into `secret/tenants/<tenant_id>/` and update the
-   target's `secret_ref`.
+3. Copy each distinct secret once into `secret/tenants/<tenant_id>/`.
+   Targets of one tenant that shared a secret point to the same new
+   path. Update the target's `secret_ref` or `provider_secret_ref`. For
+   `provider_secret_ref`, pass every other key of `extras` too, because
+   `meho targets update --extra` replaces the whole map.
 4. Check that MEHO reads the moved secret. Use a check that reads the
-   secret: run a read-only operation on the target, or run steps 2 and 3
+   secret: run a read-only operation on the target (for a moved provider
+   secret, one of the provider plane), or run steps 2 and 3
    of [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
    §5 with your own login. `meho targets probe` alone does not prove it,
    because some connectors probe without a login. For a target that a

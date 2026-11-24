@@ -483,6 +483,11 @@ async def _verify_session_token(
     is raised (:func:`~meho_backplane.ui.auth.tenant.fall_back_after_removal`).
     Before that, :func:`_assert_same_tenant` refuses a row whose tenant is
     no longer *request_tenant*.
+
+    A block of the person in the session's tenant counts only with a
+    *request_tenant*: a call without one (the tenant picker, the switch,
+    the read-path check) does not work in that tenant, and the session
+    middleware checks the block list on every other page itself.
     """
     _assert_same_tenant(decrypted, request_tenant)
     requested, allow_unchosen = session_tenant_request(decrypted)
@@ -492,6 +497,7 @@ async def _verify_session_token(
             expected_audience=expected_audience,
             requested_tenant=requested,
             allow_unchosen=allow_unchosen,
+            check_tenant_block=request_tenant is not None,
         )
     except HTTPException as exc:
         if requested is not None and lost_tenant(exc):

@@ -30,12 +30,13 @@ value of a flag may be on the next line.
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Any, Final
 
 from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
     "HIDDEN",
+    "hide_command_parts",
     "hide_command_text",
     "hide_flag_value",
     "hide_in_text",
@@ -351,3 +352,41 @@ def hide_shell_script(script: str) -> str:
         hide_in_text(script), None, shell=True, p_programs=_SCRIPT_P_PROGRAMS
     )
     return text
+
+
+def hide_command_parts(parts: list[Any]) -> list[Any]:
+    """Copy one command line (``command`` + ``args``) with its secret values hidden.
+
+    The words stay, so the approver still reads what runs. Hidden are: what
+    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
+    password in a URL, tokens with a known vendor prefix, the argument after
+    a secret-shaped flag (``--password x``, ``-p x``) and the password in
+    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
+    two list items or two words of one string.
+
+    Each list item is one argument of the program, so a secret value in it
+    runs to the end of the item, spaces and shell operators included
+    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
+    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
+    is a shell command string: there a value is one shell word, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
+    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
+    """
+    hidden: list[Any] = []
+    pending: str | None = None
+    previous = ""
+    for part in parts:
+        if not isinstance(part, str):
+            hidden.append(part)
+            previous = ""
+            continue
+        if pending is not None and not part.startswith("-"):
+            hidden.append(hide_flag_value(pending, part))
+            pending = None
+        else:
+            text, pending = hide_command_text(
+                hide_in_text(part), pending, shell=reads_shell_script(previous)
+            )
+            hidden.append(text)
+        previous = part
+    return hidden

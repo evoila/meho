@@ -84,10 +84,15 @@ no list of parent keys:
   own. A secret word may sit inside a longer name (`is_secret_shaped_name`
   in `redaction/command_line.py`: `PGPASSWORD`, `DB_PASS`). An entry that
   reads its value from a Secret (`valueFrom`) does not count;
-- a `command` or `args` item has a secret flag or a secret-named
-  assignment (`hide_command_text` in `redaction/command_line.py`);
-- a line of a text in a `data` or `stringData` value names a secret and
-  gives it a value (a file kept in a ConfigMap);
+- the `command` and `args` of an object, read as one command line, have a
+  value that the approval preview hides (`hide_command_parts` in
+  `redaction/command_line.py`): a secret flag and its value, also when the
+  flag ends `command` and the value starts `args`, or a secret-named
+  assignment. A user name alone after `-u` does not count;
+- a field of a text in a `data` or `stringData` value names a secret and
+  gives it a value (a file kept in a ConfigMap). Every field of a line is
+  read, so every field of a one-line JSON text is too, and a quoted value
+  keeps all that is inside its quotes;
 - an annotation value that is JSON (the last applied object) is parsed and
   read with the same rules;
 - a text at any depth has a secret shape of its own: the rule of
@@ -99,9 +104,12 @@ never ends the walk. The wider name rule also counts a plain value under a
 name that holds a secret word (`KEYBOARD_LAYOUT`, `passwordSecretRef`); such
 a call needs the encryption key too.
 
-The check reads each value of the manifest once, and the keys of each
-`data`, `stringData` and `binaryData` map once, also when YAML aliases name
-them many times, and the same object limit (`MAX_CHECKED_OBJECTS`)
+The check reads each value of the manifest once, also when YAML aliases
+name it many times. So it reads each shared input of a rule once: an `env`
+list, a pair of `command` and `args`, an `annotations` map and its texts,
+and the keys and the texts of a `data`, `stringData` or `binaryData` map,
+each on its own (a map shared by `binaryData` and `data` still has its
+texts read), and the same object limit (`MAX_CHECKED_OBJECTS`)
 holds. The regular expressions of `hide_in_text` stay fast on a long line.
 The row of the request keeps no copy, also not when the request is
 approved and never runs, and a step of a multi-step run keeps no copy of
@@ -768,8 +776,10 @@ manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
 Secret `data` / `stringData` values (key names stay), every `env` value
 (variable names stay), every `httpHeaders` value of a probe or lifecycle
 hook (header names stay), the text of every `command` / `args` list (only
-its size in bytes stays, as `{"hidden": true, "bytes": N}`) and the
-last-applied annotation. All of this is done at any depth: a Secret nested
+its size in bytes stays, as `{"hidden": true, "bytes": N}`), the
+last-applied annotation and a number under a secret name
+(`password: 12345678`). Any other annotation text that is JSON is read
+with the same rules and kept as JSON text. All of this is done at any depth: a Secret nested
 in a custom resource and a pod template's copy of the annotation are hidden
 too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
 walk: the entry's other fields are checked as well. Then the shared

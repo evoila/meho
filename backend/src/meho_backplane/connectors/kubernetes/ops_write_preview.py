@@ -105,6 +105,7 @@ from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.broadcast.events import is_secret_param_name, scrub_secret_named_values
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
 from meho_backplane.operations._preview import (
     PreviewContext,
@@ -112,13 +113,8 @@ from meho_backplane.operations._preview import (
     register_person_only_preview_keys,
     register_preview_builder,
 )
-from meho_backplane.redaction.command_line import (
-    HIDDEN,
-    hide_command_text,
-    hide_flag_value,
-    hide_in_text,
-    reads_shell_script,
-)
+from meho_backplane.redaction.command_line import HIDDEN
+from meho_backplane.redaction.command_line import hide_command_parts as _hide_command_secrets
 
 #: Put in place of a value the approver must not see.
 _HIDDEN = HIDDEN
@@ -188,44 +184,6 @@ async def _secret_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 def _parts_bytes(parts: list[Any]) -> int:
     """Total UTF-8 size of the parts of a command line."""
     return sum(len(str(part).encode("utf-8")) for part in parts)
-
-
-def _hide_command_secrets(parts: list[Any]) -> list[Any]:
-    """Copy one command line (``command`` + ``args``) with its secret values hidden.
-
-    The words stay, so the approver still reads what runs. Hidden are: what
-    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
-    password in a URL, tokens with a known vendor prefix, the argument after
-    a secret-shaped flag (``--password x``, ``-p x``) and the password in
-    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
-    two list items or two words of one string.
-
-    Each list item is one argument of the program, so a secret value in it
-    runs to the end of the item, spaces and shell operators included
-    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
-    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
-    is a shell command string: there a value is one shell word, quotes and
-    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
-    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
-    """
-    hidden: list[Any] = []
-    pending: str | None = None
-    previous = ""
-    for part in parts:
-        if not isinstance(part, str):
-            hidden.append(part)
-            previous = ""
-            continue
-        if pending is not None and not part.startswith("-"):
-            hidden.append(hide_flag_value(pending, part))
-            pending = None
-        else:
-            text, pending = hide_command_text(
-                hide_in_text(part), pending, shell=reads_shell_script(previous)
-            )
-            hidden.append(text)
-        previous = part
-    return hidden
 
 
 def _job_spec_echo(ctx: PreviewContext, spec: Any) -> Any:
@@ -332,6 +290,34 @@ def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _hide_json_text(text: Any) -> Any:
+    """An annotation text that is JSON, with its secret values hidden; other values as they are.
+
+    The parsed object is hidden by :func:`_hide_values`, and every value
+    under a secret name (a number too) is replaced, then the object is
+    written back as JSON text. A text too deep to read is hidden whole.
+    """
+    if not isinstance(text, str) or text.lstrip()[:1] not in ("{", "["):
+        return text
+    try:
+        parsed = json.loads(text)
+        hidden, _ = scrub_secret_named_values(_hide_values(parsed), hide_numbers=True)
+    except RecursionError:
+        return _HIDDEN
+    except ValueError:
+        return text
+    return text if hidden == parsed else json.dumps(hidden)
+
+
+def _is_secret_number(key: Any, value: Any) -> bool:
+    """True for a number under a secret name: a value of its own the approver must not see."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and is_secret_param_name(str(key))
+    )
+
+
 def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     """Copy *node*, hiding at any depth every value that can hold a secret.
 
@@ -347,7 +333,10 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
       ``data`` and ``stringData``. This catches a Secret nested in another
       object, not only a top-level Secret document.
     * The last-applied annotation is hidden in every ``annotations`` map,
-      so a pod template's copy is caught too.
+      so a pod template's copy is caught too. Any other annotation text
+      that is JSON is read with these same rules (:func:`_hide_json_text`).
+    * A number under a secret name (``password: 12345678``) is hidden. The
+      shared params redaction hides only a text, a map or a list there.
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
@@ -364,9 +353,15 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
                 ]
             elif key in _COMMAND_LISTS and isinstance(item, list):
                 out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
-            elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
+            elif _is_secret_number(key, item):
+                out[key] = _HIDDEN
+            elif key == "annotations" and isinstance(item, dict):
                 out[key] = _hide_values(
-                    {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands
+                    {
+                        name: _HIDDEN if name == _LAST_APPLIED else _hide_json_text(text)
+                        for name, text in item.items()
+                    },
+                    hide_commands=hide_commands,
                 )
             else:
                 out[key] = _hide_values(item, hide_commands=hide_commands)

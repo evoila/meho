@@ -47,7 +47,7 @@
 {% block content %}
 <section class="space-y-4">
   {# ---------- Breadcrumb ---------- #}
-  <nav aria-label="Breadcrumb" class="text-xs opacity-70">
+  <nav aria-label="Breadcrumb" class="text-xs text-muted">
     <a href="/ui/corpus" class="link link-hover">Docs Corpus</a>
     <span aria-hidden="true">/</span>
     <a href="/ui/corpus/collections/{{ collection.collection_key | urlencode }}" class="link link-hover font-mono">{{ collection.collection_key }}</a>
@@ -58,12 +58,12 @@
   <header>
     <h1 class="text-2xl font-semibold">Cited source</h1>
     {% if read_mode %}
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         The text around a search hit, read from the collection's backend. The
         internal reference below identifies the exact chunk.
       </p>
     {% else %}
-      <p class="text-sm opacity-70">
+      <p class="text-sm text-muted">
         This source was cited in a grounded answer but has no public URL, so it
         opens here rather than as an outbound link. The internal reference below
         identifies the exact chunk; MEHO resolves it to the underlying object.
@@ -97,16 +97,16 @@
           {% if read.text is not none %}
             <p class="text-sm whitespace-pre-wrap" data-testid="read-text">{{ read.text }}</p>
           {% elif read.disclosure == "link" %}
-            <p class="text-sm opacity-70">
+            <p class="text-sm text-muted">
               The owner of this file allows only its link. Open the source to read it.
             </p>
           {% else %}
-            <p class="text-sm opacity-70">
+            <p class="text-sm text-muted">
               This file cannot be shown as text here. Open the source to read it.
             </p>
           {% endif %}
           {% if read.truncated %}
-            <p class="text-xs opacity-60">The text was cut at the size limit.</p>
+            <p class="text-xs text-subtle">The text was cut at the size limit.</p>
           {% endif %}
           {% if read.next %}
             <form method="post" action="{{ read_action }}">
@@ -125,28 +125,28 @@
     <div class="card-body space-y-2">
       <h2 class="card-title text-base">Provenance</h2>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">reference</dt>
+        <dt class="text-subtle">reference</dt>
         <dd class="font-mono text-xs break-all" title="Stable backend-agnostic citation reference">{{ chunk_ref }}</dd>
-        <dt class="opacity-60">chunk id</dt>
+        <dt class="text-subtle">chunk id</dt>
         <dd class="font-mono text-xs break-all">{{ chunk_id }}</dd>
-        <dt class="opacity-60">collection</dt>
+        <dt class="text-subtle">collection</dt>
         <dd>
           <a href="/ui/corpus/collections/{{ collection.collection_key | urlencode }}" class="link link-primary font-mono">{{ collection.collection_key }}</a>
         </dd>
-        <dt class="opacity-60">vendor</dt>
+        <dt class="text-subtle">vendor</dt>
         <dd>{{ collection.vendor }}</dd>
-        <dt class="opacity-60">products</dt>
+        <dt class="text-subtle">products</dt>
         <dd>
           {% if collection.products %}
             {{ collection.products | join(", ") }}
           {% else %}
-            <span class="opacity-50">&mdash;</span>
+            <span class="text-subtle">&mdash;</span>
           {% endif %}
         </dd>
       </dl>
       {% if collection.when_to_use %}
         <div class="mt-1">
-          <h3 class="text-xs font-semibold uppercase opacity-60">When to use this collection</h3>
+          <h3 class="text-xs font-semibold uppercase text-subtle">When to use this collection</h3>
           <p class="text-sm whitespace-pre-line">{{ collection.when_to_use }}</p>
         </div>
       {% endif %}

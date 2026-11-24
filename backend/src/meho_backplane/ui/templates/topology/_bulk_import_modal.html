@@ -44,7 +44,7 @@
     <header class="flex items-start justify-between gap-2">
       <div>
         <h2 class="card-title text-base">Bulk-import curated edges</h2>
-        <p class="text-xs opacity-70">
+        <p class="text-xs text-muted">
           Paste or upload an <code class="font-mono">edges:</code> document
           ({{ max_rows }} rows max). Mirrors
           <code class="font-mono">meho topology bulk-import</code>. Preview
@@ -84,7 +84,7 @@
               <span class="badge badge-outline badge-xs">{{ err.error }}</span>
               <span>{{ err.message }}</span>
               {% if err.kinds %}
-                <span class="opacity-70">
+                <span class="text-muted">
                   (well-known kinds: {{ err.kinds | join(', ') }})
                 </span>
               {% endif %}
@@ -109,7 +109,7 @@
       <input type="hidden" name="dry_run" value="false" />
 
       <label class="form-control">
-        <span class="label-text text-xs opacity-70">Paste edges document (YAML or JSON)</span>
+        <span class="label-text text-xs text-muted">Paste edges document (YAML or JSON)</span>
         <textarea
           name="rows_text"
           rows="8"
@@ -120,7 +120,7 @@
       </label>
 
       <label class="form-control">
-        <span class="label-text text-xs opacity-70">…or upload a file (takes precedence)</span>
+        <span class="label-text text-xs text-muted">…or upload a file (takes precedence)</span>
         <input
           type="file"
           name="upload"

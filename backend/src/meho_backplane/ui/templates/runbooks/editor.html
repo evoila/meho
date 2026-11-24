@@ -154,7 +154,7 @@
                  x-model="slug" pattern="[a-z]([a-z0-9.\-]*[a-z0-9])?"
                  placeholder="rotate-cluster-cert" autocomplete="off" required
                  aria-label="Template slug" />
-          <span class="text-xs opacity-60">lowercase, dots/hyphens, required</span>
+          <span class="text-xs text-subtle">lowercase, dots/hyphens, required</span>
           <span class="text-xs text-error" x-show="slugError()" x-text="slugError()"></span>
         </label>
         {% else %}
@@ -177,7 +177,7 @@
         </label>
 
         <label class="flex flex-col gap-1 max-w-md">
-          <span class="text-sm font-medium">Target kind <span class="opacity-60 font-normal">(optional)</span></span>
+          <span class="text-sm font-medium">Target kind <span class="text-subtle font-normal">(optional)</span></span>
           <input type="text" name="target_kind" class="input input-bordered input-sm font-mono w-full"
                  x-model="targetKind" placeholder="k8s-node" autocomplete="off"
                  aria-label="Template target kind" />
@@ -192,7 +192,7 @@
     <div class="space-y-4 mt-4">
       <div class="flex items-center justify-between">
         <h2 class="text-xl font-semibold">
-          Steps <span class="text-sm font-normal opacity-60" x-text="'(' + steps.length + ')'"></span>
+          Steps <span class="text-sm font-normal text-subtle" x-text="'(' + steps.length + ')'"></span>
         </h2>
         <button type="button" class="btn btn-outline btn-sm" x-on:click="addStep()">
           + Add step

@@ -64,7 +64,7 @@
     </div>
 
     {% if not started %}
-      <p class="mt-2 text-sm text-base-content/70">
+      <p class="mt-2 text-sm text-muted">
         MEHO approves the pending steps one by one, oldest first. Each approval
         runs the operation at once. MEHO goes on only when the run was OK. It
         stops at the first step that fails or is refused. At a dangerous or
@@ -135,7 +135,7 @@
               {% endif %}
             </div>
             {% if s.detail %}
-              <p class="text-xs text-base-content/60 [overflow-wrap:anywhere]">{{ s.detail }}</p>
+              <p class="text-xs text-subtle [overflow-wrap:anywhere]">{{ s.detail }}</p>
             {% endif %}
             {% if s.self_approval %}
               <p class="text-xs font-semibold [overflow-wrap:anywhere]" data-testid="approval-self-approved">{{ s.self_approval }}</p>
@@ -220,7 +220,7 @@
           <input type="hidden" name="reason" value="{{ reason }}" />
         {% else %}
           <label class="form-control w-full">
-            <span class="label-text text-xs">Reason <span class="opacity-60">(optional, recorded on every step)</span></span>
+            <span class="label-text text-xs">Reason <span class="text-subtle">(optional, recorded on every step)</span></span>
             <textarea name="reason" rows="2" maxlength="2000" class="textarea textarea-bordered textarea-sm" aria-label="Decision reason"></textarea>
           </label>
         {% endif %}

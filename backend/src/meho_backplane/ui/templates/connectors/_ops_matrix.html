@@ -23,6 +23,8 @@
       candidate set + the remediation step (set
       ``target.preferred_impl_id``).
 -#}
+
+{% from "_components.html" import badge %}
 <article
   id="ops-matrix-card"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -77,21 +79,12 @@
                               title="Dangerous — irreversible or high-impact"
                             >{{ safety }}</span>
                           {% elif safety == "caution" %}
-                            <span
-                              class="badge badge-warning badge-xs"
-                              title="Caution — state-changing"
-                            >{{ safety }}</span>
+                            {{ badge(safety, variant="warning", size="xs", title="Caution — state-changing") }}
                           {% else %}
-                            <span
-                              class="badge badge-ghost badge-xs"
-                              title="Safe — read or non-impacting"
-                            >{{ safety }}</span>
+                            {{ badge(safety, variant="quiet", size="xs", title="Safe — read or non-impacting") }}
                           {% endif %}
                           {% if op.requires_approval %}
-                            <span
-                              class="badge badge-outline badge-xs"
-                              title="Requires approval"
-                            >approval</span>
+                            {{ badge("approval", variant="outline", size="xs", title="Requires approval") }}
                           {% endif %}
                         </span>
                       </li>

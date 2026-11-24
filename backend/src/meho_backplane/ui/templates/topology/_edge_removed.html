@@ -11,11 +11,13 @@
   The fragment renders an empty (visually quiet) acknowledgement rather than
   vanishing entirely so the operator gets feedback the row was removed.
 -#}
+
+{% from "_components.html" import badge %}
 <li
   class="text-sm text-subtle"
   data-test="edge-removed"
   data-edge-id="{{ edge_id }}"
 >
-  <span class="badge badge-ghost badge-xs">removed</span>
+  {{ badge("removed", variant="quiet", size="xs") }}
   Curated edge removed.
 </li>

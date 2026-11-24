@@ -1,3 +1,4 @@
+{% from "_components.html" import badge, button %}
 {% extends "base.html" %}
 {% from "_references.html" import subject %}
 {% macro page_url(service, agent) -%}
@@ -31,7 +32,7 @@
   <form method="get" class="flex flex-wrap items-end gap-3" aria-label="Filter grants">
     <label class="block space-y-1">
       <span class="text-sm font-medium">Principal sub</span>
-      <input type="search" name="principal" value="{{ principal }}" maxlength="512" class="input input-bordered w-full font-mono" placeholder="Exact JWT sub" />
+      <input type="search" name="principal" value="{{ principal }}" maxlength="512" class="input w-full font-mono" placeholder="Exact JWT sub" />
     </label>
     <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
       <input class="checkbox checkbox-sm" type="checkbox" name="include_expired" value="true" {% if include_expired %}checked{% endif %} />
@@ -58,14 +59,14 @@
           {% for grant in service_rows %}
             <tr data-grant-id="{{ grant.id }}" data-grant-kind="service"{% if grant.delete_grant %} data-delete-grant="true"{% endif %}>
               <td class="max-w-xs break-all text-xs">{{ subject(grant.subject) }}</td>
-              <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}{% if grant.delete_grant %} <span class="badge badge-sm badge-warning font-sans">delete grant</span>{% endif %}</td>
+              <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}{% if grant.delete_grant %} {{ badge("delete grant", variant="warning", class="font-sans") }}{% endif %}</td>
               <td class="max-w-xs break-all font-mono text-xs">{{ grant.connector }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
               <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% elif grant.effect == 'orphaned' %}badge-warning{% else %}badge-success{% endif %}">{{ grant.effect }}</span>{% if grant.remediation %}<p class="mt-1 max-w-xs text-xs" data-grant-remediation>{{ grant.remediation }}</p>{% endif %}</td>
               <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
               {% if can_write %}
-                <td class="text-right"><form hx-post="/ui/grants/service/{{ grant.id }}/revoke" hx-confirm="Revoke this service-principal grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+                <td class="text-right"><form hx-post="/ui/grants/service/{{ grant.id }}/revoke" hx-confirm="Revoke this service-principal grant?">{{ button("Revoke", variant="danger", size="xs", type="submit") }}</form></td>
               {% endif %}
             </tr>
           {% else %}
@@ -81,8 +82,8 @@
     {% endif %}
     {% if service_offset > 0 or service_has_next %}
       <nav class="flex justify-end gap-2" aria-label="Service grant pages">
-        {% if service_offset > 0 %}<a class="btn btn-sm" href="{{ page_url([service_offset - limit, 0] | max, agent_offset) }}">Previous</a>{% endif %}
-        {% if service_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset + limit, agent_offset) }}">Next</a>{% endif %}
+        {% if service_offset > 0 %}{{ button("Previous", variant="default", href=(page_url([service_offset - limit, 0] | max, agent_offset))) }}{% endif %}
+        {% if service_has_next %}{{ button("Next", variant="default", href=(page_url(service_offset + limit, agent_offset))) }}{% endif %}
       </nav>
     {% endif %}
   </section>
@@ -95,8 +96,8 @@
       </div>
       {% if agent_offset > 0 or agent_has_next %}
         <nav class="flex justify-end gap-2" aria-label="Agent grant pages">
-          {% if agent_offset > 0 %}<a class="btn btn-sm" href="{{ page_url(service_offset, [agent_offset - limit, 0] | max) }}">Previous</a>{% endif %}
-          {% if agent_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset, agent_offset + limit) }}">Next</a>{% endif %}
+          {% if agent_offset > 0 %}{{ button("Previous", variant="default", href=(page_url(service_offset, [agent_offset - limit, 0] | max))) }}{% endif %}
+          {% if agent_has_next %}{{ button("Next", variant="default", href=(page_url(service_offset, agent_offset + limit))) }}{% endif %}
         </nav>
       {% endif %}
       <div class="overflow-x-auto rounded-box border border-base-300">
@@ -108,10 +109,10 @@
                 <td class="max-w-xs break-all text-xs">{{ subject(grant.subject) }}</td>
                 <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
                 <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
-                <td><span class="badge badge-sm badge-outline">{{ grant.effect }}</span></td>
+                <td>{{ badge(grant.effect, variant="outline") }}</td>
                 <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
                 <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
-                <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+                <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?">{{ button("Revoke", variant="danger", size="xs", type="submit") }}</form></td>
               </tr>
             {% else %}
               <tr><td colspan="7" class="py-8 text-center text-muted">No agent grants match this filter.</td></tr>

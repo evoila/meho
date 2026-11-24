@@ -471,10 +471,15 @@ compare reads, the read of the existing sink secret before a `secret.move` with
 `merge: true` writes it (noted also when the write then fails, and also for
 the second read that tells why the write failed), the pfSense VPN
 user read, the KV password read of
-`vault.auth.userpass.write` and `vault.kv.generate`) and the Google Secret Manager read
+`vault.auth.userpass.write` and `vault.kv.generate`, the read of the current
+version inside `vault.kv.patch` (noted also when the write after it fails)) and
+the Google Secret Manager read
 (`connectors/_shared/gsm_creds.py`) note the login id after the store returned
-the secret. A login that passed, followed by a refused read or by no read at
-all, notes nothing. For Vault the id is the `sub` of the token MEHO sent. The
+the secret. `vault.token.create_and_store` and `harbor.robot.create` with a
+`vault_target` store the new secret with the `vault.kv.patch` handler, so their
+rows name the caller the same way when that read returned the existing item. A
+login that passed, followed by a refused read or by no read at all, notes
+nothing. For Vault the id is the `sub` of the token MEHO sent. The
 audit writer reads it when it writes the row. The row is written once, at the
 end of the call, and is never updated. The same people see the field who see
 the row today: a service login reads only the rows of its own calls.

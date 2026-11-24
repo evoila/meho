@@ -536,9 +536,10 @@ async def _run_stop_safe[T](
     async def _inside_scope() -> Any:
         # The task runs in a copy of the caller's context, so this stays inside it.
         _inside_stop_safe.set(True)
+        result: Any = _NO_ANSWER
         with scope:
-            return await work()
-        return _NO_ANSWER
+            result = await work()
+        return result
 
     task: asyncio.Future[Any] = asyncio.ensure_future(_inside_scope())
     _keep_until_done(task)

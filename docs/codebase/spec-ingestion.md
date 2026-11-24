@@ -1300,6 +1300,9 @@ the edit "approval off" also ends the per-call wait. After it, a person in the
 web console runs a `caution` operation at once, and a `dangerous` operation
 still waits because of its risk level. A standing grant or a run approval still
 does not cover the operation. The edit is refused for a destructive operation (`approval_off_destructive`) and for a change of rights (`approval_off_rights_change`).
+An operation that writes or makes a credential, for example `harbor.robot.create`
+or `pfsense.openvpn.user.create`, keeps its approval: the edit does not end its
+wait.
 
 **Every edit that ends approval passes the same checks.** The rule looks
 at the result, not at the field in the request. When the effective

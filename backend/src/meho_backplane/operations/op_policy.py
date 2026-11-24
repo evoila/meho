@@ -23,7 +23,8 @@ The rules:
   connector marked with ``declare_per_call_approval``: a ``caution``
   operation then runs at once for a person in the web console, a
   ``dangerous`` operation still waits because of its risk level, and a
-  change of rights is refused.
+  change of rights is refused. A credential write or mint keeps its
+  approval (see below).
 * **Scope.** A tenant admin's override (``tenant_id`` = the tenant) applies
   to that tenant only. A platform admin's override on a built-in operation
   (``tenant_id IS NULL``) applies to the whole install. Each scope's

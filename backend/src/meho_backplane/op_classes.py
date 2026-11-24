@@ -161,11 +161,16 @@ def declare_per_call_approval(op_ids: Iterable[str]) -> None:
     directory group. Safe to call twice with the same ids.
 
     A platform admin can turn approval off for such an operation, for the
-    whole install or for one tenant's own copy, with a written reason and
-    a fresh sign-in. The edit is written to the audit log. After it, a
-    person in the web console runs a ``caution`` operation at once, and a
-    ``dangerous`` operation still waits because of its risk level. A
-    standing grant or a run approval still does not cover the operation.
+    whole install or for one tenant's own copy. Each path needs a written
+    reason; the REST API and the CLI also need a fresh sign-in. The edit is
+    written to the audit log. After it, a person in the web console runs a
+    ``caution`` operation at once, and a ``dangerous`` operation still waits
+    because of its risk level. A standing grant or a run approval still does
+    not cover the operation. MEHO refuses the edit for a destructive
+    operation and for a change of rights. An operation that writes or makes
+    a credential, for example ``harbor.robot.create`` or
+    ``pfsense.openvpn.user.create``, keeps its approval: the edit does not
+    end its wait.
     """
     _PER_CALL_APPROVAL.update(op_ids)
 

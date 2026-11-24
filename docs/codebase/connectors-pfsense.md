@@ -1161,11 +1161,12 @@ approval, like any other call of these ops.
 `user.create` and `user.delete` give or take a login, so a person approves
 each call: a standing grant never covers them (`declare_per_call_approval` in
 `op_classes.py`). A platform admin can turn approval off for such an operation,
-for the whole install or for one tenant's own copy, with a written reason and a
-fresh sign-in; the edit is written to the audit log. After it, a person in the
-web console runs a `caution` operation at once, a `dangerous` operation still
-waits because of its risk level, and a standing grant or a run approval still
-does not cover the operation. None of the five ops makes a copy of `config.xml`: pfSense
+for the whole install or for one tenant's own copy. Both the console and the
+REST API or CLI need a written reason; the REST API and the CLI also need a
+fresh sign-in. The edit is written to the audit log. `user.create` makes a
+credential, so it keeps its approval: the edit does not end its wait. `user.delete`
+is `dangerous`, so it still waits because of its risk level, and a standing
+grant or a run approval still does not cover it. None of the five ops makes a copy of `config.xml`: pfSense
 keeps its own history of the file (Diagnostics > Backup & Restore > Config
 History).
 

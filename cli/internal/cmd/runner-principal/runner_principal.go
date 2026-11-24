@@ -53,7 +53,8 @@ func NewRootCmd() *cobra.Command {
 			"principal_kind=runner and a read-only tenant_role, letting a " +
 			"push-only satellite runner authenticate to MEHO. That token is " +
 			"caged to the gateway path prefixes and 403'd everywhere else. " +
-			"Write verbs (register / revoke) require tenant_admin; read verbs " +
+			"Write verbs (register / revoke) require tenant_admin, and register " +
+			"also requires a person, not a service or agent login; read verbs " +
 			"(list / show) are operator-level. register creates the Keycloak " +
 			"client and a DB row; revoke disables the Keycloak client (kill " +
 			"switch) and marks the row revoked.",

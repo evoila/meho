@@ -4594,7 +4594,7 @@ meho runner-principal list [flags]
 
 ### `meho runner-principal register`
 
-Register a new runner principal (tenant_admin)
+Register a new runner principal (a person with tenant_admin)
 
 ```
 meho runner-principal register <name> [flags]

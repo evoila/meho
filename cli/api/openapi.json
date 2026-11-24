@@ -10570,7 +10570,7 @@
           "runner-principals"
         ],
         "summary": "Register Runner Principal",
-        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\nThe answer carries a one-time enrollment code, shown only here. The runner\nsends it with its own public key to ``POST /api/v1/runner-principals/enroll``.\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\nThe answer carries a one-time enrollment code, shown only here. The runner\nsends it with its own public key to ``POST /api/v1/runner-principals/enroll``.\n\nOnly a person with ``tenant_admin`` may call it. A service, agent or\nrunner login gets 403 ``human_principal_required`` before anything is\nmade. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 when a runner with the same Keycloak client id exists, also a\nrevoked one or one of another tenant; 503 when Keycloak admin is not\nconfigured.",
         "operationId": "register_runner_principal_api_v1_runner_principals_post",
         "parameters": [
           {

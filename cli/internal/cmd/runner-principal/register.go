@@ -25,7 +25,7 @@ func newRegisterCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "register <name>",
-		Short: "Register a new runner principal (tenant_admin)",
+		Short: "Register a new runner principal (a person with tenant_admin)",
 		Long: "register calls POST /api/v1/runner-principals to create a new " +
 			"satellite-runner principal in the operator's tenant. " +
 			"Creates a Keycloak client (kind=runner, serviceAccounts=true) and a DB row. " +
@@ -38,8 +38,9 @@ func newRegisterCmd() *cobra.Command {
 			"the runner sends it with its own public key on its first start, so it " +
 			"can renew its own login. " +
 			"--owner-sub sets the kill-switch owner; defaults to the caller's sub. " +
-			"Returns 409 when a principal with the same name already exists. " +
-			"Requires tenant_admin.",
+			"Returns 409 when the name is taken, also by a revoked runner. " +
+			"Only a person with tenant_admin can register: a service login or an " +
+			"agent login gets 403 human_principal_required.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

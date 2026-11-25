@@ -323,6 +323,22 @@ older dotted names (`meho.status`) failed.
 to underscores (`meho_status`, `list_targets`, …). See
 [Claude Desktop § pinning a build](claude-desktop.md#pin-a-build-with-underscore-tool-names-and-structured-results).
 
+## A model gateway refuses MEHO's tool list
+
+**Symptom.** A strict model gateway (one that checks tool schemas the
+way the OpenAI API does in strict mode) refuses the tool list, and the
+agent gets no MEHO tools. The error says a schema holds `null` inside an
+`enum`.
+
+**Wall.** Some tool inputs list `null` as one allowed value. A strict
+gateway refuses such a schema, and then refuses the whole list.
+
+**Fix.** The admin turns on `config.mcpStrictToolSchemas` in the Helm
+values (environment setting `MCP_STRICT_TOOL_SCHEMAS`). MEHO then sends the
+tool schemas without `null` inside an `enum`. A call that sends `null`
+still works, because the server checks every call against the full
+schema.
+
 ## A tool call fails with "Tool execution failed" but the server logged 200
 
 **Symptom.** A specific tool (e.g. `list_targets`, `query_topology`)

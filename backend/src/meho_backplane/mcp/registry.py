@@ -65,6 +65,7 @@ at app boot. Called from the FastAPI ``lifespan`` so the first incoming
 from __future__ import annotations
 
 import importlib
+import os
 import pkgutil
 import re
 from collections.abc import Awaitable, Callable
@@ -77,7 +78,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
 from meho_backplane.mcp.profiles import profile_admits
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import get_settings, parse_bool_env
 
 __all__ = [
     "MCP_ADMIN_SCOPE",
@@ -332,8 +333,50 @@ def addon_family_active(
 _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 
 
-def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def _strict_tool_schemas_on() -> bool:
+    """True when the ``MCP_STRICT_TOOL_SCHEMAS`` switch is on.
+
+    Read from the environment, not from :func:`get_settings`: the hosted
+    agent builds its tool list when its module is imported, and the full
+    settings need more environment than that import has.
+    """
+    return parse_bool_env(os.environ.get("MCP_STRICT_TOOL_SCHEMAS"))
+
+
+def _without_null_enum_members(node: Any) -> Any:
+    """Return *node* with ``None`` removed from every ``enum`` list, at any depth.
+
+    Used for ``MCP_STRICT_TOOL_SCHEMAS``. Nothing else changes: a ``type``
+    list such as ``["string", "null"]`` stays. *node* is not mutated. A node
+    with nothing to change is returned as the same object.
+    """
+    if isinstance(node, dict):
+        changed = False
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "enum" and isinstance(value, list) and None in value:
+                new_value: Any = [member for member in value if member is not None]
+            else:
+                new_value = _without_null_enum_members(value)
+            changed = changed or new_value is not value
+            out[key] = new_value
+        return out if changed else node
+    if isinstance(node, list):
+        items = [_without_null_enum_members(item) for item in node]
+        if any(new is not old for new, old in zip(items, node, strict=True)):
+            return items
+    return node
+
+
+def _wire_safe_input_schema(
+    schema: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
     """Return *schema* with any top-level combinator keyword removed.
+
+    With *strict* (the ``MCP_STRICT_TOOL_SCHEMAS`` switch) ``None`` is also
+    removed from every ``enum`` at every depth.
 
     See :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why. *schema* is not
     mutated: when it carries no forbidden top-level key the same object is
@@ -341,9 +384,13 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     shallow copy minus those keys is returned. Nested combinators are
     untouched — the Anthropic restriction is top-level only.
     """
-    if not any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
-        return schema
-    return {key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS}
+    if any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
+        schema = {
+            key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS
+        }
+    if strict:
+        schema = _without_null_enum_members(schema)
+    return schema
 
 
 class ToolAnnotations(BaseModel):
@@ -546,7 +593,9 @@ class ToolDefinition(BaseModel):
         :func:`_wire_safe_input_schema`, which strips top-level
         ``oneOf`` / ``allOf`` / ``anyOf`` — the Anthropic Messages API
         rejects those at the top level of a tool's ``input_schema`` and
-        the rejection poisons the whole session. The full schema (with
+        the rejection poisons the whole session. With
+        ``MCP_STRICT_TOOL_SCHEMAS`` on, ``null`` is also dropped from every
+        ``enum``, because a strict model gateway refuses it. The full schema (with
         the combinators) is retained on ``self.inputSchema`` so
         server-side jsonschema validation in
         :mod:`~meho_backplane.mcp.handlers` is unaffected.
@@ -554,7 +603,10 @@ class ToolDefinition(BaseModel):
         out: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
-            "inputSchema": _wire_safe_input_schema(self.inputSchema),
+            "inputSchema": _wire_safe_input_schema(
+                self.inputSchema,
+                strict=_strict_tool_schemas_on(),
+            ),
         }
         if self.title is not None:
             out["title"] = self.title

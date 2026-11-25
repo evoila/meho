@@ -2193,6 +2193,9 @@ gets the waiting request writes its own audit row, and the answer's
 `audit_id` is that row, not the first call's. No tool and no input changes.
 See [approvals.md](approvals.md#1-send-an-idempotency_key-so-a-retry-gets-the-same-request).
 
+An eighth switch changes the schemas that are sent: `MCP_STRICT_TOOL_SCHEMAS`
+(off by default). See "Strict tool schemas" below.
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second
@@ -2321,6 +2324,27 @@ The read checks no agent grant.
   measurement before it goes on by default is
   [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).
 - Tests: `tests/test_mcp_call_operation_own_request_status.py`.
+
+## Strict tool schemas (`MCP_STRICT_TOOL_SCHEMAS`, off by default)
+
+A strict model gateway refuses a tool schema that holds `null` inside an
+`enum`, and then refuses the whole tool list. 16 fields in 11 tools are
+written as `{"type": ["string", "null"], "enum": [..., null]}`. The switch
+(Helm: `config.mcpStrictToolSchemas`) removes `null` from every `enum` in
+the copy of the schema that `tools/list` sends.
+
+- **Off (default):** every sent schema is the same as before
+  (`contracts/mcp-tools-list.json`).
+- **On:** `_wire_safe_input_schema` in `mcp/registry.py` walks the whole
+  schema (`properties`, `items`, `$defs`, and so on) and drops `None` from
+  each `enum`. Nothing else changes: a `type` list such as
+  `["string", "null"]` stays.
+- The server checks each call against `inputSchema`, not the wire copy. A
+  call that sends `null` for such a field still passes, and the handler
+  treats it like a missing field.
+- MEHO's own hosted agent reuses `to_wire()`, so it gets the same copy.
+- No tool is added, removed or renamed.
+- Tests: `tests/test_mcp_strict_tool_schemas.py`.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

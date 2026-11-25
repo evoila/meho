@@ -938,6 +938,7 @@ data:
   KB_WIKI_INTERLEAVE: "false"
   FILE_REF_PARAMS: "false"
   MCP_SHORT_TOOL_TEXTS: "false"
+  MCP_STRICT_TOOL_SCHEMAS: "false"
   # Tool profiles with a connector list. Off by default.
   MCP_PROFILE_CONNECTOR_LISTS: "false"
   MCP_CONNECTOR_PROFILES: ""

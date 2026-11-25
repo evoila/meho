@@ -176,21 +176,22 @@ hands it a token. The private key never leaves the site.
 The runner uses the key file only when its group and other users have no
 rights to it (for example mode `0600` or `0400`). With any other mode it stops
 with an error that names the file and its mode and says to set mode `0600`.
-From the Kubernetes docs
-([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
-In a Kubernetes pod with
-`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
-the runner then stops. Mount the key so that it keeps mode `0600`: set no
-`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
-volume driver that does not change file rights.
+In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key
+file at each mount, and the runner then stops. Mount the key so that it keeps
+mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does
+not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode
+only when the top folder of the volume already has the `fsGroup` group and the
+rights Kubernetes expects. When it does not, Kubernetes changes the rights of
+every file in the volume, and the runner stops (see
+[Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
 
 This login follows RFC 7523, a signed JWT as the proof of a client's login
 ([section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3)), and
 Keycloak's "Signed JWT" client authenticator
 ([Keycloak: Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials)).
 MEHO's live test of this login runs in CI against the Keycloak image
-`keycloak/keycloak:26.0`. The proof on an operator's own Keycloak comes with
-a later step on a real install.
+`keycloak/keycloak:26.0`. It was proven on the Keycloak image
+`keycloak/keycloak:26.0` of the CI live test.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
@@ -201,11 +202,14 @@ python -m meho_backplane.runner
 
 Put `MEHO_RUNNER_KEY_DIR` on a volume that stays when the runner
 restarts. After the first start the runner finds its key there, so the
-code is not needed again. When the answer to the first start is lost, start
+code is not needed again. After the first good start, take
+`MEHO_RUNNER_ENROLLMENT_CODE` out of the runner's settings; the runner needs
+only its key folder. When the answer to the first start is lost, start
 the runner again with the same code and the same key folder: it finishes the
-enrollment, also after the 30 minutes. `MEHO_RUNNER_TOKEN_URL` sets the login
-server's token address when the runner must reach it under another name than
-central tells it. Both addresses must be `https://`. Plain `http://` works only
+enrollment, also after the 30 minutes. `MEHO_RUNNER_TOKEN_URL` changes only the
+address the runner sends its login request to. The signed request still names
+the issuer that central gives, so the login server must know itself under that
+issuer name. Both addresses must be `https://`. Plain `http://` works only
 for an address on the same machine.
 
 The runner sends its `MEHO_RUNNER_ID` with the code. When the code belongs to
@@ -223,7 +227,7 @@ central refuses it under the new name.
 
 *A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
 Keycloak client instead. The runner sends it as it is and does not renew
-it; give it a new one by hand when it ends. This mode works as before.
+it; give it a new one by hand when it ends.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
@@ -312,8 +316,8 @@ tenant_admin writes for each runner (step 4 above) also still works.
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. With `RUNNER_CHECKS_ENABLED` on, results of a sensor with a `runner_name` count as check results. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
-| `403` registering a runner principal | `meho runner-principal register` needs a person with **tenant_admin**; `revoke` needs **tenant_admin**. A service login or an agent login gets `403 human_principal_required` on register. | Register with your own sign-in as a person with tenant_admin; `show` / `list` are operator-level. |
-| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | The group or other users have rights to the key file in `MEHO_RUNNER_KEY_DIR`. In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key file at each mount. | Run `chmod 600` on the file and start the runner again. In a pod, mount the key so that it keeps mode `0600`: set no `fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a volume driver that does not change file rights. |
+| `403` registering a runner principal | `meho runner-principal register` needs a person with **tenant_admin**; `revoke` needs **tenant_admin**. A service login or an agent login gets `403 human_principal_required` on register, and a runner login gets `403 runner_scope_violation`. | Register with your own sign-in as a person with tenant_admin; `show` / `list` are operator-level. |
+| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | The group or other users have rights to the key file in `MEHO_RUNNER_KEY_DIR`. In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key file at each mount. | Run `chmod 600` on the file and start the runner again. In a pod, mount the key so that it keeps mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode only when the top folder of the volume already has the `fsGroup` group and the rights Kubernetes expects; else Kubernetes changes the rights of every file in the volume. |
 
 ## What is not built yet
 

@@ -294,3 +294,78 @@ func TestFormatSecretFieldMapSortsEntries(t *testing.T) {
 		t.Errorf("got %q; want %q", got, want)
 	}
 }
+
+// TestPrintTargetSummaryKeycloakRealms — a Keycloak target shows its admin
+// realm and its managed realm side by side; another product shows no
+// realms line.
+func TestPrintTargetSummaryKeycloakRealms(t *testing.T) {
+	cases := []struct {
+		name    string
+		product string
+		extras  map[string]interface{}
+		want    string
+	}{
+		{"both set", "keycloak", map[string]interface{}{"admin_realm": "ops", "managed_realm": "acme"}, "realms:            admin=ops, managed=acme"},
+		{"admin defaults to master", "keycloak", map[string]interface{}{"managed_realm": "acme"}, "admin=master, managed=acme"},
+		{"managed not set", "keycloak", map[string]interface{}{}, "admin=master, managed=(not set)"},
+		{"other product", "vcenter", map[string]interface{}{"managed_realm": "acme"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tgt := &api.Target{
+				Id:        mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+				TenantId:  mustUUID(t, "22222222-2222-2222-2222-222222222222"),
+				Name:      "t",
+				Product:   tc.product,
+				Host:      "h",
+				AuthModel: "shared_service_account",
+				Extras:    tc.extras,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			}
+			var buf bytes.Buffer
+			printTargetSummary(&buf, tgt)
+			out := buf.String()
+			if tc.want == "" {
+				if strings.Contains(out, "realms:") {
+					t.Errorf("unexpected realms line in %q", out)
+				}
+				return
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("missing %q in %q", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestPrintTargetSummaryKeycloakRealmsEscapesControlCharacters — a control
+// character in a stored realm name shows as a visible escape in the realms
+// line and in the extras line.
+func TestPrintTargetSummaryKeycloakRealmsEscapesControlCharacters(t *testing.T) {
+	tgt := &api.Target{
+		Id:        mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		TenantId:  mustUUID(t, "22222222-2222-2222-2222-222222222222"),
+		Name:      "t",
+		Product:   "keycloak",
+		Host:      "h",
+		AuthModel: "shared_service_account",
+		Extras:    map[string]interface{}{"admin_realm": "a\x1b[2Kb", "managed_realm": "c\ad"},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	var buf bytes.Buffer
+	printTargetSummary(&buf, tgt)
+	out := buf.String()
+	if strings.ContainsAny(out, "\x1b\a") {
+		t.Errorf("output holds a raw ESC or BEL byte:\n%q", out)
+	}
+	for _, want := range []string{
+		`realms:            admin=a\x1b[2Kb, managed=c\x07d`,
+		`extras:            admin_realm=a\x1b[2Kb, managed_realm=c\x07d`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

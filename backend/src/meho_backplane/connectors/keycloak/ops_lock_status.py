@@ -49,6 +49,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     _opt_str,
     get_or_none,
 )
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -156,6 +157,7 @@ async def keycloak_realm_lock_settings(
     row = await self._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
     )
+    check_answered_realm("keycloak.realm.lock_settings", row, target)
     if row.get("bruteForceProtected") is None:
         raise KeycloakUnexpectedResponseError(
             "the realm answer has no 'bruteForceProtected' (absent or null)"

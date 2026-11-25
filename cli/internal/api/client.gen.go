@@ -2884,6 +2884,7 @@ type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
 // BodyUnblockUiBlockedPeopleUnblockPost defines model for Body__unblock_ui_blocked_people_unblock_post.
 type BodyUnblockUiBlockedPeopleUnblockPost struct {
 	Confirm *string `json:"confirm,omitempty"`
+	Shown   *string `json:"shown,omitempty"`
 	Sub     string  `json:"sub"`
 }
 

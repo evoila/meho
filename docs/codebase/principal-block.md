@@ -68,7 +68,8 @@ The text names no admin and no reason.
   for each `(sub, scope)`. `scope` is `*` or the tenant id. It holds the
   reason, the admin's `sub` and the time.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,
-  and `block_principal`, `unblock_principal`, `list_blocked`.
+  and `block_principal`, `unblock_principal`, `list_blocked`,
+  `block_set_digest`.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
@@ -210,8 +211,15 @@ block. The admin check uses the signed-in session only. The unblock
 button of a row opens a confirm page; only its form (`confirm=yes`)
 removes blocks. The confirm page names the login, its blocks and the
 scope: for a platform admin the button reads "Unblock in all tenants",
-and the page says that every block of the login goes, also the blocks of
-tenant admins. The page never unblocks the admin's own login (403
+and the page says that the blocks it lists go, in all tenants, also the
+blocks of tenant admins. The confirm removes only the blocks the confirm
+page showed: its form carries that set (`shown`, from
+`block_set_digest`), and `unblock_principal(..., shown=...)` compares it
+with the blocks in the table before it removes anything. When the set
+changed in between (a block was added, removed, or set again with a new
+reason, admin or time), MEHO removes nothing, shows the confirm page
+again with the new blocks and a note, and asks again. The audit row
+`principal.unblock` names only the removed blocks. The page never unblocks the admin's own login (403
 `own_login`), and it shows no button on that row. The hint on that row
 names the tenant of the block. A platform admin removes a block on their
 own login with `meho principal unblock <sub> --reason <text>`, run in

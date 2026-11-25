@@ -20569,7 +20569,7 @@
             "description": "Done. The answer sends the browser back to the page."
           },
           "200": {
-            "description": "The confirm page (the form has no confirm=yes).",
+            "description": "The confirm page: the form has no confirm=yes, or the blocks of the login are not the blocks the confirm page showed.",
             "content": {
               "text/html": {
                 "schema": {
@@ -30373,6 +30373,11 @@
           "confirm": {
             "type": "string",
             "title": "Confirm",
+            "default": ""
+          },
+          "shown": {
+            "type": "string",
+            "title": "Shown",
             "default": ""
           }
         },

@@ -46,9 +46,11 @@ for an unknown state.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -131,6 +133,10 @@ class PrincipalNotBlockedError(Exception):
 
 class OwnBlockStaysError(Exception):
     """An admin tried to remove a block on their own login that they may not remove."""
+
+
+class BlockSetChangedError(Exception):
+    """The blocks of the login are not the blocks the admin was shown."""
 
 
 @dataclass(frozen=True)
@@ -350,18 +356,31 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
 
-async def _read_blocks(session: AsyncSession, sub: str) -> list[tuple[str, str]]:
-    """Every block of *sub* as ``(scope, reason)``, read from the table.
+def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
+    """A short text that names a set of blocks.
+
+    It changes when a block is added or removed, and when a block is set
+    again (a new reason, admin or time).
+    """
+    rows = sorted(
+        [b.sub, b.scope, b.reason, b.blocked_by_sub, b.blocked_at.isoformat()] for b in blocks
+    )
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+
+
+async def _read_blocks(session: AsyncSession, sub: str) -> list[BlockedPerson]:
+    """Every block of *sub*, sorted by scope, read from the table.
 
     Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
     """
-    query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(PrincipalBlock.sub == sub)
+    query = select(PrincipalBlock).where(PrincipalBlock.sub == sub)
     try:
-        rows = (await session.execute(query)).tuples()
-        return sorted((str(scope), str(reason)) for scope, reason in rows)
+        rows = (await session.execute(query)).scalars().all()
     except Exception as exc:
         _log.warning("principal_block_read_failed", exc_info=True)
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    blocks = [BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows]
+    return sorted(blocks, key=lambda b: b.scope)
 
 
 async def unblock_principal(
@@ -370,6 +389,7 @@ async def unblock_principal(
     *,
     reason: str | None = None,
     sign_in: dict[str, Any] | None = None,
+    shown: str | None = None,
 ) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
@@ -382,29 +402,36 @@ async def unblock_principal(
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
     is none, and :class:`PrincipalBlockUnavailableError` when the table
     cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given.
+    go into the audit row when they are given. When *shown* is given (the
+    :func:`block_set_digest` of the blocks the admin was shown), MEHO
+    removes the blocks only when they are still exactly those blocks, and
+    else raises :class:`BlockSetChangedError` and removes nothing.
     """
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
     only_this_tenant = own_login or not operator.platform_admin
-    condition = PrincipalBlock.sub == sub
-    if only_this_tenant:
-        condition = condition & (PrincipalBlock.scope == tenant_scope)
     async with get_sessionmaker()() as session:
         blocks = await _read_blocks(session, sub)
-        scopes = {scope for scope, _reason in blocks}
+        scopes = {b.scope for b in blocks}
         if own_login and (
             BLOCK_SCOPE_ALL in scopes or (not operator.platform_admin and tenant_scope in scopes)
         ):
             raise OwnBlockStaysError
-        removed = [b for b in blocks if b[0] == tenant_scope] if only_this_tenant else blocks
+        removed = [b for b in blocks if b.scope == tenant_scope] if only_this_tenant else blocks
         if not removed:
             raise PrincipalNotBlockedError
-        await session.execute(delete(PrincipalBlock).where(condition))
+        if shown is not None and shown != block_set_digest(removed):
+            raise BlockSetChangedError
+        removed_scopes = [b.scope for b in removed]
+        await session.execute(
+            delete(PrincipalBlock).where(
+                PrincipalBlock.sub == sub, PrincipalBlock.scope.in_(removed_scopes)
+            )
+        )
         payload: dict[str, Any] = {
             "unblocked_sub": sub,
-            "scopes": [scope for scope, _reason in removed],
-            "removed_blocks": [{"scope": scope, "reason": why} for scope, why in removed],
+            "scopes": removed_scopes,
+            "removed_blocks": [{"scope": b.scope, "reason": b.reason} for b in removed],
         }
         if reason is not None:
             payload["reason"] = reason

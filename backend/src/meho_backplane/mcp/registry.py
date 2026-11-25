@@ -65,7 +65,6 @@ at app boot. Called from the FastAPI ``lifespan`` so the first incoming
 from __future__ import annotations
 
 import importlib
-import os
 import pkgutil
 import re
 from collections.abc import Awaitable, Callable
@@ -78,7 +77,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.features import FEATURE_MATURITY
 from meho_backplane.mcp.profiles import profile_admits
-from meho_backplane.settings import get_settings, parse_bool_env
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "MCP_ADMIN_SCOPE",
@@ -333,18 +332,6 @@ def addon_family_active(
 _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 
 
-def _strict_tool_schemas_on() -> bool:
-    """True when the ``MCP_STRICT_TOOL_SCHEMAS`` switch is on.
-
-    Read from the environment, not from :func:`get_settings`: the hosted
-    agent builds its tool list when its module is imported, and the full
-    settings need more environment than that import has. It uses the same
-    :func:`parse_bool_env` as ``Settings.mcp_strict_tool_schemas``, so both
-    give one answer; ``test_mcp_strict_tool_schemas.py`` checks that.
-    """
-    return parse_bool_env(os.environ.get("MCP_STRICT_TOOL_SCHEMAS"))
-
-
 #: Keywords whose value is plain data, not a schema. An ``enum`` inside such a
 #: value is not a rule of the schema, so it stays as it is.
 _LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "examples", "example"})
@@ -359,7 +346,7 @@ _SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
 def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
     """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
 
-    Used for ``MCP_STRICT_TOOL_SCHEMAS``. It goes to any depth. Nothing else
+    Used for the wire copy of each tool schema. It goes to any depth. Nothing else
     changes: a ``type`` list such as ``["string", "null"]`` stays, and so do
     the values under ``default``, ``const`` and ``examples``. An ``enum``
     that would be left empty is removed: an empty ``enum`` matches nothing,
@@ -397,15 +384,10 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
     return node
 
 
-def _wire_safe_input_schema(
-    schema: dict[str, Any],
-    *,
-    strict: bool = False,
-) -> dict[str, Any]:
+def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return *schema* with any top-level combinator keyword removed.
 
-    With *strict* (the ``MCP_STRICT_TOOL_SCHEMAS`` switch) ``None`` is also
-    removed from every ``enum`` at every depth.
+    ``None`` is also removed from every ``enum`` at every depth.
 
     See :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why. *schema* is not
     mutated: when it carries no forbidden top-level key the same object is
@@ -417,9 +399,8 @@ def _wire_safe_input_schema(
         schema = {
             key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS
         }
-    if strict:
-        schema = _without_null_enum_members(schema)
-    return schema
+    stripped: dict[str, Any] = _without_null_enum_members(schema)
+    return stripped
 
 
 class ToolAnnotations(BaseModel):
@@ -622,9 +603,8 @@ class ToolDefinition(BaseModel):
         :func:`_wire_safe_input_schema`, which strips top-level
         ``oneOf`` / ``allOf`` / ``anyOf`` — the Anthropic Messages API
         rejects those at the top level of a tool's ``input_schema`` and
-        the rejection poisons the whole session. With
-        ``MCP_STRICT_TOOL_SCHEMAS`` on, ``null`` is also dropped from every
-        ``enum``, because a strict model gateway refuses it. The full schema (with
+        the rejection poisons the whole session. ``null`` is also dropped from
+        every ``enum``, because a strict model gateway refuses it. The full schema (with
         the combinators) is retained on ``self.inputSchema`` so
         server-side jsonschema validation in
         :mod:`~meho_backplane.mcp.handlers` is unaffected.
@@ -632,10 +612,7 @@ class ToolDefinition(BaseModel):
         out: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
-            "inputSchema": _wire_safe_input_schema(
-                self.inputSchema,
-                strict=_strict_tool_schemas_on(),
-            ),
+            "inputSchema": _wire_safe_input_schema(self.inputSchema),
         }
         if self.title is not None:
             out["title"] = self.title

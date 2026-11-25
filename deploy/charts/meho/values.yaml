@@ -757,11 +757,6 @@ config:
   # text, and no tool sends an output schema. The inputs they accept stay
   # the same. See `docs/codebase/mcp.md`.
   mcpShortToolTexts: "false"
-  # -- `mcpStrictToolSchemas` is rendered into `MCP_STRICT_TOOL_SCHEMAS`. When
-  # `"true"`, the tool schemas sent to MCP clients hold no `null` inside an
-  # `enum`, so a strict model gateway accepts the tool list. The server still
-  # checks every call against the full schema. See `docs/codebase/mcp.md`.
-  mcpStrictToolSchemas: "false"
   # -- `mcpProfileConnectorLists` is rendered into
   # `MCP_PROFILE_CONNECTOR_LISTS`. When `"true"`, the profiles of
   # `mcpConnectorProfiles` count: a session at `/mcp?profile=<name>` may use

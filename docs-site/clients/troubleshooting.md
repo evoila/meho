@@ -333,8 +333,7 @@ agent gets no MEHO tools. The error says a schema holds `null` inside an
 **Wall.** Some tool inputs list `null` as one allowed value. A strict
 gateway refuses such a schema, and then refuses the whole list.
 
-**Fix.** The admin turns on `config.mcpStrictToolSchemas` in the Helm
-values (environment setting `MCP_STRICT_TOOL_SCHEMAS`). MEHO then sends the
+**Fix.** Update MEHO to the version with this fix. MEHO then sends the
 tool schemas without `null` inside an `enum`. A call that sends `null`
 still works, because the server checks every call against the full
 schema.

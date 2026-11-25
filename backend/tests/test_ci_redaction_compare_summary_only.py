@@ -148,11 +148,35 @@ def test_flag_taken_out_fails() -> None:
         _check(changed)
 
 
+def _move_flag_before_judge(text: str) -> str:
+    """Put ``--summary-only`` before ``--judge`` on the judge line of the compare script.
+
+    A judge line can go on over lines that end in a backslash. Only the
+    ``--judge`` of a command that names the compare script moves; the judge
+    call of another script stays as it is.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if "--judge " not in line:
+            continue
+        start = index
+        while start > 0 and lines[start - 1].rstrip().endswith("\\"):
+            start -= 1
+        if any(_SCRIPT in earlier for earlier in lines[start : index + 1]):
+            lines[index] = line.replace("--judge ", "--summary-only --judge ")
+    return "\n".join(lines)
+
+
 def test_flag_in_another_place_passes() -> None:
-    text = _ci_text()
-    changed = _without_flag(text)
-    changed = changed.replace("--judge ", "--summary-only --judge ")
-    assert changed.count("--summary-only --judge ") == 1
+    changed = _move_flag_before_judge(_without_flag(_ci_text()))
+    judge_lines = [
+        line
+        for _, _, run in _steps(_jobs(changed))
+        for line in run.replace("\\\n", " ").splitlines()
+        if _SCRIPT in line and "--judge" in line
+    ]
+    assert len(judge_lines) == 1
+    assert "--summary-only --judge " in judge_lines[0]
     _check(changed)
 
 

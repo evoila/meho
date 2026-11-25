@@ -1618,13 +1618,6 @@ class Settings(BaseModel):
         model keeps more of its context window for the job. It stays off
         until model tests show it helps. Env
         ``MCP_SHORT_TOOL_TEXTS``.
-    mcp_strict_tool_schemas:
-        Off by default. When on, the input schemas that MEHO sends in
-        ``tools/list`` hold no ``null`` inside an ``enum``. A strict model
-        gateway refuses such a schema, and then refuses the whole tool
-        list. Only the copy that is sent changes. The server still checks
-        each call against the full schema, so a call that sends ``null``
-        still works. Env ``MCP_STRICT_TOOL_SCHEMAS``.
     mcp_call_flow_guide:
         Off by default. When on, the MCP session-start text starts with a
         short guide that explains, in order, how to find and call an
@@ -2705,7 +2698,6 @@ class Settings(BaseModel):
     kb_wiki_filtered_search: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     kb_wiki_interleave: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_short_tool_texts: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    mcp_strict_tool_schemas: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_call_flow_guide: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_profile_connector_lists: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_connector_profiles: dict[str, ConnectorProfile] = Field(default_factory=dict)
@@ -3945,9 +3937,6 @@ def get_settings() -> Settings:
         ),
         mcp_short_tool_texts=parse_bool_env(
             os.environ.get("MCP_SHORT_TOOL_TEXTS"),
-        ),
-        mcp_strict_tool_schemas=parse_bool_env(
-            os.environ.get("MCP_STRICT_TOOL_SCHEMAS"),
         ),
         mcp_call_flow_guide=parse_bool_env(
             os.environ.get("MCP_CALL_FLOW_GUIDE"),

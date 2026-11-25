@@ -62,7 +62,6 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "mcp_profile_connector_lists",
         "mcp_reveal_fetch",
         "mcp_short_tool_texts",
-        "mcp_strict_tool_schemas",
         "mcp_topology_off_default_list",
         "operation_contract_guidance",
         "policy_classification",

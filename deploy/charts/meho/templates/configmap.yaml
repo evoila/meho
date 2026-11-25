@@ -238,7 +238,6 @@ data:
   KB_WIKI_INTERLEAVE: {{ .Values.config.kbWikiInterleave | quote }}
   FILE_REF_PARAMS: {{ .Values.config.fileRefParams | quote }}
   MCP_SHORT_TOOL_TEXTS: {{ .Values.config.mcpShortToolTexts | quote }}
-  MCP_STRICT_TOOL_SCHEMAS: {{ .Values.config.mcpStrictToolSchemas | quote }}
   # Tool profiles with a connector list. Off by default.
   MCP_PROFILE_CONNECTOR_LISTS: {{ .Values.config.mcpProfileConnectorLists | quote }}
   MCP_CONNECTOR_PROFILES: {{ .Values.config.mcpConnectorProfiles | quote }}

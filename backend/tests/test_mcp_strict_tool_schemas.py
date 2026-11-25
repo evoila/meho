@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``MCP_STRICT_TOOL_SCHEMAS``: no ``null`` inside an ``enum`` in the sent tool schemas.
+"""No ``null`` inside an ``enum`` in the sent tool schemas.
 
 A strict model gateway refuses a tool schema that holds ``null`` inside an
-``enum``, and then refuses the whole tool list. With the switch on, the copy
-of each input schema that ``tools/list`` sends has no such ``null``. The
-schema the server checks a call against does not change.
+``enum``, and then refuses the whole tool list. The copy of each input schema
+that ``tools/list`` sends has no such ``null``. The schema the server checks a
+call against does not change.
 
 The tests read the tools from the registry. They keep no list of tools.
 """
@@ -38,7 +38,6 @@ from meho_backplane.mcp.registry import (
     _without_null_enum_members,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
-from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -47,11 +46,6 @@ from tests.mcp_test_fixtures import (
 )
 
 _SNAPSHOT = Path(__file__).resolve().parents[1] / "contracts" / "mcp-tools-list.json"
-
-
-def _switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
-    monkeypatch.setenv("MCP_STRICT_TOOL_SCHEMAS", "true" if on else "false")
-    get_settings.cache_clear()
 
 
 def _registered() -> list[ToolDefinition]:
@@ -83,17 +77,12 @@ def _null_enum_fields() -> list[tuple[str, str]]:
     return sorted(fields)
 
 
-def test_switch_is_off_by_default() -> None:
-    assert get_settings().mcp_strict_tool_schemas is False
-
-
 def test_the_registry_has_null_enums_to_remove() -> None:
     """The tests below mean something only while some tool has this shape."""
     assert _null_enum_fields()
 
 
-def test_switch_on_no_sent_schema_has_null_in_an_enum(monkeypatch: pytest.MonkeyPatch) -> None:
-    _switch(monkeypatch, on=True)
+def test_no_sent_schema_has_null_in_an_enum() -> None:
     bad = {
         definition.name: _null_enum_paths(definition.to_wire()["inputSchema"])
         for definition in _registered()
@@ -101,24 +90,22 @@ def test_switch_on_no_sent_schema_has_null_in_an_enum(monkeypatch: pytest.Monkey
     assert {name: paths for name, paths in bad.items() if paths} == {}
 
 
-def test_switch_off_every_sent_schema_is_the_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_snapshot_is_the_sent_schemas_and_has_no_null_in_an_enum() -> None:
     """The snapshot is built from ``to_wire()``, so this checks every sent schema."""
-    _switch(monkeypatch, on=False)
     assert _SNAPSHOT.read_text(encoding="utf-8") == render_snapshot()
-    assert _null_enum_paths(json.loads(_SNAPSHOT.read_text(encoding="utf-8")))
+    tools = json.loads(_SNAPSHOT.read_text(encoding="utf-8"))["tools"]
+    assert not [tool["name"] for tool in tools if _null_enum_paths(tool["inputSchema"])]
 
 
-def test_switch_on_changes_only_the_null_enum_members(monkeypatch: pytest.MonkeyPatch) -> None:
-    _switch(monkeypatch, on=True)
+def test_only_the_null_enum_members_change() -> None:
     for definition in _registered():
         sent = definition.to_wire()["inputSchema"]
         expected = json.loads(json.dumps(_wire_safe_input_schema(definition.inputSchema)))
         assert sent == _without_null_enum_members(expected), definition.name
 
 
-def test_the_server_schema_keeps_the_null_members(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_server_schema_keeps_the_null_members() -> None:
     before = {d.name: json.dumps(d.inputSchema, sort_keys=True) for d in _registered()}
-    _switch(monkeypatch, on=True)
     for definition in _registered():
         definition.to_wire()
     assert {d.name: json.dumps(d.inputSchema, sort_keys=True) for d in _registered()} == before
@@ -350,7 +337,6 @@ async def test_a_call_with_null_or_without_the_field_passes_and_gives_the_same_r
     Both must pass the schema check, give the same answer, and hand the same
     arguments to the layer below.
     """
-    _switch(monkeypatch, on=True)
     operator = build_operator(TenantRole.TENANT_ADMIN, platform_admin=True)
     fields = _null_enum_fields()
     assert len(fields) == 16
@@ -387,25 +373,10 @@ def test_literal_values_and_property_names_are_not_schema_rules() -> None:
     assert out["properties"]["c"] == {"const": {"enum": [None]}, "enum": ["z"]}
 
 
-@pytest.mark.parametrize(
-    "raw", [None, "", "1", "true", "True", "yes", "on", "0", "false", "off", "maybe"]
-)
-def test_the_registry_and_the_settings_read_the_switch_the_same_way(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None
-) -> None:
-    if raw is None:
-        monkeypatch.delenv("MCP_STRICT_TOOL_SCHEMAS", raising=False)
-    else:
-        monkeypatch.setenv("MCP_STRICT_TOOL_SCHEMAS", raw)
-    get_settings.cache_clear()
-    assert mcp_registry._strict_tool_schemas_on() is get_settings().mcp_strict_tool_schemas
-
-
 async def test_a_value_outside_the_enum_is_still_refused(
     monkeypatch: pytest.MonkeyPatch,
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
-    _switch(monkeypatch, on=True)
     tool, field = _null_enum_fields()[0]
     definition, _handler = mcp_registry._TOOLS[tool]
     operator = build_operator(TenantRole.TENANT_ADMIN, platform_admin=True)
@@ -424,17 +395,7 @@ def _hosted_agent_schemas() -> dict[str, dict[str, Any]]:
     return {spec.name: spec.parameter_schema for spec in specs}
 
 
-def test_hosted_agent_tool_list_has_no_null_in_an_enum_when_the_switch_is_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _switch(monkeypatch, on=True)
+def test_hosted_agent_tool_list_has_no_null_in_an_enum() -> None:
     schemas = _hosted_agent_schemas()
     assert {"search_knowledge", "search_memory"} <= set(schemas)
     assert {name: _null_enum_paths(s) for name, s in schemas.items() if _null_enum_paths(s)} == {}
-
-
-def test_hosted_agent_tool_list_keeps_the_null_when_the_switch_is_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _switch(monkeypatch, on=False)
-    assert _null_enum_paths(_hosted_agent_schemas()["search_knowledge"])

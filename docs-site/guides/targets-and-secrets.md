@@ -29,7 +29,7 @@ which is why this is the first guide.
 | Path | What it is | When to use it |
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
-| **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
+| **Operator console — "Targets" in the menu (`/ui/connectors`)** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
 | **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
 
 Create, edit and delete on REST are for people only. A service login

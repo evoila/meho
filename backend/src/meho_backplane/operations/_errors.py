@@ -2548,6 +2548,14 @@ def is_auth_failed_status(
     return status_code in recognised
 
 
+#: The ``--data`` argument the restage hint names for ``meho vault kv put``.
+#: It is a file, so the credential never stands on the command line. The CLI
+#: reads it in ``loadJSONFlag`` (``cli/internal/cmd/vault/vault.go``); a Go
+#: test there reads this constant from this file and checks that the CLI
+#: accepts it. Keep the assignment on one line.
+RESTAGE_KV_PUT_DATA_ARG: Final = "@<file>"
+
+
 def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -> str:
     """The restage-the-stale-credential remediation clause (#2329).
 
@@ -2559,20 +2567,32 @@ def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -
     the filing (#2329) documents -- so the fix is to restage the credential,
     not to widen a policy.
 
-    #2400: names the **real** staging surface. The prior text pointed at
-    ``meho target credential set <name>``, which does not exist in the CLI --
-    it sent both MFC 401 reporters (#2395, #2396) down a credential rabbit
-    hole citing a phantom command. A target's credential is staged by writing
-    it back to its Vault ``secret_ref`` with ``meho vault kv put``.
+    The command is ``meho vault kv put secret <secret_ref> --data @<file>``:
+    a target's ``secret_ref`` is a path under the ``secret`` mount, and the
+    JSON object comes from a file that only the reader can read. The text
+    never puts a credential value on the command line, and it points to the
+    guide part "Store the credential through MEHO".
     """
     who = f"target {target_name!r}" if target_name else "this target"
     ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
+    path = secret_ref if secret_ref else "<secret_ref>"
+    find_ref = (
+        ""
+        if secret_ref
+        else f" `meho targets describe {target_name or '<target>'}` shows its secret_ref."
+    )
     return (
         f"the credential for {who}{ref_clause} appears stale or wrong -- most "
         f"likely the upstream service-account password was rotated while the "
-        f"backplane-side Vault copy lagged. Restage it by writing the corrected "
-        f"secret back to its Vault path with "
-        f"`meho vault kv put <mount> <path> --data <field>=<value>`, then retry."
+        f"backplane-side Vault copy lagged.{find_ref} Restage it through MEHO: write the "
+        f'corrected credential as a JSON object (for example {{"username": '
+        f'"<user>", "password": "<password>"}}) into a file that only you can '
+        f"read, store it with "
+        f"`meho vault kv put secret {path} --data {RESTAGE_KV_PUT_DATA_ARG}`"
+        f" (the write waits for a person's approval), delete the "
+        f"file, then retry. Never put the password on the command line. The steps "
+        f"are in docs-site/guides/targets-and-secrets.md "
+        f"(Store the credential through MEHO)."
     )
 
 

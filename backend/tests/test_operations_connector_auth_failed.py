@@ -35,6 +35,7 @@ structured ``extras`` payload.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -72,6 +73,8 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
     _UPSTREAM_MESSAGE_CAP,
+    RESTAGE_KV_PUT_DATA_ARG,
+    _auth_restage_remediation,
     is_auth_failed_status,
     result_connector_auth_failed,
 )
@@ -580,6 +583,56 @@ def test_result_connector_auth_failed_shape_401() -> None:
     # The httpx (dispatch) path has no connector-composed establish message.
     assert extras["raw_message"] is None
     assert extras["upstream_message"] == "session token invalid or expired"
+
+
+_DATA_ARG_RE = re.compile(r"--data\s+(\S+?)`")
+
+
+@pytest.mark.parametrize(
+    ("target_name", "secret_ref"),
+    [
+        ("vrli-lab", "tenants/tid/vrli-lab"),
+        ("vrli-lab", None),
+        (None, None),
+    ],
+)
+def test_restage_hint_reads_the_credential_from_a_file(
+    target_name: str | None, secret_ref: str | None
+) -> None:
+    """The restage hint names only the ``--data @<file>`` form and no value."""
+    text = _auth_restage_remediation(target_name, secret_ref)
+
+    # The only --data form is the shared constant the Go test checks
+    # against the CLI's loadJSONFlag.
+    assert _DATA_ARG_RE.findall(text) == [RESTAGE_KV_PUT_DATA_ARG]
+    assert RESTAGE_KV_PUT_DATA_ARG.startswith("@")
+    assert "<field>=<value>" not in text
+    assert "--data '" not in text
+    assert "--data {" not in text
+    assert "only you can read" in text
+    assert "delete the file" in text
+    assert "Never put the password on the command line" in text
+    assert "docs-site/guides/targets-and-secrets.md" in text
+    assert "Store the credential through MEHO" in text
+
+
+def test_restage_hint_uses_the_known_secret_ref_as_path() -> None:
+    """A known secret_ref is the path under the ``secret`` mount."""
+    text = _auth_restage_remediation("vrli-lab", "tenants/tid/vrli-lab")
+
+    assert "`meho vault kv put secret tenants/tid/vrli-lab --data @<file>`" in text
+    assert "meho targets describe" not in text
+
+
+def test_restage_hint_without_secret_ref_says_where_to_read_it() -> None:
+    """Without a secret_ref the path is a placeholder and the hint names the lookup."""
+    text = _auth_restage_remediation("vrli-lab", None)
+
+    assert "`meho vault kv put secret <secret_ref> --data @<file>`" in text
+    assert "`meho targets describe vrli-lab` shows its secret_ref." in text
+
+    unnamed = _auth_restage_remediation(None, None)
+    assert "`meho targets describe <target>` shows its secret_ref." in unnamed
 
 
 def test_result_connector_auth_failed_after_relogin_cause_and_no_restage() -> None:

@@ -12,20 +12,29 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from structlog.testing import capture_logs
 
 from meho_backplane.api.v1.targets import router as targets_router
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared import vault_creds
-from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors._shared.vault_creds import (
+    OperatorTokenRequiredError,
+    VaultCredentialsReadError,
+    load_basic_credentials,
+)
+from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.connectors.vault.tenant_scope import (
     REASON_OUTSIDE_TENANT,
@@ -35,7 +44,12 @@ from meho_backplane.connectors.vault.tenant_scope import (
     outside_tenant_folder_reason,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.operations import (
+    dispatch,
+    register_typed_operation,
+    reset_dispatcher_caches,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
@@ -220,6 +234,186 @@ async def test_the_check_runner_is_still_refused_and_does_not_warn(
     with capture_logs() as captured, pytest.raises(VaultTenantScopeError):
         await load_basic_credentials(_Target(), _operator(check_runner_dispatch=True))
     assert _warnings(captured) == []
+
+
+async def test_an_error_in_the_warning_step_does_not_stop_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("path check failed")
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vault.tenant_scope.outside_tenant_folder_reason", _boom
+    )
+    creds, captured = await _read(monkeypatch, _Target(), _operator())
+    assert creds == {"username": "u", "password": _CANARY}
+    assert _warnings(captured) == []
+
+
+async def test_an_error_in_the_log_call_does_not_stop_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(_ref: str) -> str:
+        raise ValueError("cut failed")
+
+    monkeypatch.setattr(vault_creds, "_folder_warning_prefix", _boom)
+    creds, _ = await _read(monkeypatch, _Target(), _operator())
+    assert creds == {"username": "u", "password": _CANARY}
+
+
+async def test_a_read_with_no_operator_token_is_refused_and_writes_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+    operator = _operator().model_copy(update={"raw_jwt": ""})
+    with capture_logs() as captured, pytest.raises(OperatorTokenRequiredError):
+        await load_basic_credentials(_Target(), operator)
+    assert _warnings(captured) == []
+
+
+async def test_a_path_in_the_store_api_form_is_refused_and_writes_no_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+    target = _Target(secret_ref="secret/data/targets/vc-lab-01")
+    with capture_logs() as captured, pytest.raises(VaultCredentialsReadError):
+        await load_basic_credentials(target, _operator())
+    assert _warnings(captured) == []
+
+
+# ---------------------------------------------------------------------------
+# The caller sees no change
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_embedding_service() -> AsyncMock:
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    return service
+
+
+class _DispatchTarget:
+    product = "vault"
+    version = "1.x"
+    preferred_impl_id: str | None = None
+    fingerprint = None
+    host = "t.example.test"
+    port = 443
+    auth_model = "shared_service_account"
+
+    def __init__(self, *, name: str, secret_ref: str) -> None:
+        self.id = uuid4()
+        self.name = name
+        self.secret_ref = secret_ref
+
+
+async def _read_credentials_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    creds = await load_basic_credentials(target, operator)
+    return {"user": creds["username"], "reachable": True}
+
+
+def _register_dispatch_connector() -> None:
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    class _Stub(Connector):
+        product = "vault"
+        version = "1.x"
+        impl_id = "vault"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> Any:
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> Any:
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+            raise NotImplementedError
+
+    reset_dispatcher_caches()
+    clear_registry()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_Stub)
+
+
+async def _dispatch_and_audit(
+    monkeypatch: pytest.MonkeyPatch, target: _DispatchTarget
+) -> tuple[Any, dict[str, Any], int]:
+    install_fake_client(monkeypatch, secret={"username": "u", "password": _CANARY})
+    with capture_logs() as captured:
+        result = await dispatch(
+            operator=_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.folder.read",
+            target=target,
+            params={},
+        )
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "vault.folder.read")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    columns = {c.key: getattr(rows[0], c.key) for c in AuditLog.__table__.columns}
+    text = json.dumps(columns, default=str, sort_keys=True)
+    for secret_text, mark in (
+        (str(target.id), "<id>"),
+        (target.name, "<name>"),
+        (target.secret_ref, "<path>"),
+    ):
+        text = text.replace(secret_text, mark)
+    row = json.loads(text)
+    for volatile in (
+        "id",
+        "occurred_at",
+        "duration_ms",
+        "request_id",
+        "correlation_id",
+        "trace_id",
+    ):
+        row.pop(volatile, None)
+    return result, row, len(_warnings(captured))
+
+
+async def test_the_caller_answer_and_the_audit_row_are_the_same_inside_and_outside(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    _register_dispatch_connector()
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.folder.read",
+        handler=_read_credentials_handler,
+        summary="Read a target login.",
+        description="Read.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    inside = _DispatchTarget(name="inside-t", secret_ref=tenant_secret_ref(_TENANT, "inside-t"))
+    inside_result, inside_row, inside_warnings = await _dispatch_and_audit(monkeypatch, inside)
+    async with get_sessionmaker()() as session:
+        for old in (await session.execute(select(AuditLog))).scalars().all():
+            await session.delete(old)
+        await session.commit()
+    outside = _DispatchTarget(name="outside-t", secret_ref="targets/outside-t")
+    outside_result, outside_row, outside_warnings = await _dispatch_and_audit(monkeypatch, outside)
+
+    assert (inside_warnings, outside_warnings) == (0, 1)
+    assert inside_result.status == outside_result.status == "ok"
+    assert inside_result.result == outside_result.result
+    assert inside_row == outside_row
+    assert _EVENT not in json.dumps(outside_row)
+    assert _EVENT not in repr(outside_result)
+    clear_registry()
+    reset_dispatcher_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +809,82 @@ async def test_a_built_path_inside_the_default_folder_is_not_warned_or_listed(
 
     assert warnings == []
     assert names == []
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_target_is_not_in_the_list() -> None:
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    await _insert_target(name="live", secret_ref="targets/live")
+    await _insert_target(name="gone", secret_ref="targets/gone", deleted_at=datetime.now(UTC))
+    await _insert_target(
+        name="gone-other",
+        tenant_id=_OTHER_TENANT,
+        secret_ref="targets/gone-other",
+        deleted_at=datetime.now(UTC),
+    )
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            tenant_admin = _get(client, key, tenant_role=TenantRole.TENANT_ADMIN.value)
+            platform = _get(
+                client, key, tenant_role=TenantRole.TENANT_ADMIN.value, platform_admin=True
+            )
+    assert tenant_admin.status_code == 200, tenant_admin.text
+    assert [i["name"] for i in tenant_admin.json()["items"]] == ["live"]
+    assert platform.status_code == 200, platform.text
+    assert [i["name"] for i in platform.json()["items"]] == ["live"]
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_with_its_own_store_role_is_listed_and_its_read_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from meho_backplane.api.v1.targets_outside_tenant_folder import router
+
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT}=meho-own-role")
+    get_settings.cache_clear()
+    await _insert_target(name="outside", secret_ref="targets/outside")
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            listed = _get(client, key, tenant_role=TenantRole.TENANT_ADMIN.value)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["check_off"] is False
+    assert [(i["name"], i["reason"]) for i in listed.json()["items"]] == [
+        ("outside", REASON_OUTSIDE_TENANT)
+    ]
+
+    install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+    with capture_logs() as captured, pytest.raises(VaultTenantScopeError):
+        await load_basic_credentials(
+            _Target(name="outside", secret_ref="targets/outside"), _operator()
+        )
+    assert _warnings(captured) == []
+
+
+@pytest.mark.asyncio
+async def test_an_older_route_refuses_the_own_tenant_of_the_token() -> None:
+    """``GET /api/v1/sensors?tenant_filter=<token tenant>`` with another tenant chosen."""
+    from meho_backplane.api.v1.sensors import router
+
+    await _seed_tenant_row(_OTHER_TENANT, "lab-b")
+    app = _app_with(router)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        with TestClient(app) as client:
+            response = _get(
+                client,
+                key,
+                url=f"/api/v1/sensors?tenant_filter={_TENANT}",
+                tenant_role=TenantRole.READ_ONLY.value,
+                platform_admin=True,
+                headers={"Meho-Tenant": str(_OTHER_TENANT)},
+            )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("tenant_select_with_header:")

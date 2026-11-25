@@ -959,6 +959,8 @@ meho audit replay <session-id> [flags]
 
 Fetch a single audit row by id
 
+The summary prints `secret_read_as` when the row has it. It is the id of the login that the secret store accepted when the secret this call used was read. That read can be in this call, or in an earlier call when the call used a login MEHO kept in memory. So a value does not prove that this call read the store again. It can also be one of three fixed texts: `meho` (the store saw MEHO's own identity), `check-runner` (the check runner read it, and its login has no id), or `kept-login:reader-unknown` (the call used a login MEHO kept in memory, and it is not known whose login read it). The line is missing when no login read a secret for this call. The backplane sends the field only while the switch `AUDIT_SECRET_READ_AS` is on (off by default).
+
 ```
 meho audit show <audit-id> [flags]
 ```

@@ -1221,8 +1221,8 @@ Session Max Limited**, that maximum also applies.
 
 Without `offline_access`, the refresh token ends at the realm's **SSO
 Session Idle** limit. A realm the MEHO chart created new has 1 hour.
-An older realm or a realm made by hand keeps its own limit (Keycloak's
-default is 30 minutes).
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has, so check it once.
 After that, the next MEHO call needs a new login.
 
 Two more things must be true:
@@ -1262,7 +1262,7 @@ an upgrade, because Keycloak reads the realm file only when it creates
 the realm. So check every existing realm once (see "On an existing
 realm, set the two values once" below).
 A realm made by hand starts with Keycloak's defaults: 30 minutes and 10 hours.
-With them, a console session ends after 30 minutes without use.
+In a realm made by hand, a console session ends after 30 minutes without use.
 
 When the session ends, the console shows "Your session ended. Please
 sign in again." and a **Sign in** button. After the login, the person is

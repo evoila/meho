@@ -238,8 +238,9 @@ at session start; restart the session after edits:
 - **`offline_access`** in `scopes` gives a long login that renews
   itself: it ends after 48 hours without use, or after 7 days at most.
   Without it, the login ends at the realm's SSO idle limit: 1 hour on a
-  realm the MEHO chart created new. An older realm or a realm made by
-  hand keeps its own limit (Keycloak's default is 30 minutes). See
+  realm the MEHO chart created new.
+  A realm made by hand starts with Keycloak's default of 30 minutes.
+  An older realm keeps the limit it already has. See
   [How long each login lasts](../install/keycloak-realm.md#how-long-each-login-lasts).
 
 ## Work in one tenant

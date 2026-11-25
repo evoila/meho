@@ -223,8 +223,9 @@ after 7 days at most. Then run `meho login` again.
 
 - `meho login --offline=false` asks for a short login instead. It ends
   at the realm's SSO Session Idle limit: 1 hour on a realm the MEHO
-  chart created new. An older realm or a realm made by hand keeps its
-  own limit (Keycloak's default is 30 minutes).
+  chart created new.
+  A realm made by hand starts with Keycloak's default of 30 minutes.
+  An older realm keeps the limit it already has: ask your admin.
 - If the login server does not offer the long login (an older realm),
   `meho login` logs in without it and prints one line that says so. Ask
   your admin to fix the realm: see

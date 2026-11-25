@@ -137,9 +137,11 @@ To see what it would change, run it with `--dry-run`. See
 call, the next call opens a new browser login or does not answer.
 
 **Wall.** The client did not ask for `offline_access`. Then Keycloak
-issues a normal refresh token, and it ends at the realm's SSO idle limit
-(1 hour on a realm the MEHO chart created new; an older realm or a realm
-made by hand keeps its own limit, and Keycloak's default is 30 minutes). Older versions of the MEHO plugin and the Claude
+issues a normal refresh token, and it ends at the realm's SSO idle limit:
+1 hour on a realm the MEHO chart created new.
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has.
+Older versions of the MEHO plugin and the Claude
 Desktop bundle did not ask for it.
 
 **Fix.** Update the MEHO plugin (`claude plugin update meho@meho`, then

@@ -243,7 +243,8 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
     rules of the ``Meho-Tenant`` header
     (:func:`~meho_backplane.auth.current_tenant.select_current_tenant`):
 
-    * A tenant in the caller's own tenant list is refused with HTTP 403
+    * A tenant in the caller's own tenant list, or the token's own tenant
+      (``operator.token_tenant_id``), is refused with HTTP 403
       ``tenant_select_with_header``. The caller selects it with the
       ``Meho-Tenant`` header, so their own role there applies.
     * Any other tenant is allowed only for a platform admin
@@ -259,7 +260,9 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
     if requested is None or requested == operator.tenant_id:
         return operator.tenant_id
     log = structlog.get_logger(__name__)
-    if any(entry.tenant_id == requested for entry in operator.tenants):
+    if requested == operator.token_tenant_id or any(
+        entry.tenant_id == requested for entry in operator.tenants
+    ):
         log.warning(
             "cross_tenant_own_tenant_denied",
             operator_sub=operator.sub,

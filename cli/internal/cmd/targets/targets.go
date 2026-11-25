@@ -113,6 +113,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newProbeCmd())
 	cmd.AddCommand(newImportCmd())
 	cmd.AddCommand(newDiscoverCmd())
+	cmd.AddCommand(newOutsideFolderCmd())
 	return cmd
 }
 

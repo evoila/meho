@@ -10381,7 +10381,7 @@ type RunnerPrincipalRead struct {
 	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
 	SetAsideCount      *int               `json:"set_aside_count,omitempty"`
-	SetAsideLastAt     *time.Time         `json:"set_aside_last_at"`
+	SetAsideLastAt     *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	WireVersion        *string            `json:"wire_version"`
@@ -10405,7 +10405,7 @@ type RunnerPrincipalRegistered struct {
 	PackageSetDigest        *string            `json:"package_set_digest"`
 	Revoked                 bool               `json:"revoked"`
 	SetAsideCount           *int               `json:"set_aside_count,omitempty"`
-	SetAsideLastAt          *time.Time         `json:"set_aside_last_at"`
+	SetAsideLastAt          *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId                openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt               time.Time          `json:"updated_at"`
 	WireVersion             *string            `json:"wire_version"`

@@ -881,10 +881,13 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   them again on the next tick. With
   `RUNNER_CHECKS_ENABLED` on, the console page `/ui/runners` has a "Set
   aside" column with both, and the list and get answers of
-  `/api/v1/runner-principals` hold `set_aside_count` and `set_aside_last_at`
-  (`0` and `null` for a runner that has never set a batch aside), which `meho runner-principal
-  list` and `show` print; with the switch off the page has no such column and
-  the answers have neither field.
+  `/api/v1/runner-principals` hold `set_aside_count` for every runner and
+  `set_aside_last_at` only for a runner that has set a batch aside. A runner
+  that has never set a batch aside has the count `0` and no time key; no
+  answer holds the time as `null`. `meho runner-principal list` and `show`
+  print both (`-` for a missing time), and their `--json` output holds the
+  same keys as the answer. With the switch off the page has no such column
+  and the answers and the CLI output have neither field.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
   `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
   result is added after its transaction commits, so a result that rolls

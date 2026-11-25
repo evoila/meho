@@ -43146,7 +43146,6 @@
           "set_aside_last_at": {
             "type": "string",
             "format": "date-time",
-            "nullable": true,
             "title": "Set Aside Last At"
           }
         },
@@ -43236,7 +43235,6 @@
           "set_aside_last_at": {
             "type": "string",
             "format": "date-time",
-            "nullable": true,
             "title": "Set Aside Last At"
           },
           "enrollment_code": {

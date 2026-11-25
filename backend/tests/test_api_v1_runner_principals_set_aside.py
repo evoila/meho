@@ -4,8 +4,10 @@
 """The set-aside count and time in the answers of ``/api/v1/runner-principals``.
 
 With ``RUNNER_CHECKS_ENABLED`` on, the list and get answers hold
-``set_aside_count`` and ``set_aside_last_at`` of each runner of the tenant.
-With the switch off, the answers have neither key.
+``set_aside_count`` of each runner of the tenant, and ``set_aside_last_at``
+only for a runner that has set a batch aside; a runner that has never set a
+batch aside has the count 0 and no time key. With the switch off, the answers
+have neither key. No answer holds the time as ``null``.
 
 The helpers come from :mod:`tests.test_api_v1_runner_principals`.
 """
@@ -112,7 +114,7 @@ async def test_list_and_get_hold_the_set_aside_count_and_time_with_the_switch_on
     for name in ("no-row", "never-set-aside"):
         for entry in (listed[name], _get(client, f"{_PATH}/{name}")):
             assert entry["set_aside_count"] == 0
-            assert entry["set_aside_last_at"] is None
+            assert "set_aside_last_at" not in entry
 
 
 @pytest.mark.asyncio
@@ -136,3 +138,5 @@ def test_the_openapi_schema_holds_both_fields_as_optional_values() -> None:
 
     assert principal["properties"].keys() >= _KEYS
     assert not _KEYS & set(principal["required"])
+    for key in _KEYS:
+        assert "null" not in str(principal["properties"][key])

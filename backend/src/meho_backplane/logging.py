@@ -29,6 +29,10 @@ The HTTP client libraries that MEHO uses write trace lines for each call
 at DEBUG: header lines (``httpcore``, ``h2``, ``hpack``), the path and the
 query (``urllib3``, used by ``requests`` and ``hvac``), the full request
 (``botocore``) and the response body (``kubernetes_asyncio.client.rest``).
+``httpx2`` (used for sign-in and by the AI SDKs) writes the full URL at INFO,
+and ``httpcore2`` below it writes header lines at DEBUG. The AI SDKs
+(``anthropic``, ``openai``) write the request options, with the message
+body, and the response headers at DEBUG.
 :func:`_bridge_stdlib_logging` holds the loggers in
 :data:`_HTTP_STACK_LOGGERS` at WARNING, whatever the root level is, so
 these trace lines never reach a log line.
@@ -61,6 +65,10 @@ _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
 #: values, paths, queries or bodies, so they stay at WARNING at every root level.
 _HTTP_STACK_LOGGERS = (
     "httpcore",
+    "httpx2",
+    "httpcore2",
+    "anthropic",
+    "openai",
     "h2",
     "hpack",
     "urllib3",

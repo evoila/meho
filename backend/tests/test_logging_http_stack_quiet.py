@@ -11,7 +11,10 @@ import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import anthropic
 import httpx
+import httpx2
+import openai
 import pytest
 import requests
 
@@ -24,6 +27,21 @@ _STACK_LOGGERS = (
     "urllib3.connectionpool",
     "botocore.endpoint",
     "google.auth.transport.requests",
+    "httpcore2.http11",
+    "httpcore2.connection",
+    "anthropic._base_client",
+    "openai._base_client",
+)
+
+_ANTHROPIC_REPLY = (
+    b'{"id": "msg_1", "type": "message", "role": "assistant", "model": "m",'
+    b' "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",'
+    b' "stop_sequence": null, "usage": {"input_tokens": 1, "output_tokens": 1}}'
+)
+_OPENAI_REPLY = (
+    b'{"id": "c1", "object": "chat.completion", "created": 0, "model": "m",'
+    b' "choices": [{"index": 0, "finish_reason": "stop",'
+    b' "message": {"role": "assistant", "content": "ok"}}]}'
 )
 
 
@@ -43,6 +61,7 @@ def values() -> dict[str, str]:
         "query": f"q{secrets.token_hex(6)}",
         "cookie": f"c{secrets.token_hex(6)}",
         "header": f"h{secrets.token_hex(6)}",
+        "prompt": f"m{secrets.token_hex(6)}",
     }
 
 
@@ -56,6 +75,17 @@ def server(values: dict[str, str]) -> Iterator[str]:
             self.send_header("X-Vendor", values["header"])
             self.send_header("Content-Length", "0")
             self.end_headers()
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = _ANTHROPIC_REPLY if self.path.endswith("/messages") else _OPENAI_REPLY
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", f"sid={values['cookie']}")
+            self.send_header("X-Vendor", values["header"])
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *args: object) -> None:
             return
@@ -76,7 +106,7 @@ def captured() -> Iterator[_ListHandler]:
     handler = _ListHandler()
     root = logging.getLogger()
     saved_root = root.level
-    names = ("httpx", *_STACK_LOGGERS)
+    names = ("httpx", "httpx2", "httpcore2", "anthropic", "openai", *_STACK_LOGGERS)
     saved = {n: (logging.getLogger(n).level, logging.getLogger(n).disabled) for n in names}
     # An earlier logging.config call in the same test process can disable these
     # loggers; turn them on so the test sees what the level alone does.
@@ -117,6 +147,40 @@ def test_real_requests_call_logs_no_path_or_query(
         f"{server}/{values['path']}?z={values['query']}", allow_redirects=False, timeout=5
     )
     assert response.status_code == 302
+    text = "\n".join(captured.lines)
+    for value in values.values():
+        assert value not in text
+
+
+@pytest.mark.parametrize("level", [logging.DEBUG, logging.INFO])
+def test_real_httpx2_call_logs_no_query_or_cookie(
+    level: int, server: str, values: dict[str, str], captured: _ListHandler
+) -> None:
+    configure_logging(level)
+    with httpx2.Client(follow_redirects=False) as client:
+        response = client.get(f"{server}/{values['path']}?z={values['query']}")
+    assert response.status_code == 302
+    text = "\n".join(captured.lines)
+    for value in values.values():
+        assert value not in text
+
+
+@pytest.mark.parametrize("level", [logging.DEBUG, logging.INFO])
+def test_real_ai_sdk_calls_log_no_prompt_or_header(
+    level: int, server: str, values: dict[str, str], captured: _ListHandler
+) -> None:
+    configure_logging(level)
+    prompt = f"say {values['prompt']}"
+    with anthropic.Anthropic(base_url=server, api_key="test-key", max_retries=0) as client:
+        reply = client.messages.create(
+            model="m", max_tokens=8, messages=[{"role": "user", "content": prompt}]
+        )
+    assert reply.content[0].type == "text"
+    with openai.OpenAI(base_url=f"{server}/v1", api_key="test-key", max_retries=0) as oai:
+        completion = oai.chat.completions.create(
+            model="m", messages=[{"role": "user", "content": prompt}]
+        )
+    assert completion.choices[0].message.content == "ok"
     text = "\n".join(captured.lines)
     for value in values.values():
         assert value not in text

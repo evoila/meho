@@ -588,6 +588,8 @@ def test_list_full_page_renders_seeded_targets() -> None:
     assert re.search(r'href="/ui/connectors"[^>]*>(?:(?!</a>).)*?Targets', body, re.S)
     assert re.search(r'href="/ui/connectors/registry"[^>]*>(?:(?!</a>).)*?Connectors', body, re.S)
     assert "Connector Registry" not in body
+    assert 'aria-label="Filter targets"' in body
+    assert 'aria-label="Filter connectors"' not in body
     assert "vmware-prod" in body
     assert "vmware-dev" in body
     # Sidebar link to /ui/connectors carries the active highlight.

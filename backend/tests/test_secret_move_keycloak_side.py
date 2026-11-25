@@ -389,6 +389,29 @@ def _assert_refused(result: OperationResult, says: str, fake: Any, keycloak: _Ke
 
 
 @_MOVES
+async def test_a_managed_realm_changed_after_approval_refuses_the_run(
+    params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
+) -> None:
+    """The realm is checked before the source is read: no Vault read, no Keycloak call."""
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    row = await _ask(params)
+    request = await _approve(row.id, _OTHER_ADMIN)
+    await _update("kc-a", extras={"managed_realm": "another-realm"})
+    fake.secrets.kv.v2.read_calls.clear()  # the card looked at the Vault sink
+
+    result: OperationResult = await resume_dispatch_after_approval(
+        operator=_OTHER_ADMIN, request=request, params=None
+    )
+
+    assert result.status == "error", result
+    assert result.error == "connector_error: KeycloakSecretRefError"
+    if params is _TO_KEYCLOAK:
+        assert fake.secrets.kv.v2.read_calls == []  # the Vault source is never read
+    assert fake.secrets.kv.v2.put_calls == []
+    assert keycloak.hosts_called() == set()
+
+
+@_MOVES
 async def test_a_target_moved_to_another_host_refuses_the_run(
     params: dict[str, Any], monkeypatch: pytest.MonkeyPatch, keycloak: _Keycloak
 ) -> None:

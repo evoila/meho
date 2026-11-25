@@ -27,6 +27,22 @@ connector cannot reach it: the sign-in and the probe fail. This page
 works only with a Keycloak that serves at the root path, such as your
 own Keycloak with no `http-relative-path` set.
 
+**One target, one realm.** A Keycloak target works on the managed realm it
+names, and on no other. The approval card of a write shows that realm
+in its opening summary. With the switch `KEYCLOAK_ANSWER_REALM` on (off by default), every
+answer also has a `managed_realm` field with that realm. A call that names
+another realm in its `realm` value (`keycloak.realm.update`,
+`keycloak.realm.create`, `keycloak.realm.delete`,
+`keycloak.user.check_login`), and a `keycloak:` ref in `secret.move`
+or `secret.handoff.export` that names another realm, are refused before they wait for approval. To
+work on another realm, register a second target that names it, with the
+same login (`--secret-ref`), admin realm and connection settings as the
+first. To
+create a new realm, use a target that names that realm as its managed
+realm. `keycloak.realm.delete` still needs its `realm` value: give the
+managed realm. In the other calls the `realm` value stays for now, and
+it will be removed: leave it out.
+
 ## What this surface is
 
 The `keycloak-admin-26.x` connector is a **typed** connector: hand-coded
@@ -238,9 +254,18 @@ Other rules:
 - It is safe to run twice: if the object is already gone, nothing is
   deleted and the result says `already_absent: true`.
 - `realm.delete` needs the realm name (`realm`); it never falls back to
-  the target's managed realm. MEHO refuses (`protected_realm`) the realm
-  `master`, the target's `admin_realm`, the target's `managed_realm`, and
-  the realm of MEHO's own login. Names are compared without case.
+  the target's managed realm. The name must be the managed realm of the
+  target; another realm is refused. MEHO also refuses (`protected_realm`)
+  the realm `master`, the target's `admin_realm`, and the realm of MEHO's
+  own login. Names are compared without case. MEHO reads the realm first
+  and deletes it only when Keycloak answers with exactly the managed realm
+  (`realm_name_mismatch` otherwise), and with the realm's id
+  (`realm_id_missing` otherwise: the target's login needs `view-realm`).
+  When the approved call runs, the realm id must still be the id on the
+  approval card (`realm_id_changed` otherwise). A call under a delete grant
+  in sandbox mode compares with the preview MEHO built for that call.
+  Approval cannot be turned off for this
+  operation.
 
 `keycloak.idp.create` (identity-provider federation) is **deferred** —
 it is not exercised by the current bootstrap scripts (#1406), so it is
@@ -688,11 +713,13 @@ $ meho keycloak user delete --target kc --username event-guest
 $ meho keycloak user delete --target kc --username event-guest \
     --preview-hash <hash>
 
-# The same two steps for a group (--name), a client (--client-id)
-# and a whole realm (--realm)
+# The same two steps for a group (--name) and a client (--client-id)
 $ meho keycloak group delete --target kc --name event-team
 $ meho keycloak client delete --target kc --client-id event-app
-$ meho keycloak realm delete --target kc --realm event-realm
+
+# The same two steps for a whole realm (--realm). The target is the one
+# whose managed realm is event-realm.
+$ meho keycloak realm delete --target kc-event-realm --realm event-realm
 ```
 
 The user, group and client delete verbs also take `--id <uuid>`

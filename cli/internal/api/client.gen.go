@@ -12925,6 +12925,14 @@ type UISessionContext struct {
 	TenantSlug      *string                 `json:"tenant_slug"`
 }
 
+// UnblockBody Body of “DELETE /api/v1/principals/blocked/{sub}“.
+//
+// The reason is needed when the login is the caller's own. On another
+// person's login it is optional and goes into the audit row.
+type UnblockBody struct {
+	Reason *string `json:"reason"`
+}
+
 // UnblockResponse Response of “DELETE /api/v1/principals/blocked/{sub}“.
 type UnblockResponse struct {
 	Removed int    `json:"removed"`
@@ -15346,6 +15354,9 @@ type ExplainApiV1PolicyExplainPostJSONRequestBody = PolicyExplainBody
 
 // BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody defines body for BlockPrincipalRouteApiV1PrincipalsBlockedPost for application/json ContentType.
 type BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody = BlockCreate
+
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody defines body for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete for application/json ContentType.
+type UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody = UnblockBody
 
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
@@ -18299,8 +18310,10 @@ type ClientInterface interface {
 
 	BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete request
-	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody request with any body
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21998,8 +22011,20 @@ func (c *Client) BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(c.Server, sub, params)
+func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(c.Server, sub, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(c.Server, sub, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -37550,8 +37575,19 @@ func NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody(server stri
 	return req, nil
 }
 
-// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest generates requests for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete
-func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams) (*http.Request, error) {
+// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest calls the generic UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete builder with application/json body
+func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(server, sub, params, "application/json", bodyReader)
+}
+
+// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody generates requests for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete with any type of body
+func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -37576,10 +37612,12 @@ func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server strin
 		return nil, err
 	}
 
-	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -56135,8 +56173,10 @@ type ClientWithResponsesInterface interface {
 
 	BlockPrincipalRouteApiV1PrincipalsBlockedPostWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error)
 
-	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request
-	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse request with any body
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
+
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
@@ -69961,9 +70001,17 @@ func (c *ClientWithResponses) BlockPrincipalRouteApiV1PrincipalsBlockedPostWithR
 	return ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp)
 }
 
-// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request returning *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse
-func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
-	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx, sub, params, reqEditors...)
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse request with arbitrary body returning *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse
+func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx, sub, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx, sub, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

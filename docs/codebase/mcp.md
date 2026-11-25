@@ -2183,8 +2183,11 @@ A sixth switch changes an answer: `APPROVAL_SAME_CALL_REUSE` (off by
 default). With it on, a call that must wait for approval gets the request
 that already waits, when the same login in the same tenant sent the same
 call. The answer has that request's `approval_request_id` and
-`approval_request_reused: true`, with no key or with a different key. No
-tool and no input changes. See
+`approval_request_reused: true`, with no key or with a different key. The
+acting agent must be the same too, and the check of a step of a
+multi-step operation never uses the reuse. A retry key that was linked to a
+request while the switch was on keeps finding that request after it is
+turned off. No tool and no input changes. See
 [approvals.md](approvals.md#the-same-call-without-the-same-key-approval_same_call_reuse-off-by-default).
 
 A seventh switch changes the `audit_id` of an answer: `APPROVAL_RETRY_OWN_AUDIT_ROW`

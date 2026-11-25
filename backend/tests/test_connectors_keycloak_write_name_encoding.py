@@ -62,14 +62,14 @@ async def connector() -> AsyncIterator[KeycloakConnector]:
     await instance.aclose()
 
 
-def _target() -> MagicMock:
+def _target(managed_realm: str = _REALM) -> MagicMock:
     target = MagicMock(spec=KeycloakTargetLike)
     target.name = "keycloak-names-test"
     target.host = "keycloak-names.test.invalid"
     target.port = 443
     target.secret_ref = "stub/secret"
     target.auth_model = "shared_service_account"
-    target.extras = {"managed_realm": _REALM}
+    target.extras = {"managed_realm": managed_realm}
     target.id = uuid.UUID(int=0xC1)
     target.tenant_id = uuid.UUID(int=0)
     return target
@@ -107,7 +107,10 @@ async def test_realm_update_encodes_a_dot_in_the_realm_name(
         mock.route(method="GET").respond(200, json={"realm": "a.b", "enabled": True})
         mock.route(method="PUT").respond(204)
         await keycloak_realm_update(
-            connector, _OPERATOR, _target(), {"realm": "a.b", "representation": {"enabled": True}}
+            connector,
+            _OPERATOR,
+            _target("a.b"),
+            {"realm": "a.b", "representation": {"enabled": True}},
         )
         paths = [p for p in _raw_paths(mock) if p.startswith("/admin/")]
 

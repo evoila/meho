@@ -43,7 +43,10 @@ reading a raw ``aiohttp`` response), the span is still recorded with the
 request, the HTTP status, and the response headers; only the body is left
 out. The trace must not lose the request when an apply's outcome is unclear.
 
-When capture is off the wrapper costs one contextvar read. It never changes
+Each request first passes :func:`~meho_backplane.auth.principal_block.raise_if_send_refused`:
+a login that an admin blocked while the call runs gets no further request.
+
+When capture is off the wrapper costs one contextvar read and the block check. It never changes
 what the SDK returns or raises: an ``ApiException`` and any transport error
 are re-raised unchanged after the span is recorded.
 
@@ -60,6 +63,7 @@ import structlog
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.rest import ApiException
 
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.connectors.kubernetes.redaction import redact_kubernetes_payload
 from meho_backplane.flight_recorder._capture_util import MAX_SPAN_BODY_BYTES
 from meho_backplane.flight_recorder.capture import SpanStart, span_start
@@ -149,6 +153,9 @@ def instrument_api_client(api_client: client.ApiClient) -> client.ApiClient:
         _preload_content: bool = True,
         _request_timeout: Any = None,
     ) -> Any:
+        # The check right before the request goes out: a login blocked while
+        # the call runs gets no further request (``auth.principal_block``).
+        await raise_if_send_refused()
         start = span_start()
         if start is None:
             return await original(

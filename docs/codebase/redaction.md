@@ -1083,6 +1083,20 @@ before a reviewer reads the pull request.
 - **The rules come from the base branch.** The job reads the rule script
   of the base commit with `git show` and runs the judge with
   `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The job also lists, with `git diff --name-only --no-renames -z`, each
+  file that the pull request changes under `backend/tests/redaction_compare/`
+  (the input set and the code that reads the answers) and the file
+  `backend/tests/__init__.py` (it runs when the package is imported), and
+  passes the list with `--changed`. A moved file gives its old and its new
+  path. The judge reads the list as bytes and spells each path so that two
+  different paths never get the same spelling: a printable letter other than a space, a
+  quote or a backslash stays as it is (also a letter outside ASCII), a
+  backslash becomes `\\`, a byte that is not UTF-8 becomes `\xNN`, and any
+  other letter becomes `\uNNNN` (for example a line break is `\u000a`). The
+  job runs for any change in that folder, a `.md` file too. Each listed
+  file is a difference and needs its own reviewed entry: an approved entry
+  with `id: compare-package`, the path as the judge spells it as `path`,
+  and `part: changed`.
   The approved file is the one that the pull request commits: it is the
   open list that a reviewer reads. The job reads it, the base's approved
   file and the rule script from git before any code of the pull request
@@ -1098,10 +1112,19 @@ before a reviewer reads the pull request.
   is not approved" or "differences are left that are not approved". A
   stale approved entry is still printed, because it is in the committed
   approved file already. The exit code is the same as without the flag.
+  The error output of the pull request's container goes to a file in the
+  job's temporary folder that the job never prints. When the record build
+  fails, the job prints one fixed line that says so and points to the local
+  run below, and the job fails.
 - **See the differences locally.** Without `--summary-only` the judge
   prints each difference that is not approved (input id, step, kind) and
-  the counts. From the repo root, with the pull request branch checked out,
-  run the block below. It works in a new private folder from `mktemp -d`,
+  the counts. From the repo root, with the pull request branch checked out
+  and its changes committed, run the block below. It compares the same two
+  trees as CI: it fetches `main` and stops when the branch does not hold
+  the newest `origin/main`, so merge it first. Like CI, it passes the
+  changed files of the compare package with `--changed` only when the
+  judge of `main` knows that option, so a change there needs its approved
+  entry here too. It works in a new private folder from `mktemp -d`,
   stops when a step fails (also either record build), and removes the
   folder and the second checkout when it ends, so no record file is left
   behind or read again by a later run.
@@ -1109,6 +1132,11 @@ before a reviewer reads the pull request.
   ```bash
   (
     set -euo pipefail
+    git fetch -q origin main
+    if ! git merge-base --is-ancestor origin/main HEAD; then
+      echo "merge origin/main into this branch first, so the compare uses the trees of CI" >&2
+      exit 1
+    fi
     tmp="$(mktemp -d)"
     trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
     git worktree add --detach "$tmp/base" origin/main
@@ -1118,8 +1146,14 @@ before a reviewer reads the pull request.
     (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
     git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
       > "$tmp/base-approved.yaml"
+    changed_args=()
+    if grep -q -e '--changed' "$rules"; then
+      git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/__init__.py backend/tests/redaction_compare > "$tmp/changed.txt"
+      changed_args=(--changed "$tmp/changed.txt")
+    fi
     python3 -I "$rules" \
       --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      ${changed_args[@]+"${changed_args[@]}"} \
       --approved backend/tests/snapshots/redaction_compare_approved.yaml \
       --base-approved "$tmp/base-approved.yaml"
   )

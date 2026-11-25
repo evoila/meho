@@ -15,6 +15,7 @@ refusal and stores no inventory. Covered:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -79,13 +80,24 @@ sent: list[str] = []
 during_step: dict[str, Callable[[], Awaitable[None]]] = {}
 #: The handles of the stored inventories.
 stored: list[Any] = []
+#: ``step`` is the step op id of ``during_step``. ``saved`` is set when its
+#: hook has returned, so the block is saved. ``_env`` makes a new event for
+#: each test: each test has its own event loop.
+change = SimpleNamespace(step="", saved=asyncio.Event())
 
 
 async def _note(op_id: str) -> None:
     sent.append(op_id)
     hook = during_step.pop(op_id, None)
     if hook is not None:
-        await hook()
+        try:
+            await hook()
+        finally:
+            change.saved.set()
+    elif op_id == change.step:
+        # A parallel read of the same step returns only after the save, so
+        # every later step of it checks the block list after the save.
+        await change.saved.wait()
 
 
 async def linux_about(target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +164,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_registry()
     sent.clear()
     during_step.clear()
+    change.step = ""
+    change.saved = asyncio.Event()
     stored.clear()
     yield
     get_settings.cache_clear()
@@ -266,9 +280,8 @@ async def test_inventory_stops_and_stores_nothing_when_a_step_is_refused(
     case: str,
 ) -> None:
     await _register(op_id, embedding)
-    during_step[_FIRST_STEP[op_id]] = (
-        _block_person if case == "blocked" else _make_unreadable(monkeypatch)
-    )
+    change.step = _FIRST_STEP[op_id]
+    during_step[change.step] = _block_person if case == "blocked" else _make_unreadable(monkeypatch)
 
     result = await _run(op_id)
 

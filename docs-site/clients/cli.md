@@ -304,7 +304,7 @@ TOKEN=$(meho login --print-token https://meho.example.com)
 ```
 
 The value is a live bearer token. Never log it or paste it into a shared
-channel.
+channel. It ends after 5 minutes.
 
 To read the token of an existing login without a new login, force the
 file backend at login and read the token from `credentials.json`:

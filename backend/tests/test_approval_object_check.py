@@ -500,6 +500,28 @@ async def test_operator_resume_is_refused_when_the_card_does_not_build(
     assert stored.resume_result["extras"]["reason"] == REASON_UNREADABLE
 
 
+@pytest.mark.parametrize("missing", [None, ""], ids=["no-id", "empty-id"])
+@pytest.mark.parametrize("side", ["live", "approved"])
+async def test_operator_resume_is_refused_when_an_object_that_is_there_has_no_id(
+    monkeypatch: pytest.MonkeyPatch, side: str, missing: str | None
+) -> None:
+    """``present: true`` with no id to compare is not "absent": the run is refused."""
+    no_id = {**_USER_CARD, "id": missing}
+    target_id = await _persist_target(f"kc-no-id-{uuid.uuid4().hex[:6]}")
+    request = await _park_approved(target_id, card=no_id if side == "approved" else _USER_CARD)
+    _same_preview(monkeypatch)
+    _live_object(monkeypatch, no_id if side == "live" else dict(_USER_CARD))
+    calls = _spy_dispatch(monkeypatch)
+
+    result = await resume_dispatch_after_approval(
+        operator=_operator("op-approver"), request=await _row(request.id)
+    )
+
+    assert calls == [], "the vendor must get no call"
+    assert result.status == "denied"
+    assert result.extras["reason"] == REASON_UNREADABLE
+
+
 async def test_operator_resume_is_refused_when_an_object_appeared_under_an_absent_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

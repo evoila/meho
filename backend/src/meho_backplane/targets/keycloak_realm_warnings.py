@@ -28,6 +28,7 @@ __all__ = [
     "backplane_login_realms",
     "keycloak_realm_warnings",
     "realm_from_url",
+    "target_managed_realm",
     "target_warnings",
 ]
 
@@ -97,3 +98,21 @@ def target_warnings(target: Any) -> list[str]:
     return keycloak_realm_warnings(
         getattr(target, "product", None), getattr(target, "extras", None)
     )
+
+
+def target_managed_realm(target: Any) -> str | None:
+    """The managed realm of a Keycloak *target*, for the approval card; ``None`` otherwise.
+
+    A target of another product, or a Keycloak target whose managed realm
+    does not pass the realm check, gives ``None``: the card shows no realm.
+    """
+    product = getattr(target, "product", None)
+    extras = getattr(target, "extras", None)
+    if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
+        return None
+    if not isinstance(extras, Mapping):
+        return None
+    managed = extras.get("managed_realm")
+    if realm_name_problem(managed) is not None:
+        return None
+    return str(managed)

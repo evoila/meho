@@ -1280,9 +1280,12 @@ def result_awaiting_approval(
     ``extras["approval_request_reused"] = True``; the key is absent
     otherwise, so a new park's envelope is unchanged.
 
-    *audit_id* is the id of the committed ``approval.request`` audit row
-    of the pending request (its ``request_audit_id``). It becomes the
-    result's ``audit_id`` receipt. ``None`` when the caller has no row id.
+    *audit_id* becomes the result's ``audit_id`` receipt. With
+    ``APPROVAL_SAME_CALL_REUSE`` and ``APPROVAL_RETRY_OWN_AUDIT_ROW`` off, it
+    is the committed ``approval.request`` audit row of the request (its
+    ``request_audit_id``). When a call gets an existing request and the
+    switch of its path is on, it is the call's own ``approval.reuse`` audit
+    row. ``None`` when the caller has no row id.
 
     *note* (#6641) is a sentence the person must read about the wait, for
     example that no other admin of the tenant could approve a change of

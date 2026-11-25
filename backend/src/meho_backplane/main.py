@@ -1433,7 +1433,8 @@ app.include_router(api_v1_agent_principals_router)
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
 app.include_router(api_v1_runner_principals_router)
 # The admin block list: block, unblock and list logins that MEHO refuses on
-# every request. Person-only, tenant_admin; no MCP tool.
+# every request. Person-only; tenant_admin, and a platform admin for their own
+# block (with a fresh sign-in and a reason); no MCP tool.
 app.include_router(api_v1_principal_blocks_router)
 # #4901 -- the agent session store: upload, list, show, download, delete and
 # the tenant's retention period. Person-only; rights per route in

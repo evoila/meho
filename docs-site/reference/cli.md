@@ -4333,7 +4333,7 @@ meho principal blocked [flags]
 
 ### `meho principal unblock`
 
-Unblock a person in MEHO (tenant_admin)
+Unblock a person in MEHO (tenant_admin; a platform admin for their own block)
 
 ```
 meho principal unblock <sub> [flags]
@@ -4341,6 +4341,7 @@ meho principal unblock <sub> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the block is removed (required on your own login; kept in the audit log)
 
 ## `meho promote`
 

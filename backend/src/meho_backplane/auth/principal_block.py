@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import delete, select
@@ -339,7 +339,13 @@ async def _read_blocks(session: AsyncSession, sub: str) -> list[tuple[str, str]]
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
 
 
-async def unblock_principal(operator: Operator, sub: str) -> int:
+async def unblock_principal(
+    operator: Operator,
+    sub: str,
+    *,
+    reason: str | None = None,
+    sign_in: dict[str, Any] | None = None,
+) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
     A platform admin removes every block of the login. A tenant admin
@@ -350,7 +356,8 @@ async def unblock_principal(operator: Operator, sub: str) -> int:
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
     is none, and :class:`PrincipalBlockUnavailableError` when the table
-    cannot be read.
+    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
+    go into the audit row when they are given.
     """
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
@@ -369,17 +376,22 @@ async def unblock_principal(operator: Operator, sub: str) -> int:
         if not removed:
             raise PrincipalNotBlockedError
         await session.execute(delete(PrincipalBlock).where(condition))
+        payload: dict[str, Any] = {
+            "unblocked_sub": sub,
+            "scopes": [scope for scope, _reason in removed],
+            "removed_blocks": [{"scope": scope, "reason": why} for scope, why in removed],
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        if sign_in is not None:
+            payload["sign_in"] = sign_in
         add_audit_row(
             session,
             operator,
             op_id="principal.unblock",
             method="DELETE",
             path=f"/api/v1/principals/blocked/{sub}",
-            payload={
-                "unblocked_sub": sub,
-                "scopes": [scope for scope, _reason in removed],
-                "removed_blocks": [{"scope": scope, "reason": reason} for scope, reason in removed],
-            },
+            payload=payload,
         )
         await session.commit()
     reset_block_cache()

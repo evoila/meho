@@ -15,30 +15,43 @@ Routes (REST and CLI only; there is no MCP tool):
   A platform admin blocks in every tenant. A tenant admin blocks in their
   own tenant only. Nobody blocks their own login (422).
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
-  is no block the admin may remove. A platform admin whom a tenant admin
-  blocked in this tenant removes that block on their own login: this is
-  their way back, also on an install with one tenant. On their own login
-  the route removes only the block of this tenant, and it reads the
+  is no block the admin may remove. A tenant admin removes the blocks of
+  their tenant; a platform admin with ``tenant_admin`` removes every block
+  of another person's login. A platform admin whom a tenant admin blocked
+  in this tenant removes that block on their own login: this is their
+  way back, also on an install with one tenant. On their own login the
+  call needs a reason (JSON body ``{"reason": "..."}``, 1 to 500
+  characters, else 422 ``unblock_reason_required``) and a fresh approval
+  sign-in, the same check as an approve (else 401
+  ``fresh_sign_in_required``). Both are checked before any block is read.
+  The route then removes only the block of this tenant, and it reads the
   table first. A block that a platform admin made (every tenant) stays
-  until another platform admin removes it. A tenant admin who is
-  blocked cannot remove a block.
+  until another platform admin removes it. A tenant admin who is blocked
+  cannot remove a block.
 
-Every route needs ``tenant_admin`` (the unblock route also takes a
-platform admin of any tenant role) and a person's login: an agent,
-service or runner login is refused with 403. Block and unblock write one
-audit row each, with the admin, the login and the reason.
+Block and list need ``tenant_admin``. Unblock needs ``tenant_admin``, or a
+platform admin who removes their own block. Every route needs a person's
+login: an agent, service or runner login is refused with 403. Block and
+unblock write one audit row each, with the admin, the login and the
+reason; the unblock of the caller's own login also holds the sign-in
+(``sign_in``).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.auth.approval_sign_in import (
+    check_fresh_approval_sign_in,
+    fresh_sign_in_required,
+)
+from meho_backplane.auth.fresh_sign_in import has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
@@ -55,6 +68,7 @@ from meho_backplane.auth.principal_block import (
 )
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.middleware import verify_jwt_and_bind_platform_admin_way_back
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -63,6 +77,15 @@ router = APIRouter(prefix="/api/v1/principals/blocked", tags=["principals"])
 _SUB_MAX_LENGTH: Final[int] = 255
 _PEOPLE_ONLY: Final[str] = (
     "only a person can block or unblock a login. Use the CLI (meho principal) or the REST API."
+)
+_REASON_REQUIRED: Final[str] = (
+    "unblock_reason_required: removing a block on your own login needs a reason of "
+    f"1 to {REASON_MAX_LENGTH} characters. Add --reason <text>."
+)
+_UNBLOCK_FRESH_SIGN_IN: Final[str] = (
+    "sign in again: removing a block on your own login needs a fresh approval sign-in. "
+    "`meho principal unblock <sub> --reason <text>` opens the browser sign-in for you. "
+    "A stored `meho login` token is not enough for it."
 )
 
 
@@ -75,14 +98,49 @@ def _require_person_admin(operator: Operator = _require_admin) -> Operator:
     return operator
 
 
-def _require_unblock_caller(
+async def _require_unblock_caller(
+    sub: Annotated[str, Path(min_length=1, max_length=_SUB_MAX_LENGTH)],
     operator: Operator = Depends(verify_jwt_and_bind_platform_admin_way_back),
 ) -> Operator:
-    """A tenant admin or a platform admin, who signed in as a person."""
-    if operator.tenant_role is not TenantRole.TENANT_ADMIN and not operator.platform_admin:
+    """A person with ``tenant_admin``, or a platform admin for their own login."""
+    structlog.contextvars.bind_contextvars(audit_op_id="principal.unblock", audit_op_class="write")
+    admin = operator.tenant_role is TenantRole.TENANT_ADMIN
+    if not admin and not operator.platform_admin:
         raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="insufficient_role")
     ensure_human_principal(operator, remediation=_PEOPLE_ONLY)
+    if not admin and sub != operator.sub:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail="insufficient_role")
     return operator
+
+
+async def _own_login_sign_in(operator: Operator) -> dict[str, Any]:
+    """The proof of a fresh approval sign-in, or the ``401`` challenge.
+
+    The same check as an approve (:func:`check_fresh_approval_sign_in`):
+    the approval client, credentials asked, the approval level, and a
+    sign-in no older than the approval window.
+    """
+    # Imported here: the check reads Keycloak through the Keycloak connector
+    # package, and loading that package registers the connector.
+    from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
+
+    settings = get_settings()
+    level = await sign_in_level_in_force(settings)
+    window = settings.fresh_sign_in_max_age_seconds
+    proof = check_fresh_approval_sign_in(
+        operator,
+        settings,
+        level_in_force=level.in_force,
+        level_check_failed=level.check_failed,
+        remediation=_UNBLOCK_FRESH_SIGN_IN,
+    )
+    if not has_fresh_sign_in(operator, max_age_seconds=window):
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_required",
+            max_age_seconds=window,
+            remediation=_UNBLOCK_FRESH_SIGN_IN,
+        )
+    return proof.audit_payload(operator.sub)
 
 
 class BlockCreate(BaseModel):
@@ -92,6 +150,18 @@ class BlockCreate(BaseModel):
 
     sub: str = Field(min_length=1, max_length=_SUB_MAX_LENGTH)
     reason: str = Field(min_length=1, max_length=REASON_MAX_LENGTH)
+
+
+class UnblockBody(BaseModel):
+    """Body of ``DELETE /api/v1/principals/blocked/{sub}``.
+
+    The reason is needed when the login is the caller's own. On another
+    person's login it is optional and goes into the audit row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
 
 
 class BlockRead(BaseModel):
@@ -163,17 +233,26 @@ async def block_principal_route(
 @router.delete("/{sub}", response_model=UnblockResponse)
 async def unblock_principal_route(
     sub: Annotated[str, Path(min_length=1, max_length=_SUB_MAX_LENGTH)],
+    body: UnblockBody | None = None,
     operator: Operator = Depends(_require_unblock_caller),
 ) -> UnblockResponse:
     """Unblock a login. On their own login an admin removes this tenant's block only."""
+    own_login = sub == operator.sub
+    reason = body.reason if body is not None else None
+    if (own_login and reason is None) or (
+        reason is not None and not 1 <= len(reason) <= REASON_MAX_LENGTH
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_REASON_REQUIRED
+        )
+    sign_in = await _own_login_sign_in(operator) if own_login else None
     # A caller who is blocked in this tenant may remove only their own
     # block, and only as a platform admin: a blocked tenant admin never
     # reaches this point.
-    structlog.contextvars.bind_contextvars(audit_op_id="principal.unblock", audit_op_class="write")
     try:
-        if sub != operator.sub and await is_principal_blocked(operator.sub, operator.tenant_id):
+        if not own_login and await is_principal_blocked(operator.sub, operator.tenant_id):
             raise _blocked()
-        removed = await unblock_principal(operator, sub)
+        removed = await unblock_principal(operator, sub, reason=reason, sign_in=sign_in)
     except PrincipalBlockUnavailableError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,

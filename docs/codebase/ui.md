@@ -4060,12 +4060,16 @@ admin block list (`docs/codebase/principal-block.md`):
 - `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
   303 back to the page. Refused: 422, the page again with the typed
   values and the message next to its field.
-- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Done: 303
-  back to the page. No block to remove: 404.
+- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
+  `confirm=yes`: 200, the confirm page with the login, its blocks and
+  the scope (all tenants for a platform admin). With `confirm=yes`: 303
+  back to the page. The admin's own login: 403 `own_login` (the CLI
+  `meho principal unblock` does it, with a reason and a fresh sign-in).
+  No block to remove: 404. The blocks cannot be read: 503.
 
-Both forms are plain `POST` forms with the CSRF token in a hidden field,
-so they work without JavaScript. The unblock prompt names the login and
-its scope (all tenants for a platform admin).
+Every form is a plain `POST` form with the CSRF token and the page's
+tenant (`meho_tenant`) in hidden fields, so it works without JavaScript.
+A form from a page of another tenant answers 409.
 
 The three routes need a person with `tenant_admin`
 (`resolve_human_admin_or_403`, with the session of the session cookie

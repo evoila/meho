@@ -206,12 +206,19 @@ functions as the REST routes, so the rules are the same: only a person
 with `tenant_admin` may open the page or send a form (403 for anyone
 else), a tenant admin works in their own tenant, a platform admin in
 every tenant, and blocking your own login shows a refusal and writes no
-block. The admin check uses the signed-in session only. The confirm step
-names the login and its scope: for a platform admin the button reads
-"Unblock in all tenants", and the prompt says that every block of the
-login goes, also the blocks of tenant admins. Both forms are plain `POST`
-forms with the CSRF token in a hidden field, so they work without
-JavaScript. A done form answers 303 back to the page. A refused block
+block. The admin check uses the signed-in session only. The unblock
+button of a row opens a confirm page; only its form (`confirm=yes`)
+removes blocks. The confirm page names the login, its blocks and the
+scope: for a platform admin the button reads "Unblock in all tenants",
+and the page says that every block of the login goes, also the blocks of
+tenant admins. The page never unblocks the admin's own login (403
+`own_login`), and it shows no button on that row: the admin uses
+`meho principal unblock <sub> --reason <text>`, which asks for a reason
+and a fresh sign-in. When MEHO cannot read the blocks, the unblock
+answers 503 `principal_block_check_unavailable`. Every form is a plain
+`POST` form with the CSRF token and the page's tenant (`meho_tenant`)
+in hidden fields, so it works without JavaScript, and a form from a page
+of another tenant answers 409. A done form answers 303 back to the page. A refused block
 answers 422 and shows the page with the message next to its field. Each
 block and unblock writes one audit row (`principal.block` or
 `principal.unblock`); the request row of the form keeps its own

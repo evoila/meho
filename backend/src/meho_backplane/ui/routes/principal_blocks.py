@@ -11,11 +11,16 @@ their own tenant, and nobody blocks their own login. Only a person with
 ``tenant_admin`` may open the page or send a form. The admin check uses
 the signed-in session only.
 
-Both forms are plain ``POST`` forms with the CSRF token in a hidden
-field, so they work without JavaScript. A change answers ``303`` back to
-the page. Each block and unblock writes one audit row named
-``principal.block`` or ``principal.unblock``; the request record of the
-form keeps its own ``http.post:`` name.
+Every form is a plain ``POST`` form with the CSRF token and the page's
+tenant (``meho_tenant``) in hidden fields, so it works without
+JavaScript, and a form from a page of another tenant gets ``409``. A
+change answers ``303`` back to the page. The unblock button of a row
+opens a confirm page first; only the form of that page (``confirm=yes``)
+removes blocks. The page never unblocks the admin's own login: that
+needs a reason and a fresh sign-in, so the admin uses
+``meho principal unblock <sub> --reason <text>``. Each block and unblock
+writes one audit row named ``principal.block`` or ``principal.unblock``;
+the request record of the form keeps its own ``http.post:`` name.
 """
 
 from __future__ import annotations
@@ -30,7 +35,9 @@ from meho_backplane.api.v1.principal_blocks import BlockCreate
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import (
     BLOCK_SCOPE_ALL,
+    BlockedPerson,
     CannotBlockSelfError,
+    PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
     list_blocked,
@@ -55,6 +62,11 @@ async def _human_admin(request: Request, session: UISessionContext = _session) -
 _admin = Depends(_human_admin)
 
 _SELF_BLOCK_MESSAGE = "You cannot block your own login."
+_OWN_LOGIN_UNBLOCK = (
+    "own_login: the console does not remove a block on your own login. "
+    "Use `meho principal unblock <sub> --reason <text>`; it asks for a fresh sign-in."
+)
+_CONFIRMED = "yes"
 _FIELD_MESSAGES = {
     "sub": "Enter the login id of the person.",
     "reason": "Enter a reason (at most 500 characters).",
@@ -95,6 +107,7 @@ async def _page(
         "blocked": await list_blocked(operator),
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
+        "own_sub": operator.sub,
         "csrf_token": token,
         "errors": errors or {},
         "values": values or {},
@@ -143,16 +156,62 @@ async def _block(
     )
 
 
+async def _confirm_page(
+    request: Request,
+    session: UISessionContext,
+    operator: Operator,
+    sub: str,
+    blocks: list[BlockedPerson],
+) -> HTMLResponse:
+    token = mint_csrf_token(str(session.session_id))
+    context = {
+        "page_title": "Unblock a person",
+        "active_surface": "blocked-people",
+        "sub": sub,
+        "blocks": blocks,
+        "scope_all": BLOCK_SCOPE_ALL,
+        "platform_admin": operator.platform_admin,
+        "confirmed": _CONFIRMED,
+        "csrf_token": token,
+    }
+    response = get_templates().TemplateResponse(
+        request, "principal_blocks/confirm_unblock.html", context
+    )
+    _set_csrf_cookie(response, token)
+    return response
+
+
+def _not_blocked() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="principal_not_blocked")
+
+
+def _unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="principal_block_check_unavailable",
+    )
+
+
 async def _unblock(
+    request: Request,
     sub: str = Form(min_length=1, max_length=255),
+    confirm: str = Form(default=""),
+    session: UISessionContext = _session,
     operator: Operator = _admin,
-) -> RedirectResponse:
+) -> HTMLResponse | RedirectResponse:
+    if sub == operator.sub:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_LOGIN_UNBLOCK)
+    if confirm != _CONFIRMED:
+        blocks = [b for b in await list_blocked(operator) if b.sub == sub]
+        if not blocks:
+            raise _not_blocked()
+        return await _confirm_page(request, session, operator, sub, blocks)
     try:
         await unblock_principal(operator, sub)
+    except PrincipalBlockUnavailableError as exc:
+        raise _unavailable() from exc
     except PrincipalNotBlockedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="principal_not_blocked"
-        ) from exc
+        raise _not_blocked() from exc
     return _back_to_page()
 
 
@@ -193,7 +252,13 @@ def build_principal_blocks_router() -> APIRouter:
         response_model=None,
         responses={
             **_BACK_TO_PAGE,
+            200: {
+                "description": "The confirm page (the form has no confirm=yes).",
+                "content": _HTML,
+            },
+            403: {"description": "The login is the admin's own login.", "content": _JSON_DETAIL},
             404: {"description": "The login has no block you may remove.", "content": _JSON_DETAIL},
+            503: {"description": "MEHO cannot read the block list now.", "content": _JSON_DETAIL},
         },
     )
     return router

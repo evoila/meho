@@ -17,12 +17,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.auth.principal_block import reset_block_cache
+from meho_backplane.auth.principal_block import PrincipalBlockUnavailableError, reset_block_cache
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, PrincipalBlock
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
+from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.routes import build_router as build_ui_router
 from tests._oidc_jwt_helpers import mint_token, mock_discovery_and_jwks
@@ -38,6 +40,7 @@ from tests.test_ui_agent_grants import (
 )
 
 _PAGE = "/ui/blocked-people"
+_UNBLOCK = f"{_PAGE}/unblock"
 _BLOCKED = "person-to-block"
 
 
@@ -65,6 +68,7 @@ def _client(
     principal_kind: str | None = None,
     sub: str = _OP_A,
     keys: Any = None,
+    extra_claims: dict[str, Any] | None = None,
 ) -> Any:
     clear_jwks_cache()
     keypair, jwks = keys or _make_keypair_and_jwks()
@@ -75,6 +79,7 @@ def _client(
         tenant_role=role.value,
         platform_admin=platform_admin,
         principal_kind=principal_kind,
+        extra_claims=extra_claims,
     )
     session_id = _seed_session_sync(tenant_id=tenant, access_token=token, operator_sub=sub)
     mock = respx.mock(assert_all_called=False)
@@ -84,7 +89,13 @@ def _client(
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     csrf = mint_csrf_token(str(session_id))
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    client.session_id = session_id
     return client, mock, csrf
+
+
+def _confirmed(sub: str) -> dict[str, str]:
+    """The fields of the confirm page's form."""
+    return {"sub": sub, "confirm": "yes"}
 
 
 def _seed_blocks(*rows: tuple[str, str, str]) -> None:
@@ -174,13 +185,10 @@ def test_tenant_admin_blocks_and_unblocks_in_their_own_tenant_with_one_audit_row
             headers=_csrf_headers(csrf),
         )
         listed = client.get(_PAGE)
-        unblocked = client.post(
-            f"{_PAGE}/unblock", data={"sub": _BLOCKED}, headers=_csrf_headers(csrf)
-        )
-        again = client.post(f"{_PAGE}/unblock", data={"sub": _BLOCKED}, headers=_csrf_headers(csrf))
-        other_tenant = client.post(
-            f"{_PAGE}/unblock", data={"sub": "in-b"}, headers=_csrf_headers(csrf)
-        )
+        unblocked = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+        again = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+        other_tenant = client.post(_UNBLOCK, data=_confirmed("in-b"), headers=_csrf_headers(csrf))
+        other_tenant_page = client.post(_UNBLOCK, data={"sub": "in-b"}, headers=_csrf_headers(csrf))
     finally:
         mock.stop()
     assert blocked.status_code == 303, blocked.text
@@ -190,6 +198,7 @@ def test_tenant_admin_blocks_and_unblocks_in_their_own_tenant_with_one_audit_row
     assert unblocked.headers["location"] == _PAGE
     assert again.status_code == 404
     assert other_tenant.status_code == 404
+    assert other_tenant_page.status_code == 404
     assert _block_rows() == [("in-b", str(_TENANT_B), "reason b")]
     (block_row,) = _audit_payloads("principal.block")
     assert block_row["blocked_sub"] == _BLOCKED and block_row["reason"] == "typed reason"
@@ -211,15 +220,17 @@ def test_a_block_and_an_unblock_each_write_one_row_with_their_name_and_one_reque
     client, mock, csrf = _client()
     try:
         client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r"}, headers=_csrf_headers(csrf))
-        client.post(f"{_PAGE}/unblock", data={"sub": _BLOCKED}, headers=_csrf_headers(csrf))
+        client.post(_UNBLOCK, data={"sub": _BLOCKED}, headers=_csrf_headers(csrf))
+        client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
     finally:
         mock.stop()
     assert len(_audit_payloads("principal.block")) == 1
     assert len(_audit_payloads("principal.unblock")) == 1
     (block_request,) = _request_rows(_PAGE)
-    (unblock_request,) = _request_rows(f"{_PAGE}/unblock")
+    unblock_requests = _request_rows(_UNBLOCK)
+    assert len(unblock_requests) == 2
     assert block_request.get("op_id") != "principal.block"
-    assert unblock_request.get("op_id") != "principal.unblock"
+    assert all(r.get("op_id") != "principal.unblock" for r in unblock_requests)
 
 
 def test_a_session_context_in_the_request_body_does_not_change_the_admin_check() -> None:
@@ -254,7 +265,7 @@ def test_a_session_context_in_the_request_body_does_not_change_the_admin_check()
     assert "in-b" not in response.text
 
 
-def test_unblock_names_the_login_and_its_scope_when_two_tenants_blocked_it() -> None:
+def test_unblock_confirm_page_names_the_login_and_its_scope_when_two_tenants_blocked_it() -> None:
     _tenants()
     _seed_blocks(
         ("shared-login", str(_TENANT_A), "reason a"), ("shared-login", str(_TENANT_B), "reason b")
@@ -262,34 +273,141 @@ def test_unblock_names_the_login_and_its_scope_when_two_tenants_blocked_it() -> 
     platform, platform_mock, platform_csrf = _client(platform_admin=True)
     try:
         platform_page = platform.get(_PAGE)
+        platform_confirm = platform.post(
+            _UNBLOCK, data={"sub": "shared-login"}, headers=_csrf_headers(platform_csrf)
+        )
     finally:
         platform_mock.stop()
     tenant, tenant_mock, tenant_csrf = _client()
     try:
         tenant_page = tenant.get(_PAGE)
+        tenant_confirm = tenant.post(
+            _UNBLOCK, data={"sub": "shared-login"}, headers=_csrf_headers(tenant_csrf)
+        )
         tenant_unblock = tenant.post(
-            f"{_PAGE}/unblock", data={"sub": "shared-login"}, headers=_csrf_headers(tenant_csrf)
+            _UNBLOCK, data=_confirmed("shared-login"), headers=_csrf_headers(tenant_csrf)
         )
     finally:
         tenant_mock.stop()
-    everywhere = (
-        "Unblock the login shared-login in all tenants? This removes every block of this login"
-    )
-    assert platform_page.text.count(f'data-confirm="{everywhere}') == 2
-    assert "Unblock in all tenants" in platform_page.text
-    assert 'data-confirm="Unblock the login shared-login in this tenant?"' in tenant_page.text
+    assert platform_page.text.count("Unblock in all tenants") == 2
+    assert platform_confirm.status_code == 200
+    assert "removes every block of this login in all tenants" in platform_confirm.text
+    assert "reason a" in platform_confirm.text and "reason b" in platform_confirm.text
     assert "in all tenants" not in tenant_page.text
+    assert tenant_confirm.status_code == 200
+    assert "removes the block of this login in this tenant" in tenant_confirm.text
+    assert "reason a" in tenant_confirm.text and "reason b" not in tenant_confirm.text
     assert tenant_unblock.status_code == 303
     assert _block_rows() == [("shared-login", str(_TENANT_B), "reason b")]
     platform, platform_mock, platform_csrf = _client(platform_admin=True)
     try:
         platform_unblock = platform.post(
-            f"{_PAGE}/unblock", data={"sub": "shared-login"}, headers=_csrf_headers(platform_csrf)
+            _UNBLOCK, data=_confirmed("shared-login"), headers=_csrf_headers(platform_csrf)
         )
     finally:
         platform_mock.stop()
     assert platform_unblock.status_code == 303
     assert _block_rows() == []
+
+
+def test_the_first_click_on_unblock_only_shows_the_confirm_page() -> None:
+    _tenants()
+    _seed_blocks(("in-a", str(_TENANT_A), "reason a"), ("in-b", str(_TENANT_B), "reason b"))
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        first = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
+        rows_after_first = _block_rows()
+        audit_after_first = _audit_payloads("principal.unblock")
+        confirmed = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
+    finally:
+        mock.stop()
+    assert first.status_code == 200, first.text
+    assert 'name="confirm" value="yes"' in first.text
+    assert f'name="csrf_token" value="{csrf}"' in first.text
+    assert rows_after_first == [
+        ("in-a", str(_TENANT_A), "reason a"),
+        ("in-b", str(_TENANT_B), "reason b"),
+    ]
+    assert audit_after_first == []
+    assert confirmed.status_code == 303
+    assert _block_rows() == [("in-b", str(_TENANT_B), "reason b")]
+
+
+def test_the_page_never_unblocks_the_admins_own_login() -> None:
+    _tenants()
+    _seed_blocks((_OP_A, str(_TENANT_B), "own block in b"), ("in-b", str(_TENANT_B), "reason b"))
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        page = client.get(_PAGE)
+        _seed_blocks((_OP_A, str(_TENANT_A), "own block in a"))
+        first = client.post(_UNBLOCK, data={"sub": _OP_A}, headers=_csrf_headers(csrf))
+        direct = client.post(_UNBLOCK, data=_confirmed(_OP_A), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    assert page.status_code == 200, page.text
+    assert "data-own-login" in page.text
+    assert "meho principal unblock" in page.text
+    assert f'name="sub" value="{_OP_A}"' not in page.text
+    assert 'name="sub" value="in-b"' in page.text
+    assert first.status_code == 403
+    assert direct.status_code == 403
+    assert direct.json()["detail"].startswith("own_login:")
+    assert (_OP_A, str(_TENANT_A), "own block in a") in _block_rows()
+    assert (_OP_A, str(_TENANT_B), "own block in b") in _block_rows()
+    assert _audit_payloads("principal.unblock") == []
+
+
+def test_unblock_answers_503_when_the_block_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _tenants()
+    _seed_blocks(("in-a", str(_TENANT_A), "reason a"))
+
+    async def _unreadable(*_args: Any, **_kwargs: Any) -> Any:
+        raise PrincipalBlockUnavailableError("OperationalError")
+
+    client, mock, csrf = _client()
+    monkeypatch.setattr(principal_block, "_read_blocks", _unreadable)
+    try:
+        response = client.post(_UNBLOCK, data=_confirmed("in-a"), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    assert response.status_code == 503
+    assert response.json()["detail"] == "principal_block_check_unavailable"
+    assert _block_rows() == [("in-a", str(_TENANT_A), "reason a")]
+
+
+def test_old_forms_after_a_tenant_switch_are_refused_and_change_no_blocks() -> None:
+    _tenants()
+    _seed_blocks(("in-a", str(_TENANT_A), "reason a"), ("in-b", str(_TENANT_B), "reason b"))
+    admin_in_both = {
+        "meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Admins"]
+    }
+    client, mock, csrf = _client(extra_claims=admin_in_both)
+    try:
+        page = client.get(_PAGE)
+        confirm_page = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
+        asyncio.run(
+            save_session_tenant(
+                client.session_id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
+            )
+        )
+        old = {"csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        block = client.post(_PAGE, data={**old, "sub": _BLOCKED, "reason": "r"})
+        unblock = client.post(_UNBLOCK, data={**old, **_confirmed("in-a")})
+        now_b = client.get(_PAGE)
+    finally:
+        mock.stop()
+    field = f'name="meho_tenant" value="{_TENANT_A}"'
+    assert page.text.count(field) == 2
+    assert confirm_page.text.count(field) == 1
+    assert block.status_code == 409 and unblock.status_code == 409
+    assert unblock.json()["detail"] == "The tenant changed. Reload the page."
+    assert now_b.status_code == 200 and "in-b" in now_b.text
+    assert _block_rows() == [
+        ("in-a", str(_TENANT_A), "reason a"),
+        ("in-b", str(_TENANT_B), "reason b"),
+    ]
 
 
 def test_both_forms_post_with_the_token_in_a_hidden_field_and_work_without_htmx() -> None:
@@ -300,13 +418,13 @@ def test_both_forms_post_with_the_token_in_a_hidden_field_and_work_without_htmx(
         page = client.get(_PAGE)
         blocked = client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r", "csrf_token": csrf})
         refused = client.post(_PAGE, data={"sub": _OP_A, "reason": "r", "csrf_token": csrf})
-        unblocked = client.post(f"{_PAGE}/unblock", data={"sub": "in-a", "csrf_token": csrf})
+        unblocked = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
     finally:
         mock.stop()
     assert page.text.count('method="post"') == 2
     assert page.text.count(f'name="csrf_token" value="{csrf}"') == 2
     assert "hx-post" not in page.text
-    assert 'onsubmit="return confirm(this.dataset.confirm);"' in page.text
+    assert "confirm(" not in page.text
     assert blocked.status_code == 303
     assert refused.status_code == 422
     assert "<h1" in refused.text and "You cannot block your own login." in refused.text
@@ -372,11 +490,12 @@ def test_page_and_both_forms_refuse_a_caller_who_is_not_a_person_admin(
         responses = [
             client.get(_PAGE),
             client.post(_PAGE, data={"sub": _BLOCKED, "reason": "x"}, headers=headers),
-            client.post(f"{_PAGE}/unblock", data={"sub": "in-a"}, headers=headers),
+            client.post(_UNBLOCK, data={"sub": "in-a"}, headers=headers),
+            client.post(_UNBLOCK, data=_confirmed("in-a"), headers=headers),
         ]
     finally:
         mock.stop()
-    assert [r.status_code for r in responses] == [403, 403, 403]
+    assert [r.status_code for r in responses] == [403, 403, 403, 403]
     assert _block_rows() == [("in-a", str(_TENANT_A), "reason a")]
 
 

@@ -20568,8 +20568,48 @@
           "303": {
             "description": "Done. The answer sends the browser back to the page."
           },
+          "200": {
+            "description": "The confirm page (the form has no confirm=yes).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The login is the admin's own login.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
           "404": {
             "description": "The login has no block you may remove.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now.",
             "content": {
               "application/json": {
                 "schema": {
@@ -30329,6 +30369,11 @@
             "maxLength": 255,
             "minLength": 1,
             "title": "Sub"
+          },
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "default": ""
           }
         },
         "type": "object",

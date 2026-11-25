@@ -2882,7 +2882,8 @@ type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
 
 // BodyUnblockUiBlockedPeopleUnblockPost defines model for Body__unblock_ui_blocked_people_unblock_post.
 type BodyUnblockUiBlockedPeopleUnblockPost struct {
-	Sub string `json:"sub"`
+	Confirm *string `json:"confirm,omitempty"`
+	Sub     string  `json:"sub"`
 }
 
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
@@ -64672,10 +64673,16 @@ func (r BlockUiBlockedPeoplePostResponse) StatusCode() int {
 type UnblockUiBlockedPeopleUnblockPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON404      *struct {
+	JSON403      *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
+	JSON404 *struct {
 		Detail *string `json:"detail,omitempty"`
 	}
 	JSON422 *HTTPValidationError
+	JSON503 *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
 }
 
 // Status returns HTTPResponse.Status
@@ -84055,6 +84062,15 @@ func ParseUnblockUiBlockedPeopleUnblockPostResponse(rsp *http.Response) (*Unbloc
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest struct {
 			Detail *string `json:"detail,omitempty"`
@@ -84070,6 +84086,15 @@ func ParseUnblockUiBlockedPeopleUnblockPostResponse(rsp *http.Response) (*Unbloc
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
 
 	}
 

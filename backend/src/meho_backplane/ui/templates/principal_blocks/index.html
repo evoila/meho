@@ -35,16 +35,15 @@
               <td class="max-w-xs break-all font-mono text-xs">{{ person.blocked_by_sub }}</td>
               <td class="whitespace-nowrap text-xs">{{ person.blocked_at }}</td>
               <td class="text-right">
-                {% if platform_admin %}
-                  {% set confirm_text = "Unblock the login " ~ person.sub ~ " in all tenants? This removes every block of this login, also the blocks that tenant admins set." %}
+                {% if person.sub == own_sub %}
+                  <span class="text-xs text-muted" data-own-login>Your own login: use <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span></span>
                 {% else %}
-                  {% set confirm_text = "Unblock the login " ~ person.sub ~ " in this tenant?" %}
+                  <form method="post" action="/ui/blocked-people/unblock">
+                    {% include "principal_blocks/_hidden.html" %}
+                    <input type="hidden" name="sub" value="{{ person.sub }}" />
+                    {{ button("Unblock in all tenants…" if platform_admin else "Unblock…", variant="default", size="xs", type="submit") }}
+                  </form>
                 {% endif %}
-                <form method="post" action="/ui/blocked-people/unblock" data-confirm="{{ confirm_text }}" onsubmit="return confirm(this.dataset.confirm);">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                  <input type="hidden" name="sub" value="{{ person.sub }}" />
-                  {{ button("Unblock in all tenants" if platform_admin else "Unblock", variant="default", size="xs", type="submit") }}
-                </form>
               </td>
             </tr>
           {% else %}

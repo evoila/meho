@@ -19,8 +19,11 @@ answer ``503`` with ``principal_block_check_unavailable``. A
 change answers ``303`` back to the page. The unblock button of a row
 opens a confirm page first; only the form of that page (``confirm=yes``)
 removes blocks. The page never unblocks the admin's own login: that
-needs a reason and a fresh sign-in, so the admin uses
-``meho principal unblock <sub> --reason <text>``. Each block and unblock
+needs a reason and a fresh sign-in, so the admin runs
+``meho principal unblock <sub> --reason <text>`` in the tenant of the
+block. On the own login MEHO removes only the block of the current
+tenant, and a block in every tenant stays until another platform admin
+removes it. Each block and unblock
 writes one audit row named ``principal.block`` or ``principal.unblock``;
 the request record of the form keeps its own ``http.post:`` name.
 """
@@ -68,7 +71,9 @@ _admin = Depends(_human_admin)
 _SELF_BLOCK_MESSAGE = "You cannot block your own login."
 _OWN_LOGIN_UNBLOCK = (
     "own_login: the console does not remove a block on your own login. "
-    "Use `meho principal unblock <sub> --reason <text>`; it asks for a fresh sign-in."
+    "Run `meho principal unblock <sub> --reason <text>` in the tenant of the block, "
+    "with a fresh sign-in. On your own login MEHO removes only the block of the "
+    "current tenant. A block in every tenant stays until another platform admin removes it."
 )
 _CONFIRMED = "yes"
 _FIELD_MESSAGES = {

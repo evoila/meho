@@ -359,6 +359,48 @@ def test_the_page_never_unblocks_the_admins_own_login() -> None:
     assert _audit_payloads("principal.unblock") == []
 
 
+def _own_login_hint(page: str) -> str:
+    start = page.index("data-own-login")
+    return page[start : page.index("</td>", start)]
+
+
+def test_the_own_login_hint_names_the_tenant_of_the_block() -> None:
+    _tenants()
+    _seed_blocks((_OP_A, str(_TENANT_B), "own block in b"))
+    client, mock, _csrf = _client(platform_admin=True)
+    try:
+        page = client.get(_PAGE)
+    finally:
+        mock.stop()
+    assert page.status_code == 200, page.text
+    hint = _own_login_hint(page.text)
+    assert f'in tenant <span class="font-mono">{_TENANT_B}</span>' in hint
+    assert "meho principal unblock" in hint
+    assert "fresh sign-in" in hint
+    assert "only the block of that tenant" in hint
+    assert str(_TENANT_A) not in hint
+    assert f'name="sub" value="{_OP_A}"' not in page.text
+
+
+def test_own_login_unblock_answers_403_naming_the_tenant_rule() -> None:
+    _tenants()
+    _seed_blocks((_OP_A, str(_TENANT_B), "own block in b"))
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        refused = client.post(_UNBLOCK, data=_confirmed(_OP_A), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    assert refused.status_code == 403
+    detail = refused.json()["detail"]
+    assert detail.startswith("own_login:")
+    assert "in the tenant of the block" in detail
+    assert "fresh sign-in" in detail
+    assert "only the block of the current tenant" in detail
+    assert "A block in every tenant stays until another platform admin removes it." in detail
+    assert _block_rows() == [(_OP_A, str(_TENANT_B), "own block in b")]
+    assert _audit_payloads("principal.unblock") == []
+
+
 def test_unblock_answers_503_when_the_block_list_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

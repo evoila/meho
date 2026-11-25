@@ -212,9 +212,12 @@ removes blocks. The confirm page names the login, its blocks and the
 scope: for a platform admin the button reads "Unblock in all tenants",
 and the page says that every block of the login goes, also the blocks of
 tenant admins. The page never unblocks the admin's own login (403
-`own_login`), and it shows no button on that row: the admin uses
-`meho principal unblock <sub> --reason <text>`, which asks for a reason
-and a fresh sign-in. When MEHO cannot read the blocks, the page and
+`own_login`), and it shows no button on that row. The hint on that row
+names the tenant of the block. A platform admin removes a block on their
+own login with `meho principal unblock <sub> --reason <text>`, run in
+the tenant of that block, with a fresh sign-in. On their own login, MEHO
+removes only the block of the current tenant. A block in every tenant
+stays until another platform admin removes it. When MEHO cannot read the blocks, the page and
 both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)
 in hidden fields, so it works without JavaScript, and a form from a page

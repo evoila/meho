@@ -36,7 +36,11 @@
               <td class="whitespace-nowrap text-xs">{{ person.blocked_at }}</td>
               <td class="text-right">
                 {% if person.sub == own_sub %}
-                  <span class="text-xs text-muted" data-own-login>Your own login: use <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span></span>
+                  {% if person.scope == scope_all %}
+                    <span class="text-xs text-muted" data-own-login>Your own login, blocked in all tenants: another platform admin removes this block.</span>
+                  {% else %}
+                    <span class="text-xs text-muted" data-own-login>Your own login: in tenant <span class="font-mono">{{ person.scope }}</span>, run <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span> with a fresh sign-in. It removes only the block of that tenant.</span>
+                  {% endif %}
                 {% else %}
                   <form method="post" action="/ui/blocked-people/unblock">
                     {% include "principal_blocks/_hidden.html" %}

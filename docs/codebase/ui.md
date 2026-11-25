@@ -4063,8 +4063,12 @@ admin block list (`docs/codebase/principal-block.md`):
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
   the scope (all tenants for a platform admin). With `confirm=yes`: 303
-  back to the page. The admin's own login: 403 `own_login` (the CLI
-  `meho principal unblock` does it, with a reason and a fresh sign-in).
+  back to the page. The admin's own login: 403 `own_login`. A platform
+  admin removes a block on their own login with `meho principal unblock
+  <sub> --reason <text>`, run in the tenant of that block, with a fresh
+  sign-in. On their own login, MEHO removes only the block of the
+  current tenant. A block in every tenant stays until another platform
+  admin removes it.
   No block to remove: 404. The blocks cannot be read: 503.
 
 Every form is a plain `POST` form with the CSRF token and the page's

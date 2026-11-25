@@ -2183,8 +2183,11 @@ A sixth switch changes an answer: `APPROVAL_SAME_CALL_REUSE` (off by
 default). With it on, a call that must wait for approval gets the request
 that already waits, when the same login in the same tenant sent the same
 call. The answer has that request's `approval_request_id` and
-`approval_request_reused: true`, with no key or with a different key. No
-tool and no input changes. See
+`approval_request_reused: true`, with no key or with a different key. The
+acting agent must be the same too, and the check of a step of a
+multi-step operation never uses the reuse. A retry key that was linked to a
+request while the switch was on keeps finding that request after it is
+turned off. No tool and no input changes. See
 [approvals.md](approvals.md#the-same-call-without-the-same-key-approval_same_call_reuse-off-by-default).
 
 A seventh switch changes the `audit_id` of an answer: `APPROVAL_RETRY_OWN_AUDIT_ROW`
@@ -2297,8 +2300,10 @@ The read checks no agent grant.
   writes one more `approval.status` row with that outcome. An unknown `status` text in
   an otherwise valid result is passed on as stored, as the REST read does.
 - The answer by state: waiting gives the same `awaiting_approval` answer as
-  the first call, with its `audit_id` and, for a change of rights that no
-  other admin could approve, its `extras.approval_note`; approved and not finished gives `status: "pending"` with
+  the first call, with its `audit_id` and, when the request has the note of
+  `rights_change_note` (see
+  [approvals.md](approvals.md#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
+  its `extras.approval_note`; approved and not finished gives `status: "pending"` with
   `extras.result_state` (`not_started` or `started`); approved and run gives
   the stored result with `extras.result_state` added (`executed`, `failed`
   or `uncertain`; with `uncertain` MEHO does not know if the change

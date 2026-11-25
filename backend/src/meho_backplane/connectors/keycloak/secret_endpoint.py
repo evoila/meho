@@ -78,11 +78,14 @@ routed by :func:`build_keycloak_secret_endpoint`:
 * ``<target>`` — the MEHO target *name* (or alias) the Keycloak admin
   connection is configured under; resolved tenant-scoped via
   :func:`~meho_backplane.targets.resolver.resolve_target`.
-* ``<realm>`` — the Keycloak realm the user lives in. Taken from the ref
-  (the operator addresses it explicitly), not from the target's
-  ``extras["managed_realm"]``. It must be a plain realm name
+* ``<realm>`` — the Keycloak realm the user lives in. It must be a plain
+  realm name
   (:func:`~meho_backplane.targets.required_extras.realm_name_problem`)
-  and is not trimmed.
+  and is not trimmed. A target works on one realm only, so it must also
+  be the target's managed realm (``extras["managed_realm"]``):
+  :func:`managed_realm_problem` refuses any other realm, before the move
+  waits for approval (the park check of ``secret.move``) and again when
+  the move runs.
 * ``<username>`` — the human username; resolved to the internal UUID via
   the Admin REST ``?username=&exact=true`` lookup.
 * ``#password`` (required) — the only writable field. Any other field is
@@ -179,6 +182,8 @@ __all__ = [
     "KeycloakCredentialSecretEndpoint",
     "KeycloakSecretRefError",
     "build_keycloak_secret_endpoint",
+    "keycloak_ref_realm_problem",
+    "managed_realm_problem",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -239,6 +244,22 @@ def _ref_realm(ref: str, raw: str) -> str:
             f"keycloak secret ref {ref!r}: the realm {raw!r} is not a plain realm name: {problem}"
         )
     return raw
+
+
+def managed_realm_problem(target: KeycloakTargetLike, realm: str) -> str | None:
+    """The text that refuses a ref whose *realm* is not the target's managed realm, or ``None``.
+
+    A target with no usable managed realm raises
+    :class:`~meho_backplane.connectors.keycloak.session.KeycloakManagedRealmMissingError`.
+    The text names the managed realm, never the ref.
+    """
+    managed = resolve_realm_config(target).managed_realm
+    if realm == managed:
+        return None
+    return (
+        f"keycloak secret ref: this target works on the realm {managed!r} only, and the "
+        "ref names another realm. Use a target that names that realm as its managed realm."
+    )
 
 
 def _parse_keycloak_ref(ref: str) -> tuple[str, str, str]:
@@ -338,12 +359,20 @@ class KeycloakCredentialSecretEndpoint:
         await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
-    async def check_target(self, operator: Operator) -> None:
-        """Find the named target and check it against the approval card. No Keycloak call.
+    async def realm_problem(self, operator: Operator) -> str | None:
+        """:func:`managed_realm_problem` for the ref's target and realm."""
+        return managed_realm_problem(await self._resolve_target(operator), self._realm)
 
+    async def check_target(self, operator: Operator) -> None:
+        """Find the named target and check it and the ref's realm. No Keycloak call.
+
+        The target must be the one on the approval card, and the ref's realm
+        must be its managed realm now (:func:`managed_realm_problem`).
         ``secret.move`` calls this before it reads the source.
         """
-        await self._resolve_target(operator)
+        problem = await self.realm_problem(operator)
+        if problem is not None:
+            raise KeycloakSecretRefError(problem)
 
     def _in_sign_in_realm(self, target: KeycloakTargetLike) -> bool:
         return self._realm == resolve_realm_config(target).admin_realm
@@ -440,6 +469,9 @@ class KeycloakCredentialSecretEndpoint:
             )
 
         target = await self._resolve_target(operator)
+        problem = managed_realm_problem(target, self._realm)
+        if problem is not None:
+            raise KeycloakSecretRefError(problem)
         uuid = await connector._find_user_uuid(
             target, self._realm, self._username, operator=operator
         )
@@ -508,6 +540,10 @@ class KeycloakClientSecretSourceEndpoint:
         await forget_target_if_changed(row)
         return cast(KeycloakTargetLike, row)
 
+    async def realm_problem(self, operator: Operator) -> str | None:
+        """:func:`managed_realm_problem` for the ref's target and realm."""
+        return managed_realm_problem(await self._resolve_target(operator), self._realm)
+
     async def read_secret(self, operator: Operator) -> SecretMaterial:
         """Read the addressed client's secret and wrap it in a :class:`SecretMaterial`.
 
@@ -533,6 +569,9 @@ class KeycloakClientSecretSourceEndpoint:
             )
 
         target = await self._resolve_target(operator)
+        problem = managed_realm_problem(target, self._realm)
+        if problem is not None:
+            raise KeycloakSecretRefError(problem)
         uuid = await connector._find_client_uuid(
             target, self._realm, self._client_id, operator=operator
         )
@@ -616,6 +655,19 @@ def build_keycloak_secret_endpoint(ref: str) -> SecretEndpoint:
     if _looks_like_client_secret_ref(ref):
         return KeycloakClientSecretSourceEndpoint(ref)
     return KeycloakCredentialSecretEndpoint(ref)
+
+
+async def keycloak_ref_realm_problem(operator: Operator, ref: str) -> str | None:
+    """:func:`managed_realm_problem` for a sink or source *ref*.
+
+    Raises :class:`KeycloakSecretRefError` for a malformed ref.
+    """
+    endpoint: KeycloakCredentialSecretEndpoint | KeycloakClientSecretSourceEndpoint
+    if _looks_like_client_secret_ref(ref):
+        endpoint = KeycloakClientSecretSourceEndpoint(ref)
+    else:
+        endpoint = KeycloakCredentialSecretEndpoint(ref)
+    return await endpoint.realm_problem(operator)
 
 
 # Register the keycloak secret adapters under kind ``"keycloak"`` at import

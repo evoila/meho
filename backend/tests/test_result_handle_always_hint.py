@@ -201,7 +201,7 @@ async def test_hint_changes_nothing_over_the_limits(valkey: _MemoryValkey) -> No
 
 
 def _descriptor(llm_instructions: dict[str, Any] | None) -> Any:
-    return SimpleNamespace(source_kind="typed", llm_instructions=llm_instructions)
+    return SimpleNamespace(source_kind="typed", product="test", llm_instructions=llm_instructions)
 
 
 def test_dispatcher_forwards_the_hint() -> None:

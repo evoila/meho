@@ -262,6 +262,7 @@ func printUserList(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  %-28s %-8s %-14s %s\n", "USERNAME", "ENABLED", "EMAIL_VERIFIED", "INTERNAL_ID")
 	for _, row := range rows {
 		username := truncate(stringField(row, "username"), 28)

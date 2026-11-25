@@ -29,7 +29,7 @@ which is why this is the first guide.
 | Path | What it is | When to use it |
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
-| **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
+| **Operator console — "Targets" in the menu (`/ui/connectors`)** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
 | **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
 
 Create, edit and delete on REST are for people only. A service login
@@ -415,7 +415,8 @@ removes every alias. In YAML, write `secret_ref: null`.
 A Keycloak target must name the realm MEHO manages, in
 `extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
 refuses to create or update the target, and refuses every operation on
-it.
+it. The target works on that realm only: a call that names another realm
+is refused.
 
 ```bash
 meho targets add lab-sso --product keycloak --host sso.example.com \

@@ -24,7 +24,7 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole VKS cluster. `kubectl vsphere login` gives this. | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one namespace only | Steps 2 to 8 |
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 The page uses these example values. Use your own in their place.
 
@@ -375,6 +375,19 @@ MEHO may reach only its own parts and DNS. List here every system MEHO
 must reach, for example the vCenter and NSX. Without a rule, MEHO cannot
 reach the vCenter it runs on.
 
+MEHO also refuses a target on a private address by default. The vCenter
+and NSX are usually on one. List their networks in
+`config.targetSsrfAllowlist`, separated by commas:
+
+```yaml
+config:
+  # List only the networks of the systems MEHO manages. Never 0.0.0.0/0.
+  targetSsrfAllowlist: "192.0.2.0/24"
+```
+
+The network rule above decides what the pod may reach. This list decides
+which addresses MEHO accepts as a target. A target needs both.
+
 ## Step 4: Install
 
 ```bash
@@ -533,7 +546,7 @@ Logged in as <your email> (sub: ...)
   Vault: reachable, read OK (version=1)
   DB:    migrated, revision 0137
   Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)
-  Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured
+  Approvals: you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in); decisions on someone else's instruction are refused; approval key configured
   Features: all configured
   Connector packages: none
 ```

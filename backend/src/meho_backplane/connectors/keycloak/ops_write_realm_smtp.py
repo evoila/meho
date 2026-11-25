@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.connectors.keycloak.realm_params import realm_fence_park_check
 from meho_backplane.connectors.keycloak.redaction import (
     PASSWORD_POLICY_FIELD,
     redact_preview_fields,
@@ -210,5 +211,8 @@ async def _realm_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-register_park_check(REALM_UPDATE_OP_ID, _refuse_inline_smtp_password)
+register_park_check(
+    REALM_UPDATE_OP_ID,
+    realm_fence_park_check(REALM_UPDATE_OP_ID, _refuse_inline_smtp_password),
+)
 register_preview_builder(REALM_UPDATE_OP_ID, _realm_update_preview)

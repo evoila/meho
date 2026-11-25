@@ -298,6 +298,27 @@ async def test_an_approved_request_that_ran_gives_the_stored_result(
         assert answer["extras"]["retry"] is False
 
 
+async def test_an_unknown_status_text_in_a_valid_stored_result_is_passed_on_as_stored(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    await _set(
+        request_id,
+        status=ApprovalRequestStatus.APPROVED.value,
+        resumed_at=datetime.now(UTC),
+        resume_result={"status": "weird", "op_id": _OP, "duration_ms": 1.0},
+    )
+    status_before = await _status_row_ids()
+
+    answer = _answer(_call(client, request_id))
+
+    assert answer["status"] == "weird"
+    assert answer["extras"]["approval_status"] == "approved"
+    assert answer["extras"]["result_state"] == "failed"
+    assert await _status_row_ids() == status_before
+
+
 def _readable_handle() -> ResultHandle:
     return ResultHandle(
         handle_id=uuid.uuid4(),
@@ -634,6 +655,7 @@ async def test_an_unknown_id_writes_one_audit_row_of_the_caller_linked_to_no_req
     row = await _the_one_new_status_row(status_before, _NOT_FOUND)
     assert row.operator_sub == _REQUESTER.sub
     assert row.tenant_id == _REQUESTER.tenant_id
+    assert row.status_code == 404
     assert "approval_request_id" not in row.payload
     assert await _result_rows() == results_before
     # One row of this refusal, and the general MCP call row.
@@ -666,6 +688,34 @@ async def test_a_request_of_someone_else_gets_no_row_in_its_own_history(
     ]
     assert "approval_request_id" not in row.payload
     assert await _result_rows() == 0
+
+
+async def test_a_caller_of_another_tenant_gets_one_not_found_row_in_its_own_tenant(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    await _set(request_id, request_audit_id=uuid.uuid4())
+    other_tenant = uuid.UUID("00000000-0000-0000-0000-000000006892")
+    caller = _REQUESTER.model_copy(update={"tenant_id": other_tenant, "sub": "caller-elsewhere"})
+    _Caller.operator = caller
+    status_before = await _status_row_ids()
+    all_before = await _audit_row_ids()
+
+    answer = _answer(_call(client, request_id))
+
+    assert answer["extras"]["error_code"] == _NOT_FOUND
+    row = await _the_one_new_status_row(status_before, _NOT_FOUND)
+    assert row.tenant_id == other_tenant
+    assert row.operator_sub == "caller-elsewhere"
+    assert row.parent_audit_id is None
+    async with get_sessionmaker()() as session:
+        written = (await session.scalars(select(AuditLog))).all()
+    assert [
+        (r.path, r.tenant_id)
+        for r in written
+        if r.id not in all_before and r.tenant_id == _REQUESTER.tenant_id
+    ] == []
 
 
 @pytest.mark.parametrize(
@@ -708,6 +758,7 @@ async def test_a_request_outside_the_connector_list_writes_one_audit_row(
     assert answer["extras"]["error_code"] == CONNECTOR_NOT_ALLOWED
     row = await _the_one_new_status_row(status_before, CONNECTOR_NOT_ALLOWED)
     assert row.payload["approval_request_id"] == str(request_id)
+    assert row.status_code == 409
     assert await _result_rows() == results_before
 
 
@@ -873,16 +924,115 @@ async def test_a_waiting_answer_has_the_audit_id_of_the_first_call(
 async def test_a_waiting_change_of_rights_with_one_admin_has_the_note(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _switch(monkeypatch, status=True)
-    request_id = await _park()
-    await _set(request_id, rights_change=True)
+    """A member add in MEHO's own login realm, asked by the only admin of the tenant."""
+    from meho_backplane.operations import grant_approval
 
-    async def _only_one(tenant_id: uuid.UUID, requester_sub: str) -> str:
-        return "You are the only admin."
+    _switch(monkeypatch, status=True)
+    member_add = "keycloak.group.member.add"
+    monkeypatch.setitem(
+        grant_approval._GRANT_OPS,
+        member_add,
+        grant_approval._GrantOp(("user_id",), ("group_id",)),
+    )
+    request_id = await _park(connector_id="keycloak-admin-26.x", op_id=member_add)
+    await _set(
+        request_id,
+        rights_change=True,
+        proposed_effect={"op_id": member_add, "preview": {"grant": {"login_realm": True}}},
+    )
+
+    async def _only_one(
+        tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool
+    ) -> str | None:
+        return "You are the only admin." if login_realm else None
 
     monkeypatch.setattr("meho_backplane.operations.approval_queue.only_admin_note", _only_one)
 
-    answer = _answer(_call(client, request_id))
+    answer = _answer(
+        _call(client, request_id, connector_id="keycloak-admin-26.x", op_id=member_add)
+    )
 
     assert answer["extras"]["approval_note"] == "You are the only admin."
     assert "You are the only admin." in answer["error"]
+
+
+async def _request_columns(request_id: uuid.UUID) -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request_id)
+        assert row is not None
+        return {
+            column.name: getattr(row, column.name) for column in ApprovalRequest.__table__.columns
+        }
+
+
+async def _fail_the_write(*_args: Any, **_kwargs: Any) -> None:
+    raise RuntimeError("audit write failed")
+
+
+_STORED_OK = OperationResult(
+    status="ok", op_id=_OP, result={"stored-marker": "kept"}, duration_ms=1.0
+).model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("target", "caller_sub", "overrides", "stored"),
+    [
+        (
+            "meho_backplane.mcp.tools._call_operation_status.write_mcp_audit_row",
+            "someone-else",
+            {},
+            None,
+        ),
+        (
+            "meho_backplane.mcp.tools._call_operation_status._write_audit_row",
+            None,
+            {"op_id": "demo.vm.list"},
+            None,
+        ),
+        (
+            "meho_backplane.mcp.tools._call_operation_status._write_audit_row",
+            None,
+            {},
+            {"result": {"stored-marker": "kept"}},
+        ),
+        (
+            "meho_backplane.operations.approval_queue._write_audit_row",
+            None,
+            {},
+            _STORED_OK,
+        ),
+    ],
+    ids=["not-found-row", "refusal-row", "unreadable-result-row", "result-row"],
+)
+async def test_a_failed_audit_write_ends_the_call_with_an_internal_error_and_sends_nothing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    caller_sub: str | None,
+    overrides: dict[str, str],
+    stored: Any,
+) -> None:
+    _switch(monkeypatch, status=True)
+    request_id = await _park()
+    if stored is not None:
+        await _set(
+            request_id,
+            status=ApprovalRequestStatus.APPROVED.value,
+            resumed_at=datetime.now(UTC),
+            resume_result=stored,
+        )
+    if caller_sub is not None:
+        _Caller.operator = _REQUESTER.model_copy(update={"sub": caller_sub})
+    columns_before = await _request_columns(request_id)
+    monkeypatch.setattr(target, _fail_the_write)
+
+    response = _call(client, request_id, **overrides)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["error"]["code"] == -32603, body
+    assert "result" not in body
+    assert "demo.vm.delete" not in response.text
+    for text in ("awaiting_approval", "pending", "approved", "stored-marker", "executed"):
+        assert text not in response.text
+    assert await _request_columns(request_id) == columns_before

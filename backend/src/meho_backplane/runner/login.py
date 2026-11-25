@@ -64,6 +64,7 @@ _ENROLL_PATH: Final[str] = "/api/v1/runner-principals/enroll"
 _HTTP_TIMEOUT_SECONDS: Final[float] = 15.0
 #: How long one signed login request is valid.
 _ASSERTION_LIFETIME_SECONDS: Final[int] = 60
+_SIGNING_ALG: Final[str] = "ES256"
 #: A token is renewed when less than this share of its life is left ...
 _RENEW_LIFETIME_SHARE: Final[float] = 0.25
 #: ... or fewer seconds than this.
@@ -243,13 +244,21 @@ class _LoginRecord:
     def from_file(cls, path: Path) -> _LoginRecord:
         try:
             data = json.loads(path.read_text())
-            return cls(**{name: str(data[name]) for name in cls.__dataclass_fields__})
+            record = cls(**{name: str(data[name]) for name in cls.__dataclass_fields__})
         except OSError as exc:
             raise RunnerLoginError(
                 f"cannot read the login record {path}: {type(exc).__name__}"
             ) from exc
         except (ValueError, KeyError, TypeError) as exc:
             raise _SavedLoginError(f"the login record {path} is damaged") from exc
+        if record.signing_alg != _SIGNING_ALG:
+            # A plain RunnerLoginError: startup stops here, and the enrollment
+            # code is not sent again.
+            raise RunnerLoginError(
+                f"the login record {path} has signing type {record.signing_alg}; "
+                f"the runner reads only {_SIGNING_ALG}. {_RECOVERY}"
+            )
+        return record
 
 
 async def enroll_with_code(
@@ -300,6 +309,11 @@ async def enroll_with_code(
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise RunnerLoginError("enrollment answer is not valid") from exc
+    if record.signing_alg != _SIGNING_ALG:
+        raise RunnerLoginError(
+            f"enrollment answer has signing type {record.signing_alg}; "
+            f"the runner reads only {_SIGNING_ALG}"
+        )
     if record.client_id != _client_id(runner_id):
         raise RunnerLoginError(f"{_OTHER_RUNNER} (the code is for {record.client_id})")
     if record.key_id != ec_key_id(public_jwk(key)):

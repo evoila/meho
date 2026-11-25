@@ -49,6 +49,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "jsonflux_answer_ready",
         "k8s_apply_one_approval_hint",
         "k8s_node_list_resources",
+        "keycloak_answer_realm",
         "file_ref_params",
         "kb_search_plain_sentences",
         "kb_search_word_hint",

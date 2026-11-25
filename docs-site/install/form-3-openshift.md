@@ -36,7 +36,7 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole OpenShift cluster | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one project only | Steps 2 to 8 |
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 **Tools on your laptop:**
 
@@ -449,6 +449,18 @@ coreVault:
 EOF
 ```
 
+**Targets on private addresses.** MEHO refuses a target on a private
+address (for example `192.168.x.x` or `10.x.x.x`) by default, also
+though the network rules are off here. List only the networks of the
+systems MEHO manages, separated by commas. Never `0.0.0.0/0`:
+
+```bash
+cat > values-targets.yaml <<EOF
+config:
+  targetSsrfAllowlist: "192.0.2.0/24"
+EOF
+```
+
 **A test install** with the check of [Step 5.5](#55-the-install-check-with-a-login):
 this makes a service login for the checks. Do not use it on a real
 install.
@@ -496,7 +508,7 @@ This collects the files of Step 3.2 and 3.3 that you made, in the list
 
 ```bash
 EXTRA=()
-for f in values-tls.yaml values-registry.yaml values-storage.yaml values-ci.yaml values-openbao-ubi.yaml; do
+for f in values-tls.yaml values-registry.yaml values-storage.yaml values-targets.yaml values-ci.yaml values-openbao-ubi.yaml; do
   [ -f "$f" ] && EXTRA+=(-f "$f")
 done
 echo "extra files: ${EXTRA[*]}"

@@ -2069,8 +2069,9 @@ networkPolicy:
   # etc.) — disabling without a replacement removes the chart's least-
   # privilege egress story.
   enabled: true
-  # -- Namespace label value selecting the ingress controller. RKE2 ships with
-  # `ingress-nginx`; override per-cluster.
+  # -- Namespace label value selecting the ingress controller. `ingress-nginx`
+  # is only an example. RKE2 and k3s run Traefik in `kube-system`; set the
+  # namespace of your own controller.
   ingressControllerNamespace: ingress-nginx
   # -- Let the backplane reach its own console address (`ingress.host`).
   # The first-start `certificate` check opens a TLS connection to it. A

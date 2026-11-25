@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -205,4 +206,18 @@ func askYes(in *bufio.Reader, w io.Writer, prompt string) bool {
 	fmt.Fprint(w, prompt)
 	line, _ := in.ReadString('\n')
 	return strings.EqualFold(strings.TrimSpace(line), "yes")
+}
+
+// BrowserApprovalSignIn runs one browser sign-in with the approval client
+// and returns its token source. Other commands whose call needs a fresh
+// approval sign-in use it, for example `meho principal unblock` on the
+// person's own login. The token stays in memory for this one run.
+func BrowserApprovalSignIn(ctx context.Context, client *api.AuthedClient) (oauth2.TokenSource, error) {
+	return browserApprovalSignIn(ctx, client)
+}
+
+// NeedsFreshSignIn reports whether a 401 asks for a newer sign-in (the
+// RFC 9470 challenge).
+func NeedsFreshSignIn(resp *http.Response) bool {
+	return needsFreshSignIn(resp)
 }

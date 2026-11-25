@@ -1686,6 +1686,20 @@ admin's change of rights. MEHO says so; it builds no exception.
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
   admin": a warning with the same sentence for one admin, ok for two or
   more, and no line when the count is not known or the backplane is older.
+- The note for each number of admins (`only_admin_note`):
+
+  | Admins | Note |
+  |---|---|
+  | none | "This tenant has no admin." and the guide link. No "second admin" sentence, because one more admin would not be enough. |
+  | one, the requester | "This change needs a second admin to approve it. This tenant has only one admin." and the link |
+  | one, another person | no note, because that admin can approve |
+  | two or more | no note |
+  | not known | no note |
+
+  The "no admin" note shows only for a sure count of zero. Today the read of
+  the realm gives "not known" instead of zero (see above), so this note comes
+  into use when that read changes. On an approved request (a retry with the
+  same key), the "second admin" sentence goes and the rest stays in every row.
 
 ## The "may I approve this?" answer (#3329)
 

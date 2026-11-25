@@ -87,6 +87,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_credential_write_preview_conformance.py",
     "tests/test_operations_jsonflux_conformance.py",
     "tests/test_broadcast_classifier_coverage.py",
+    # The checked-in table of class, risk level and approval of every typed operation.
+    "tests/test_approval_table_snapshot.py",
     # Every typed operation in the flight recorder.
     "tests/test_flight_recorder_typed_spans.py",
     "tests/test_flight_recorder_secret_field_guard.py",

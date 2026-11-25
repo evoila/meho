@@ -460,7 +460,10 @@ Switch: `AUDIT_SECRET_READ_AS` (`Settings.audit_secret_read_as`), off by
 default. MEHO writes the column `audit_log.secret_read_as` on every
 install. With the switch off, no audit read (REST, CLI, MCP, web console)
 shows the field, and every answer is the same as without it. With it on,
-each row in an answer carries the field.
+each row in an answer carries the field. The measurement of the switch is
+tracked in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch (audit
+answers name whose login read the secret) before it is on by default". The
+switch stays off by default until that measurement is done.
 
 How the value gets to the row: the dispatcher opens one scope for each call
 (`auth/secret_read_as.py`), at the start of `dispatch()`, before the first

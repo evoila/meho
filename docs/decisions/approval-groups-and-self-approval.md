@@ -9,6 +9,7 @@
 **Replaces:** the "DENY for agent principals" rule for `destructive` changes in [governed-delete-operations.md](governed-delete-operations.md)
 **Superseded in part by:** [configurable policy](2026-11-09-configurable-policy.md) (proposed, waits for the owner's confirmation). It replaces the section "No exceptions": categories, custom roles and routing may give different rules per connector, operation group and operation. The rest of this record stays.
 **Changed by:** [the four default roles](2026-11-18-four-default-roles.md) (not built yet). Only Admins and Platform Admins approve their own changes. MEHO-SA-Operators and MEHO-Approvers are no longer default groups. An Admin's own change of rights in the web console runs at once. A change of rights asked with a token or by an AI waits, and is approved only with a click in the web console.
+**Replaced in part by:** [the custom policy model](2026-11-25-custom-policy-model.md) (proposed, not built yet). With its one switch on, a tenant policy decides what a token call (an agent call) may run at once, instead of "only safe".
 
 ## The decision in short
 

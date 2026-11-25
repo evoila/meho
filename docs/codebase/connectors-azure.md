@@ -2112,8 +2112,26 @@ the mixin to its own.
 - The import keeps its record in Azure, in the tags of the import site: one
   tag `meho-csv-<first 16 characters of the file's SHA-256>` with the job
   name. MEHO writes it after it got the upload link and before it uploads.
-  A retry finds the tag, reads that job and uploads nothing. If the tag
-  cannot be written, nothing is uploaded, and the import job that Azure made
+  A retry finds the tag, reads that job and uploads nothing. A tag stays after
+  a finished import, because it is what keeps a retry from uploading the file
+  twice. Azure allows at most 50 tags on one resource
+  ([limits page](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits)),
+  and MEHO uses one tag per file and per `repeat_key`. MEHO counts the
+  site's tags before it asks for an upload link. When a file has no record
+  yet and the site has 50 tags, MEHO makes room: it reads the site's job list
+  and removes its own records (`meho-csv-` tags) of jobs that ended at least
+  a day ago, oldest first, as many as it needs. Other tags stay, and so do
+  records of jobs that still run, that ended less than a day ago, that have no
+  end time, or that Azure does not list. So a record stays at least a day
+  after its job ended, and a retry in that time uploads nothing. A retry
+  after its record was removed finds no record and imports the file again,
+  as a new import job. When MEHO finds no record to remove, the call stops
+  with a conflict that says how many tags the site has, and MEHO asks Azure
+  for no upload link and uploads nothing. The caller then sends the call again
+  a day after the earlier jobs ended, sends it with another `site` name, or a
+  person removes tags of the import site that are not needed. A retry of a
+  file that has a record still works on a full site. If the tag
+  cannot be written (for example when someone added a tag in between), nothing is uploaded, and the import job that Azure made
   for the upload link stays without a file; the agent then tells the person
   and reads the jobs with `azure.migrate.job.list` first. An existing site is
   never written again (a `PUT` would replace its tags). MEHO adds and removes
@@ -2125,12 +2143,14 @@ the mixin to its own.
   busy for two minutes, MEHO sends nothing and answers with a conflict.
 - A tag whose job Azure no longer has (a 404 when MEHO reads it) is kept.
   A missing job does not prove the file never arrived, so MEHO uploads
-  nothing and the error asks for a new `repeat_key`.
+  nothing. The error and the import advice say to read `azure.migrate.job.list`
+  and `azure.migrate.machine.list` first and tell the person; a new
+  `repeat_key` is only for a person who wants another import of the same file.
 - A tag whose job still waits for its file (`WaitingForBlobUpload`) is
   followed, not sent again: the first upload may still be under way, or its
   answer was lost (`outcome: earlier_upload_waiting`). Only a refusal from
-  Azure Storage (any answer from 300 to 499, also 401, 404 and 429) means
-  the file did not arrive; then MEHO removes the tag, so the same call again
+  Azure Storage (an answer from 300 to 499, also 401, 404 and 429, but not
+  408) means the file did not arrive; then MEHO removes the tag, so the same call again
   uploads the file. The error has a fixed text, "Azure Storage refused the
   upload (HTTP <status>)", with no part of the upload link.
 - `repeat_key` imports the same file again on purpose. The tag name gets
@@ -2139,18 +2159,36 @@ the mixin to its own.
   there.
   A job in `WaitingForBlobUpload` may still get its file; a new key is only
   for a person who wants another import of the same file.
-- A lost answer or a 5xx on the upload is not an error: the call follows the
-  job (`outcome: upload_unconfirmed`). The upload is sent in one request,
-  whatever the answer: no new login after a 401, and no wait and second try
-  after a 429. So the upload is never sent twice by the same call.
-- Each step waits for the one before it. When Azure has not confirmed the
+- A lost answer, a 408 or a 5xx on the upload is not an error: the call follows
+  the job (`outcome: upload_unconfirmed`). A 408 can come from a proxy on the
+  way, so the file may have arrived: the record stays. The upload is sent in
+  one request, whatever the answer: no new login after a 401, and no wait and
+  second try after a 429. So the upload is never sent twice by the same call.
+- Each step waits for the one before it. A write whose answer has no link to
+  follow but a `provisioningState` that has not ended (Azure may answer 201 with
+  `Provisioning` or `Running`) is read again with `GET` of the resource, with
+  Azure's `Retry-After`, until it ends or MEHO's wait is over. `done` is true
+  only for `Succeeded`; `Failed` and `Canceled` raise an error with Azure's
+  reason. An answer with no state counts as done. This holds for every `PUT`
+  of these writes, for the `updateMachines` `POST` of `group.create` and
+  `group.update` (MEHO then reads the group), and for an import site that
+  already exists: a retry that
+  finds the site still running goes no further. When Azure has not confirmed the
   import site or the import collector after MEHO's wait, the import stops
   before it asks for an upload link. When Azure has not confirmed the group
   `PUT`, `group.create` adds no machines; when it has not confirmed the Add of
   `group.update`, Remove is not sent. The step that was not sent has
   `sent: false`, and `not_sent` says what to do.
+- MEHO reads the import collector before it writes it. When it exists, points
+  to the same import site (`discoverySiteId`) and is `Succeeded`, no `PUT` is
+  sent, so a retry after a slow collector write does not start a new write.
+  In every other case the `PUT` is sent.
 - When Azure accepts a write but its status cannot be read, the step keeps
   the operation reference, `done` is false and `poll_error` says what failed.
+  The error of an import setup step (site or collector) holds that reference,
+  for `azure.operation.status`, and the read error. A status answer with
+  HTTP 200 whose body is not JSON counts as a failed read, with the fixed text
+  "Azure's answer was not JSON.".
 - A read that fails after a write was sent does not hide the write: the result
   carries `poll_error`, and `azure.migrate.job.list`,
   `azure.migrate.assessment.list` or `azure.operation.status` show the
@@ -2161,7 +2199,9 @@ the mixin to its own.
 
 `importUri` returns a signed link (a secret) and the job id. MEHO checks that
 the link is plain https to a blob host of the target's cloud, then uploads
-through `send` with a caller object that gives no `Authorization` header:
+through `send_single_try` (`_http.py`) with a caller object that gives no
+`Authorization` header. The upload is sent exactly once: no new login after a
+401, and no second try after a 429, a 5xx or a lost connection:
 MEHO's Azure token never goes to the link. The link is in no result, error,
 log or audit text. The trace mask (`trace_mask.py`) hides `uri`,
 `blobSasUri`, `errorSasUri` and `sasUri` in every Azure answer, and the shared
@@ -2181,6 +2221,10 @@ SHA-256, size and row count.
   each with or without its `*` mark, in any case. A UTF-8 byte order mark at
   the start is allowed; MEHO hashes and uploads the bytes as they came. Azure checks every row; its reasons for
   bad rows come back in `bad_rows` (at most 100, secrets filtered).
+- One import site holds at most 50 tags (Azure's limit). MEHO uses one per
+  file and per `repeat_key`, and removes its own records of jobs that ended at
+  least a day ago when it needs room. When it finds none, the call stops and
+  uploads nothing.
 - `machines`, `add` and `remove` take the machine `name` from
   `azure.migrate.machine.list` (the API description says "machine names").
   At most 1000 per call.
@@ -2202,7 +2246,19 @@ SHA-256, size and row count.
 
 Nothing yet. The lab login does not exist yet, so every read and write is
 proven with mocked HTTP only, with answers shaped like the examples in Azure's pinned
-API description files. Open points for the lab proof:
+API description files. The live proof of the Migrate operations is made on a
+real Azure Migrate project in the operator's own Azure subscription (named by
+type only here).
+
+Sign-in. Microsoft's page for the client credentials flow
+(<https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow>)
+says: for a higher level of assurance, the calling service uses a certificate
+or a federated credential instead of a shared secret. The connector signs in
+as an app with a client secret (OAuth 2.0 client credentials, see "Login"), so
+it does not use the recommended way yet. A separate Task changes the sign-in.
+
+The limit of 50 tags on one resource is Microsoft's documented limit. It is
+not yet checked on a real Azure Migrate project. Open points for the lab proof:
 
 - that the ID of an imported machine points at its import site, as the API
   description implies;

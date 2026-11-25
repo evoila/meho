@@ -49,6 +49,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -59,6 +60,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -74,6 +76,7 @@ from meho_backplane.operations._errors import (
     result_already_resumed,
     result_target_gone_since_approval,
 )
+from meho_backplane.operations.approval_context import ReviewerContext, resolve_reviewer_context
 from meho_backplane.operations.approval_queue import claim_resume, persist_resume_result
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
@@ -97,6 +100,7 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.approvals import routes as approvals_routes
 from meho_backplane.ui.routes.work_ref_form import WORK_REF_REFUSED_HEADER
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
@@ -548,6 +552,45 @@ def test_detail_modal_renders_request_fields() -> None:
     assert "X-CSRF-Token" in body
     # CSRF cookie re-set on the modal render so the pair lines up.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+@pytest.mark.parametrize("with_summary", [True, False], ids=["summary", "no-summary"])
+def test_detail_modal_shows_the_realm_in_the_opening_summary(with_summary: bool) -> None:
+    """The realm of a Keycloak target stands in the first block, before the detail rows (#6418)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="keycloak.realm.update",
+        connector_id="keycloak-admin-26.x",
+        proposed_effect={
+            "op_id": "keycloak.realm.update",
+            "safety_level": "dangerous",
+            "target_realm": "example-realm",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    async def _context(session: AsyncSession, row: ApprovalRequest) -> ReviewerContext:
+        found = await resolve_reviewer_context(session, row)
+        return replace(found, summary="Update a realm." if with_summary else None)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(f"{approvals_routes.__name__}.resolve_reviewer_context", _context),
+        ):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert body.count('data-testid="approval-target-realm"') == 1
+    box = body.index('aria-label="What this request does"')
+    realm = body.index('data-testid="approval-target-realm"')
+    assert box < realm < body.index(">Operation</dt>") < body.index(">Proposed effect</p>")
+    assert "example-realm" in body[realm : body.index(">Operation</dt>")]
+    assert ("Update a realm." in body[box:realm]) is with_summary
 
 
 def _seed_target_sync(

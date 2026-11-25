@@ -73,6 +73,7 @@ from meho_backplane.connectors.keycloak.ops_write_merge import (
     unrequested_changes,
 )
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import PreviewContext
 
@@ -541,6 +542,7 @@ async def keycloak_authflow_ensure_passkey_code_skip(
     realm = resolve_realm_config(target).managed_realm
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     before = await self._get_admin_json(target, realm_path, operator=operator)
+    check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
     bound = before.get("browserFlow")
     if not isinstance(bound, str) or not bound:
         raise KeycloakUnexpectedResponseError("the realm has no browserFlow")

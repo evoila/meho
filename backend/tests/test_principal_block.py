@@ -12,13 +12,16 @@ What these tests check:
 * A block list that cannot be read refuses the call; it never lets it through.
 * A tenant admin blocks in their own tenant only. A platform admin blocks
   in every tenant. Nobody blocks their own login.
-* Only a person with ``tenant_admin`` blocks or unblocks. There is no MCP tool.
+* Only a person with ``tenant_admin`` blocks or unblocks. A platform admin
+  also removes their own block, with a fresh sign-in and a reason. There is
+  no MCP tool.
 * Each block and each unblock writes one audit row with the admin, the
   login and the reason.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -32,6 +35,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from httpx import ASGITransport
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -39,7 +44,9 @@ from meho_backplane.auth.principal_block import (
     BLOCK_CACHE_SECONDS,
     BLOCK_SCOPE_ALL,
     PRINCIPAL_BLOCKED_MESSAGE,
+    PrincipalBlockUnavailableError,
     block_principal,
+    is_principal_blocked,
     reset_block_cache,
 )
 from meho_backplane.connectors.schemas import OperationResult
@@ -90,6 +97,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("MCP_RESOURCE_URI", _MCP_AUDIENCE)
     monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.delenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", raising=False)
+    monkeypatch.delenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", raising=False)
+    monkeypatch.delenv("KEYCLOAK_CLI_APPROVE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("APPROVAL_SIGN_IN_LEVEL", raising=False)
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
     clear_jwks_cache()
@@ -402,6 +413,25 @@ async def test_only_a_person_with_tenant_admin_blocks_and_unblocks(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_block_call_writes_no_block_and_one_audit_row(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+
+    refused = await _block(ac, _admin(key), sub="admin-person")
+
+    assert refused.status_code == 422
+    assert await _rows("admin-person") == []
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    block_rows = [r for r in rows if r.payload.get("op_id") == "principal.block"]
+    assert len(block_rows) == 1
+    assert block_rows[0].status_code == 422
+    assert block_rows[0].operator_sub == "admin-person"
+
+
+@pytest.mark.asyncio
 async def test_block_and_unblock_each_write_one_audit_row(
     _client: tuple[httpx.AsyncClient, Any],
 ) -> None:
@@ -630,3 +660,407 @@ async def test_approved_call_does_not_run_while_the_asker_is_blocked(
     assert stored.resumed_at is not None
     assert stored.resume_result is not None
     assert stored.resume_result["extras"]["error_code"] == "principal_blocked"
+
+
+# ---------------------------------------------------------------------------
+# A platform admin's own way back
+# ---------------------------------------------------------------------------
+
+_PA = "platform-person"
+_PA_ROLE = "meho-platform-admin"
+
+
+def _pa_token(
+    key: Any,
+    *,
+    tenant: uuid.UUID = _TENANT_A,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: Any = True,
+    extra_claims: dict[str, Any] | None = None,
+    fresh_sign_in: bool = True,
+) -> str:
+    """A token of the person ``_PA``; the platform admin flag is the claim value.
+
+    By default the token comes from a fresh approval sign-in, as the way
+    back needs it.
+    """
+    claims: dict[str, Any] = {"platform_admin": platform_admin}
+    claims.update(extra_claims or {})
+    return mint_token(
+        key,
+        sub=_PA,
+        tenant_id=str(tenant),
+        tenant_role=role.value,
+        extra_claims=claims,
+        fresh_sign_in=fresh_sign_in,
+    )
+
+
+_WHY = "the block was a mistake"
+
+
+async def _unblock(
+    ac: httpx.AsyncClient,
+    token: str,
+    sub: str,
+    *,
+    tenant: uuid.UUID | None = None,
+    reason: str | None = _WHY,
+) -> httpx.Response:
+    headers = _auth(token)
+    if tenant is not None:
+        headers["Meho-Tenant"] = str(tenant)
+    body = None if reason is None else {"reason": reason}
+    return await ac.request("DELETE", f"{_ROUTE}/{sub}", json=body, headers=headers)
+
+
+async def _unblock_rows() -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    return [r for r in rows if r.payload.get("op_id") == "principal.unblock"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_platform_admin_removes_own_block_and_works_again(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(key, role=TenantRole.READ_ONLY)
+
+    # Every other route of the tenant still refuses the person.
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+    assert (await ac.get(_ROUTE, headers=_auth(token))).status_code == 403
+
+    removed = await _unblock(ac, token, _PA, tenant=_TENANT_A)
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"sub": _PA, "removed": 1}
+    assert await _rows(_PA) == []
+    after = await ac.get(_WORK_ROUTE, headers=_auth(token))
+    assert "principal_blocked" not in after.text
+    # The audit row names the person who removed the block, the reason and the sign-in.
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    (row,) = [r for r in rows if r.payload.get("unblocked_sub") == _PA]
+    assert row.operator_sub == _PA
+    assert row.payload["reason"] == _WHY
+    sign_in = row.payload["sign_in"]
+    assert sign_in["method"] == "fresh_sign_in"
+    assert sign_in["acr"] == "1"
+    assert isinstance(sign_in["auth_time"], int)
+    assert len(sign_in["sign_in_key"]) == 32
+
+
+@pytest.mark.asyncio
+async def test_way_back_works_on_an_install_with_one_tenant(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT_A, slug="block-a", name="Block A"))
+        await session.commit()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(key)
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+
+    assert (await _unblock(ac, token, _PA)).status_code == 200
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code != 403
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_under_a_block_in_every_tenant_cannot_unblock(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    other_platform_admin = _token(
+        key, "other-platform-person", role=TenantRole.TENANT_ADMIN, platform_admin=True
+    )
+    assert (await _block(ac, other_platform_admin, sub=_PA)).status_code == 201
+    (row,) = await _rows(_PA)
+    assert row.scope == BLOCK_SCOPE_ALL
+
+    refused = await _unblock(ac, _pa_token(key), _PA)
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}"
+    assert len(await _rows(_PA)) == 1
+    # A platform admin who is not blocked removes it.
+    assert (await _unblock(ac, other_platform_admin, _PA)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_blocked_tenant_admin_cannot_unblock_anyone(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub="admin-person-2")).status_code == 201
+    blocked_admin = _token(key, "admin-person-2", role=TenantRole.TENANT_ADMIN)
+
+    own = await _unblock(ac, blocked_admin, "admin-person-2")
+    assert own.status_code == 403
+    assert own.json()["detail"].startswith("principal_blocked")
+    assert (await _block(ac, _admin(key))).status_code == 201
+    other = await _unblock(ac, blocked_admin, _BLOCKED)
+    assert other.status_code == 403
+    assert len(await _rows("admin-person-2")) == 1
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_platform_admin_cannot_remove_another_persons_block(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key))).status_code == 201
+
+    refused = await _unblock(ac, _pa_token(key), _BLOCKED)
+    assert refused.status_code == 403
+    assert len(await _rows(_BLOCKED)) == 1
+    assert len(await _rows(_PA)) == 1
+
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    unblock_rows = [r for r in rows if r.payload.get("op_id") == "principal.unblock"]
+    assert len(unblock_rows) == 1
+    assert unblock_rows[0].status_code == 403
+    assert unblock_rows[0].operator_sub == _PA
+
+
+@pytest.mark.asyncio
+async def test_a_token_without_a_valid_platform_admin_flag_has_no_way_back(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+
+    for flag in (False, "yes", "nope", [], None):
+        token = _pa_token(key, platform_admin=flag)
+        response = await _unblock(ac, token, _PA)
+        assert response.status_code == 403, flag
+    assert len(await _rows(_PA)) == 1
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_from_a_realm_role_has_the_same_way_back(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    monkeypatch.setenv("JWT_PLATFORM_ADMIN_ROLE_NAME", _PA_ROLE)
+    get_settings.cache_clear()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    token = _pa_token(
+        key,
+        platform_admin=None,
+        extra_claims={"realm_access": {"roles": [_PA_ROLE]}},
+    )
+    assert (await ac.get(_WORK_ROUTE, headers=_auth(token))).status_code == 403
+    assert (await _unblock(ac, token, _PA)).status_code == 200
+    assert await _rows(_PA) == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_block_list_gives_a_platform_admin_no_way_through(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    reset_block_cache()
+
+    async def _broken() -> Any:
+        raise PrincipalBlockUnavailableError
+
+    monkeypatch.setattr(f"{_BLOCK_MODULE}._load_entries", _broken)
+    response = await _unblock(ac, _pa_token(key), _PA)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "principal_block_check_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_way_back_removes_only_the_block_of_the_current_tenant(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key, tenant=_TENANT_A), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key, tenant=_TENANT_B), sub=_PA)).status_code == 201
+
+    removed = await _unblock(ac, _pa_token(key), _PA, tenant=_TENANT_A)
+
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"sub": _PA, "removed": 1}
+    (row,) = await _rows(_PA)
+    assert row.scope == str(_TENANT_B)
+
+
+@pytest.mark.asyncio
+async def test_way_back_reads_the_table_and_a_new_block_in_every_tenant_stays(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    # This process holds the list with the tenant block only.
+    assert await is_principal_blocked(_PA, None) is False
+    # Another process adds a block in every tenant; the cached list does not show it yet.
+    async with get_sessionmaker()() as session:
+        session.add(
+            PrincipalBlock(
+                sub=_PA,
+                scope=BLOCK_SCOPE_ALL,
+                tenant_id=None,
+                reason="blocked everywhere",
+                blocked_by_sub="other-platform-person",
+                blocked_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    refused = await _unblock(ac, _pa_token(key), _PA, tenant=_TENANT_A)
+
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}"
+    assert sorted(row.scope for row in await _rows(_PA)) == sorted(
+        [BLOCK_SCOPE_ALL, str(_TENANT_A)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_unblock_answers_503_when_the_table_read_fails_with_the_list_cached(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key))).status_code == 201
+    # The cached list lets sign-in pass without a read of the table.
+    assert await is_principal_blocked(_PA, _TENANT_A) is True
+
+    real_execute = AsyncSession.execute
+
+    async def _execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(statement, "is_select", False) and "principal_block" in str(statement):
+            raise OperationalError(str(statement), {}, Exception("database is gone"))
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _execute)
+
+    for token, sub in ((_pa_token(key), _PA), (_admin(key), _BLOCKED)):
+        response = await _unblock(ac, token, sub, tenant=_TENANT_A)
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "principal_block_check_unavailable"
+    monkeypatch.undo()
+    assert len(await _rows(_PA)) == 1
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Who may unblock, and what the way back needs
+# ---------------------------------------------------------------------------
+
+
+async def _seed_one_tenant() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT_A, slug="block-a", name="Block A"))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [TenantRole.READ_ONLY, TenantRole.OPERATOR])
+async def test_platform_admin_below_tenant_admin_cannot_remove_another_persons_block(
+    _client: tuple[httpx.AsyncClient, Any], role: TenantRole
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key))).status_code == 201
+    platform_reader = _token(key, "platform-reader", role=role, platform_admin=True)
+
+    refused = await _unblock(ac, platform_reader, _BLOCKED, reason=None)
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"] == "insufficient_role"
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_own_unblock_with_a_login_token_asks_for_a_fresh_sign_in(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+
+    refused = await _unblock(ac, _pa_token(key, fresh_sign_in=False), _PA)
+
+    assert refused.status_code == 401, refused.text
+    detail = refused.json()["detail"]
+    assert detail.startswith("fresh_sign_in_required: ")
+    assert "meho principal unblock <sub> --reason <text>" in detail
+    assert "approvals approve" not in detail
+    challenge = refused.headers["WWW-Authenticate"]
+    assert 'error="insufficient_user_authentication"' in challenge
+    assert "max_age=900" in challenge
+    assert len(await _rows(_PA)) == 1
+    (row,) = await _unblock_rows()
+    assert row.status_code == 401
+    assert row.operator_sub == _PA
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [None, "", "x" * 501], ids=["none", "empty", "too-long"])
+async def test_own_unblock_needs_a_reason(
+    _client: tuple[httpx.AsyncClient, Any], reason: str | None
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+
+    refused = await _unblock(ac, _pa_token(key), _PA, reason=reason)
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"].startswith("unblock_reason_required: ")
+    assert len(await _rows(_PA)) == 1
+    (row,) = await _unblock_rows()
+    assert row.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_own_unblock_with_an_approval_sign_in_older_than_the_window_is_refused(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    old = _pa_token(key, extra_claims={"auth_time": int(time.time()) - 900 - 60})
+
+    refused = await _unblock(ac, old, _PA)
+
+    assert refused.status_code == 401, refused.text
+    assert refused.json()["detail"].startswith("fresh_sign_in_required: ")
+    assert len(await _rows(_PA)) == 1
+
+
+@pytest.mark.asyncio
+async def test_admins_remove_another_persons_block_with_a_login_token_and_no_reason(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key))).status_code == 201
+    assert (await _unblock(ac, _admin(key), _BLOCKED, reason=None)).status_code == 200
+    assert await _rows(_BLOCKED) == []
+
+    assert (await _block(ac, _admin(key))).status_code == 201
+    platform_admin = _pa_token(key, fresh_sign_in=False)
+    removed = await _unblock(ac, platform_admin, _BLOCKED, reason="sent by the admin")
+    assert removed.status_code == 200, removed.text
+    assert await _rows(_BLOCKED) == []
+    rows = [r for r in await _unblock_rows() if r.payload.get("unblocked_sub") == _BLOCKED]
+    assert [r.payload.get("reason") for r in rows] == [None, "sent by the admin"]
+    assert all("sign_in" not in r.payload for r in rows)

@@ -110,6 +110,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.principal_block import (
+    PrincipalBlockUnavailableError,
+    is_principal_blocked,
+)
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.broadcast.archive_cursor import (
     InvalidArchiveCursorError,
@@ -130,6 +134,7 @@ __all__ = [
     "StreamLiveness",
     "announcement_feed_frames",
     "feed_response",
+    "login_not_blocked",
     "resolve_feed_start",
     "router",
     "token_liveness",
@@ -145,6 +150,12 @@ _REQUIRE_OPERATOR = Depends(require_role(TenantRole.OPERATOR))
 #: Longest single archive wait. Also bounds how long a client disconnect
 #: takes to land in the generator.
 _WAIT_MS: Final[int] = 30_000
+
+#: The longest archive wait of a stream that checks the block list, and the
+#: oldest list copy such a check accepts. A block ends the stream within
+#: the sum of the two: 4 seconds, inside the 5 seconds of the block rule.
+_BLOCK_POLL_MS: Final[int] = 2_000
+_BLOCK_COPY_MAX_AGE_SECONDS: Final[float] = 2.0
 
 #: Idle time after which the generator emits an SSE comment heartbeat.
 #: Common proxy idle timeouts are 60 s (nginx ``proxy_read_timeout``,
@@ -190,9 +201,14 @@ class StreamLiveness:
         return self.still_valid is None or await self.still_valid()
 
     def wait_ms(self) -> int:
-        """The next archive wait: at most :data:`_WAIT_MS`, never past ``ends_at``."""
+        """The next archive wait, never past ``ends_at``.
+
+        At most :data:`_WAIT_MS`, or :data:`_BLOCK_POLL_MS` when the stream
+        checks the login.
+        """
         left_ms = (self.ends_at - time.monotonic()) * 1000
-        return max(1, int(min(float(_WAIT_MS), left_ms)))
+        longest = _WAIT_MS if self.still_valid is None else _BLOCK_POLL_MS
+        return max(1, int(min(float(longest), left_ms)))
 
     def seconds_left(self) -> float | None:
         """Seconds until ``ends_at`` (``0`` when past it), or ``None`` for no fixed end."""
@@ -235,11 +251,12 @@ async def _read_until_end[T](liveness: StreamLiveness, read: Awaitable[T]) -> T:
 
 
 def token_liveness(operator: Operator) -> StreamLiveness:
-    """The end of a ``GET /api/v1/feed`` stream: token expiry or the longest time.
+    """The end of a ``GET /api/v1/feed`` stream: token expiry, a block, or the longest time.
 
     The stream ends at the token's ``exp`` plus the JWT leeway, the same
     leeway the token check allows, and after ``feed_stream_max_seconds``
-    at the latest.
+    at the latest. It also ends when an admin blocks the login, or when the
+    block list cannot be read (:func:`login_not_blocked`).
     """
     settings = get_settings()
     now = time.monotonic()
@@ -247,7 +264,23 @@ def token_liveness(operator: Operator) -> StreamLiveness:
     if operator.token_exp is not None:
         left = operator.token_exp + settings.keycloak_jwt_leeway_seconds - time.time()
         ends_at = min(ends_at, now + left)
-    return StreamLiveness(ends_at=ends_at)
+    return StreamLiveness(ends_at=ends_at, still_valid=lambda: login_not_blocked(operator))
+
+
+async def login_not_blocked(operator: Operator) -> bool:
+    """``False`` when an admin blocked the login, or when the block list cannot be read.
+
+    The list is the one of :mod:`meho_backplane.auth.principal_block`, with a
+    copy at most 2 seconds old, so a stream that checks every 2 seconds ends
+    within 4 seconds of a block.
+    """
+    try:
+        blocked = await is_principal_blocked(
+            operator.sub, operator.tenant_id, max_age=_BLOCK_COPY_MAX_AGE_SECONDS
+        )
+    except PrincipalBlockUnavailableError:
+        return False
+    return not blocked
 
 
 def _parse_iso(raw: str) -> datetime | None:

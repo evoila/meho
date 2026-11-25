@@ -8739,6 +8739,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-targets-outside-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho targets outside-folder
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-targets-probe" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -16320,6 +16331,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-targets-outside-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho targets outside-folder
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-targets-probe" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -22076,6 +22098,15 @@
 <li><code>--json</code> — emit machine-readable JSON to stdout instead of the human table</li>
 <li><code>--limit</code> — max targets per page (1..500, server default 100 when omitted)</li>
 <li><code>--product</code>, <code>-p</code> — filter by product slug (exact match)</li>
+</ul>
+<h3 id="meho-targets-outside-folder"><code>meho targets outside-folder</code><a class="headerlink" href="#meho-targets-outside-folder" title="Permanent link">&para;</a></h3>
+<p>List targets whose secret path is outside the tenant's folder</p>
+<div class="highlight"><pre><span></span><code>meho targets outside-folder [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit machine-readable JSON to stdout instead of the human table</li>
+<li><code>--tenant</code> — tenant id to list (platform admin: a tenant you are not a member of, or the tenant chosen with <code>meho tenants use</code>; default: your own tenant, or every tenant for a platform admin)</li>
 </ul>
 <h3 id="meho-targets-probe"><code>meho targets probe</code><a class="headerlink" href="#meho-targets-probe" title="Permanent link">&para;</a></h3>
 <p>Probe a target's connector and refresh its fingerprint</p>

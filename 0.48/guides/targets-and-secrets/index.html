@@ -2273,6 +2273,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#find-targets-whose-secret-is-outside-the-tenants-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Find targets whose secret is outside the tenant's folder
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#change-a-secret" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3490,6 +3501,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#find-targets-whose-secret-is-outside-the-tenants-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Find targets whose secret is outside the tenant's folder
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#change-a-secret" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4061,6 +4083,44 @@ when you leave it out.</p>
   admin sees the targets of every tenant. You can fix one with
   <code>meho targets update</code>, or in the console edit form ("Managed realm").</li>
 </ul>
+<h2 id="find-targets-whose-secret-is-outside-the-tenants-folder">Find targets whose secret is outside the tenant's folder<a class="headerlink" href="#find-targets-whose-secret-is-outside-the-tenants-folder" title="Permanent link">&para;</a></h2>
+<p>MEHO keeps each tenant's secrets under the tenant's own folder in the
+secret store (Vault or OpenBao). When a target's <code>secret_ref</code> points
+outside that folder, MEHO writes a warning to the server log, at most once
+an hour for each target. The call still works. Move the secret into the
+tenant's folder.</p>
+<p>To list these targets, run this as an admin:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>outside-folder
+</code></pre></div>
+<p>A tenant admin sees their own tenant. A platform admin sees every tenant,
+or one tenant with <code>--tenant &lt;tenant-id&gt;</code>. To list one tenant you are a
+member of, choose it first, so your own role there applies, and then name
+its ID:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>tenants<span class="w"> </span>use<span class="w"> </span>&lt;name&gt;
+meho<span class="w"> </span>targets<span class="w"> </span>outside-folder<span class="w"> </span>--tenant<span class="w"> </span>&lt;tenant-id&gt;
+</code></pre></div>
+<p>Without <code>--tenant</code>, a platform admin still sees every tenant. The list of
+every tenant leaves out each other tenant where you are a member without
+the admin role. Each row has the target name, the
+tenant, the <code>secret_ref</code> and why it is outside. The same list is at
+<code>GET /api/v1/targets/checks/outside-tenant-folder</code>.</p>
+<p>The folder is set by <code>VAULT_KV_TENANT_SCOPE_PREFIX</code>, with the tenant id in
+place of <code>{tenant_id}</code>. By default it is <code>secret/tenants/&lt;tenant-id&gt;/</code>.
+Ask the person who runs your MEHO install if your install uses another
+folder.</p>
+<p>To move a target into the folder:</p>
+<ol>
+<li>Copy the secret into the tenant's folder with your own store tooling.
+   With the default folder, that is <code>tenants/&lt;tenant-id&gt;/&lt;target-name&gt;</code>
+   in the <code>secret</code> mount.</li>
+<li>Run <code>meho targets update &lt;name&gt; --secret-ref &lt;new path&gt;</code>. With the
+   default folder, the new path is <code>tenants/&lt;tenant-id&gt;/&lt;target-name&gt;</code>.</li>
+<li>The update waits until a person approves it. The command prints the
+   approval request. Wait for the approval.</li>
+<li>Run <code>meho targets outside-folder</code> again. The target is gone from the list.</li>
+</ol>
+<p>When the folder check is off on your install, the command says
+"The folder check is off on this install" and lists nothing.</p>
 <h2 id="change-a-secret">Change a secret<a class="headerlink" href="#change-a-secret" title="Permanent link">&para;</a></h2>
 <p>MEHO keeps a login for each target for a while, so it does not have to
 log in on every call. When you change a secret only in Vault (or your

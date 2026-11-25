@@ -1073,6 +1073,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Step 6: Install the CLI and log in">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#if-you-are-the-only-admin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If you are the only admin
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3381,6 +3398,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Step 6: Install the CLI and log in">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#if-you-are-the-only-admin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If you are the only admin
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3678,6 +3712,62 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </
 screen and not to a file, and no password goes into your shell history.</p>
 <p>Prove the whole chain:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>status
+</code></pre></div>
+<h3 id="if-you-are-the-only-admin">If you are the only admin<a class="headerlink" href="#if-you-are-the-only-admin" title="Permanent link">&para;</a></h3>
+<p>The first login is an Admin, and an Admin may approve their own changes,
+at every risk level. This is on purpose, so one person can use MEHO. Read
+the rule in
+<a href="../../guides/approvals-and-break-glass/#who-may-approve">Who may approve</a>.
+Do not turn on the emergency switch for this.</p>
+<ul>
+<li>A change of rights (who may do what in MEHO) runs only with a click in
+  the web console.</li>
+<li><code>meho status</code> shows the rule for your own role on its <code>Approvals</code> line.</li>
+</ul>
+<p>To add a second admin:</p>
+<ol>
+<li>
+<p>Route the Keycloak admin console. This is one upgrade, with the same
+   chart version you installed. If you did not pin a version, run
+   <code>helm list -n meho</code> and read it from the <code>CHART</code> column (for example
+   <code>meho-chart-1.2.3</code> is version <code>1.2.3</code>):</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span>--version<span class="w"> </span>&lt;chart-version&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reuse-values<span class="w"> </span>--set<span class="w"> </span>coreKeycloak.ingress.exposeAdmin<span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+</li>
+<li>
+<p>Log in to the console as the console admin. Its steps are in
+   <a href="../keycloak-realm/#the-console-admin">The console admin</a>.</p>
+</li>
+<li>Create the person and join them to the group <strong>MEHO-Admins</strong>. The
+   steps are in <a href="../login/local-users/">Local users</a>. An admin alone
+   cannot approve a change of rights that someone sent with a token in MEHO's own login realm. Only a second
+   person who is a platform admin approves it. If this person should do
+   that, also join them to the group <strong>MEHO-Platform-Admins</strong>. The rule
+   is in
+   <a href="../../guides/approvals-and-break-glass/#more-rules-for-a-change-of-one-login-or-one-group">More rules for a change of one login or one group</a>.</li>
+<li>
+<p>Set the route back when you are done:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span>--version<span class="w"> </span>&lt;chart-version&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reuse-values<span class="w"> </span>--set<span class="w"> </span>coreKeycloak.ingress.exposeAdmin<span class="o">=</span><span class="nb">false</span>
+</code></pre></div>
+</li>
+</ol>
+<p>If your values file already sets <code>coreKeycloak.ingress.exposeAdmin</code>,
+change it there instead: <code>true</code> to open the admin console, <code>false</code> to
+close it. Each time, run the install command of Step 4 with these
+options, so the chart stays at the version you run:</p>
+<ul>
+<li><code>--version &lt;chart-version&gt;</code>: the version you installed (item 1 above
+  says how to find it);</li>
+<li>the same <code>-f</code> values files you used for the installation, in the same
+  order.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span>--version<span class="w"> </span>&lt;chart-version&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>values.yaml
 </code></pre></div>
 <p><strong>You now have a running MEHO and a logged-in operator.</strong> Go on with
 <a href="../setup-page/">the setup page and the settings file</a>.</p>

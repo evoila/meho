@@ -4204,6 +4204,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td><code>meho status</code> now prints the approval rule for your own role in the current tenant on its <code>Approvals</code> line. It no longer says "a second person must approve" for everyone.</td>
+<td>If a script reads the <code>Approvals</code> text of <code>meho status</code>, change it to read the new line, or read <code>effective_posture</code> from <code>meho status --json</code> instead. The JSON output does not change. See https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/ for the rule.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A write step of a multi-step operation now uses the override rows of its operation like a direct call, with the policy switches on or off. An override that raises the risk level to <code>dangerous</code> or sets the approval flag now makes the step wait for a person the same way as a direct call. A step that an override raises to <code>destructive</code> is refused. The approval of the whole run still covers a step that an override raised to <code>dangerous</code>; a step that an override gives the approval flag keeps its own approval. An override that turns approval off does not change a step. No schema migration.</td>
 <td>Before the upgrade, run <code>meho connector overrides</code> (as a platform admin, to see every tenant) and check each row that sets a higher risk level or requires approval. After the upgrade, the multi-step operations that run these operations as a step wait for approval at that step, and a step that an override raised to <code>destructive</code> is refused. Remove an override you do not want with <code>meho connector remove-override</code>, and give an approver time for the steps that now wait.</td>
 </tr>

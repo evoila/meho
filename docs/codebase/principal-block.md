@@ -54,35 +54,22 @@ Where the list is checked:
 | `UISessionMiddleware` (`ui/auth/middleware.py`) | Every console request, not only the 300-second token check. 403 with the plain text above. |
 | `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. Each step of a multi-step operation that runs through `dispatch()` checks again before it is sent. A `denied` result, and the vendor gets no call. |
 | `enforce_subop_policy`, `run_governed_subop` (`operations/composite.py`) | Each governed direct step of a multi-step operation, also a step that is sent again on a resume. The step is refused before it is sent, and the operation returns the refusal. |
-| The send places below (`raise_if_send_refused`) | Each request, command or step right before it is sent. The request is not sent; `dispatch()` returns the same refusal. |
+| `raise_if_send_refused` (`auth/principal_block.py`) | A check that MEHO runs at fixed points while a call runs. A call that reaches it while its login is blocked ends with the block refusal; `dispatch()` returns it. |
 | `PrincipalBlockGate` (`agent/principal_block_gate.py`) | Every tool call and every model request of a hosted agent run and of its child runs (`invoke_agent`). The tool does not run, the model gets no further request, and the run ends failed with the refusal text. The audit row of the refused tool call has status 403 (503 when the list cannot be read). |
 | `invoke_agent` (`agent/invoke.py`) | A child run that is refused because its person is blocked ends failed with the refusal text, and its heartbeat stops. The refusal goes on to the parent run: the parent stops with no retry and ends failed with the same text. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
-A block made while a call runs stops its next send. This holds for every
-operation call, not only for a multi-step operation. Each send place in the
-table below calls `raise_if_send_refused` (`auth/principal_block.py`) right
-before the send goes out. A connector that sends through a vendor library
-(Vault, Postgres) is checked at the start of its handler. The check reads the login that the dispatcher noted for the running
-call (`tracking_run` in `auth/principal_block_run.py`) and every login bound
-with `checking_logins_for_steps`. It runs after the call has its credentials,
-so a long wait for credentials does not skip it. The copy of the list is at
-most 5 seconds old, so a send reads the database at most once in 5 seconds. A
-send outside a running call (a health probe, for example) has no login and is
-not checked.
+MEHO checks the block again at fixed points while a call runs
+(`raise_if_send_refused`). A call that reaches such a point ends with the
+block refusal, and the answer says whether a part of it may have run. A
+request that is already on its way to a system runs to its end. The check
+reads the login that the dispatcher noted for the running call
+(`tracking_run` in `auth/principal_block_run.py`) and every login bound with
+`checking_logins_for_steps`. It reads a copy of the list that is at most 5
+seconds old, so it reads the database at most once in 5 seconds per process.
 
-The send places:
-
-| Place | What it covers |
-|---|---|
-| `_stream_capped_json_response` and the request hook of the HTTP connector base (`connectors/adapters/http.py`) | Every request of a connector built on the base, also each request a redirect sends. |
-| `instrument_api_client` (`connectors/kubernetes/_wire_span.py`) | Every REST request of the Kubernetes client, for each Kubernetes operation. Not the websocket client of `k8s.exec`. |
-| `run_capped` (`connectors/adapters/ssh.py`) | Every SSH command: the shared runner `SshConnector._run_command` and the sudo helpers of the Linux, RKE2 and BIND9 connectors, which call `run_capped` on their own. |
-| `run_governed_subop`, `enforce_subop_policy` (`operations/composite.py`) | A governed step, after its policy gate and before its journal entry starts. A step that waited in the gate while another step was refused is not sent. |
-| `_run_source_kind_handler` (`operations/dispatcher.py`) | The start of every operation's handler, for every kind of connector. |
-
-Once a step or request of a run was refused, no later send of the run goes
-out, also when the list can be read again. The operation answers with the
+Once a check of a run refused, every later check of the same run refuses
+too, also when the list can be read again. The operation answers with the
 refusal, also when its handler catches the error of the step. An inventory
 read (`linux.migration.inventory` and the others) stores no inventory then.
 A list that cannot be read stops the call the same way. The answer says

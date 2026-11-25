@@ -30,16 +30,13 @@ Where it is checked (all through :func:`is_principal_blocked`):
 * an approved call, which does not run while the person who asked is
   blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`);
 * each step of a multi-step operation;
-* each send place, right before the send goes out
-  (:func:`raise_if_send_refused`): a request of the HTTP connector base,
-  a request of the Kubernetes client, an SSH command (``run_capped``), the
-  start of a governed step and the start of each operation's handler. A
-  connector that sends through a vendor library is checked at the start
-  of its handler. So a block made
-  while a call runs stops its next send. The logins a send checks are the
-  login of the running call and every login bound with
-  :func:`checking_logins_for_steps`: the operator of a multi-step
-  operation, and on an approved run also the person who asked.
+* a running call, at fixed points while it runs (:func:`raise_if_send_refused`).
+  A call that reaches such a point while its login is blocked ends with
+  the block refusal, and the answer says whether a part of it may have
+  run. A request that is already on its way to a system runs to its end.
+  The logins it checks are the login of the running call and every login
+  bound with :func:`checking_logins_for_steps`: the operator of a
+  multi-step operation, and on an approved run also the person who asked.
 
 The reader keeps the whole list in memory for a few seconds per process.
 When the list cannot be read, the check raises
@@ -288,16 +285,13 @@ def _earlier_refusal() -> PrincipalBlockedStepError | None:
 
 
 async def raise_if_send_refused() -> None:
-    """The one check each send place calls, right before the send goes out.
+    """The check MEHO runs at fixed points while a call runs.
 
-    Called by the places that send to a target: the request hook of the HTTP
-    connector base, the Kubernetes client wrapper, ``run_capped`` (every SSH command),
-    the step runner of multi-step operations, and the start of each
-    operation's handler. The login is the one the dispatcher noted for the
-    running call (:func:`~meho_backplane.auth.principal_block_run.tracking_run`),
-    plus every login bound with :func:`checking_logins_for_steps`. A send
-    outside a running call (a health probe, for example) has no login and
-    is not checked.
+    A call that reaches it while its login is blocked ends with the block
+    refusal. A request that is already on its way to a system runs to its
+    end. The login is the one the dispatcher noted for the running call
+    (:func:`~meho_backplane.auth.principal_block_run.tracking_run`), plus
+    every login bound with :func:`checking_logins_for_steps`.
 
     Raises :class:`PrincipalBlockedStepError` when an earlier step of the
     run was refused, when a login is blocked, or when the list cannot be

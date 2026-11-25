@@ -35,7 +35,6 @@ What is proven:
 
 from __future__ import annotations
 
-import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -52,6 +51,7 @@ import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry s
 from meho_backplane.api.v1.approvals import get_approval_request
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.managed_realm_check import _RUN_CHECKS
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import KeycloakDeleteRefusedError
 from meho_backplane.connectors.keycloak.ops_write_delete_schemas import DELETE_WRITE_OPS
 from meho_backplane.connectors.keycloak.ops_write_realm_delete import check_realm_guards
@@ -975,8 +975,11 @@ async def test_a_realm_made_again_under_the_same_name_is_not_deleted(
 
 
 def _in_the_handler() -> bool:
-    """True while the realm delete handler itself runs (not a check before it)."""
-    return any(frame.function == "keycloak_realm_delete" for frame in inspect.stack())
+    """True while an operation handler runs (not a check before it).
+
+    The handler wrapper opens a run of the realm check; nothing else does.
+    """
+    return _RUN_CHECKS.get() is not None
 
 
 @pytest.mark.parametrize("same_id", [True, False], ids=["same-id", "other-id"])
@@ -1021,7 +1024,7 @@ async def test_the_handler_compares_its_realm_id_with_the_approved_id(
         assert resumed.result == {"realm": _REALM, "deleted": True, "already_absent": False}
         assert del_route.call_count == 1
         return
-    assert handler_reads == [other_id]
+    assert handler_reads == [other_id], resumed
     assert resumed.status == "error", resumed
     assert resumed.extras is not None
     assert resumed.extras["exception_class"] == "KeycloakDeleteRefusedError"

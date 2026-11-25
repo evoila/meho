@@ -161,13 +161,15 @@ class CertificateCredentials:
 
     ``private_key`` (PEM) stays in the secret store and in MEHO's memory. Only the
     public ``certificate`` (PEM) is uploaded to the app registration. The key is
-    left out of ``repr`` so it cannot reach a log line by accident.
+    left out of ``repr`` so it cannot reach a log line by accident. The
+    certificate is left out too: an operator may paste one PEM file that holds
+    both the certificate and the key into the ``certificate`` field.
     """
 
     tenant_id: str
     client_id: str
     private_key: str = field(repr=False)
-    certificate: str
+    certificate: str = field(repr=False)
 
 
 #: The two ways to prove the app to Microsoft.

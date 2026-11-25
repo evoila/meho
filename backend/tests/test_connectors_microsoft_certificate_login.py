@@ -293,6 +293,15 @@ def test_the_private_key_is_in_no_repr_and_no_log_line(
     assert body not in caplog.text
 
 
+def test_a_certificate_field_that_also_holds_the_key_is_in_no_repr(pair: _Pair) -> None:
+    combined = pair.certificate + pair.private_key
+    credentials = CertificateCredentials(TENANT_A, CLIENT_A, pair.private_key, combined)
+    build_client_assertion(credentials, audience=_TOKEN_URL)
+    key_line = pair.private_key.splitlines()[1]
+    assert key_line not in repr(credentials)
+    assert key_line not in str(credentials)
+
+
 _BASE = {"tenant_id": TENANT_A, "client_id": CLIENT_A}
 
 

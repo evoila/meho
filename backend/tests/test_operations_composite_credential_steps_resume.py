@@ -30,6 +30,9 @@ counts the requests that reached the target
   approval and stops at once;
 * a credential write through ``dispatch_child``, wait, change: the write is
   sent once and gives back no result after the approval;
+* a credential read checked by ``enforce_subop_policy``, wait, change: when
+  the login is blocked while the read waits in its policy check before it
+  is sent again, the read is not sent and the answer is the block refusal;
 * the stored record holds no credential value and no field of a credential
   step's answer.
 """
@@ -47,12 +50,15 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.principal_block import block_principal, reset_block_cache
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations import _preview, reset_dispatcher_caches
+from meho_backplane.operations import composite as composite_module
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.composite_steps import (
@@ -98,10 +104,12 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _reset_module_state() -> Iterator[None]:
     """Reset dispatcher caches, the connector registry and the sent requests."""
     reset_dispatcher_caches()
+    reset_block_cache()
     clear_registry()
     c.reset()
     yield
     reset_dispatcher_caches()
+    reset_block_cache()
     clear_registry()
     c.reset()
 
@@ -516,6 +524,47 @@ async def test_child_credential_read_that_now_requires_approval_is_not_sent_agai
     assert "composite_resume_read_not_sent" in (second.error or "")
     assert c.sent == [c.CREDENTIAL_READ_STEP], "the read is not sent again"
     assert len(await _requests()) == 1, "no approval request is made for the read"
+
+
+async def test_read_sent_again_on_a_resume_is_not_sent_when_the_login_is_blocked_in_its_gate(
+    stub_embedding_service: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The login is blocked while the read waits in its policy check before it is sent again."""
+    await _setup(
+        stub_embedding_service,
+        session,
+        c.GATED_READ_WAIT_CHANGE_OP_ID,
+        "gated_read_wait_change_composite",
+    )
+    first = await h.run(c.GATED_READ_WAIT_CHANGE_OP_ID)
+    assert c.sent == [c.CREDENTIAL_READ_STEP]
+    (waiting,) = await _requests()
+    assert [(step["op_id"], step["status"]) for step in _steps(waiting)] == [
+        (c.CREDENTIAL_READ_STEP, STEP_RUN_AGAIN)
+    ]
+    read_again = composite_module._read_again_refusal
+
+    async def _check_then_block(*args: Any, **kwargs: Any) -> OperationResult | None:
+        refused = await read_again(*args, **kwargs)
+        admin = Operator(
+            sub="admin-person",
+            name=None,
+            email=None,
+            raw_jwt="<test>",
+            tenant_id=h.TENANT_ID,
+            tenant_role=TenantRole.TENANT_ADMIN,
+            principal_kind=PrincipalKind.USER,
+        )
+        await block_principal(admin, h.operator().sub, "left the team")
+        return refused
+
+    monkeypatch.setattr(composite_module, "_read_again_refusal", _check_then_block)
+
+    second = await _approve_and_resume(first)
+
+    assert c.sent == [c.CREDENTIAL_READ_STEP], "the read is not sent again"
+    assert second.status == "denied", second
+    assert second.extras["error_code"] == "principal_blocked"
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,7 @@ from meho_backplane.flight_recorder._capture_util import (
     cap_body,
     coerce_uuid,
     elapsed_ms,
+    encoded_safe_url,
     header_value,
     mask_path_values,
     now_utc,
@@ -149,6 +150,9 @@ class _OpContext:
     # The texts of the call's parameter values. For an operation that sends a
     # secret, a path segment that holds one of them is masked on the span.
     path_values: frozenset[str] = frozenset()
+    # The path template of an ingested op (``/keys/{name}``). It says which
+    # path segments hold a parameter, so the other segments stay readable.
+    path_template: str | None = None
 
 
 @dataclass(slots=True)
@@ -489,15 +493,15 @@ def _span_url(url: Any) -> str:
     """The address put on a vendor-call span: scheme, host, port and path.
 
     For an operation that sends a secret, each path segment that holds a
-    value of the call's parameters is replaced by a fixed mark; the segments
-    of the operation's own path stay. The test is the one the error results
-    use (``operations._vendor_text.sends_secret``).
+    value of the call's parameters is replaced by a fixed mark
+    (:func:`mask_path_values`); the path is then kept percent-encoded, as it
+    was sent. The test is the one the error results use
+    (``operations._vendor_text.sends_secret``).
     """
-    text = safe_url(url)
     op = _op_context_var.get()
     if op is not None and _op_sends_secret(op):
-        return mask_path_values(text, op.path_values)
-    return text
+        return mask_path_values(encoded_safe_url(url), op.path_values, op.path_template)
+    return safe_url(url)
 
 
 def _op_sends_secret(op: _OpContext) -> bool:
@@ -631,4 +635,13 @@ def _op_context_from(descriptor: Any, connector_id: str, params: Any = None) -> 
         delete_shaped_patterns=delete_shaped,
         stored_op_class=getattr(descriptor, "op_class", None),
         path_values=path_values(params),
+        path_template=_ingested_path(descriptor),
     )
+
+
+def _ingested_path(descriptor: Any) -> str | None:
+    """The path template of an ingested op; ``None`` for a typed op."""
+    path = getattr(descriptor, "path", None)
+    if getattr(descriptor, "source_kind", None) != "ingested" or not isinstance(path, str):
+        return None
+    return path

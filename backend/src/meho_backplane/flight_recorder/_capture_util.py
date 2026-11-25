@@ -37,6 +37,7 @@ __all__ = [
     "cap_body",
     "coerce_uuid",
     "elapsed_ms",
+    "encoded_safe_url",
     "header_value",
     "mask_path_values",
     "now_utc",
@@ -159,13 +160,34 @@ def safe_url(url: Any) -> str:
         return "?"
 
 
+def encoded_safe_url(url: Any) -> str:
+    """Like :func:`safe_url`, with the path still percent-encoded as it was sent.
+
+    :attr:`httpx.URL.path` decodes ``%2F``, so a parameter value that holds a
+    ``/`` would look like two path segments. A plain string is taken as it is.
+    """
+    try:
+        raw_path = getattr(url, "raw_path", None)
+        if isinstance(raw_path, bytes):
+            port = getattr(url, "port", None)
+            host = url.host if port in (None, 80, 443) else f"{url.host}:{port}"
+            path = raw_path.split(b"?", 1)[0].decode("ascii")
+            return f"{url.scheme}://{host}{path}"
+    except Exception:
+        return "?"
+    return safe_url(url)
+
+
 #: Stands in for a path segment that holds a value of the call's parameters.
 PATH_VALUE_MARK: Final[str] = "[redacted]"
 
 #: A parameter value this long is masked also inside a longer path segment
-#: (``/keys/<value>:rotate``). A shorter one is masked only when the whole
-#: segment equals it, so a fixed segment such as ``v1`` stays readable.
+#: where it does not stand as a word of its own (``/keys/x<value>``).
 _MIN_VALUE_INSIDE_SEGMENT: Final[int] = 8
+
+#: A ``{name}`` placeholder of an operation's path template. ``{+name}`` and
+#: ``{#name}`` may hold a ``/``; every other form may not.
+_PLACEHOLDER: Final = re.compile(r"\{([+#./;?&]?)[^{}]*\}")
 
 
 def path_values(params: Any) -> frozenset[str]:
@@ -184,30 +206,93 @@ def path_values(params: Any) -> frozenset[str]:
     return frozenset(values)
 
 
-def mask_path_values(url_text: str, values: frozenset[str]) -> str:
-    """Replace each path segment of *url_text* that holds one of *values* with a mark.
+def mask_path_values(url_text: str, values: frozenset[str], template: str | None = None) -> str:
+    """Replace each path segment of *url_text* that holds a value of the call with a mark.
 
-    *url_text* is a :func:`safe_url` result. A segment is compared after
-    percent-decoding. Segments that hold no value stay as they are.
+    *url_text* is an :func:`encoded_safe_url` result. With the operation's
+    path *template* (an ingested operation), the segments where the template
+    puts a parameter are masked, and the fixed segments of the template stay.
+    Without a template, or when the address does not follow it (a redirect to
+    another path), a segment is masked when, after percent-decoding, it holds
+    one of *values* as a word of its own, or a long value anywhere.
     """
     scheme_end = url_text.find("://")
-    if scheme_end == -1 or not values:
+    if scheme_end == -1:
         return url_text
     path_start = url_text.find("/", scheme_end + 3)
     if path_start == -1:
         return url_text
     segments = url_text[path_start:].split("/")
-    masked = [
-        PATH_VALUE_MARK if segment and _holds_a_value(unquote(segment), values) else segment
-        for segment in segments
-    ]
-    return url_text[:path_start] + "/".join(masked)
+    masked = _template_segments(url_text[path_start:], template) if template else None
+    if masked is None:
+        masked = _value_segments(segments, values)
+    if not masked:
+        return url_text
+    kept = [PATH_VALUE_MARK if index in masked else seg for index, seg in enumerate(segments)]
+    return url_text[:path_start] + "/".join(kept)
 
 
-def _holds_a_value(segment: str, values: frozenset[str]) -> bool:
-    if segment in values:
-        return True
-    return any(len(value) >= _MIN_VALUE_INSIDE_SEGMENT and value in segment for value in values)
+def _segment_indexes(segments: list[str], start: int, end: int) -> set[int]:
+    """The indexes of *segments* that ``[start, end)`` of ``"/".join(segments)`` touches."""
+    indexes: set[int] = set()
+    seg_start = 0
+    for index, segment in enumerate(segments):
+        seg_end = seg_start + len(segment)
+        if seg_start < end and start < seg_end:
+            indexes.add(index)
+        seg_start = seg_end + 1
+    return indexes
+
+
+def _template_segments(path: str, template: str) -> set[int] | None:
+    """The segments of *path* where *template* puts a parameter; ``None`` if it does not match.
+
+    The template is matched against the end of the encoded *path*, so a mount
+    prefix before it and one slash after it (a redirect to the same path with
+    a slash) are allowed.
+    """
+    pattern = []
+    position = 0
+    for match in _PLACEHOLDER.finditer(template):
+        pattern.append(re.escape(template[position : match.start()]))
+        pattern.append("(.*?)" if match.group(1) in ("+", "#") else "([^/]*)")
+        position = match.end()
+    pattern.append(re.escape(template[position:]))
+    found = re.search("".join(pattern) + "/?$", path)
+    if found is None:
+        return None
+    masked: set[int] = set()
+    for group in range(1, (found.lastindex or 0) + 1):
+        start, end = found.span(group)
+        if end > start:
+            masked |= _segment_indexes(path.split("/"), start, end)
+    return masked
+
+
+def _value_segments(segments: list[str], values: frozenset[str]) -> set[int]:
+    """The segments that hold one of *values*, compared after percent-decoding.
+
+    The decoded segments are joined with ``/``, so a value that holds a ``/``
+    marks every segment it covers.
+    """
+    decoded = [unquote(segment) for segment in segments]
+    joined = "/".join(decoded)
+    masked: set[int] = set()
+    for value in values:
+        start = joined.find(value)
+        while start != -1:
+            end = start + len(value)
+            if len(value) >= _MIN_VALUE_INSIDE_SEGMENT or _stands_alone(joined, start, end):
+                masked |= _segment_indexes(decoded, start, end)
+            start = joined.find(value, start + 1)
+    return masked
+
+
+def _stands_alone(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` has no letter or digit right before or after it."""
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    return not before.isalnum() and not after.isalnum()
 
 
 def coerce_uuid(value: Any) -> uuid.UUID | None:

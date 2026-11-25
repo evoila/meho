@@ -129,6 +129,7 @@ class _DeployConnector(HttpConnector):
     product = _PRODUCT
     version = _VERSION
     impl_id = _IMPL_ID
+    accepts_ingested_operations = True
 
     async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
         return {"Authorization": "Bearer spec-trace-session"}
@@ -552,3 +553,79 @@ async def test_the_trace_masks_a_path_value_of_an_operation_that_sends_a_secret(
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
         assert _KEY_NAME not in text, f"the path value is in {label}"
         _assert_no_made_up_value(label, text)
+
+
+#: An ingested write whose path puts a key name inside a segment. Its fixed
+#: segment ``proxy`` equals the value of a body parameter of the call.
+_INGESTED_KEY_OP_ID = "PUT:/v1/proxy/keys/{key_name}:rotate"
+
+
+async def _register_ingested_key_operation(session: AsyncSession) -> None:
+    session.add(
+        EndpointDescriptor(
+            tenant_id=_TENANT_ID,
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            source_kind="ingested",
+            method="PUT",
+            path="/v1/proxy/keys/{key_name}:rotate",
+            summary="Synthetic ingested key rotation.",
+            description="Synthetic ingested write; it sends a secret.",
+            tags=[_TAG],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "key_name": {"type": "string", "x-meho-param-loc": "path"},
+                    "label": {"type": "string", "x-meho-param-loc": "body"},
+                },
+            },
+            safety_level="dangerous",
+            requires_approval=True,
+            is_enabled=True,
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.parametrize(
+    ("key_name", "sent_forms"),
+    [
+        ("made/up-key-4c1e", ("made/up-key-4c1e", "made%2Fup-key-4c1e")),
+        ("zq7", ("zq7",)),
+    ],
+    ids=["value-with-a-slash", "short-value-inside-a-segment"],
+)
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_path_value_where_the_template_puts_it(
+    key_name: str,
+    sent_forms: tuple[str, ...],
+    session: AsyncSession,
+    result_store: MemoryResultStore,
+) -> None:
+    await _register_operations(session)
+    await _register_ingested_key_operation(session)
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        route = mock.put(path__regex=r"^/v1/proxy/keys/.+:rotate$").respond(200, json={"ok": 1})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            target=_Target(),
+            params={"key_name": key_name, "label": "proxy"},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+    assert route.call_count == 1
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/proxy/keys/[redacted]"
+    assert urls == [masked]
+    agent_copy = await _agent_copy(result)
+    assert masked in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        for form in sent_forms:
+            assert form not in text, f"the path value is in {label}"

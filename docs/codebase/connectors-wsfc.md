@@ -110,15 +110,14 @@ approval flag of its own. With the default settings, a call runs at once in two
 cases only: a person with the Operator role or higher sends it in the web
 console, or a service login sends it and a standing grant or a run approval
 covers the call. Every other call that policy allows waits for approval.
-Examples: a call with a person's token from the CLI, MCP or REST, an agent
-call, and a run of a hosted agent that a person starts (it follows the agent
-rule). When the matching agent grant says `deny`, MEHO refuses the agent call and
+Examples: a call with a person's token from the CLI, MCP or REST, and an agent
+call. When the matching agent grant says `deny`, MEHO refuses the agent call and
 asks no person to approve it. So an agent grant can deny the move, but it cannot
 make the move run at once. When `AGENT_GRANT_REQUIRED` is `on`, an agent with no
-matching grant is refused. A person with the Admin role can make the op stricter: raise its risk
-level or require approval. Then the web console call waits too. No setting
-lowers the risk level. So no setting lets a person's token call or an agent call
-run at once.
+matching grant is refused. A person with the Admin role can make the op
+stricter: raise its risk level or require approval. Then the web console call
+waits too. No setting lowers the risk level. So no setting lets a person's token
+call or an agent call run at once.
 
 ## Key types
 

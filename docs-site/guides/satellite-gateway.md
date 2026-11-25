@@ -285,8 +285,9 @@ and is marked revoked, and its enrollment code is cleared:
 `meho runner-principal list --include-revoked` shows it, and `show` shows it
 as revoked. The name stays taken: a new register of the same name gets `409`.
 A revoked runner cannot be brought back, because the deleted client cannot be
-turned on again. A new runner needs a new name and a new enrollment code. A
-token the runner already has works until it ends.
+turned on again. A new runner needs a new name and a new enrollment code.
+A token the runner already has works until it ends: at most the access token
+life of the realm, 300 seconds in the realm MEHO ships.
 
 ## Satellite vs. the in-process check runner
 

@@ -1006,6 +1006,23 @@ while the enrollment waited) and the id of the offered key when the key can
 be read. It holds no code and no key. A code that matches no runner writes no
 audit row; the route writes a log line.
 
+**Request limits of the open route.** The route counts requests per source address
+(the address uvicorn resolves, so the client address behind a trusted proxy)
+on the shared Valkey, `meho:ratelimit:runner-enroll:<source>:<minute>`. Over
+`RUNNER_ENROLL_RATE_PER_MINUTE` (default 60, `0` turns it off) the route
+answers 429 `enrollment_rate_limited` with `Retry-After`. If Valkey cannot be
+reached, the request goes on. The limit comes before the body check. A code over
+256 characters gets 403 before any database read. A runner gets at most one
+refusal row per reason and minute (`auth/runner_enrollment_limits.py`); the next
+row carries `left_out_before`, the number of refusals the minute before left
+out. A body that fails the body check gets 422 without `input`, without the
+names of fields the sender added, and with only numbers in `ctx`. When its code
+matches a runner that is not revoked, one refusal row records it (status 422,
+reason `request_body_invalid`, or `code_expired` for an ended code with no key).
+The audit row `runner.principal.key_enrollment_started` is saved in the same
+commit as the claim of the key. When it cannot be written, Keycloak is not
+called, and the same code and key work on a retry.
+
 **Revoke.** Revoke works the same for every runner, with a key or with a fixed
 token. `RunnerPrincipalService.revoke` turns the runner's Keycloak client off,
 then deletes the client. With the client, its public key and its Keycloak
@@ -1015,7 +1032,8 @@ revoked runners included; `show` shows it as revoked. The name stays taken: a
 new register of the same name gets 409. A revoked runner cannot be brought
 back: the deleted client cannot be turned on again. A new runner needs a new
 name and a new enrollment code. A token the runner already has works until it
-ends.
+ends: at most the access token life of the realm, 300 seconds in the realm MEHO
+ships. Central does not read `revoked` on each request.
 
 ## Dependencies
 

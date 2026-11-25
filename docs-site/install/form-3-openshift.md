@@ -716,9 +716,11 @@ export XDG_CONFIG_HOME=$W/cli MEHO_KEYRING_DISABLE=1
 meho login https://$HOST
 ```
 
-The command prints an address and a code. Open the address in your
-**normal** browser window, enter the code and sign in as `admin` with
-its temporary password. Then you should see
+The command prints an address and a short code. Open the address in a
+**normal** browser window on any device, enter the code and sign in as
+`admin` with its temporary password. No browser opens on the machine
+where the CLI runs, and nothing comes back to it from the browser: the
+CLI sees the login by itself. Then you should see
 `Logged in to https://meho.apps...`.
 
 Keep the two `export` settings in this terminal for every later `meho`

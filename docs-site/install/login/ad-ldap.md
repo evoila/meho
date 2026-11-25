@@ -219,7 +219,9 @@ code with an authenticator app (for example Microsoft Authenticator or
 FreeOTP). After that, every login asks for the code.
 
 The same flow runs for `meho login`, the web UI and Claude (MCP): all
-three log in through the browser.
+three log in through a browser. For `meho login`, the CLI prints an
+address and a short code, and you open the address on any device with a
+browser.
 
 ## Lab test
 

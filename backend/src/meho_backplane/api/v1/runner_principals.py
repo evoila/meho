@@ -24,6 +24,8 @@ Route inventory
   ``tenant_admin``, and the caller must be a person: a service login or an
   agent login gets 403 ``human_principal_required``, and a runner login gets
   403 ``runner_scope_violation``.
+* ``POST /api/v1/runner-principals/enroll`` — a runner sends its public key
+  with its one-time enrollment code. No login: the code is the proof.
 * ``DELETE /api/v1/runner-principals/{name}/revoke`` — revoke a runner
   (kill switch: turns the runner's Keycloak client off and deletes it, and
   marks the row revoked). Returns the updated row. Role: ``tenant_admin``.

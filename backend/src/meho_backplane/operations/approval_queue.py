@@ -189,6 +189,7 @@ from meho_backplane.operations.grant_approval import (
     check_rights_change_approval,
     grant_audit_fields,
     grant_changed_since_request,
+    grant_facts,
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
@@ -1327,11 +1328,30 @@ async def _link_reuse_key(
         )
 
 
+#: Status code of the ``approval.reuse`` row of a retry that got a request a
+#: person already approved. Only a waiting request has 202.
+_REUSE_APPROVED_STATUS_CODE: int = 200
+
+
+def _found_request_state(request: ApprovalRequest) -> str:
+    """The state of *request* as the ``approval.reuse`` row says it.
+
+    ``waiting``, or ``approved_`` plus the run phase
+    (:class:`ApprovalResultState`): ``approved_not_started``,
+    ``approved_started``, ``approved_executed``, ``approved_failed`` or
+    ``approved_uncertain``.
+    """
+    phase = approval_result_state(request)
+    return "waiting" if phase is None else f"approved_{phase.value}"
+
+
 async def _write_reuse_audit_row(
     session: AsyncSession,
     operator: Operator,
     request: ApprovalRequest,
     params: dict[str, Any],
+    *,
+    say_state: bool = False,
 ) -> None:
     """Write the ``approval.reuse`` audit row of a call that got *request*.
 
@@ -1341,8 +1361,19 @@ async def _write_reuse_audit_row(
     masked before the hash). Its id is kept in ``request._reuse_audit_id``,
     so the answer's ``audit_id`` is this row and not the first call's
     ``approval.request`` row.
+
+    With *say_state* (a retry with the same key), the payload also has
+    ``request_state`` (see :func:`_found_request_state`). The status code is
+    202 for a waiting request and 200 for an approved one.
     """
     audit_id = uuid.uuid4()
+    payload: dict[str, Any] = {"params_hash": compute_audit_params_hash(params)}
+    status_code = _APPROVAL_STATUS_CODE
+    if say_state:
+        state = _found_request_state(request)
+        payload["request_state"] = state
+        if state != "waiting":
+            status_code = _REUSE_APPROVED_STATUS_CODE
     await _write_audit_row(
         session,
         audit_id=audit_id,
@@ -1350,9 +1381,9 @@ async def _write_reuse_audit_row(
         operator=operator,
         request=request,
         path=_REUSE_PATH,
-        status_code=_APPROVAL_STATUS_CODE,
+        status_code=status_code,
         duration_ms=0.0,
-        extra_payload={"params_hash": compute_audit_params_hash(params)},
+        extra_payload=payload,
         caller_session=True,
     )
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
@@ -1373,7 +1404,7 @@ async def _reuse_for_key_retry(
     from meho_backplane.settings import get_settings
 
     if get_settings().approval_retry_own_audit_row:
-        await _write_reuse_audit_row(session, operator, reused, params)
+        await _write_reuse_audit_row(session, operator, reused, params, say_state=True)
     return reused
 
 
@@ -1772,9 +1803,10 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
-#: Audit path of a call that got the waiting request of the same call
-#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
-#: ``approval.request`` row.
+#: Audit path of a call that gets an existing request. The call writes this
+#: row, not a second ``approval.request`` row. Two calls write it: a call that
+#: gets the waiting request of the same call (``APPROVAL_SAME_CALL_REUSE``),
+#: and a retry with the same key (``APPROVAL_RETRY_OWN_AUDIT_ROW``).
 _REUSE_PATH = "approval.reuse"
 
 #: Audit paths written on the task of the call that waits.
@@ -2413,20 +2445,34 @@ async def create_pending_request(
 
 
 async def rights_change_note(request: ApprovalRequest) -> str | None:
-    """The note for a change of rights that no other admin could approve (#6641).
+    """The note for a waiting change of rights that no other admin could approve.
 
-    The request is stored all the same, so an admin added later can still
-    approve it. ``None`` for any other request, when another admin could
-    approve, and when MEHO cannot count the admins
-    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+    * A sure count of zero admins gives the "no admin" note for every
+      waiting change of rights (:func:`is_rights_change`), also
+      ``policy.apply``, ``policy.classify`` and a change in any other realm.
+    * The note that the person who asked is the only admin shows only where
+      a platform admin must approve: the card's ``login_realm`` fact is true
+      (:func:`~meho_backplane.operations.grant_approval.grant_facts`; a
+      missing realm fact counts as true). There the person who asked
+      approves it only as a platform admin who asked in the web console.
+
+    ``None`` for every other request, when another admin is found, when the
+    person who asked is not an admin, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). The request
+    is stored all the same, so an admin added later can still approve it.
 
     The note is extra help only. When reading it fails, the answer is
     ``None`` and the request still waits for approval as stored.
     """
     if not is_rights_change(request):
         return None
+    facts = grant_facts(request)
     try:
-        return await only_admin_note(request.tenant_id, request.principal_sub)
+        return await only_admin_note(
+            request.tenant_id,
+            request.principal_sub,
+            login_realm=facts is not None and facts.login_realm,
+        )
     except Exception:
         _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
         return None

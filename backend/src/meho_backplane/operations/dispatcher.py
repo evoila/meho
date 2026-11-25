@@ -308,7 +308,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
-from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
 from meho_backplane.auth.principal_block_run import (
     mark_request_sent,
     raise_if_step_was_refused,
@@ -911,6 +911,10 @@ async def _run_source_kind_handler(
     extended the bind to the direct seam so its parked children are no
     longer orphaned).
     """
+    # The check right before the handler starts, for every kind of handler:
+    # a login blocked while the call waited for its policy gate or its
+    # credentials gets no handler run (``auth.principal_block``).
+    await raise_if_send_refused()
     if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
         # Only the HTTP connector base notes each request it sends. Any other
         # client (SSH, a vendor library) counts as sent from its start.
@@ -1072,7 +1076,11 @@ async def _execute_and_audit(
         with (
             track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
             # What this operation sent, and the step the block list refused.
-            tracking_run(is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL),
+            tracking_run(
+                is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
+                login=(operator.sub, operator.tenant_id),
+                op_id=op_id,
+            ),
         ):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
@@ -4159,8 +4167,9 @@ async def _handle_needs_approval(
         request.id,
         duration_ms,
         reused=reused,
-        # A call that got the waiting request of the same call has its own
-        # ``approval.reuse`` audit row (APPROVAL_SAME_CALL_REUSE).
+        # The ``approval.reuse`` audit row is written by a call that got the
+        # waiting request of the same call (APPROVAL_SAME_CALL_REUSE) and by a
+        # retry with the same key (APPROVAL_RETRY_OWN_AUDIT_ROW).
         audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
         note=await rights_change_note(request),
         already_approved=reused and request.status == ApprovalRequestStatus.APPROVED,

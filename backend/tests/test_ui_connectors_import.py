@@ -441,6 +441,9 @@ def test_import_page_renders_for_tenant_admin() -> None:
     assert 'name="pasted"' in body
     assert 'name="upload"' in body
     assert 'type="file"' in body
+    assert "<title>Bulk import &middot; Targets &middot; MEHO Operator Console</title>" in body
+    assert 'aria-label="Back to targets list"' in body
+    assert "connectors list" not in body
 
 
 def test_import_page_rejects_operator_role_with_403() -> None:

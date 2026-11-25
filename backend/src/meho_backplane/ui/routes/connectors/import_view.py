@@ -421,7 +421,7 @@ async def render_import_page(
         request,
         "connectors/import.html",
         {
-            "page_title": "Connectors",
+            "page_title": "Targets",
             "active_surface": "connectors",
             "csrf_token": csrf_token,
         },

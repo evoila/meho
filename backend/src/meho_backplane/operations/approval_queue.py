@@ -3120,11 +3120,19 @@ async def find_remote_write_approval(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    approval_request_id: uuid.UUID,
+    asker_sub: str,
+    connector_id: str,
     op_id: str,
     target_id: uuid.UUID | None,
     params: dict[str, Any],
+    now: datetime | None = None,
 ) -> ApprovalRequest | None:
     """Find the committed approval that authorises a remote-write mint (read-only).
+
+    The approval is the request named by *approval_request_id*. Only the
+    login that asked (*asker_sub*) can use it, and it must match the
+    connector. An approval past its time limit is refused.
 
     Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
     the ``remote-write`` (caution) tier mints a capability **only** against a
@@ -3141,7 +3149,7 @@ async def find_remote_write_approval(
     approval, or -- later -- the signing key is unavailable) **without**
     consuming an approval. The single-use consumption is a separate atomic
     step, :func:`consume_remote_write_approval`, run only once the mint is
-    certain to proceed. Returns the newest matching un-consumed
+    certain to proceed. Returns the matching un-consumed
     (``resumed_at IS NULL``) approval, or ``None``.
     """
     target_clause = (
@@ -3149,21 +3157,24 @@ async def find_remote_write_approval(
         if target_id is not None
         else ApprovalRequest.target_id.is_(None)
     )
-    stmt = (
-        select(ApprovalRequest)
-        .where(
-            ApprovalRequest.tenant_id == tenant_id,
-            ApprovalRequest.op_id == op_id,
-            ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
-            ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
-            ApprovalRequest.resumed_at.is_(None),
-            target_clause,
-        )
-        .order_by(ApprovalRequest.decided_at.desc())
-        .limit(1)
+    stmt = select(ApprovalRequest).where(
+        ApprovalRequest.id == approval_request_id,
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == asker_sub,
+        ApprovalRequest.connector_id == connector_id,
+        ApprovalRequest.op_id == op_id,
+        ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
+        ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
+        ApprovalRequest.resumed_at.is_(None),
+        target_clause,
     )
     result = await session.execute(stmt)
-    return result.scalars().first()
+    approval = result.scalars().first()
+    if approval is None:
+        return None
+    if _deadline_has_passed(approval, now or _now(), _resolve_default_ttl()):
+        return None
+    return approval
 
 
 async def consume_remote_write_approval(

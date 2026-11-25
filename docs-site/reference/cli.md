@@ -5412,6 +5412,18 @@ meho targets list [flags]
 - `--limit` — max targets per page (1..500, server default 100 when omitted)
 - `--product`, `-p` — filter by product slug (exact match)
 
+### `meho targets outside-folder`
+
+List targets whose secret path is outside the tenant's folder
+
+```
+meho targets outside-folder [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--tenant` — tenant id to list (platform admin: a tenant you are not a member of, or the tenant chosen with `meho tenants use`; default: your own tenant, or every tenant for a platform admin)
+
 ### `meho targets probe`
 
 Probe a target's connector and refresh its fingerprint

@@ -40,6 +40,8 @@ LEVELS = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 CREDENTIAL_CLASSES = {"credential_read", "credential_write", "credential_mint"}
 # The first character of a YAML value that the judge does not read.
 _UNSUPPORTED_START = set("|>&*!%@`[]{},?")
+# The plain values that YAML reads as null.
+_NULLS = {"~", "null", "Null", "NULL"}
 
 
 def load(path: Path) -> dict[tuple[str, str], dict]:
@@ -72,10 +74,12 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
     return found
 
 
-def _value(text: str) -> str:
+def _value(text: str) -> str | None:
     """A YAML scalar: quoted text, or plain text without a ``#`` comment.
 
-    A comment starts at a ``#`` after a space or a tab. Any other YAML form
+    A comment starts at a ``#`` after a space or a tab. A plain ``~``,
+    ``null``, ``Null`` or ``NULL`` is null (``None``); in quotes it is text.
+    Any other YAML form
     (a block such as ``|`` or ``>``, an anchor, a tag, a list or a map) stops
     the judge, so the value it reads is always the value YAML reads.
     """
@@ -88,7 +92,7 @@ def _value(text: str) -> str:
         plain = re.split(r"[ \t]#|^#", text, maxsplit=1)[0].rstrip(" \t")
         if plain[:1] and plain[0] in _UNSUPPORTED_START:
             sys.exit(f"approved file: unsupported YAML value {text!r}")
-        return plain
+        return None if plain in _NULLS else plain
     rest = rest.lstrip(" \t")
     if rest and not rest.startswith("#"):
         sys.exit(f"approved file: unsupported YAML value {text!r}")
@@ -153,7 +157,7 @@ def judge(
         old = read_approved(base_approved_path)
     approved = [e for e in read_approved(approved_path) if e not in old]
     for entry in approved:
-        if not entry.get("reason", "").strip():
+        if not (entry.get("reason") or "").strip():
             sys.exit(f"approved entry {entry} has no reason")
     found = differences(load(base_path), load(head_path))
     used = set()

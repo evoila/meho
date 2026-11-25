@@ -57,11 +57,16 @@ def _judge(
     )
 
 
-def _entry(change: str, reason: str = "the reason", op_id: str = "vault.kv.put") -> str:
+def _entry(
+    change: str,
+    reason: str = "the reason",
+    op_id: str = "vault.kv.put",
+    connector_id: str = "vault-1.x",
+) -> str:
     return (
         "approved:\n"
         f"  - op_id: {op_id}\n"
-        "    connector_id: vault-1.x\n"
+        f"    connector_id: {connector_id}\n"
         f"    change: {change}\n"
         f"    reason: {reason}\n"
     )
@@ -124,6 +129,17 @@ def test_an_approved_entry_for_another_row_or_change_does_not_cover(tmp_path: Pa
     assert _judge(tmp_path, [_row()], head, _entry("lowered_level", op_id="vault.kv.get")) == 1
 
 
+def test_an_approved_entry_for_another_connector_does_not_cover(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    approved = _entry("lowered_level", connector_id="vault-2.x")
+    assert _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], approved) == 1
+    out = capfd.readouterr().out
+    assert "vault.kv.put (vault-1.x): lowered_level" in out
+    assert "approved entry matches no change (stale)" in out
+    assert "'connector_id': 'vault-2.x'" in out
+
+
 def test_a_stale_approved_entry_fails(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     assert _judge(tmp_path, [_row()], [_row()], _entry("lowered_level")) == 1
     assert "matches no change (stale)" in capfd.readouterr().out
@@ -143,6 +159,19 @@ def test_an_entry_without_a_reason_is_refused(tmp_path: Path) -> None:
 def test_an_entry_with_a_blank_quoted_reason_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="has no reason"):
         _judge(tmp_path, [_row()], [_row(**_LOWERED[1])], _entry("lowered_level", reason='"   "'))
+
+
+@pytest.mark.parametrize("reason", ["~", "null", "Null", "NULL", "null # a comment"])
+def test_a_removal_whose_reason_yaml_reads_as_null_is_refused(tmp_path: Path, reason: str) -> None:
+    approved = _entry("removed", reason=reason, op_id="vault.kv.get")
+    with pytest.raises(SystemExit, match="has no reason"):
+        _judge(tmp_path, [_row(), _row("vault.kv.get")], [_row()], approved)
+
+
+@pytest.mark.parametrize("reason", ["'null'", '"~"', '"NULL"'])
+def test_a_removal_whose_null_word_is_in_quotes_passes(tmp_path: Path, reason: str) -> None:
+    approved = _entry("removed", reason=reason, op_id="vault.kv.get")
+    assert _judge(tmp_path, [_row(), _row("vault.kv.get")], [_row()], approved) == 0
 
 
 @pytest.mark.parametrize("reason", ["#", "# a comment", "  #"])
@@ -214,12 +243,20 @@ def test_reasons_that_differ_after_an_apostrophe_are_two_entries(tmp_path: Path)
         '"say \\"hi\\""',
         '"tab\\there" # note',
         "''",
+        "~",
+        "null",
+        "Null",
+        "NULL",
+        "null # note",
+        "'null'",
+        '"~"',
+        "nullable",
     ],
 )
 def test_a_value_reads_as_yaml_reads_it(text: str) -> None:
     # PyYAML refuses a tab before a comment, so the tab cases have their own tests.
     yaml = pytest.importorskip("yaml")
-    assert judge_module._value(text) == (yaml.safe_load(f"k: {text}")["k"] or "")
+    assert judge_module._value(text) == yaml.safe_load(f"k: {text}")["k"]
 
 
 def test_a_tab_before_a_comment_ends_the_value() -> None:

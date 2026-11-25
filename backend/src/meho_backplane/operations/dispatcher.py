@@ -1074,6 +1074,7 @@ async def _execute_and_audit(
             tracking_run(
                 is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
                 login=(operator.sub, operator.tenant_id),
+                op_id=op_id,
             ),
         ):
             result = await _execute_and_audit_inner(

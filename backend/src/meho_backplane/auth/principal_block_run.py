@@ -9,7 +9,9 @@ below the record of the operation.
 
 * :func:`mark_request_sent` notes that a request goes to the target. A
   refusal after that says that a part of the operation may have run
-  (:func:`request_was_sent`).
+  (:func:`request_was_sent`). For a step, the records above also note the
+  step's operation id, and :func:`mark_step_sent` notes a direct step of a
+  multi-step operation. A refusal names these steps (:func:`sent_steps`).
 * :func:`mark_step_refused` notes the first step the block list refused. The
   whole operation then stops with that refusal
   (:func:`raise_if_step_was_refused`), also when its handler catches the
@@ -26,14 +28,16 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 __all__ = [
     "mark_request_sent",
     "mark_step_refused",
+    "mark_step_sent",
     "raise_if_step_was_refused",
     "request_was_sent",
     "run_login",
+    "sent_steps",
     "step_refused_in_run",
     "tracking_run",
 ]
@@ -43,7 +47,9 @@ __all__ = [
 class _Run:
     parent: _Run | None
     login: tuple[str, uuid.UUID | None] | None = None
+    op_id: str | None = None
     sent: bool = False
+    steps_sent: list[str] = field(default_factory=list)
     refused: Exception | None = None
 
     def with_parents(self) -> Iterator[_Run]:
@@ -57,15 +63,19 @@ _run_var: ContextVar[_Run | None] = ContextVar("principal_block_run", default=No
 
 
 @contextmanager
-def tracking_run(*, is_step: bool, login: tuple[str, uuid.UUID | None]) -> Iterator[None]:
+def tracking_run(
+    *, is_step: bool, login: tuple[str, uuid.UUID | None], op_id: str | None = None
+) -> Iterator[None]:
     """Keep a record while one operation runs.
 
     *is_step* is true for a step of a multi-step operation: its marks then
     also reach the record of that operation. *login* is the ``(sub,
     tenant_id)`` of the operation's operator, the login every send of the
-    operation checks (:func:`run_login`).
+    operation checks (:func:`run_login`). *op_id* is the operation id; for a
+    step, the records above note it when the step sends (:func:`sent_steps`).
     """
-    token = _run_var.set(_Run(parent=_run_var.get() if is_step else None, login=login))
+    parent = _run_var.get() if is_step else None
+    token = _run_var.set(_Run(parent=parent, login=login, op_id=op_id))
     try:
         yield
     finally:
@@ -81,9 +91,37 @@ def run_login() -> tuple[str, uuid.UUID | None] | None:
 def mark_request_sent() -> None:
     """Note that the running operation sends a request to the target."""
     run = _run_var.get()
-    if run is not None:
-        for each in run.with_parents():
-            each.sent = True
+    if run is None:
+        return
+    for each in run.with_parents():
+        each.sent = True
+    if run.parent is not None and run.op_id is not None:
+        _note_step(run.parent, run.op_id)
+
+
+def mark_step_sent(op_id: str) -> None:
+    """Note that a direct step *op_id* of the running multi-step operation goes to the target."""
+    run = _run_var.get()
+    if run is None:
+        return
+    for each in run.with_parents():
+        each.sent = True
+    _note_step(run, op_id)
+
+
+def _note_step(run: _Run, op_id: str) -> None:
+    for each in run.with_parents():
+        if op_id not in each.steps_sent:
+            each.steps_sent.append(op_id)
+
+
+def sent_steps() -> list[str]:
+    """The operation ids of the steps the running multi-step operation sent, in order."""
+    run = _run_var.get()
+    if run is None:
+        return []
+    *_, top = run.with_parents()
+    return list(top.steps_sent)
 
 
 def request_was_sent() -> bool:

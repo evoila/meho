@@ -104,7 +104,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.principal_block_run import (
-    mark_request_sent,
+    mark_step_sent,
     raise_if_step_was_refused,
     request_was_sent,
 )
@@ -954,7 +954,7 @@ async def enforce_subop_policy(
         if refused is None:
             await raise_if_send_refused()
             journal.start(connector_id, op_id, target, params, may_send_again=True)
-            mark_request_sent()
+            mark_step_sent(op_id)
         return refused
     # The rows the gate writes for this step hold only what the step read.
     with track_secret_read_as():
@@ -979,7 +979,7 @@ async def enforce_subop_policy(
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
         )
-    mark_request_sent()
+    mark_step_sent(op_id)
     return None
 
 
@@ -1086,7 +1086,7 @@ async def run_governed_subop(
         if journal is not None
         else None
     )
-    mark_request_sent()
+    mark_step_sent(op_id)
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)

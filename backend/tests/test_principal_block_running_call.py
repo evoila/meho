@@ -384,6 +384,9 @@ async def test_second_write_of_a_multi_step_operation_is_not_sent_and_the_answer
     assert result.status == "denied", result
     assert result.extras["execution_outcome"] == "uncertain"
     assert "A part of the operation may have run" in str(result.error)
+    assert f"These steps were sent: `{_STEP_OP_ID}`." in str(result.error)
+    assert "The steps after them were not sent." in str(result.error)
+    assert _DIRECT_STEP not in str(result.error)
     assert "nothing" not in str(result.error).lower()
     row = _dispatch_row(await _audit_rows(), _WRITE_AFTER_STEP_OP_ID)
     assert row.payload["result_status"] == "denied"

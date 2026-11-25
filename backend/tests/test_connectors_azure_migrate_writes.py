@@ -15,6 +15,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -171,11 +172,13 @@ class _Import:
             self.site_get = _arm(mock, "GET", SITE_PATH).respond(200, json={"tags": tags})
         self.site_put = _arm(mock, "PUT", SITE_PATH).respond(201, json={"name": SITE})
         self.site_patch = _arm(mock, "PATCH", SITE_TAGS_PATH).respond(200, json={})
+        self.collector_get = _arm(mock, "GET", COLLECTOR_PATH).respond(404, json=_error(404).json())
         self.collector = _arm(mock, "PUT", COLLECTOR_PATH).respond(200, json={})
         self.import_uri = _arm(mock, "POST", f"{SITE_PATH}/importUri").respond(
             200, json={"uri": LINK, "jobArmId": f"{JOBS_PATH}/{JOB}"}
         )
         self.upload = mock.put(host=BLOB_HOST, path="/import-container/servers.csv").respond(201)
+        self.job_list = _arm(mock, "GET", JOBS_PATH).respond(200, json={"value": []})
         self.job = _arm(mock, "GET", f"{JOBS_PATH}/{JOB}").mock(
             side_effect=[
                 httpx.Response(200, json=_job("InProgress")),
@@ -1688,14 +1691,22 @@ def test_the_largest_file_passes_the_check_and_the_schema() -> None:
         prepare_csv(text + "x")
 
 
-def test_the_largest_file_reaches_the_operation_through_mcp(
+@pytest.mark.asyncio
+async def test_the_largest_file_reaches_the_operation_through_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fastapi.testclient import TestClient
+    """The real dispatcher runs: the call waits for approval and holds the whole file."""
+    from sqlalchemy import select
 
+    from meho_backplane.connectors.azure import AZURE_CONNECTOR_ID
+    from meho_backplane.connectors.azure.typed_ops import register_azure_typed_operations
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.db.models import Target as TargetORM
     from meho_backplane.main import app
     from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
     from meho_backplane.mcp.server import _MAX_REQUEST_BODY_BYTES
+    from meho_backplane.operations import reset_dispatcher_caches
     from meho_backplane.settings import get_settings
 
     for name, value in (
@@ -1706,6 +1717,36 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
     ):
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "meho_backplane.operations.typed_register.encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    )
+    reset_dispatcher_caches()
+    await register_azure_typed_operations()
+    target = AzureTargetStub()
+    async with get_sessionmaker()() as session:
+        session.add(
+            TargetORM(
+                id=target.id,
+                tenant_id=target.tenant_id,
+                name="example-migrate-target",
+                aliases=[],
+                product="azure",
+                host=target.host,
+                port=target.port,
+                fqdn=None,
+                secret_ref=target.secret_ref,
+                auth_model=target.auth_model,
+                vpn_required=False,
+                extras=dict(target.extras),
+                fingerprint={},
+                preferred_impl_id=None,
+                notes="made by the Azure Migrate size test",
+            )
+        )
+        await session.commit()
+
+    text = _largest_file()
     request = {
         "jsonrpc": "2.0",
         "id": 7,
@@ -1713,10 +1754,10 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
         "params": {
             "name": "call_operation",
             "arguments": {
-                "connector_id": "azure-arm",
+                "connector_id": AZURE_CONNECTOR_ID,
                 "op_id": "azure.migrate.import.start",
-                "target": "example-target",
-                "params": {**IMPORT_PARAMS, "csv": _largest_file()},
+                "target": "example-migrate-target",
+                "params": {**IMPORT_PARAMS, "csv": text},
             },
         },
     }
@@ -1729,22 +1770,45 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
 
     app.dependency_overrides[verify_mcp_jwt_and_bind] = fixture_operator
     try:
-        response = TestClient(app).post(
-            "/mcp", content=body, headers={"content-type": "application/json"}
-        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://meho.test"
+        ) as client:
+            response = await client.post(
+                "/mcp",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+            )
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        reset_dispatcher_caches()
         get_settings.cache_clear()
 
-    assert response.status_code != 413
-    answer = response.json()
-    assert answer["id"] == 7  # the request was read and dispatched, not refused by size
+    assert response.status_code == 200
+    assert response.json()["id"] == 7
+    async with get_sessionmaker()() as session:
+        parked = (await session.execute(select(ApprovalRequest))).scalars().all()
+    # The call reached the approval step, for the registered connector and target,
+    # with the whole file: the same size and SHA-256.
+    assert len(parked) == 1
+    assert parked[0].connector_id == AZURE_CONNECTOR_ID
+    assert parked[0].op_id == "azure.migrate.import.start"
+    assert parked[0].target_id == target.id
+    assert parked[0].params is not None
+    received = str(parked[0].params["csv"]).encode()
+    assert len(received) == MAX_CSV_BYTES
+    assert hashlib.sha256(received).hexdigest() == hashlib.sha256(text.encode()).hexdigest()
 
 
-#: The first two sentences of the approval text of every write.
-_APPROVAL_START = (
+#: The whole approval text of every write, written out. A dropped sentence fails the test.
+_APPROVAL_TEXT = (
     "The call waits for a person's approval. A service login runs it at once when a "
-    "standing grant or an approved run covers it."
+    "standing grant or an approved run covers it. A platform admin can turn approval off "
+    "for this operation for the whole install, with a reason and a fresh sign-in. A person "
+    "in the web console then runs it at once. Calls by token, by a service login without a "
+    "grant and by an agent still wait."
 )
 
 
@@ -1753,4 +1817,617 @@ def test_the_guidance_of_every_write_says_who_waits_for_approval() -> None:
 
     assert len(writes) == 4
     for op in writes:
-        assert _APPROVAL_START in op.llm_instructions["preconditions"], op.op_id
+        assert op.llm_instructions["preconditions"].startswith(_APPROVAL_TEXT), op.op_id
+
+
+#: The advice sentences on a new repeat_key, written out.
+_REPEAT_KEY_ADVICE = (
+    "Set a new repeat_key also to import the same file on purpose. When an error says Azure "
+    "no longer has the job of an earlier upload, the file may have been imported: tell the "
+    "person and read azure.migrate.job.list and azure.migrate.machine.list first; a new "
+    "repeat_key is only for a person who wants another import of the same file."
+)
+
+
+def test_the_import_advice_says_to_read_the_job_and_machine_lists_for_a_gone_job() -> None:
+    advice = _op("azure.migrate.import.start").llm_instructions["next_step"]
+
+    assert _REPEAT_KEY_ADVICE in advice
+    assert "or when an error says Azure no longer has the job" not in advice
+
+
+# ----------------------------------------------------------------------
+# The site's tag limit, steps Azure has not finished, the collector, lost references
+# ----------------------------------------------------------------------
+
+
+def _other_file(number: int) -> str:
+    return CSV + f"extra-server-{number},2,4096,Ubuntu Linux\n"
+
+
+def _full_tags(count: int) -> dict[str, str]:
+    return {f"owner-{number}": "example-team" for number in range(count)}
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_49_tags_takes_one_more_record() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags=_full_tags(49))
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "uploaded"
+    assert _patch_bodies(routes.site_patch) == [_tag_patch("Merge", _tag())]
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_50_tags_gets_no_upload_link_and_no_upload() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags=_full_tags(50))
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    text = f"{caught.value} {caught.value.remediation}"
+    assert "has 50 tags" in text
+    assert "at most 50 tags" in text
+    assert "site parameter" in text
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+    assert routes.site_patch.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_retry_with_a_record_still_works_on_a_site_with_50_tags() -> None:
+    tags = _full_tags(49)
+    tags[_tag()] = JOB
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags=tags)
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "already_sent"
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_file_split_over_many_calls_fills_the_site_and_the_next_call_is_refused() -> None:
+    site_tags: dict[str, str] = {}
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _shared_site(mock, site_tags)
+        for number in range(50):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+        assert len(site_tags) == 50
+        links_asked = routes.import_uri.call_count
+        uploads = routes.upload.call_count
+        with pytest.raises(AzureConflictError, match="has 50 tags"):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(50)}
+            )
+        # A retry of a file that has a record still finds its job.
+        again = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(7)}
+        )
+
+    assert again["outcome"] == "already_sent"
+    assert links_asked == 50
+    assert routes.import_uri.call_count == links_asked
+    assert routes.upload.call_count == uploads == 50
+
+
+#: The time "now" of the tests that make room on a full site.
+_NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+
+def _ended_job(name: str, ended: datetime | None, state: str = "Completed") -> dict[str, Any]:
+    """An import job as Azure lists it, with the time it ended (or none)."""
+    return {
+        "name": name,
+        "id": f"{JOBS_PATH}/{name}",
+        "startTime": "2026-11-01T08:00:00Z",
+        "endTime": ended.isoformat().replace("+00:00", "Z") if ended else None,
+        "properties": {"jobResult": state, "numberOfMachinesImported": 1},
+    }
+
+
+class _SiteOverTime:
+    """A shared site where each upload link makes a new job that ended *age* before now."""
+
+    def __init__(self, mock: respx.MockRouter, site_tags: dict[str, str], age: timedelta) -> None:
+        self.routes = _shared_site(mock, site_tags)
+        self.jobs: list[dict[str, Any]] = []
+        self.age = age
+        self.routes.import_uri.mock(side_effect=self._new_job)
+        self.routes.job_list.mock(
+            side_effect=lambda _: httpx.Response(200, json={"value": self.jobs})
+        )
+        mock.route(method="GET", host=ARM_HOST, path__regex=rf"^{JOBS_PATH}/job-\d+$").mock(
+            side_effect=self._read_job
+        )
+
+    def _new_job(self, _: httpx.Request) -> httpx.Response:
+        name = f"job-{len(self.jobs):03d}"
+        # Each later job ended one minute later, so the first job is the oldest.
+        ended = _NOW - self.age + timedelta(minutes=len(self.jobs))
+        self.jobs.append(_ended_job(name, ended))
+        return httpx.Response(200, json={"uri": LINK, "jobArmId": f"{JOBS_PATH}/{name}"})
+
+    def _read_job(self, request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rpartition("/")[2]
+        return httpx.Response(200, json=next(job for job in self.jobs if job["name"] == name))
+
+
+@pytest.mark.asyncio
+async def test_a_site_takes_more_than_50_files_over_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {"owner": "example-team"}
+    sizes: list[int] = []
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(days=2))
+        for number in range(60):
+            result = await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+            assert result["outcome"] == "uploaded"
+            sizes.append(len(site_tags))
+        deletes = [
+            body for body in _patch_bodies(site.routes.site_patch) if body["operation"] == "Delete"
+        ]
+
+    assert max(sizes) == 50
+    assert site.routes.upload.call_count == 60
+    # One owner tag and 60 files need 61 tags: MEHO removed the records of the
+    # eleven oldest jobs, oldest first, and no other tag.
+    assert [next(iter(body["properties"]["tags"].values())) for body in deletes] == [
+        f"job-{number:03d}" for number in range(11)
+    ]
+    assert site_tags["owner"] == "example-team"
+    assert _tag(_other_file(0)) not in site_tags
+    assert site_tags[_tag(_other_file(59))] == "job-059"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_its_record_was_removed_imports_the_file_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {}
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(days=2))
+        for number in range(51):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+        # The record of file 0 was removed to make room for file 50.
+        assert _tag(_other_file(0)) not in site_tags
+        again = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(0)}
+        )
+
+    assert again["outcome"] == "uploaded"
+    assert again["job_name"] == "job-051"
+    assert site.routes.upload.call_count == 52
+
+
+@pytest.mark.asyncio
+async def test_records_of_jobs_that_ended_less_than_a_day_ago_are_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {}
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(hours=23))
+        for number in range(50):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+        links_asked = site.routes.import_uri.call_count
+        patches = site.routes.site_patch.call_count
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(50)}
+            )
+
+    text = f"{caught.value} {caught.value.remediation}"
+    assert "has 50 tags" in text
+    assert "ended at least a day ago" in text
+    assert "azure.migrate.job.list" in text
+    assert len(site_tags) == 50
+    assert site.routes.import_uri.call_count == links_asked
+    assert site.routes.site_patch.call_count == patches  # no tag removed
+    assert site.routes.upload.call_count == 50
+
+
+@pytest.mark.asyncio
+async def test_only_ended_records_are_removed_and_other_tags_stay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    old = _NOW - timedelta(days=3)
+    site_tags = _full_tags(46)
+    site_tags.update(
+        {
+            "meho-csv-00000000000000a1": "job-running",
+            "meho-csv-00000000000000a2": "job-not-listed",
+            "meho-csv-00000000000000a3": "job-no-end-time",
+            "meho-csv-00000000000000a4": "job-ended-old",
+        }
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _shared_site(mock, site_tags)
+        routes.job_list.respond(
+            200,
+            json={
+                "value": [
+                    _ended_job("job-running", None, "InProgress"),
+                    _ended_job("job-no-end-time", None),
+                    _ended_job("job-ended-old", old),
+                    # A job that ended long ago but has no MEHO record.
+                    _ended_job("job-of-someone-else", old - timedelta(days=9)),
+                ]
+            },
+        )
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "uploaded"
+    assert _patch_bodies(routes.site_patch) == [
+        _tag_patch("Delete", "meho-csv-00000000000000a4", "job-ended-old"),
+        _tag_patch("Merge", _tag()),
+    ]
+    assert len(site_tags) == 50
+    assert {"meho-csv-00000000000000a1", "meho-csv-00000000000000a2"} <= site_tags.keys()
+
+
+def _state_of(state: str) -> dict[str, Any]:
+    return {"name": SITE, "properties": {"provisioningState": state}}
+
+
+def _group_state(state: str, count: int = 0) -> dict[str, Any]:
+    answer = _group_answer(count)
+    answer["properties"]["provisioningState"] = state
+    return answer
+
+
+@pytest.mark.asyncio
+async def test_a_pending_group_put_with_no_link_is_read_until_it_succeeds_before_the_add() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.put.respond(201, json=_group_state("Provisioning"))
+        routes.get.mock(
+            side_effect=[
+                httpx.Response(200, json=_group_state("Provisioning")),
+                httpx.Response(200, json=_group_state("Succeeded")),
+                httpx.Response(200, json=_group_state("Succeeded", 1)),
+            ]
+        )
+        result = await _connector().migrate_group_create(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "machines": ["m-1"]}
+        )
+
+    assert routes.get.call_count == 3  # two reads until it ended, then the read-back
+    assert routes.update.call_count == 1
+    assert result["steps"][0]["done"] is True
+    assert result["steps"][1]["sent"] is True
+    assert result["not_sent"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_group_put_still_pending_when_the_wait_is_over_sends_no_add() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.put.respond(201, headers={"Retry-After": "3600"}, json=_group_state("Running"))
+        result = await _connector().migrate_group_create(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "machines": ["m-1"]}
+        )
+
+    assert routes.update.call_count == 0
+    assert result["steps"][0]["done"] is False
+    assert result["steps"][0]["operation"] is None
+    assert "had not finished the resource" in result["steps"][0]["poll_error"]
+    assert result["steps"][1]["sent"] is False
+    assert "Adding the machines was not sent" in result["not_sent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["Failed", "Canceled"])
+async def test_a_group_that_azure_ends_as_failed_raises_with_the_reason(state: str) -> None:
+    failed = {**_group_state(state), "error": {"code": "ExampleFault", "message": "Example."}}
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.put.respond(201, json=_group_state("Provisioning"))
+        routes.get.respond(200, json=failed)
+        with pytest.raises(AzureRequestError) as caught:
+            await _connector().migrate_group_create(
+                operator(), AzureTargetStub(), {**GROUP_PARAMS, "machines": ["m-1"]}
+            )
+
+    assert caught.value.azure_error_code == "ExampleFault"
+    assert state in str(caught.value)
+    assert routes.update.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_group_put_that_names_no_state_counts_as_done() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.put.respond(201, json={"name": GROUP})
+        result = await _connector().migrate_group_create(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "machines": ["m-1"]}
+        )
+
+    assert result["steps"][0]["done"] is True
+    assert routes.update.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pending_add_with_no_link_is_read_until_it_succeeds_before_the_remove() -> None:
+    sent: list[str] = []
+
+    def update(request: httpx.Request) -> httpx.Response:
+        kind = json.loads(request.content)["properties"]["operationType"]
+        sent.append(kind)
+        return httpx.Response(200, json=_group_state("Updating" if kind == "Add" else "Succeeded"))
+
+    def read(_: httpx.Request) -> httpx.Response:
+        sent.append("GET")
+        state = "Succeeded" if sent.count("GET") > 1 else "Updating"
+        return httpx.Response(200, json=_group_state(state))
+
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.update.mock(side_effect=update)
+        routes.get.mock(side_effect=read)
+        result = await _connector().migrate_group_update(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "add": ["m-1"], "remove": ["m-2"]}
+        )
+
+    # The Add answered Updating with no link: the group is read until it is
+    # Succeeded, and only then is the Remove sent. The last GET is the read-back.
+    assert sent == ["Add", "GET", "GET", "Remove", "GET"]
+    assert result["steps"][0]["done"] is True
+    assert result["steps"][1]["sent"] is True
+    assert result["not_sent"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_add_still_pending_when_the_wait_is_over_sends_no_remove() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.update.respond(200, headers={"Retry-After": "3600"}, json=_group_state("Updating"))
+        result = await _connector().migrate_group_update(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "add": ["m-1"], "remove": ["m-2"]}
+        )
+
+    assert routes.update.call_count == 1
+    assert result["steps"][0]["done"] is False
+    assert "had not finished the resource" in result["steps"][0]["poll_error"]
+    assert result["steps"][1] == {
+        "operation_type": "Remove",
+        "machines": 1,
+        "sent": False,
+        "done": False,
+        "operation": None,
+        "poll_error": None,
+    }
+    assert "Taking machines out was not sent" in result["not_sent"]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_import_site_with_no_link_is_read_until_it_succeeds() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.site_put.respond(201, json=_state_of("Provisioning"))
+        routes.site_get.mock(
+            side_effect=[
+                httpx.Response(404, json=_error(404).json()),
+                httpx.Response(200, json=_state_of("Provisioning")),
+                httpx.Response(200, json=_state_of("Succeeded")),
+            ]
+        )
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "uploaded"
+    assert routes.site_get.call_count == 3
+    assert routes.collector.call_count == 1  # the collector came after the site ended
+
+
+@pytest.mark.asyncio
+async def test_a_pending_import_site_when_the_wait_is_over_goes_no_further() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.site_put.respond(
+            201, headers={"Retry-After": "3600"}, json=_state_of("Provisioning")
+        )
+        with pytest.raises(AzureConflictError, match="the new import site"):
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    assert routes.collector.call_count == 0
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_finds_the_site_still_running_goes_no_further() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.site_get.respond(200, json={**_state_of("Running"), "tags": {}})
+        with pytest.raises(AzureConflictError, match="the import site"):
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    assert routes.site_put.call_count == 0
+    assert routes.collector.call_count == 0
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_site_that_succeeded_is_used_as_it_is() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.site_get.respond(
+            200, json={**_state_of("Succeeded"), "tags": {"owner": "example-team"}}
+        )
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "uploaded"
+    assert routes.site_get.call_count == 1
+
+
+def _collector_answer(site: str = SITE_PATH, state: str = "Succeeded") -> dict[str, Any]:
+    return {"properties": {"discoverySiteId": site, "provisioningState": state}}
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_slow_collector_write_finds_it_ready_and_sends_no_second_put() -> (
+    None
+):
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.collector.respond(201, headers=_PENDING, json={})
+        routes.collector_get.mock(
+            side_effect=[
+                httpx.Response(404, json=_error(404).json()),
+                httpx.Response(200, json=_collector_answer()),
+            ]
+        )
+        with pytest.raises(AzureConflictError, match="the import collector"):
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert routes.collector.call_count == 1
+    assert result["outcome"] == "uploaded"
+    assert routes.upload.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _collector_answer(state="Provisioning"),
+        _collector_answer(site=f"{RG_PATH}/providers/Microsoft.OffAzure/importSites/other-site"),
+        {"properties": {"provisioningState": "Succeeded"}},
+        {},
+    ],
+    ids=["not-finished", "other-site", "no-site", "no-properties"],
+)
+async def test_a_collector_that_is_not_ready_for_this_site_is_written(
+    answer: dict[str, Any],
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.collector_get.respond(200, json=answer)
+        await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    assert routes.collector.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_cannot_be_read_is_written() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.collector_get.respond(403, json=_error(403, "AuthorizationFailed").json())
+        await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    assert routes.collector.call_count == 1
+
+
+_OPERATION_ONLY = {"Azure-AsyncOperation": _POLL}
+
+
+@pytest.mark.asyncio
+async def test_a_site_step_whose_status_cannot_be_read_keeps_its_reference() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.site_put.respond(201, headers=_OPERATION_ONLY, json={})
+        mock.get(_POLL).respond(403, json=_error(403, "AuthorizationFailed").json())
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    text = str(caught.value)
+    assert _POLL in text
+    assert SITE_PATH in text
+    assert "status could not be read" in text
+    assert "azure.operation.status" in caught.value.remediation
+    assert routes.collector.call_count == 0
+    assert routes.upload.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_collector_step_whose_status_cannot_be_read_keeps_its_own_reference() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.collector.respond(201, headers=_OPERATION_ONLY, json={})
+        mock.get(_POLL).respond(403, json=_error(403, "AuthorizationFailed").json())
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    text = str(caught.value)
+    assert _POLL in text
+    assert COLLECTOR_PATH in text  # the collector's own resource id, not the site's
+    assert "status could not be read" in text
+    assert routes.import_uri.call_count == 0
+    assert routes.upload.call_count == 0
+
+
+_NOT_JSON = "<html>Example gateway page</html>"
+
+
+@pytest.mark.asyncio
+async def test_a_status_answer_that_is_not_json_is_a_failed_read_for_a_group_write() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.put.respond(201, headers=_OPERATION_ONLY, json=_group_answer())
+        mock.get(_POLL).respond(200, content=_NOT_JSON.encode())
+        result = await _connector().migrate_group_create(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "machines": ["m-1"]}
+        )
+
+    step = result["steps"][0]
+    assert step["operation"]["poll_url"] == _POLL
+    assert step["done"] is False
+    assert "not JSON" in step["poll_error"]
+    assert "gateway" not in step["poll_error"]
+    assert routes.update.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_status_answer_that_is_not_json_is_a_failed_read_for_an_import_step() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock, tags={})
+        routes.collector.respond(201, headers=_OPERATION_ONLY, json={})
+        mock.get(_POLL).respond(200, content=_NOT_JSON.encode())
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(operator(), AzureTargetStub(), IMPORT_PARAMS)
+
+    text = str(caught.value)
+    assert _POLL in text
+    assert "not JSON" in text
+    assert "gateway" not in text
+    assert routes.upload.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_upload_answer_of_408_is_unknown_so_the_record_stays() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Import(mock)
+        routes.upload.respond(408)
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "upload_unconfirmed"
+    assert routes.upload.call_count == 1
+    assert _patch_bodies(routes.site_patch) == [_tag_patch("Merge", _tag())]
+    assert result["job_name"] == JOB

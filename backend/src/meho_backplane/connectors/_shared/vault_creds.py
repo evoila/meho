@@ -687,7 +687,10 @@ async def _resolve_and_load(
         # a gsm: ref in a parameter is. Checked here, not in the backend, so
         # the readiness probe's own probe secret stays outside the rule.
         check_gsm_target_ref(store_ref, target_name=target.name)
-    if kind == "vault":
+    if kind == "vault" and operator.raw_jwt and not _is_api_path_shaped(store_ref):
+        # The warning is for a read MEHO goes on to make: the store backend
+        # refuses a call with no operator token and a path in the store's
+        # API form first, and those reads write no folder warning.
         _warn_if_outside_tenant_folder(target, operator, store_ref=store_ref, mount=mount)
     backend = resolve_credential_backend(kind)
     try:
@@ -906,8 +909,23 @@ def _warn_if_outside_tenant_folder(
     ``secret_ref_prefix`` (see :func:`_folder_warning_prefix`): the first
     part of the path, or only ``…`` for a path with one part. At most once
     per target per hour. Nothing reaches the answer, the trace or the audit row.
-    Does nothing when the folder check is off.
+    Does nothing when the folder check is off. An error in this step is
+    caught and never stops the read.
     """
+    try:
+        _log_outside_tenant_folder(target, operator, store_ref=store_ref, mount=mount)
+    except Exception:
+        return
+
+
+def _log_outside_tenant_folder(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    store_ref: str,
+    mount: str,
+) -> None:
+    """Write the folder warning (the body of :func:`_warn_if_outside_tenant_folder`)."""
     if operator.check_runner_dispatch or _tenant_has_own_vault_role(operator):
         return
     from meho_backplane.connectors.vault.tenant_scope import outside_tenant_folder_reason

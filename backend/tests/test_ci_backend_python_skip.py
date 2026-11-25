@@ -165,6 +165,7 @@ def test_docs_only_pull_request_is_also_no_backend(tmp_path: Path) -> None:
         "migrations": "false",
         "docs_only": "true",
         "backend_python": "false",
+        "redaction_compare": "false",
         "single_connector": "",
     }
 
@@ -200,6 +201,7 @@ _FULL_RUN = {
     "migrations": "true",
     "docs_only": "false",
     "backend_python": "true",
+    "redaction_compare": "true",
     "single_connector": "",
 }
 
@@ -246,6 +248,7 @@ def test_connector_only_change_selects_the_connector(tmp_path: Path) -> None:
         "migrations": "false",
         "docs_only": "false",
         "backend_python": "true",
+        "redaction_compare": "false",
         "single_connector": "loki",
     }
 
@@ -309,11 +312,57 @@ def test_quoted_path_runs_everything(tmp_path: Path) -> None:
         "migrations": "true",
         "docs_only": "false",
         "backend_python": "true",
+        "redaction_compare": "true",
         "single_connector": "",
     }
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ["backend/tests/redaction_compare/README.md"],
+        ["backend/tests/redaction_compare/answers.py"],
+        ["docs/x.md", "backend/tests/redaction_compare/notes.md"],
+    ],
+)
+def test_any_change_in_the_compare_package_runs_the_compare(
+    tmp_path: Path, changed: list[str]
+) -> None:
+    assert _detect(tmp_path, "pull_request", changed)["redaction_compare"] == "true"
+
+
+def test_markdown_only_change_in_the_compare_package_runs_only_the_compare(
+    tmp_path: Path,
+) -> None:
+    outputs = _detect(tmp_path, "pull_request", ["backend/tests/redaction_compare/README.md"])
+    assert outputs["backend_python"] == "false"
+    assert outputs["redaction_compare"] == "true"
+
+
+def test_change_outside_the_compare_package_does_not_run_the_compare(tmp_path: Path) -> None:
+    outputs = _detect(tmp_path, "pull_request", ["backend/README.md", "cli/main.go"])
+    assert outputs["redaction_compare"] == "false"
+
+
+def test_failing_compare_package_check_runs_everything(tmp_path: Path) -> None:
+    tool_dir = _fake_tool(tmp_path, "grep", 2, only_with="^backend/tests/redaction_compare/")
+    outputs = _detect(
+        tmp_path, "pull_request", ["backend/tests/redaction_compare/README.md"], tool_dir=tool_dir
+    )
+    assert outputs == _FULL_RUN
+
+
 # --- Job gates ----------------------------------------------------------------
+
+
+def test_compare_job_runs_for_a_backend_or_a_compare_package_change() -> None:
+    job = _jobs()["redaction-compare"]
+    assert job["needs"] == "changes"
+    condition = " ".join(job["if"].split())
+    assert "needs.changes.outputs.backend_python == 'true' ||" in condition
+    assert "needs.changes.outputs.redaction_compare == 'true'" in condition
+    outputs = cast("dict[str, Any]", _jobs()["changes"]["outputs"])
+    assert outputs["redaction_compare"] == "${{ steps.detect.outputs.redaction_compare }}"
 
 
 @pytest.mark.parametrize("job", _SKIPPED_ON_NO_BACKEND)

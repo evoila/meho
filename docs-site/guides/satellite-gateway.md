@@ -286,8 +286,16 @@ and is marked revoked, and its enrollment code is cleared:
 as revoked. The name stays taken: a new register of the same name gets `409`.
 A revoked runner cannot be brought back, because the deleted client cannot be
 turned on again. A new runner needs a new name and a new enrollment code.
-A token the runner already has works until it ends: at most the access token
-life of the realm, 300 seconds in the realm MEHO ships.
+A token the runner already has works until it ends, plus a short grace time.
+Two settings decide how long:
+
+- The access token life of the realm: 300 seconds in the realm MEHO ships.
+- `KEYCLOAK_JWT_LEEWAY_SECONDS` on central: MEHO still accepts a token this
+  many seconds after it ends, so small clock differences do no harm. The
+  default is 30 seconds.
+
+With both defaults, a token issued just before the revoke works for about
+330 seconds.
 
 ## Satellite vs. the in-process check runner
 

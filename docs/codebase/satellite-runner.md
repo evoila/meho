@@ -1017,16 +1017,25 @@ no client address the source is `unknown`. Over `RUNNER_ENROLL_RATE_PER_MINUTE`
 answers 503 `enrollment_limit_unavailable`, as event intake does; the runner's
 login treats it as a failure and enrolls again at its next start. The limit
 comes before the body check. A code over 256 characters gets 403 before any
-database read. A runner gets at most one refusal row per reason and minute
-(`auth/runner_enrollment_limits.py`). Each refusal that is left out is added to
-one counter of that runner and reason, and the next row that is written takes
-the count as `left_out_before`, however late it comes. A row that cannot be
-written gives its slot and count back. When Valkey cannot be reached there, the
-row is written anyway. A body that fails the body check gets 422 without
-`input`, without the names of fields the sender added, and with only numbers in
+database read. A code that is not valid UTF-8 (a lone surrogate sent as a
+JSON escape) matches no stored code and is refused like any wrong code. A
+runner gets at most one refusal row per reason and minute
+(`auth/runner_enrollment_limits.py`). The row's slot is one key per minute, set
+with `SET NX`. Each refusal that is left out is added to one counter of that
+runner and reason. The counter has no end time, and the next row that is
+written takes the count as `left_out_before`, however late it comes. A row that
+cannot be written deletes the exact slot key it took (also after the minute
+changed) and gives its count back. When Valkey cannot be reached there, the row
+is written anyway. A body that fails the body check gets 422 without `input`,
+without the names of fields the sender added (an extra field is always
+`extra_field` in `loc`, also when it is named `body`), and with only numbers in
 `ctx`. When its code matches a runner that is not revoked, one refusal row
 records it (status 422, reason `request_body_invalid`, or `code_expired` for an
-ended code with no key). Keycloak is called only after an audit row
+ended code with no key). The route builds this 422 first and writes the row
+after it has left the body check error, so an audit error does not carry the
+sent body into the log. A Keycloak that cannot be reached or answers with an
+error gives 502 `keycloak_admin_error`; a Keycloak admin client that is not
+configured gives 503 `keycloak_admin_not_configured`. Keycloak is called only after an audit row
 `runner.principal.key_enrollment_started` is committed: with the claim of the
 key, and again in its own commit for each later attempt to store the key. When
 the row cannot be written, Keycloak is not called, and the same code and key
@@ -1041,8 +1050,11 @@ revoked runners included; `show` shows it as revoked. The name stays taken: a
 new register of the same name gets 409. A revoked runner cannot be brought
 back: the deleted client cannot be turned on again. A new runner needs a new
 name and a new enrollment code. A token the runner already has works until it
-ends: at most the access token life of the realm, 300 seconds in the realm MEHO
-ships. Central does not read `revoked` on each request.
+ends, plus the grace time of `KEYCLOAK_JWT_LEEWAY_SECONDS` (default 30 seconds),
+which the token check adds to `exp`. The access token life of the realm MEHO
+ships is 300 seconds, so with both defaults a token issued just before the
+revoke works for about 330 seconds. Central does not read `revoked` on each
+request.
 
 ## Dependencies
 

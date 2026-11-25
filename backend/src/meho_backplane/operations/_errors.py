@@ -100,6 +100,7 @@ __all__ = [
     "result_connector_not_found",
     "result_connector_package_not_installed",
     "result_connector_probe_refused",
+    "result_connector_redirect_generic",
     "result_connector_redirect_on_change",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -1724,17 +1725,27 @@ def _safe_address(url: httpx.URL) -> str:
     return str(url.copy_with(query=None, fragment=None, username=None, password=None))
 
 
+def _origin(url: httpx.URL) -> str:
+    """*url* as scheme, host and port only."""
+    return f"{url.scheme}://{url.netloc.decode('ascii')}"
+
+
+def _redirect_url(exc: httpx.HTTPStatusError) -> httpx.URL | None:
+    """The absolute address a redirect names, or ``None`` when MEHO cannot read it."""
+    try:
+        return exc.request.url.join(exc.response.headers.get("Location", ""))
+    except httpx.InvalidURL:
+        return None
+
+
 def _redirect_address(exc: httpx.HTTPStatusError) -> str:
     """The address a redirect names: scheme, host and path only.
 
     The query and any login part of the address are dropped, so a one-time
     ticket in the address never reaches an error text.
     """
-    location = exc.response.headers.get("Location", "")
-    try:
-        return _safe_address(exc.request.url.join(location))
-    except httpx.InvalidURL:
-        return "an address MEHO could not read"
+    url = _redirect_url(exc)
+    return "an address MEHO could not read" if url is None else _safe_address(url)
 
 
 #: Put in place of the redirect address for an operation that sends a secret.
@@ -1783,11 +1794,7 @@ def result_connector_redirect_on_change(
     # For an operation that sends a secret, the sent path is left out too: a
     # path parameter can carry the secret.
     sent_url = exc.request.url
-    sent_address = (
-        f"{sent_url.scheme}://{sent_url.netloc.decode('ascii')}"
-        if withhold_address
-        else _safe_address(sent_url)
-    )
+    sent_address = _origin(sent_url) if withhold_address else _safe_address(sent_url)
     sent = f"{exc.request.method} {sent_address}"
     return OperationResult(
         status="error",
@@ -1803,6 +1810,45 @@ def result_connector_redirect_on_change(
             "upstream_message": None,
         },
     )
+
+
+def result_connector_redirect_generic(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+    *,
+    withhold_address: bool = False,
+) -> OperationResult:
+    """A change got a redirect that MEHO did not follow: the generic answer.
+
+    The answer while the switch ``redirect_on_change_result`` is off. It has
+    the keys and the ``error`` text of :func:`result_connector_error` for that
+    status, and hides the same values as
+    :func:`result_connector_redirect_on_change`: ``exception_message`` is
+    httpx's status text, rebuilt from the status and the safe parts of the two
+    addresses (scheme, host and path; only scheme, host and port with
+    *withhold_address*), and no text of the redirect body is kept.
+    """
+    result = result_connector_error(op_id, exc, duration_ms)
+    status_code = exc.response.status_code
+    redirect_url = _redirect_url(exc)
+    if withhold_address:
+        sent = _origin(exc.request.url)
+        location = "?" if redirect_url is None else _origin(redirect_url)
+    else:
+        sent = _safe_address(exc.request.url)
+        location = "?" if redirect_url is None else _safe_address(redirect_url)
+    text = (
+        f"Redirect response '{status_code} {exc.response.reason_phrase}' for url '{sent}'\n"
+        f"Redirect location: '{location}'\n"
+        f"For more information check: "
+        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status_code}"
+    )
+    extras = dict(result.extras or {})
+    extras["exception_message"] = _sanitize_free_text(text)
+    extras["upstream_message"] = None
+    extras.pop("upstream_fault", None)
+    return result.model_copy(update={"extras": extras})
 
 
 def result_vault_credentials_read_error(

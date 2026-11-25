@@ -2196,6 +2196,21 @@ gets the waiting request writes its own audit row, and the answer's
 `audit_id` is that row, not the first call's. No tool and no input changes.
 See [approvals.md](approvals.md#1-send-an-idempotency_key-so-a-retry-gets-the-same-request).
 
+An eighth switch changes an answer: `REDIRECT_ON_CHANGE_RESULT` (off by
+default). It decides only the answer of a change (PUT, POST, PATCH,
+DELETE) that ends on a redirect MEHO does not follow, and of a connector
+login that gets a redirect. With it off, the answer has the keys and the
+`error` text of the generic `connector_error` answer for that status. With
+it on, the `error` text says what the HTTP code means (307 / 308: the target
+did not run the call; 303: the target says the change ran; 301 / 302: MEHO
+could not find out), and an operation that may change the target also gets
+`execution_outcome`, `retry` and `remediation`. Which redirects a change
+follows, the limit of two sends, the block check and the trace are the same
+in both modes, and both modes hide the same values. No tool and no input
+changes. The issue "measure the switch REDIRECT_ON_CHANGE_RESULT and decide
+its default" tracks the measurement. See the `HttpConnector` row in
+[backend.md](backend.md).
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second

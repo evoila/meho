@@ -14,13 +14,17 @@ third time after "the login ended", and a change sent once before the login
 ended follows no redirect on its repeat. A login that gets a redirect is
 reported as the login, also for an operation that sends a secret. A fresh
 login during that repeat keeps its usual redirect rule.
+
+The switch ``REDIRECT_ON_CHANGE_RESULT`` is on for each test here, unless a
+test turns it off. With it off, the answer is the generic ``connector_error``
+answer for that status. Both modes hide the same values.
 Names and addresses are made up.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock
@@ -36,6 +40,7 @@ from meho_backplane.connectors.profiled import SessionLoginRedirectError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.approval_queue import _dump_result_envelope
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
+from meho_backplane.settings import get_settings
 from tests.test_operations_session_expired_hook import (  # noqa: F401
     _audit_rows,
     _NoHook403Connector,
@@ -44,6 +49,25 @@ from tests.test_operations_session_expired_hook import (  # noqa: F401
     _run,
     _web_operator,
 )
+
+
+@pytest.fixture(autouse=True)
+def _answer_switch_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Set the switch ``REDIRECT_ON_CHANGE_RESULT`` for one test."""
+
+    def set_to(on: bool) -> None:
+        monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if on else "false")
+        get_settings.cache_clear()
+
+    return set_to
 
 
 @pytest.fixture
@@ -499,3 +523,165 @@ async def test_login_redirected_during_recovery_is_followed_and_the_call_runs_ag
         (method, "/api/v2/events"),
     ]
     assert connector.invalidations == 1
+
+
+_UNCERTAIN_KEYS = ("execution_outcome", "retry", "remediation", "message_source")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_with_the_switch_off_a_change_redirect_gets_the_generic_answer(
+    stub_embedding_service: AsyncMock, session: AsyncSession, status: int, answer_switch: Any
+) -> None:
+    answer_switch(False)
+
+    class _Conn(_RedirectingConnector):
+        impl_id = f"vcfops-rest-redirect-off-{status}"
+
+    _Conn.status = status
+    result, connector = await _run(
+        _Conn,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert connector.sent == ["PUT"]
+    assert result.status == "error"
+    assert result.error == "connector_error: HTTPStatusError"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["http_status"] == status
+    for key in _UNCERTAIN_KEYS:
+        assert key not in result.extras
+
+
+_MARKERS = (
+    "marker-sent-query",
+    "marker-sent-fragment",
+    "marker-sent-user",
+    "marker-redirect-query",
+    "marker-redirect-fragment",
+    "marker-redirect-user",
+    "marker-body",
+)
+
+
+class _MarkedRedirectConnector(_RedirectingConnector):
+    """Made-up marker values in every part of the two addresses and in the body."""
+
+    impl_id = "vcfops-rest-redirect-marked"
+    status = 307
+    sent_path = "/items/7"
+
+    def answer(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            self.status,
+            headers={
+                "Location": (
+                    "https://marker-redirect-user@vcfops.example.test/jobs/42"
+                    "?t=marker-redirect-query#marker-redirect-fragment"
+                )
+            },
+            json={"message": "marker-body"},
+        )
+
+    async def _post_json(self, target: Any, path: str, **kwargs: Any) -> Any:  # type: ignore[override]
+        return await self._send(
+            kwargs.get("verb", "POST"),
+            f"https://marker-sent-user@vcfops.example.test{self.sent_path}"
+            "?t=marker-sent-query#marker-sent-fragment",
+        )
+
+
+class _MarkedSecretPathConnector(_MarkedRedirectConnector):
+    impl_id = "vcfops-rest-redirect-marked-secret"
+    sent_path = "/keys/marker-secret-path"
+
+
+async def _assert_no_marker(result: Any, markers: tuple[str, ...]) -> None:
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    for label, text in (
+        ("the answer", json.dumps(result.model_dump(mode="json"))),
+        ("the stored result", json.dumps(_dump_result_envelope(result))),
+        ("the audit row", json.dumps(rows[0].payload, default=str)),
+    ):
+        for marker in markers:
+            assert marker not in text, f"{marker} is in {label}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_both_modes_hide_the_marked_values(
+    stub_embedding_service: AsyncMock, session: AsyncSession, on: bool, answer_switch: Any
+) -> None:
+    answer_switch(on)
+    result, _ = await _run(
+        _MarkedRedirectConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        approved=True,
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert result.status == "error"
+    assert result.extras["http_status"] == 307
+    await _assert_no_marker(result, _MARKERS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_both_modes_hide_the_path_of_an_operation_that_sends_a_secret(
+    stub_embedding_service: AsyncMock, session: AsyncSession, on: bool, answer_switch: Any
+) -> None:
+    answer_switch(on)
+    result, _ = await _run(
+        _MarkedSecretPathConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        approved=True,
+        method="PUT",
+        safety_level="caution",
+        tags=["secret"],
+    )
+
+    assert result.status == "error"
+    await _assert_no_marker(result, (*_MARKERS, "marker-secret-path", "/jobs/42"))
+
+
+class _LoginHttpRedirectConnector(_RedirectingConnector):
+    """The login POST gets a 303; the error is the login's own status error."""
+
+    impl_id = "vcfops-rest-login-http-redirect"
+
+    async def _send(self, method: str, path: str) -> dict[str, Any]:
+        request = httpx.Request("POST", "https://vcfops.example.test/api/session")
+        httpx.Response(303, headers={"Location": "/ui/"}, request=request).raise_for_status()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_a_login_redirect_gets_the_generic_answer(
+    stub_embedding_service: AsyncMock, session: AsyncSession, answer_switch: Any
+) -> None:
+    answer_switch(False)
+    result, connector = await _run(
+        _LoginHttpRedirectConnector,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert connector.sent == []
+    assert result.status == "error"
+    assert result.error == "connector_error: HTTPStatusError"
+    assert result.extras["http_status"] == 303
+    for key in _UNCERTAIN_KEYS:
+        assert key not in result.extras

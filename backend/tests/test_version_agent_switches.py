@@ -67,6 +67,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "operation_contract_guidance",
         "policy_classification",
         "preview_typed_writes",
+        "redirect_on_change_result",
         "result_query_small_form",
         "runner_checks_enabled",
         "search_clear_lead",

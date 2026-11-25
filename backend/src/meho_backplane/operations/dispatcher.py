@@ -394,6 +394,7 @@ from meho_backplane.operations._errors import (
     result_connector_http_422,
     result_connector_not_found,
     result_connector_probe_refused,
+    result_connector_redirect_generic,
     result_connector_redirect_on_change,
     result_connector_timeout,
     result_connector_tls_verify_failed,
@@ -2527,11 +2528,13 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
-    * a redirect after a change (301, 302, 303, 307, 308) ->
+    * a redirect after a change (301, 302, 303, 307, 308) -> with the switch
+      ``redirect_on_change_result`` on,
       :func:`result_connector_redirect_on_change`, worded by what the code
-      means; marked uncertain when the operation may change the target. The
-      redirect address is left out when the operation sends a secret
-      (*op_sends_secret*).
+      means and marked uncertain when the operation may change the target;
+      with it off, :func:`result_connector_redirect_generic`, the generic
+      ``connector_error`` answer. The redirect address is left out when the
+      operation sends a secret (*op_sends_secret*).
     * ``410`` -> :func:`result_connector_http_410` -- the product version
       removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
@@ -2551,9 +2554,13 @@ def _classify_http_status_error(
     """
     status_code = http_exc.response.status_code
     if is_redirect_on_change(http_exc):
-        # MEHO did not follow a redirect after a change. It does not know
-        # whether the change ran, except that a 307 / 308 asked for a repeat
-        # at another address.
+        # MEHO did not follow a redirect after a change. The switch decides
+        # only the answer: by what the code means (on), or the generic
+        # ``connector_error`` answer (off). Both hide the same values.
+        if not get_settings().redirect_on_change_result:
+            return result_connector_redirect_generic(
+                op_id, http_exc, duration_ms, withhold_address=op_sends_secret
+            )
         redirected = result_connector_redirect_on_change(
             op_id, http_exc, duration_ms, withhold_address=op_sends_secret
         )

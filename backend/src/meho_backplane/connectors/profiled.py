@@ -135,6 +135,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector", "SessionLoginRedirectError"]
 
@@ -174,6 +175,10 @@ def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
 
 class SessionLoginRedirectError(SessionLoginError, ConnectorOwnMessage):
     """The login before an operation got a redirect, so the operation was not sent.
+
+    Raised only while the switch ``redirect_on_change_result`` is on. With it
+    off, the login's ``httpx.HTTPStatusError`` reaches the dispatcher, which
+    gives the generic ``connector_error`` answer for that status.
 
     The message is a fixed sentence of MEHO with only the HTTP status. It
     names no address: a login address can come from the credential (an
@@ -555,10 +560,11 @@ class ProfiledRestConnector(HttpConnector):
             auth_error = session_establish_auth_error(exc, message=message, target=target)
             if auth_error is not None:
                 raise auth_error from exc
-            if exc.response.is_redirect:
+            if exc.response.is_redirect and get_settings().redirect_on_change_result:
                 # The login, not the operation, got the redirect. The error
                 # names the login request, and says the operation was not sent,
                 # so the dispatcher does not take it for the operation's answer.
+                # With the switch off, the generic answer for the status stays.
                 raise SessionLoginRedirectError(exc.response.status_code) from exc
             raise
         return resp.json(), established_path

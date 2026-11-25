@@ -40,9 +40,10 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakTargetLike,
 )
 from meho_backplane.flight_recorder import capture
-from meho_backplane.operations._errors import is_redirect_on_change
+from meho_backplane.operations._errors import is_redirect_on_change, result_connector_error
 from meho_backplane.operations.dispatcher import _classify_http_status_error
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
+from meho_backplane.settings import get_settings
 
 _BASE = "https://svc.example.com"
 _CHANGE_METHODS = ["PUT", "POST", "PATCH", "DELETE"]
@@ -737,6 +738,27 @@ async def test_stored_redirect_entry_of_a_keycloak_write_has_no_body() -> None:
     assert "kc-hidden-value" not in _dumped(spans)
 
 
+@pytest.fixture
+def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Set the switch ``REDIRECT_ON_CHANGE_RESULT`` for one test."""
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+
+    def set_to(on: bool) -> None:
+        monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if on else "false")
+        get_settings.cache_clear()
+
+    yield set_to
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def answer_switch_on(answer_switch: Any) -> None:
+    answer_switch(True)
+
+
 def _status_error(method: str, status: int, location: str | None) -> httpx.HTTPStatusError:
     request = httpx.Request(method, f"{_BASE}/items/7")
     headers = {"Location": location} if location else {}
@@ -769,6 +791,7 @@ def _real_status_error(status: int, location: str) -> httpx.HTTPStatusError:
     return caught.value
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_result_keeps_a_ticket_in_the_address_out_of_every_field(status: int) -> None:
     exc = _real_status_error(status, "/jobs/42?ticket=one-time-ticket-123")
@@ -785,6 +808,7 @@ def test_result_keeps_a_ticket_in_the_address_out_of_every_field(status: int) ->
     )
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_result_leaves_out_the_address_for_an_operation_that_sends_a_secret(status: int) -> None:
     exc = _real_status_error(status, "/vault/the-secret-value/result")
@@ -796,6 +820,7 @@ def test_result_leaves_out_the_address_for_an_operation_that_sends_a_secret(stat
     assert "does not show, because this call sends a secret" in result.error
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_result_leaves_out_the_sent_path_for_an_operation_that_sends_a_secret(
     status: int,
@@ -811,6 +836,7 @@ def test_result_leaves_out_the_sent_path_for_an_operation_that_sends_a_secret(
     assert result.extras["exception_message"] == f"HTTP {status} redirect after PUT {_BASE}"
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [307, 308])
 def test_result_for_307_308_says_the_target_did_not_run_the_call(status: int) -> None:
     result = _classify(_status_error("PUT", status, "/items/8?ticket=abc"))
@@ -824,6 +850,7 @@ def test_result_for_307_308_says_the_target_did_not_run_the_call(status: int) ->
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 def test_result_for_303_says_the_change_ran() -> None:
     result = _classify(_status_error("POST", 303, "/jobs/42"))
     assert "target says the change ran" in result.error
@@ -832,6 +859,7 @@ def test_result_for_303_says_the_change_ran() -> None:
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
 
 
+@pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [301, 302])
 def test_result_for_301_302_says_it_could_not_find_out(status: int) -> None:
     result = _classify(_status_error("DELETE", status, "/items/7/"))
@@ -851,3 +879,111 @@ def test_redirect_without_location_keeps_the_generic_result() -> None:
     exc = _status_error("PUT", 307, None)
     assert not is_redirect_on_change(exc)
     assert _classify(exc).error.startswith("connector_error: HTTPStatusError")
+
+
+_GENERIC_KEYS = {"error_code", "exception_class", "exception_message", "http_status"}
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_with_the_switch_off_a_change_redirect_gets_the_generic_answer(
+    status: int, answer_switch: Any
+) -> None:
+    answer_switch(False)
+    exc = _real_status_error(status, "/jobs/42")
+    generic = result_connector_error("svc.item.update", exc, 1.0)
+
+    result = _classify(exc)
+
+    assert result.status == generic.status == "error"
+    assert result.error == generic.error == "connector_error: HTTPStatusError"
+    assert set(result.extras) == set(generic.extras)
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["http_status"] == status
+    for key in ("execution_outcome", "retry", "remediation", "message_source"):
+        assert key not in result.extras
+    assert result.extras["exception_message"] == (
+        f"Redirect response '{exc.response.status_code} {exc.response.reason_phrase}' "
+        f"for url '{_BASE}/jobs'\nRedirect location: '{_BASE}/jobs/42'\n"
+        f"For more information check: "
+        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status}"
+    )
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_with_the_switch_on_a_change_redirect_gets_the_answer_by_its_code(
+    status: int, answer_switch: Any
+) -> None:
+    answer_switch(True)
+
+    result = _classify(_real_status_error(status, "/jobs/42"))
+
+    assert result.error.startswith("connector_error: HTTPStatusError. ")
+    assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
+    assert result.extras["retry"] is False
+    assert "remediation" in result.extras
+    assert result.extras["message_source"] == "meho"
+
+
+_MARKERS = (
+    "marker-sent-query",
+    "marker-sent-fragment",
+    "marker-sent-user",
+    "marker-sent-pass",
+    "marker-redirect-query",
+    "marker-redirect-fragment",
+    "marker-redirect-user",
+    "marker-body",
+)
+
+
+def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
+    """A redirect with made-up marker values in every part that must stay hidden."""
+    request = httpx.Request(
+        "PUT",
+        f"https://marker-sent-user:marker-sent-pass@svc.example.com{sent_path}"
+        "?t=marker-sent-query#marker-sent-fragment",
+    )
+    response = httpx.Response(
+        status,
+        headers={
+            "Location": (
+                "https://marker-redirect-user@svc.example.com/jobs/42"
+                "?t=marker-redirect-query#marker-redirect-fragment"
+            )
+        },
+        json={"message": "marker-body"},
+        request=request,
+    )
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        response.raise_for_status()
+    return caught.value
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_both_modes_hide_the_marked_values(status: int, on: bool, answer_switch: Any) -> None:
+    answer_switch(on)
+
+    result = _classify(_marked_status_error(status, "/items/7"))
+
+    dumped = json.dumps(result.model_dump(mode="json"))
+    for marker in _MARKERS:
+        assert marker not in dumped, marker
+    assert f"{_BASE}/items/7" in dumped
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_both_modes_hide_the_path_of_an_operation_that_sends_a_secret(
+    status: int, on: bool, answer_switch: Any
+) -> None:
+    answer_switch(on)
+
+    result = _classify(
+        _marked_status_error(status, "/keys/marker-secret-path"), op_sends_secret=True
+    )
+
+    dumped = json.dumps(result.model_dump(mode="json"))
+    for marker in (*_MARKERS, "marker-secret-path", "/jobs/42"):
+        assert marker not in dumped, marker
+    assert _BASE in dumped

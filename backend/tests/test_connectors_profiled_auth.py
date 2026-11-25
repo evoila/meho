@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -45,6 +46,7 @@ from meho_backplane.connectors.profile import (
 )
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.settings import get_settings
 
 
 def _operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -681,15 +683,33 @@ async def test_session_login_post_auth_status_raises_connector_auth_error(status
     await connector.aclose()
 
 
+@pytest.fixture
+def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Set the switch ``REDIRECT_ON_CHANGE_RESULT`` for one test."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+
+    def set_to(on: bool) -> None:
+        monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if on else "false")
+        get_settings.cache_clear()
+
+    yield set_to
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-async def test_session_login_redirect_names_the_login_and_sends_no_operation(status: int) -> None:
+async def test_session_login_redirect_names_the_login_and_sends_no_operation(
+    status: int, answer_switch: Any
+) -> None:
     """A redirect on the login POST is reported as the login's answer.
 
     The error names the login request and says the operation was not sent,
     so the dispatcher never takes it for the operation's own redirect. The
     operation's request is never sent.
     """
+    answer_switch(True)
     connector = _connector("session_login", {"username": "svc", "password": "pw"})
     target = _StubTarget(name="vrli", host="vrli.invalid")
 
@@ -710,6 +730,34 @@ async def test_session_login_redirect_names_the_login_and_sends_no_operation(sta
     )
     assert "one-time-ticket-123" not in message
     assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+    assert login.call_count == 1
+    assert operation.call_count == 0
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_with_the_switch_off_a_session_login_redirect_keeps_its_status_error(
+    status: int, answer_switch: Any
+) -> None:
+    """With the switch off, the login's own status error reaches the dispatcher.
+
+    The dispatcher then gives the generic ``connector_error`` answer for that
+    status. The operation's request is never sent.
+    """
+    answer_switch(False)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").respond(status, headers={"Location": "/ui/login"})
+        operation = mock.put("/api/v2/items/7").respond(200, json={})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector._post_json(
+                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+            )
+
+    assert exc_info.value.response.status_code == status
     assert login.call_count == 1
     assert operation.call_count == 0
     await connector.aclose()

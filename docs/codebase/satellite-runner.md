@@ -258,10 +258,14 @@ work item, plus approval-bound minting.
   audit row in the same tenant: event class `policy_decision`, path
   `gateway.command.mint`, status 403, the session id of the call, and in the
   payload the caller, the approval request id the caller sent, the runner,
-  the operation and the refusal code, and no params. No command row is
-  written and the approval stays unused. The refusals of other operations
-  (unknown operation, an operation not allowed for a runner, a read refused
-  by policy) write a log line only.
+  the operation and the refusal code, and no params. The mint commits this
+  row itself, in its own session, so it stays stored when the caller rolls
+  back, and `MintResult.refusal_audit_id` names a stored row. When that write
+  fails, MEHO logs it and the mint still refuses with the same code, with no
+  `refusal_audit_id`. The row of a successful mint stays in the caller's
+  transaction. No command row is written and the approval stays unused.
+  The refusals of other operations (unknown operation, an operation not
+  allowed for a runner, a read refused by policy) write a log line only.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the

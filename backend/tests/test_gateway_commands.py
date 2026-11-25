@@ -298,8 +298,10 @@ async def _mint_refused_before_policy_gate(
 
     The satellite-mint tier ladder (#3188) refuses an ``EXCLUDED`` or
     unauthorised ``remote-write`` op **before** the policy gate, so a
-    consulted gate is a bug. Returns the refusal result for the caller to
-    assert the exact code + zero rows written.
+    consulted gate is a bug. The mint names no approval request. Returns the
+    refusal result for the caller to assert the exact code, no command row
+    and no approval row. A refused remote-write mint writes one audit row;
+    ``test_every_remote_write_refusal_writes_one_audit_row`` checks that row.
     """
     await _seed_tenant()
     _patch_lookup(monkeypatch, _descriptor(safety_level=level))
@@ -344,13 +346,13 @@ async def test_mint_refuses_excluded_op(monkeypatch: pytest.MonkeyPatch, level: 
 async def test_mint_refuses_remote_write_gate_unsatisfied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``caution`` (remote-write) op is refused fail-closed — no rows written.
+    """A ``caution`` (remote-write) op with no approval request is refused.
 
-    The additive ``remote-write`` tier mints only through the composed gate
-    (per-runner allowlist + approval/policy), wired by the sibling tasks
-    (#3189-#3193). Until then the gate is fail-closed, so a remote-write op is
-    refused with the tier's own refusal code — distinct from ``OP_NOT_SAFE`` —
-    before the policy gate and without parking.
+    The test checks the tier's own refusal code (distinct from
+    ``OP_NOT_SAFE``), given before the policy gate and without parking, and
+    that no command row and no approval row are written. The refusal writes
+    one audit row; ``test_every_remote_write_refusal_writes_one_audit_row``
+    checks that row.
     """
     result = await _mint_refused_before_policy_gate(monkeypatch, level="caution")
 
@@ -793,6 +795,179 @@ async def test_early_remote_write_refusal_writes_one_audit_row(
     assert rows[0].payload["result_status"] == code.value
     assert rows[0].payload["approval_request_id"] == str(approval_id)
     assert "params" not in rows[0].payload
+
+
+async def _refusal_case_setup(
+    monkeypatch: pytest.MonkeyPatch, case: str, approval_id: uuid.UUID
+) -> uuid.UUID | None:
+    """Set up one refusal *case*; return the approval request id the mint names."""
+    from meho_backplane.auth.principal_block import (
+        PrincipalBlockUnavailableError,
+        block_principal,
+        reset_block_cache,
+    )
+
+    if case != "not_allowlisted":
+        await _seed_write_allowlist()
+    if case == "no_request_id":
+        return None
+    if case == "unknown_request_id":
+        return uuid.uuid4()
+    if case == "changed_release":
+        monkeypatch.setenv("GIT_SHA", "a" * 40)
+    elif case == "blocked_asker":
+        reset_block_cache()
+        admin = _caller("admin-person", PrincipalKind.USER, TenantRole.TENANT_ADMIN)
+        await block_principal(admin, _MINTER_SUB, "left the team")
+        reset_block_cache()
+    elif case == "block_list_unreadable":
+
+        async def _unreadable(sub: str, tenant_id: uuid.UUID) -> bool:
+            raise PrincipalBlockUnavailableError(sub)
+
+        monkeypatch.setattr(gc, "is_principal_blocked", _unreadable)
+    elif case == "no_signing_key":
+        monkeypatch.setenv("SATELLITE_WRITE_SIGNING_KEY", "")
+        get_settings.cache_clear()
+    elif case == "used_by_concurrent_mint":
+
+        async def _other_mint_was_first(_session: object, _approval: object) -> bool:
+            return False
+
+        monkeypatch.setattr(gc, "consume_remote_write_approval", _other_mint_was_first)
+    return approval_id
+
+
+@pytest.mark.parametrize(
+    ("case", "code"),
+    [
+        ("no_request_id", MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED),
+        ("unknown_request_id", MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED),
+        ("changed_release", MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED),
+        ("blocked_asker", MintRefusalCode.ASKER_BLOCKED),
+        ("block_list_unreadable", MintRefusalCode.ASKER_BLOCK_UNREADABLE),
+        ("no_signing_key", MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE),
+        ("not_allowlisted", MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED),
+        ("used_by_concurrent_mint", MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED),
+    ],
+)
+async def test_every_remote_write_refusal_writes_one_audit_row(
+    monkeypatch: pytest.MonkeyPatch, case: str, code: MintRefusalCode
+) -> None:
+    """Each refusal of a remote-write mint writes one 403 policy-decision row.
+
+    The row has the refusal code as ``result_status``, the normal audit query
+    lists it as ``denied``, no command row is written and the approval stays
+    unused.
+    """
+    from meho_backplane.auth.principal_block import reset_block_cache
+
+    approval_id = await _seed_committed_approval()
+    await _seed_tenant()
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+    named = await _refusal_case_setup(monkeypatch, case, approval_id)
+
+    try:
+        async with get_sessionmaker()() as session:
+            result = await mint_gateway_command(
+                session,
+                operator=_operator(),
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_ID,
+                target=None,
+                params=dict(_PARAMS),
+                runner_id=_RUNNER,
+                approval_request_id=named,
+            )
+            await session.commit()
+    finally:
+        reset_block_cache()
+
+    assert not result.minted
+    assert result.refusal_code is code
+    rows = await _mint_refusal_rows()
+    assert [row.id for row in rows] == [result.refusal_audit_id]
+    assert rows[0].event_class == AuditEventClass.POLICY_DECISION
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == code.value
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+    async with get_sessionmaker()() as session:
+        denied = await query_audit(
+            AuditQueryFilters(result_status="denied"), tenant_id=_TENANT, session=session
+        )
+    assert [(e.id, e.result_status) for e in denied.rows] == [(rows[0].id, "denied")]
+
+
+async def test_refusal_audit_row_stays_when_the_caller_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint commits its refusal row itself, so a caller rollback keeps it."""
+    approval_id = await _seed_committed_approval()
+    await _seed_tenant()
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+
+    async with get_sessionmaker()() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=dict(_PARAMS),
+            runner_id=_RUNNER,
+            approval_request_id=approval_id,
+        )
+        await session.rollback()
+
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
+    assert result.refusal_audit_id is not None
+    async with get_sessionmaker()() as session:
+        stored = (
+            (await session.execute(select(AuditLog).where(AuditLog.id == result.refusal_audit_id)))
+            .scalars()
+            .all()
+        )
+    assert len(stored) == 1
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_refusal_stays_when_its_audit_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed refusal audit write still returns the refusal, with no audit id."""
+    approval_id = await _seed_committed_approval()
+    await _seed_tenant()
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+
+    async def _write_fails(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(gc, "_write_gateway_audit_row", _write_fails)
+
+    with capture_logs() as logs:
+        async with get_sessionmaker()() as session:
+            result = await mint_gateway_command(
+                session,
+                operator=_operator(),
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_ID,
+                target=None,
+                params=dict(_PARAMS),
+                runner_id=_RUNNER,
+                approval_request_id=approval_id,
+            )
+            await session.commit()
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
+    assert result.refusal_audit_id is None
+    assert any(e["event"] == "gateway_command_mint_refusal_audit_failed" for e in logs)
+    assert await _mint_refusal_rows() == []
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
 
 
 async def test_mint_remote_write_needs_the_named_request(

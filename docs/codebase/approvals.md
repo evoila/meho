@@ -226,8 +226,8 @@ or `"target_gone_since_approval"` and the `target_id`.
 This covers a request that was approved just before an update and had
 not run yet. A remote-write mint for a satellite runner checks the same
 rule: an approval from an older release mints nothing
-(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
-and the approval stays unused).
+(`REMOTE_WRITE_GATE_UNSATISFIED`). Like the other refused remote-write
+mints, the refusal writes one audit row, and the approval stays unused.
 
 **No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
 has no release identity. Only local development runs like this; every

@@ -216,8 +216,11 @@ class MintResult:
     and :attr:`refusal_code` is ``None``. On a refusal, :attr:`command` is
     ``None`` and :attr:`refusal_code` / :attr:`refusal_reason` explain why
     — no command row is written and no approval is used up. A refused
-    remote-write mint also writes one audit row, named by
-    :attr:`refusal_audit_id`.
+    remote-write mint also writes one audit row. The mint commits that row
+    itself, in its own session, so it stays stored when the caller rolls
+    back. :attr:`refusal_audit_id` names that stored row. It is ``None``
+    when the row could not be written; the mint refuses all the same.
+    The row of a successful mint stays in the caller's transaction.
     """
 
     command: GatewayCommand | None = None
@@ -241,7 +244,6 @@ async def _refuse_remote_write(
     code: MintRefusalCode,
     reason: str,
     *,
-    session: AsyncSession,
     op_id: str,
     operator: Operator,
     runner_id: str,
@@ -258,7 +260,6 @@ async def _refuse_remote_write(
     return await _audit_remote_write_refusal(
         code,
         reason,
-        session=session,
         op_id=op_id,
         operator=operator,
         runner_id=runner_id,
@@ -270,7 +271,6 @@ async def _audit_remote_write_refusal(
     code: MintRefusalCode,
     reason: str,
     *,
-    session: AsyncSession,
     op_id: str,
     operator: Operator,
     runner_id: str,
@@ -278,12 +278,19 @@ async def _audit_remote_write_refusal(
 ) -> MintResult:
     """Write the one audit row of a refused ``remote-write`` mint and build the refusal.
 
-    The row is a ``policy_decision`` row in the caller's tenant, written in the
-    caller's session; the caller commits it, like every other gateway audit
-    row. It carries the session id of the call. It names the caller, the
-    approval request id the caller sent, the runner, the operation and the
-    refusal code. It holds no params. No command row is written.
+    The row is a ``policy_decision`` row in the caller's tenant. The mint
+    writes it in its own session and commits it, so the row stays stored
+    when the caller rolls back. It carries the session id of the call. It
+    names the caller, the approval request id the caller sent, the runner,
+    the operation and the refusal code. It holds no params. No command row
+    is written.
+
+    When the write or its commit fails, the failure is logged and the mint
+    still refuses with *code*; the result then has no
+    :attr:`MintResult.refusal_audit_id`.
     """
+    from meho_backplane.db.engine import get_sessionmaker
+
     payload: dict[str, Any] = {
         "op_id": op_id,
         "runner_id": runner_id,
@@ -293,17 +300,29 @@ async def _audit_remote_write_refusal(
     if approval_request_id is not None:
         payload["approval_request_id"] = str(approval_request_id)
     audit_id = uuid.uuid4()
-    await _write_gateway_audit_row(
-        session,
-        audit_id=audit_id,
-        operator=operator,
-        path=_MINT_AUDIT_PATH,
-        status_code=_MINT_REFUSED_AUDIT_STATUS,
-        duration_ms=0.0,
-        payload=payload,
-        event_class=AuditEventClass.POLICY_DECISION,
-        agent_session_id=resolve_audit_session_id(),
-    )
+    try:
+        async with get_sessionmaker()() as audit_session:
+            await _write_gateway_audit_row(
+                audit_session,
+                audit_id=audit_id,
+                operator=operator,
+                path=_MINT_AUDIT_PATH,
+                status_code=_MINT_REFUSED_AUDIT_STATUS,
+                duration_ms=0.0,
+                payload=payload,
+                event_class=AuditEventClass.POLICY_DECISION,
+                agent_session_id=resolve_audit_session_id(),
+            )
+            await audit_session.commit()
+    except Exception:
+        structlog.get_logger(__name__).exception(
+            "gateway_command_mint_refusal_audit_failed",
+            reason=code.value,
+            op_id=op_id,
+            operator_sub=operator.sub,
+            runner_id=runner_id,
+        )
+        return MintResult(refusal_code=code, refusal_reason=reason)
     return MintResult(refusal_code=code, refusal_reason=reason, refusal_audit_id=audit_id)
 
 
@@ -546,7 +565,6 @@ async def mint_gateway_command(
     tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     audit_refusal = functools.partial(
         _audit_remote_write_refusal,
-        session=session,
         op_id=op_id,
         operator=operator,
         runner_id=runner_id,
@@ -740,7 +758,6 @@ async def _screen_remote_write(
 
     refuse = functools.partial(
         _refuse_remote_write,
-        session=session,
         op_id=op_id,
         operator=operator,
         runner_id=runner_id,
@@ -864,7 +881,6 @@ async def _mint_remote_write(
             op_id=op_id,
             operator=operator,
             runner_id=runner_id,
-            session=session,
             approval_request_id=approval_request_id,
         )
 

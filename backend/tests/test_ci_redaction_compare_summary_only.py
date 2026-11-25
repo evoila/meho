@@ -34,7 +34,10 @@ _WHERE = (
 )
 
 
-_OPERATORS = frozenset({"&&", "||", ";", "|"})
+# Shell control characters: ``&``, ``|``, ``;``, ``<``, ``>``, a backtick,
+# a round bracket (also of ``$(...)``) and ``#``. A judge line may hold none
+# of them, also not inside quotes, so it is always one plain command.
+_CONTROL = re.compile(r"[&|;<>`()#]")
 
 
 def _jobs(workflow_text: str) -> dict[str, Any]:
@@ -61,22 +64,6 @@ def _steps(jobs: dict[str, Any]) -> list[tuple[str, str, str]]:
     return found
 
 
-def _call_words(line: str) -> list[str]:
-    """The words of the first command on the line.
-
-    Words after the first shell operator (``&&``, ``||``, ``;``, ``|``) or
-    after a shell comment belong to another command, so they do not count.
-    """
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    words: list[str] = []
-    for word in lexer:
-        if word in _OPERATORS:
-            break
-        words.append(word)
-    return words
-
-
 def _runs_script(words: list[str]) -> bool:
     """True when the words start Python on the compare script.
 
@@ -96,15 +83,25 @@ def _runs_script(words: list[str]) -> bool:
 
 
 def _check_line(job: str, step: str, line: str) -> bool:
-    """Check one shell line; True when it is a judge call."""
+    """Check one shell line; True when it is a judge line.
+
+    A judge line names the script and ``--judge``. It must be one plain
+    command: the launcher, the script, its arguments and the flag.
+    """
     if _SCRIPT not in line or "--judge" not in line:
         return False
-    words = _call_words(line)
     where = f"Job '{job}', step '{step}'"
+    update = f"Update backend/tests/{Path(__file__).name} so it can read this line"
+    control = _CONTROL.search(line)
+    assert control is None, (
+        f"{where}: the judge line has the shell control character "
+        f"'{control.group() if control else ''}'. A judge line must be one plain "
+        f"command. {update}: {line.strip()}"
+    )
+    words = shlex.split(line)
     assert _runs_script(words) and "--judge" in words, (
         f"{where}: a line names {_SCRIPT} and --judge, but the test cannot read it "
-        f"as a judge call. Update backend/tests/{Path(__file__).name} so it can "
-        f"read this line: {line.strip()}"
+        f"as a judge call. {update}: {line.strip()}"
     )
     assert "--summary-only" in words, (
         f"{where}: the judge call has no --summary-only. "
@@ -226,7 +223,6 @@ def test_judge_call_with_flag_in_another_job_passes() -> None:
     [
         f"time {_JUDGE} --summary-only",
         f"FOO=1 {_JUDGE} --summary-only",
-        f"cd backend && {_JUDGE} --summary-only",
     ],
 )
 def test_judge_call_after_another_word_fails(run: str) -> None:
@@ -241,14 +237,26 @@ def test_judge_call_after_another_word_fails(run: str) -> None:
 @pytest.mark.parametrize(
     "run",
     [
-        f"{_JUDGE} && echo --summary-only",
-        f"{_JUDGE} || echo --summary-only",
-        f"{_JUDGE}; echo --summary-only",
-        f"{_JUDGE} | tee out --summary-only",
-        f"{_JUDGE}&&echo --summary-only",
-        f"{_JUDGE} # --summary-only",
+        f"{_JUDGE} --summary-only & wait",
+        f"{_JUDGE} --summary-only |& tee out",
+        f"{_JUDGE} --summary-only > out",
+        f"{_JUDGE} --summary-only && echo done",
+        f"{_JUDGE} --summary-only; echo done",
+        f"{_JUDGE} --summary-only `echo x`",
+        f"{_JUDGE} --summary-only $(echo x)",
+        f"{_JUDGE} --summary-only (x)",
+        f"{_JUDGE} --summary-only # note",
+        f"{_JUDGE} --summary-only '&'",
     ],
 )
-def test_flag_after_shell_operator_or_comment_fails(run: str) -> None:
-    with pytest.raises(AssertionError, match="the judge call has no --summary-only"):
-        _check(_with_step(_JOB, run))
+def test_shell_control_character_fails(run: str) -> None:
+    with pytest.raises(
+        AssertionError,
+        match=r"Job 'other-job', step 'Extra judge': the judge line has the shell control "
+        r"character .*Update backend/tests/test_ci_redaction_compare_summary_only\.py",
+    ):
+        _check(_with_step("other-job", run))
+
+
+def test_quoted_array_variable_passes() -> None:
+    _check(_with_step("other-job", f'{_JUDGE} "${{extra[@]}}" "${{dir}}" --summary-only'))

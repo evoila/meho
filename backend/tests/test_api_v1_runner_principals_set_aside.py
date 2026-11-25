@@ -48,7 +48,13 @@ def _set_switch(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     get_settings.cache_clear()
 
 
-async def _add_row(name: str, *, count: int, tenant_id: uuid.UUID = _TENANT_A) -> None:
+async def _add_row(
+    name: str,
+    *,
+    count: int,
+    tenant_id: uuid.UUID = _TENANT_A,
+    last_at: datetime | None = _LAST_AT,
+) -> None:
     async with get_sessionmaker()() as session:
         session.add(
             RunnerAssignmentRow(
@@ -56,18 +62,23 @@ async def _add_row(name: str, *, count: int, tenant_id: uuid.UUID = _TENANT_A) -
                 runner_name=name,
                 items=[],
                 set_aside_count=count,
-                set_aside_last_at=_LAST_AT,
+                set_aside_last_at=last_at,
             )
         )
         await session.commit()
 
 
 async def _seed() -> None:
-    """``with-count`` has a stored count, ``no-row`` has no assignment row."""
+    """``with-count`` has a stored count, ``no-row`` has no assignment row.
+
+    ``never-set-aside`` has an assignment row with the count 0 and no time.
+    """
     await _seed_tenants()
     await _seed_runner_row("with-count")
     await _seed_runner_row("no-row")
+    await _seed_runner_row("never-set-aside")
     await _add_row("with-count", count=3)
+    await _add_row("never-set-aside", count=0, last_at=None)
     await _add_row("no-row", count=9, tenant_id=_TENANT_B)  # another tenant's runner
 
 
@@ -98,9 +109,10 @@ async def test_list_and_get_hold_the_set_aside_count_and_time_with_the_switch_on
     for entry in (listed["with-count"], _get(client, f"{_PATH}/with-count")):
         assert entry["set_aside_count"] == 3
         assert _time_of(entry) == _LAST_AT
-    for entry in (listed["no-row"], _get(client, f"{_PATH}/no-row")):
-        assert entry["set_aside_count"] == 0
-        assert "set_aside_last_at" not in entry
+    for name in ("no-row", "never-set-aside"):
+        for entry in (listed[name], _get(client, f"{_PATH}/{name}")):
+            assert entry["set_aside_count"] == 0
+            assert entry["set_aside_last_at"] is None
 
 
 @pytest.mark.asyncio
@@ -113,7 +125,7 @@ async def test_list_and_get_have_no_set_aside_key_with_the_switch_off(
 
     entries = [*_get(client, _PATH)["principals"], _get(client, f"{_PATH}/with-count")]
 
-    assert len(entries) == 3
+    assert len(entries) == 4
     for entry in entries:
         assert not _KEYS & entry.keys()
 

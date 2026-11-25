@@ -55,7 +55,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -195,10 +195,22 @@ class RunnerPrincipalRead(BaseModel):
     #: (#5038); ``None`` until it has called since this field existed.
     package_set_digest: str | None = None
     #: How many result batches the runner has set aside, as it last said, and
-    #: when it set the newest one aside. Only the list and get answers hold
-    #: them, and only with ``RUNNER_CHECKS_ENABLED`` on; left out when ``None``.
+    #: when it set the newest one aside (``null`` before the first one). Only
+    #: the list and get answers hold them, and only with
+    #: ``RUNNER_CHECKS_ENABLED`` on: both are left out while the count is
+    #: ``None``.
     set_aside_count: int | SkipJsonSchema[None] = Field(default=None, exclude_if=_is_none)
-    set_aside_last_at: datetime | SkipJsonSchema[None] = Field(default=None, exclude_if=_is_none)
+    set_aside_last_at: datetime | None = None
+
+    @model_serializer(mode="wrap")
+    def _set_aside_with_its_count(self, handler):  # type: ignore[no-untyped-def]
+        """Leave ``set_aside_last_at`` out of an answer that has no set-aside count."""
+        # No annotations on purpose: a return type would replace the answer's
+        # JSON schema with that type.
+        data = handler(self)
+        if self.set_aside_count is None and isinstance(data, dict):
+            data.pop("set_aside_last_at", None)
+        return data
 
 
 class RunnerPrincipalRegistered(RunnerPrincipalRead):

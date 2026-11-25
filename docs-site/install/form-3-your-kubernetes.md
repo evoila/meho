@@ -328,6 +328,17 @@ Do not turn on the emergency switch for this.
 - A change of rights (who may do what in MEHO) runs only with a click in
   the web console.
 - `meho status` shows the rule for your own role on its `Approvals` line.
+- MEHO refuses a change that resets or sets the password of your own
+  login, before it waits. No approval allows it. Another person asks for it
+  and a platform admin approves it.
+- Some operations need the Admin role from the person who runs them and
+  from the person who approves them, for example registering or changing a
+  target, the topology writes, the space writes, the policy changes and
+  signing out a tool. A person with a lower role is refused when they run
+  one and when they approve one, also with break-glass on.
+- In MEHO's own login realm, a change that can change the sign-in MEHO asks
+  for before an approval never runs alone, also not for a platform admin
+  with a fresh sign-in. It waits, and a second platform admin approves it.
 
 To add a second admin:
 

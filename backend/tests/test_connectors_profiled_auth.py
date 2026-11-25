@@ -763,6 +763,39 @@ async def test_with_the_switch_off_a_session_login_redirect_keeps_its_status_err
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_login_redirect_to_the_same_path_with_a_slash_is_not_followed(
+    on: bool, status: int, answer_switch: Any
+) -> None:
+    """A 307 or 308 of the login to its own path with a slash ends the call.
+
+    The login is sent once, the slash address gets no request, and the
+    operation is never sent, with the switch off and with it on.
+    """
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").respond(
+            status, headers={"Location": "/api/v2/sessions/"}
+        )
+        login_again = mock.post("/api/v2/sessions/").respond(200, json={"sessionId": "tok"})
+        operation = mock.put("/api/v2/items/7").respond(200, json={})
+        expected = SessionLoginRedirectError if on else httpx.HTTPStatusError
+        with pytest.raises(expected):
+            await connector._post_json(
+                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+            )
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert login_again.call_count == 0
+    assert operation.call_count == 0
+
+
 #: Made-up values in the login's redirect answer. None may reach the answer.
 _LOGIN_MARKERS = ("marker-login-location", "marker-login-body", "/api/v2/sessions")
 

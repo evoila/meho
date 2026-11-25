@@ -126,7 +126,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     is_acceptable_auth_model,
     session_establish_auth_error,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, change_follows_no_redirect
 from meho_backplane.connectors.base import ConnectorOwnMessage, ShimKind
 from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile, split_version
 from meho_backplane.connectors.schemas import (
@@ -595,6 +595,24 @@ class ProfiledRestConnector(HttpConnector):
         return resp.json(), established_path
 
     async def _login_attempt(
+        self,
+        target: Any,
+        spec: SessionSchemeSpec,
+        auth: AuthSpec,
+        path: str,
+        body: Mapping[str, str],
+        secret: Mapping[str, str],
+    ) -> httpx.Response:
+        """POST one login attempt at *path*, following no redirect.
+
+        A redirect on the login, also a 307 or 308 to the same path with a
+        slash, comes back as it is, so the caller ends the call on it: MEHO
+        sends the login once and never sends the operation after it.
+        """
+        with change_follows_no_redirect():
+            return await self._send_login(target, spec, auth, path, body, secret)
+
+    async def _send_login(
         self,
         target: Any,
         spec: SessionSchemeSpec,

@@ -927,6 +927,27 @@ def last_send_of_a_change() -> Iterator[None]:
         _change_sent_before.reset(repeat)
 
 
+#: Set while MEHO sends a change that must follow no redirect at all
+#: (:func:`change_follows_no_redirect`).
+_change_follows_no_redirect: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_change_follows_no_redirect", default=False
+)
+
+
+@contextlib.contextmanager
+def change_follows_no_redirect() -> Iterator[None]:
+    """Make a change request sent inside follow no redirect, also not a 307 or 308.
+
+    For a login: a redirect on it ends the call, so MEHO never sends the
+    login a second time and never sends the operation after it.
+    """
+    token = _change_follows_no_redirect.set(True)
+    try:
+        yield
+    finally:
+        _change_follows_no_redirect.reset(token)
+
+
 def _sent_address(url: httpx.URL) -> tuple[str, str, int | None, str, str]:
     """The address a request goes to: scheme, host, port, encoded path and query.
 
@@ -1027,7 +1048,8 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             # Only the repeated operation request follows no redirect; a
             # fresh login before it keeps the usual rule.
             repeat = _change_sent_before.get() and _operation_request.get()
-            max_hops = 0 if repeat else _MAX_CHANGE_REDIRECTS
+            no_redirect = repeat or _change_follows_no_redirect.get()
+            max_hops = 0 if no_redirect else _MAX_CHANGE_REDIRECTS
         else:
             max_hops = _MAX_SAME_ORIGIN_REDIRECTS
         sent_urls = {_sent_address(request.url)}

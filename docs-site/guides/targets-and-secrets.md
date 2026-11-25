@@ -55,10 +55,14 @@ scope also has `meho_targets_register` and `meho_targets_update`
 (tenant_admin only). Through `call_operation`, the connector
 `targets-registry-1.x` offers `targets.register`, `targets.update`,
 `targets.remove` and `targets.probe`; every register and every update
-waits for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret, on purpose: a password must
+waits for a person's approval, and `targets.remove` always waits for one.
+
+MEHO has no MCP tool to stage a secret, on purpose: a password must
 never pass through an agent or a model. A person stores it with the
-CLI or the web console (see [Store the credential through MEHO](#store-the-credential-through-meho)).
-This is also why the CLI is worth installing before your first agent session.
+CLI or the web console (see
+[Store the credential through MEHO](#store-the-credential-through-meho)).
+This is also why the CLI is worth installing before your first agent
+session.
 
 ## Write a `targets.yaml`
 
@@ -303,14 +307,20 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
     #   secret_ref:        tenants/4f6f6f6f-.../lab-vcenter
     ```
 
-2. Write the credential into a file. Do it in an editor, so the password
-   does not land in your shell history:
+2. Make an empty file that only you can read:
+
+    ```bash
+    install -m 600 /dev/null creds.json
+    ```
+
+    Then open `creds.json` in an editor and write the credential. The
+    password stays out of your shell history:
 
     ```json
     {"username": "svc-meho", "password": "<password>"}
     ```
 
-    Save it as `creds.json`.
+    Save the file.
 
 3. Send it. Use the mount `secret` and the `secret_ref` from step 1:
 
@@ -323,7 +333,8 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
     You need no `--target` for this. MEHO logs in to Vault with your own
     token. The `--data` flag reads a file with `@<file>`. It does not read
     standard input, and you should never put the password in the command
-    itself.
+    itself. If MEHO refuses the path, check that the mount is `secret` and
+    that the path is the `secret_ref` from step 1.
 
 4. A person approves the request. Who may do it is on the page
    [Who may approve](approvals-and-break-glass.md#who-may-approve).
@@ -332,12 +343,23 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
    a click in the web console, or on the command line after a fresh
    sign-in. See
    [Approve on the command line](approvals-and-break-glass.md#approve-on-the-command-line).
+   On the command line, use the `approval_request_id` from step 3:
 
-5. Delete the file. The secret is now in Vault:
+    ```bash
+    meho approvals approve 4b1c…
+    ```
+
+    Approving runs the write at once. No second step follows.
+
+5. Delete the file after the write is done:
 
     ```bash
     rm creds.json
     ```
+
+    If the request was rejected, nothing was stored. Delete the file
+    anyway. Fix the cause the person gave, make the file again (step 2)
+    and send it again (step 3).
 
 **The same in the web console.** Open the page **Vault** (`/ui/vault`),
 press **Write secret**, and fill in the mount `secret`, the path from
@@ -380,9 +402,11 @@ without printing it:
 
 ```bash
 # Kubernetes example — one field, whole kubeconfig as the value:
-python3 -c 'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))' \
-  rke2-kubeconfig.yaml > creds.json
+# The subshell makes creds.json readable only by you.
+(umask 077; python3 -c 'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))' \
+  rke2-kubeconfig.yaml > creds.json)
 meho vault kv put secret tenants/<tenant-id>/lab-rke2 --data @creds.json
+# After the request is approved and the write is done:
 rm creds.json
 ```
 

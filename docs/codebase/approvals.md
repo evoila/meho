@@ -3686,10 +3686,13 @@ also ends the per-call wait of an operation that a connector marked with
 `declare_per_call_approval`. After it, a person in the web console runs a
 `caution` operation at once, a `dangerous` operation still waits because of its
 risk level, and a standing grant or a run approval still does not cover the
-operation. The edit is refused for a destructive operation (`approval_off_destructive`) and for a change of rights (`approval_off_rights_change`).
+operation. The edit is refused for a destructive operation
+(`approval_off_destructive`), for an operation with a caller-address
+parameter (`approval_off_caller_address`), and for a change of rights
+(`approval_off_rights_change`).
 An operation that writes or makes a credential, for example `harbor.robot.create`
 or `pfsense.openvpn.user.create`, keeps its approval: the edit does not end its
-wait. It
+wait. The edit
 needs `platform_admin`, a written reason, and a person. This holds for
 every edit that ends approval, also removing an override that required
 it (`meho connector remove-override`, `DELETE

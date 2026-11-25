@@ -646,6 +646,70 @@ async def test_an_odd_client_id_is_not_written_into_the_error_text(
         assert part not in text
 
 
+#: A JSON value and how the error text names it.
+_SHOWN_SIGNING_TYPES: list[tuple[Any, str]] = [
+    (None, "an unknown signing type"),
+    (True, "an unknown signing type"),
+    (256, "an unknown signing type"),
+    ("RS256", "RS256"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "shown"), _SHOWN_SIGNING_TYPES, ids=repr)
+async def test_the_error_text_names_the_signing_type_only_when_it_is_a_short_text(
+    tmp_path: Path, value: Any, shown: str
+) -> None:
+    central = _Central()
+    central.signing_alg = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    assert str(caught.value) == (
+        f"enrollment answer has signing type {shown}; the runner reads only ES256"
+    )
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    _write_record_with(saved / LOGIN_FILE_NAME, value)
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    assert str(caught.value).startswith(
+        f"the login record {saved / LOGIN_FILE_NAME} has signing type {shown}; "
+        "the runner reads only ES256. Put the right files back"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, True, 123], ids=repr)
+async def test_a_client_id_that_is_not_text_is_not_written_into_the_error_text(
+    tmp_path: Path, value: Any
+) -> None:
+    central = _Central()
+    central.client_id = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    assert str(caught.value).endswith("(the code is for an unknown client id)")
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    record = json.loads((saved / LOGIN_FILE_NAME).read_text())
+    record["client_id"] = value
+    (saved / LOGIN_FILE_NAME).write_text(json.dumps(record))
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    assert f"the saved login in {saved} is for an unknown client id, " in str(caught.value)
+
+
 def _pieces(value: Any) -> list[str]:
     """Parts of a value that must not appear in an error text."""
     if isinstance(value, str):

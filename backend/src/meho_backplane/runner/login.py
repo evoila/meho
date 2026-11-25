@@ -99,14 +99,22 @@ _SHORT_CLIENT_ID: Final[re.Pattern[str]] = re.compile(r"runner:[A-Za-z0-9._-]{1,
 _log = structlog.get_logger(__name__)
 
 
-def _shown_signing_type(value: str) -> str:
-    """The signing type for an error text; any value that is not a short name is hidden."""
-    return value if _SHORT_NAME.fullmatch(value) else "an unknown signing type"
+def _shown_signing_type(value: object) -> str:
+    """The signing type as read from JSON, for an error text.
+
+    Only a JSON text that is a short name is shown; null, true, a number and
+    any other value are hidden.
+    """
+    if isinstance(value, str) and _SHORT_NAME.fullmatch(value):
+        return value
+    return "an unknown signing type"
 
 
-def _shown_client_id(value: str) -> str:
-    """The client id for an error text; any value that is not a plain name is hidden."""
-    return value if _SHORT_CLIENT_ID.fullmatch(value) else "an unknown client id"
+def _shown_client_id(value: object) -> str:
+    """The client id as read from JSON, for an error text; only a plain name is shown."""
+    if isinstance(value, str) and _SHORT_CLIENT_ID.fullmatch(value):
+        return value
+    return "an unknown client id"
 
 
 class RunnerLoginError(RuntimeError):
@@ -269,12 +277,12 @@ class _LoginRecord:
             ) from exc
         except (ValueError, KeyError, TypeError) as exc:
             raise _SavedLoginError(f"the login record {path} is damaged") from exc
-        if record.signing_alg != _SIGNING_ALG:
+        if data["signing_alg"] != _SIGNING_ALG:
             # A plain RunnerLoginError: startup stops here, and the enrollment
             # code is not sent again.
             raise RunnerLoginError(
                 f"the login record {path} has signing type "
-                f"{_shown_signing_type(record.signing_alg)}; "
+                f"{_shown_signing_type(data['signing_alg'])}; "
                 f"the runner reads only {_SIGNING_ALG}. {_RECOVERY}"
             )
         return record
@@ -328,14 +336,14 @@ async def enroll_with_code(
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise RunnerLoginError("enrollment answer is not valid") from exc
-    if record.signing_alg != _SIGNING_ALG:
+    if body["signing_alg"] != _SIGNING_ALG:
         raise RunnerLoginError(
-            f"enrollment answer has signing type {_shown_signing_type(record.signing_alg)}; "
+            f"enrollment answer has signing type {_shown_signing_type(body['signing_alg'])}; "
             f"the runner reads only {_SIGNING_ALG}"
         )
     if record.client_id != _client_id(runner_id):
         raise RunnerLoginError(
-            f"{_OTHER_RUNNER} (the code is for {_shown_client_id(record.client_id)})"
+            f"{_OTHER_RUNNER} (the code is for {_shown_client_id(body['client_id'])})"
         )
     if record.key_id != ec_key_id(public_jwk(key)):
         raise RunnerLoginError("enrollment answer is for another key")

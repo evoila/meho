@@ -11,7 +11,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -763,23 +762,26 @@ func invokesDoctor(root *cobra.Command, args []string) bool {
 	return err == nil && c != nil && c.Parent() == root && c.Name() == "doctor"
 }
 
-// invokesRootVersionFlag reports whether args run `meho --version`: the
-// root command with its --version flag set. `meho version` is a
-// subcommand and is not matched.
+// invokesRootVersionFlag reports whether args make cobra print the
+// root version line: the root command, its --version flag true after
+// cobra's own flag parsing (so `--version=0` is false), and no --help
+// (cobra prints help first). `meho version` is a subcommand and is not
+// matched.
 func invokesRootVersionFlag(root *cobra.Command, args []string) bool {
-	c, _, err := root.Find(args)
+	c, rest, err := root.Find(args)
 	if err != nil || c != root {
 		return false
 	}
-	for _, a := range args {
-		if a == "--" {
-			return false
-		}
-		if a == "--version" || (strings.HasPrefix(a, "--version=") && a != "--version=false") {
-			return true
-		}
+	// Cobra adds --help only when it runs; add it now so that `--help`
+	// and `-h` parse. Execute parses the same args again later; the
+	// root flags are plain strings and bools, so it sets the same values.
+	root.InitDefaultHelpFlag()
+	if err := root.ParseFlags(rest); err != nil {
+		return false
 	}
-	return false
+	help, _ := root.Flags().GetBool("help")
+	version, _ := root.Flags().GetBool("version")
+	return version && !help
 }
 
 // registerDynamicSubcommands runs the discovery fetch and grafts

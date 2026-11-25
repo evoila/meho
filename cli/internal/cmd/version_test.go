@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/discovery"
 	"github.com/evoila/meho/cli/internal/version"
 )
 
@@ -271,5 +272,38 @@ func TestRootVersionFlagSkipsCommandDiscovery(t *testing.T) {
 	run("version")
 	if requests.Load() == 0 {
 		t.Fatal("`meho version` sent the backplane no request; it must still fetch the command list and the backplane version")
+	}
+}
+
+// TestRootVersionFlagFalseOrHelpKeepsCommandDiscovery checks the inputs
+// where cobra prints help, not the version line: `--version=0` is false
+// in cobra's flag parsing, and --help wins over --version. The help must
+// then list the commands the backplane provides.
+func TestRootVersionFlagFalseOrHelpKeepsCommandDiscovery(t *testing.T) {
+	xdg := withTempXDG(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != discovery.Endpoint {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"commands":[{"name":"fromthebackplane","short":"a command the backplane provides"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+	t.Cleanup(setDynamicRegistrar(nil))
+
+	for _, args := range [][]string{{"--version=0", "--help"}, {"--version=false", "--help"}, {"--version", "--help"}, {"--version", "-h"}} {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		if !strings.Contains(stdout.String(), "fromthebackplane") {
+			t.Fatalf("%v: help is missing the backplane command:\n%s", args, stdout.String())
+		}
 	}
 }

@@ -102,6 +102,7 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.secret_read_as import (
     KEPT_LOGIN_READER_UNKNOWN,
     current_secret_read_as,
@@ -322,7 +323,12 @@ async def run_capped(
     :class:`SshOutputTooLargeError`; the output is decoded only after
     both streams ended under the cap. *stdin*, when set, is written to
     the command's standard input followed by end-of-file.
+
+    Right before the command goes out, the login of the running call is
+    checked (:func:`raise_if_send_refused`). Every SSH command passes
+    here, also the sudo helpers that run a command on their own.
     """
+    await raise_if_send_refused()
     cap = _MAX_OUTPUT_BYTES if max_bytes is None else max_bytes
     total = 0
 

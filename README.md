@@ -140,7 +140,9 @@ page:
 ```
 
 The token comes from `meho login https://meho.example.com` (Keycloak
-device-code flow) — the agent never sees a backend credential.
+device-code flow: the CLI prints an address and a short code, and you
+enter the code in a browser on any device) — the agent never sees a
+backend credential.
 
 **2. Ask the agent to do something.** In your Claude Code session:
 

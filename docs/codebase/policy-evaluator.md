@@ -86,6 +86,38 @@ The order is fixed.
 A floor names itself when it gives the same verdict as a later step, so
 the rule of a floor-held answer is always the floor.
 
+### The fixed rules
+
+`policy/fixed_rules.py` holds the fixed rules: rules in the code that no
+policy, no tenant admin and no platform admin can lower. Each has a short
+id and one sentence (`FIXED_RULES`):
+
+| Id | The rule |
+|---|---|
+| `credential_waits` | A call that reads, writes or makes a credential waits for a person. |
+| `rights_change_waits` | A change of rights waits for a person; an Admin's own change in the web console runs at once. |
+| `policy_change_waits` | A change of the policy (`policy.apply`, `policy.classify`) waits for a person. |
+| `agent_never_approves` | An agent, a service login and a runner never approve. |
+| `destructive_waits` | A `destructive` operation always waits for approval. |
+| `delete_waits` | A delete always waits for approval; in sandbox mode a delete grant may cover it. |
+| `caller_address_waits` | A call to an address that the caller gives always waits for approval. |
+
+`fixed_rule_for(descriptor, caller)` names the rule that holds for one
+call, or `None`. It wraps today's checks (`is_rights_change_op`, the
+credential, caller address and delete checks of `never_covered_reason`,
+the `destructive` level). Every kind of caller gets the same rule, except
+a person's own click in the web console on a change of rights or of the
+policy: there the console check decides (`rights_change_console.py`).
+
+The answer does not make a call wait by itself; today's checks still
+decide. It says that nothing after them may let the call run where they
+make it wait. The call gate asks it before it reads a standing grant or a
+run approval (`_validate._fixed_rule_blocks_grants`); in sandbox mode the
+grant lookup decides, so a delete grant may still cover a delete. The
+floors `destructive_waits` and `credential_waits` take their ids from the
+module. Per-call approval, "always wait", the role floor and the root shell
+mark are not fixed rules; they stay as they are.
+
 Steps that stay in the dispatcher and are not in the evaluator: the
 children of an approved run, the wait of a secret reveal, the announce
 gate, the role floor check when an approved call resumes, and the

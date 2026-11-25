@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The fixed rules: rules in the code that no policy and no admin can lower.
+
+No policy file, no tenant admin and no platform admin can lower a fixed
+rule (``docs/decisions/2026-11-25-custom-policy-model.md``, decision 5).
+Each rule has a short id and one plain sentence (:data:`FIXED_RULES`).
+
+:func:`fixed_rule_for` names the fixed rule that holds for one call. It
+does not decide the call by itself: today's checks still decide whether
+the call runs, waits or is refused. It says that nothing after those
+checks (a standing grant, a run approval, a later policy rule) may let the
+call run where those checks make it wait. A later step can make a call
+stricter, never looser.
+
+The function wraps today's checks and does not copy them:
+
+* a change of the policy or of rights:
+  :func:`~meho_backplane.operations.grant_approval.is_rights_change_op`;
+* a credential call:
+  :func:`~meho_backplane.operations.service_grants.descriptor_credential_reason`;
+* an address the caller gives:
+  :func:`~meho_backplane.operations.service_grants.caller_address_grant_reason`;
+* the ``destructive`` level;
+* a delete sign:
+  :func:`~meho_backplane.operations.service_grants.delete_grant_reason`.
+
+These are the kinds of :func:`~meho_backplane.operations.service_grants.never_covered_reason`
+that are fixed rules. Per-call approval and "always wait" stay their own
+rules there; they are not fixed rules. Nor are the role floor
+(:mod:`meho_backplane.operations.role_floors`) and the root shell mark.
+
+Sandbox mode keeps its delete exception (``docs/decisions/sandbox-mode.md``):
+a delete grant may still cover a ``destructive`` or delete call of a
+service login. The grant lookup checks that case.
+
+Pure functions; no database. The checks of ``operations`` are imported
+inside the functions, because the call gate imports this module.
+"""
+
+from __future__ import annotations
+
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Literal
+
+from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.operator import is_human_principal
+from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.db.models import EndpointDescriptor
+
+__all__ = [
+    "AGENT_NEVER_APPROVES",
+    "CALLER_ADDRESS_WAITS",
+    "CREDENTIAL_WAITS",
+    "DELETE_WAITS",
+    "DESTRUCTIVE_WAITS",
+    "FIXED_RULES",
+    "POLICY_CHANGE_OPS",
+    "POLICY_CHANGE_WAITS",
+    "RIGHTS_CHANGE_WAITS",
+    "FixedRuleId",
+    "fixed_rule_for",
+]
+
+FixedRuleId = Literal[
+    "credential_waits",
+    "rights_change_waits",
+    "policy_change_waits",
+    "agent_never_approves",
+    "destructive_waits",
+    "delete_waits",
+    "caller_address_waits",
+]
+
+CREDENTIAL_WAITS: Final = "credential_waits"
+RIGHTS_CHANGE_WAITS: Final = "rights_change_waits"
+POLICY_CHANGE_WAITS: Final = "policy_change_waits"
+AGENT_NEVER_APPROVES: Final = "agent_never_approves"
+DESTRUCTIVE_WAITS: Final = "destructive_waits"
+DELETE_WAITS: Final = "delete_waits"
+CALLER_ADDRESS_WAITS: Final = "caller_address_waits"
+
+#: Each fixed rule, with one plain sentence.
+FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
+    {
+        CREDENTIAL_WAITS: "A call that reads, writes or makes a credential waits for a person.",
+        RIGHTS_CHANGE_WAITS: (
+            "A change of rights waits for a person; an Admin's own change in the web "
+            "console runs at once."
+        ),
+        POLICY_CHANGE_WAITS: "A change of the policy waits for a person.",
+        AGENT_NEVER_APPROVES: "An agent, a service login and a runner never approve.",
+        DESTRUCTIVE_WAITS: "A destructive operation always waits for approval.",
+        DELETE_WAITS: (
+            "A delete always waits for approval; in sandbox mode a delete grant may cover it."
+        ),
+        CALLER_ADDRESS_WAITS: (
+            "A call to an address that the caller gives always waits for approval."
+        ),
+    }
+)
+
+#: The operations that change the policy. They are changes of rights too.
+POLICY_CHANGE_OPS: Final[frozenset[str]] = frozenset({"policy.apply", "policy.classify"})
+
+
+def _own_console_click(caller: Operator) -> bool:
+    """True for a person's own click in the web console, not a hosted agent run."""
+    return caller.web_session and is_human_principal(caller) and resolve_actor_sub() is None
+
+
+def _rights_rule(op_id: str, caller: Operator) -> FixedRuleId | None:
+    """The rule for a change of the policy or of rights, or ``None``.
+
+    A person's own click in the web console gets ``None``: there the
+    console check (:mod:`meho_backplane.operations.rights_change_console`)
+    lets only an Admin's own change run at once, and every other change
+    waits by its level, as today.
+    """
+    # Imported here: the operations package imports the call gate, which imports this module.
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    if not is_rights_change_op(op_id) or _own_console_click(caller):
+        return None
+    return POLICY_CHANGE_WAITS if op_id in POLICY_CHANGE_OPS else RIGHTS_CHANGE_WAITS
+
+
+def fixed_rule_for(descriptor: EndpointDescriptor, caller: Operator) -> FixedRuleId | None:
+    """The fixed rule that holds when *caller* calls *descriptor*, or ``None``.
+
+    When more than one rule holds, the first of this order is named: a
+    change of the policy, a change of rights, a credential, an address the
+    caller gives, ``destructive``, a delete. Every kind of caller gets the
+    same rule, except a person's own click in the web console on a change
+    of rights or of the policy (:func:`_rights_rule`).
+
+    The answer never makes a call wait by itself. It says that no grant, no
+    run approval and no later policy rule may let the call run where
+    today's checks make it wait. ``agent_never_approves`` is a rule of the
+    approve path and is never the answer here.
+    """
+    from meho_backplane.operations.service_grants import (
+        caller_address_grant_reason,
+        delete_grant_reason,
+        descriptor_credential_reason,
+    )
+
+    op_id = descriptor.op_id
+    rights = _rights_rule(op_id, caller)
+    if rights is not None:
+        return rights
+    if descriptor_credential_reason(descriptor) is not None:
+        return CREDENTIAL_WAITS
+    if caller_address_grant_reason(descriptor) is not None:
+        return CALLER_ADDRESS_WAITS
+    if descriptor.safety_level == "destructive":
+        return DESTRUCTIVE_WAITS
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    if delete_grant_reason(op_id, patterns, descriptor) is not None:
+        return DELETE_WAITS
+    return None

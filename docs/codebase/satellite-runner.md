@@ -989,9 +989,11 @@ other users (any of the last six mode bits) stops the runner with a
 and names the docs page; no request is sent. Any other mode works (for example
 `0600` and `0400`). In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key
 file at each mount, and the runner then stops. Mount the key so that it keeps
-mode `0600`: set no `fsGroup` for that pod, or set
-`fsGroupChangePolicy: OnRootMismatch`, or use a volume driver that does not
-change file rights (see
+mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does
+not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode
+only when the top folder of the volume already has the `fsGroup` group and the
+rights Kubernetes expects. When it does not, Kubernetes changes the rights of
+every file in the volume, and the runner stops (see
 [Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
 
 **Register.** Only a person with `tenant_admin` can register a runner, because

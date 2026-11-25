@@ -3649,7 +3649,7 @@ other line to standard error:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>meho<span class="w"> </span>login<span class="w"> </span>--print-token<span class="w"> </span>https://meho.example.com<span class="k">)</span>
 </code></pre></div>
 <p>The value is a live bearer token. Never log it or paste it into a shared
-channel.</p>
+channel. It ends after 5 minutes.</p>
 <p>To read the token of an existing login without a new login, force the
 file backend at login and read the token from <code>credentials.json</code>:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">MEHO_KEYRING_DISABLE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com

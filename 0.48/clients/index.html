@@ -3361,9 +3361,9 @@ matches your client:</p>
 <td><a href="codex/">Codex</a></td>
 </tr>
 <tr>
-<td><strong>Cursor and other clients that can't carry a <code>client_id</code></strong></td>
-<td>A generic <code>mcp-remote</code> stdio shim carrying a CLI-minted bearer token.</td>
-<td><a href="mcp-remote-shim/">Other MCP clients</a></td>
+<td><strong>Cursor and other clients that can't carry a <code>client_id</code>; opencode</strong></td>
+<td>A generic <code>mcp-remote</code> stdio shim in login mode with the pre-registered <code>meho-mcp</code> client. The login renews itself, also on a machine with no browser (sign in once through an SSH tunnel). A bearer token you make by hand is the last resort: it ends after 5 minutes. opencode has its own <code>client_id</code> setting, but only the shim was tested with it.</td>
+<td><a href="mcp-remote-shim/#connect-with-a-login-that-renews-itself">Other MCP clients</a></td>
 </tr>
 </tbody>
 </table>

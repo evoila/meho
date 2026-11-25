@@ -3673,8 +3673,11 @@ correct, secure response.</p>
 <p><strong>Fix.</strong> Give the client a pre-registered <code>client_id</code>. <a href="../claude-code/">Claude Code</a>
 takes it in <code>.mcp.json</code> (<code>oauth.clientId</code>); the
 <a href="../claude-desktop/">Claude Desktop shim</a> takes it via
-<code>--static-oauth-client-info</code>. For a client that exposes neither, carry a
-token through the <a href="../mcp-remote-shim/">static-token shim</a>. Do <strong>not</strong>
+<code>--static-oauth-client-info</code>. For a client that exposes neither, run the
+<a href="../mcp-remote-shim/#connect-with-a-login-that-renews-itself"><code>mcp-remote</code> shim in login mode</a>.
+Only if that is not possible, carry a token through the
+<a href="../mcp-remote-shim/#the-static-token-last-resort">static-token shim</a>; its
+token ends after 5 minutes. Do <strong>not</strong>
 open DCR on a production realm to work around a per-client config gap.</p>
 <h2 id="login-start-fails-with-unauthorized_client-w1">Login start fails with <code>unauthorized_client</code> (W1)<a class="headerlink" href="#login-start-fails-with-unauthorized_client-w1" title="Permanent link">&para;</a></h2>
 <p><strong>Symptom.</strong> The device-code or authorization request 401s with

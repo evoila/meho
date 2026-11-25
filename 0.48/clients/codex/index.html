@@ -3476,9 +3476,11 @@ target. It should wait. After a person approves it, it should run.</p>
 <h2 id="if-the-direct-login-does-not-work">If the direct login does not work<a class="headerlink" href="#if-the-direct-login-does-not-work" title="Permanent link">&para;</a></h2>
 <p>Use the <a href="../claude-desktop/"><code>mcp-remote</code> shim</a> as a local stdio server in
 Codex. The shim runs the login for the client. The setup is the same as
-for Claude Desktop. The static-token variant on the
-<a href="../mcp-remote-shim/">other clients page</a> is a last resort, because its
-token expires quickly.</p>
+for Claude Desktop. If Codex runs on a machine with no browser, use
+<a href="../mcp-remote-shim/#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host">the steps for a machine without a browser</a>.
+The static-token variant on the
+<a href="../mcp-remote-shim/#the-static-token-last-resort">other clients page</a> is a
+last resort, because its token ends after 5 minutes.</p>
 
 
 

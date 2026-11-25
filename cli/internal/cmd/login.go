@@ -64,8 +64,9 @@ func newLoginCmd() *cobra.Command {
 			"login by itself. On MEHO's built-in login server it ends after " +
 			"48 hours without use, or after 7 days at most. Pass " +
 			"--offline=false for a short login that ends at the realm's SSO " +
-			"idle timeout (1 hour on MEHO's built-in login server; 30 minutes " +
-			"on a realm you made by hand with Keycloak's default). When the login " +
+			"idle timeout (1 hour on a realm the MEHO chart created new; an " +
+			"older realm or a realm made by hand keeps its own limit, and " +
+			"Keycloak's default is 30 minutes). When the login " +
 			"server does not offer `offline_access` to the meho-cli client " +
 			"(an older realm), login retries without it and prints one line " +
 			"that says how an admin fixes the realm.\n\n" +

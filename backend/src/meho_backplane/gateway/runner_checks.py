@@ -142,6 +142,7 @@ def _count_refused_once(tenant_id: uuid.UUID, runner_name: str, result_uid: str)
         _refused_seen.popitem(last=False)
     _count(_FUTURE_TIME)
 
+
 #: How far a result's runner time may be ahead of MEHO's clock: 30 seconds.
 #: Two clocks that are set by network time still differ by a few seconds, and
 #: a runner whose clock is a little ahead must not lose its results. A larger

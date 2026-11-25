@@ -327,7 +327,16 @@ def test_linux_answer_has_two_ways_and_a_multiline_key(client: TestClient) -> No
     assert set(ways) == {"key", "password"}
     key_field = next(f for f in ways["key"]["fields"] if f["name"] == "ssh_private_key")
     assert key_field["multiline"] is True
-    assert [f["name"] for f in ways["password"]["fields"]] == ["username", "password"]
+    assert [f["name"] for f in ways["password"]["fields"]] == [
+        "username",
+        "password",
+        "known_hosts",
+    ]
+    for way in ways.values():
+        by_name = {f["name"]: f for f in way["fields"]}
+        assert by_name["username"]["required"] is False
+        assert by_name["known_hosts"]["multiline"] is True
+        assert by_name["known_hosts"]["hidden"] is False
     assert cls["test_operation"] == "linux.identity.show"
 
 

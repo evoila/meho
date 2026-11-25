@@ -18,7 +18,7 @@ the target form and the credential form.
 A class that sets none of them behaves as before.
 
 Declared today: the Linux SSH connector (`LinuxSshConnector`, two ways: key
-and password), Harbor (one way: user name and password) and Kubernetes (one
+and password; both also take the known hosts text), Harbor (one way: user name and password) and Kubernetes (one
 way: kubeconfig). Other SSH connectors do not declare yet, and nothing is
 declared on the shared `SshConnector` class.
 

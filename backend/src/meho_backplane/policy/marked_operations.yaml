@@ -1,0 +1,1681 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Marked operations: the risk level of each one for when the switch
+# CUSTOM_POLICY is on (docs/decisions/2026-11-25-custom-policy-model.md,
+# decisions 5 and 10).
+#
+# Nothing reads this file yet. A later step reads it when CUSTOM_POLICY is
+# on. Until then every operation below behaves as today.
+#
+# One row for each built-in typed operation in one of three groups:
+#   1. caution, with the plain "always ask" mark (requires_approval) and no
+#      reason that blocks a grant. With the switch on, each one becomes
+#      dangerous by default.
+#   2. "approve each call" (declare_per_call_approval). These are proposals
+#      only; the owner decides later.
+#   3. dangerous, with the plain mark and no reason that blocks a grant.
+#      These are proposals only; the owner decides later.
+#
+# Each row:
+#   op_id, connector_id   the operation.
+#   group                 1, 2 or 3, as above.
+#   level_today           the risk level in the code today.
+#   mark_today            plain (requires_approval) or per_call.
+#   does                  what the operation changes, in one line.
+#   level_with_switch     the risk level when the switch is on. Never lower
+#                         than level_today.
+#   applies               "yes" (group 1) or proposed (groups 2 and 3).
+#   fixed_rules           the fixed rules that also cover the operation
+#                         today, by the ids of decision 5. Empty when none.
+#   approves_today        which default roles may approve another person's
+#   approves_with_switch  request, today and with the switch on. A Platform
+#                         Admin may always approve what an Admin may.
+#   loses                 group 3 only: what a call loses for good, so that
+#                         no later call can bring it back: nothing, deletes,
+#                         stops or overwrites.
+#   delete_sign_proposed  group 3 only: true when we propose a delete sign.
+#   why                   the reason for the level. Needed for groups 2 and
+#                         3, and for a group 1 row that is not dangerous.
+#
+# backend/tests/test_marked_operations_table.py checks this file against the
+# registered operations.
+
+operations:
+  - op_id: argocd.app.refresh
+    connector_id: argocd-api-3.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes Argo CD compare an app with Git now; with auto sync on, this can start a sync at once."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.migrate.assessment.create
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a cost and size assessment of a machine group in an Azure Migrate project."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.migrate.group.create
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a machine group in an Azure Migrate project and adds machines to it."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.migrate.group.update
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds machines to, or takes machines out of, a machine group in an Azure Migrate project."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.migrate.import.start
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Uploads a CSV list of servers into an Azure Migrate project; makes the import site if missing."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.patching.assessment.start
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes Azure check one machine for missing updates now; installs nothing."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: azure.tag.update
+    connector_id: azure-arm-2026.10
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds, changes or removes tags on one Azure resource or resource group."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.automember.condition.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds conditions to a host group rule, so new matching hosts join the group."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.automember.rule.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an empty rule that puts new hosts into a host group."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.group.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an empty user group in the FreeIPA domain."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.group.member.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds users or groups to a user group; members get what the group may do."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hbacrule.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an empty host access rule; it lets nobody in yet."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hbacrule.disable
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Turns a host access rule off; for allow_all this can lock users out of hosts."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hbacrule.host.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds hosts to a host access rule: where the rule lets users in."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hbacrule.service.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds services, for example sshd, to a host access rule."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hbacrule.user.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds users or groups to a host access rule: who it lets in."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hostgroup.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an empty host group in the FreeIPA domain."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.hostgroup.member.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds hosts or host groups to a host group."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.pwpolicy.set
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes the password rules of a user group, or of the whole domain."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.sudocmd.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds a program path that sudo rules can then allow."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.sudorule.command.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Allows more commands in a sudo rule."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.sudorule.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an empty sudo rule; it allows nothing yet."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.sudorule.host.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds hosts to a sudo rule: where the rule applies."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.sudorule.user.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Adds users or groups to a sudo rule: who may use sudo with it."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.user.create
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a user in the FreeIPA domain, with no password yet."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.user.disable
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Turns a FreeIPA user off, so the user cannot log in."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: freeipa.user.password_expiry.set
+    connector_id: freeipa-jsonrpc-4.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Sets the date when a user's password runs out; does not set a password."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: gcloud.iam.service_accounts.create
+    connector_id: gcloud-rest-1.0
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a Google Cloud service account with no key and no role."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: gcloud.iam.workload_identity_pools.create
+    connector_id: gcloud-rest-1.0
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a workload identity pool, a first step to let an outside system in without a key."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: gcloud.storage.buckets.create
+    connector_id: gcloud-rest-1.0
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a private Cloud Storage bucket."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: gcloud.storage.buckets.update_settings
+    connector_id: gcloud-rest-1.0
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes versioning, retention time or lifecycle rules of a bucket; lifecycle rules can delete old objects."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: gh.composite.repo_create
+    connector_id: gh-rest-3
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a GitHub repository in an organisation, private unless asked."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: harbor.artifact.copy
+    connector_id: harbor-rest-2.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Copies an image from one Harbor project into another."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: harbor.project.create
+    connector_id: harbor-rest-2.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes a Harbor project, private unless asked."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: k8s.cordon
+    connector_id: k8s-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Marks a Kubernetes node so no new pods start on it, or undoes that."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: k8s.cronjob.run
+    connector_id: k8s-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Starts one job of a Kubernetes CronJob now."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: k8s.rollout.restart
+    connector_id: k8s-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Restarts every pod of a Kubernetes Deployment, one after the other."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: k8s.scale
+    connector_id: k8s-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Sets how many pods a Kubernetes Deployment runs; 0 stops it."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: keycloak.user.logout
+    connector_id: keycloak-admin-26.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Ends every open session of one Keycloak user."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: linux.firewall.confirm
+    connector_id: linux-ssh-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Keeps firewall rules that linux.firewall.load started with a timer; can also save them for boot."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: msad.domain.machine-account-quota.set
+    connector_id: msad-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Sets how many computers a normal user may join to the Active Directory domain."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: msad.domain.password-policy.set
+    connector_id: msad-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes the default password rules of the Active Directory domain."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: msad.group.create
+    connector_id: msad-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes an Active Directory group."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: msad.ou.grant-create-child
+    connector_id: msad-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Lets a group create computers, users or groups in an Active Directory OU."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: msad.ou.revoke-create-child
+    connector_id: msad-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Takes away a group's right to create objects in an Active Directory OU."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: pfsense.openvpn.csc.sync
+    connector_id: pfsense-ssh-2.7
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes or extends OpenVPN client settings on pfSense; never deletes."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: phpipam.address.reserve
+    connector_id: phpipam-rest-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Reserves one IP address in a phpIPAM subnet for a host name."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: spaces.assign
+    connector_id: spaces-records-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Gives one system to a space of the tenant."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: spaces.import
+    connector_id: spaces-records-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Makes spaces, members and assignments from a site's ownership file."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: spaces.member.disable
+    connector_id: spaces-records-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Ends one person's membership in a space."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: spaces.reassign
+    connector_id: spaces-records-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Moves an assignment of a system to another space."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: spaces.unassign
+    connector_id: spaces-records-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Ends the assignment of a system to a space."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: tools.sign_out
+    connector_id: tools-admin-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Signs out one tool of one person of the tenant."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: vault.sys.auth.tune
+    connector_id: vault-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes the settings of a Vault login method, for example how long its tokens live."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: vault.sys.mounts.tune
+    connector_id: vault-1.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes the settings of a Vault secret store, for example how long its leases live."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: windns.forwarder.set
+    connector_id: windns-ssh-2016.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Replaces the whole forwarder list of a Windows DNS server."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: windns.zone.set
+    connector_id: windns-ssh-2016.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Changes who may update names in a Windows DNS zone, and its minimum TTL."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: winsrv.time.set
+    connector_id: winsrv-ssh-2022.x
+    group: 1
+    level_today: caution
+    mark_today: plain
+    does: "Sets the time servers of a Windows server."
+    level_with_switch: dangerous
+    applies: "yes"
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+
+  - op_id: keycloak.authflow.ensure_approval_flow
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Makes the approval sign-in flow in the realm and binds it to the approval client."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It changes how MEHO approvers sign in. dangerous matches the other changes of login flows."
+
+  - op_id: keycloak.authflow.ensure_approval_touch
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Gives the web console client a sign-in flow with a passkey touch level."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It changes how every console user signs in. dangerous matches the other changes of login flows."
+
+  - op_id: keycloak.authflow.ensure_passkey_code_skip
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Makes the realm skip the one-time code after a passkey login."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It removes a sign-in step for the whole realm. dangerous matches the other changes of login flows."
+
+  - op_id: keycloak.client.create
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Makes a Keycloak client, with its sign-in flows, return addresses and mappers."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "A client decides who can get tokens. Keep dangerous."
+
+  - op_id: keycloak.client.update
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Changes a Keycloak client: flows, return addresses or other fields."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "A client decides who can get tokens. Keep dangerous."
+
+  - op_id: keycloak.client_scope.create
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Makes a Keycloak client scope, with the claims it adds to tokens."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "Its mappers can put tenant and role claims into tokens. dangerous like keycloak.protocol_mapper.create."
+
+  - op_id: keycloak.client_scope.protocol_mapper.update
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Changes one claim mapper of a Keycloak client scope."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "A mapper can change the tenant or role claim of a token. Keep dangerous."
+
+  - op_id: keycloak.group.member.add
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Adds a user to a Keycloak group; the user gets the group's tenant and role."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It gives rights. Keep dangerous."
+
+  - op_id: keycloak.group.update_attributes
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Changes the attributes of a Keycloak group, for example its tenant or role."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It changes what every member of the group may do. Keep dangerous."
+
+  - op_id: keycloak.protocol_mapper.create
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Adds a claim mapper to a Keycloak client."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "A mapper can put tenant and role claims into tokens. Keep dangerous."
+
+  - op_id: keycloak.realm.create
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Makes the Keycloak realm that MEHO manages."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It sets up logins from scratch. Keep dangerous."
+
+  - op_id: keycloak.role_mapping.assign
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Gives a Keycloak user realm roles."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It gives rights. Keep dangerous."
+
+  - op_id: keycloak.role_mapping.client.assign
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Gives a Keycloak user roles of one client, for example realm-admin."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It gives rights. Keep dangerous."
+
+  - op_id: keycloak.role_mapping.client.remove
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Takes roles of one client away from a Keycloak user."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [delete_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It takes rights away and can lock an admin out. Keep dangerous; its delete name keeps every call waiting."
+
+  - op_id: keycloak.user.credential.delete
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Removes one stored login method of a Keycloak user, for example a lost passkey."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits, delete_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "The user must set it up again. Keep dangerous; its delete name keeps every call waiting."
+
+  - op_id: keycloak.user.enable
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Turns a disabled Keycloak user on again."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It gives back access. Keep dangerous."
+
+  - op_id: keycloak.user.required_actions.update
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Adds or removes steps a Keycloak user must do at the next login."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "Removing a step, for example the one-time code setup, weakens the login. Keep dangerous."
+
+  - op_id: keycloak.user.update
+    connector_id: keycloak-admin-26.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Changes a Keycloak user's name, email, first name or last name."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "A new email can take over the password reset of the account. Raise from caution to dangerous."
+
+  - op_id: msad.group.add-member
+    connector_id: msad-ssh-2022.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Adds members to an Active Directory group; they get what the group may do."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+    why: "Adding a member to an admin group gives full rights. Raise from caution to dangerous. Without the per-call mark, a standing grant could cover it: the owner decides whether the mark stays."
+
+  - op_id: msad.group.remove-member
+    connector_id: msad-ssh-2022.x
+    group: 2
+    level_today: caution
+    mark_today: per_call
+    does: "Takes members out of an Active Directory group."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Operator, Admin]
+    approves_with_switch: [Admin]
+    why: "It can cut people off from what they need. Raise from caution to dangerous. Without the per-call mark, a standing grant could cover it: the owner decides whether the mark stays."
+
+  - op_id: pfsense.openvpn.user.delete
+    connector_id: pfsense-ssh-2.7
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Deletes a VPN user on pfSense and the user's OpenVPN client settings."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [delete_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "Keep dangerous; its delete name keeps every call waiting."
+
+  - op_id: policy.apply
+    connector_id: policy-registry-1.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Replaces the whole MEHO policy of the tenant or of the install with a policy file."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits, policy_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It changes who may do what in MEHO. Keep dangerous."
+
+  - op_id: policy.classify
+    connector_id: policy-registry-1.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Sets the category, labels or always-wait mark of one MEHO classification entry."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: [rights_change_waits, policy_change_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It changes which operations wait in MEHO. Keep dangerous."
+
+  - op_id: secret.move
+    connector_id: secret-broker-1.x
+    group: 2
+    level_today: dangerous
+    mark_today: per_call
+    does: "Copies one stored secret from one store to another; the value is never shown."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    why: "It writes a secret into a new store. Keep dangerous. Only a move with a Keycloak side is a change of rights; for a move between two Vault places no fixed rule holds, so the owner decides whether the per-call mark stays."
+
+  - op_id: argocd.app.rollback
+    connector_id: argocd-api-3.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Rolls an Argo CD app back to an older deployed version."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: deletes
+    delete_sign_proposed: true
+    why: "A new sync undoes the rollback. With prune on, it deletes resources the old version does not have, and a deleted volume loses its data. Propose a delete sign for calls with prune."
+
+  - op_id: argocd.app.sync
+    connector_id: argocd-api-3.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes the live Argo CD app match Git."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: deletes
+    delete_sign_proposed: true
+    why: "Git holds the wanted state, so a sync can be repeated. With prune on, it deletes resources that Git no longer has, and a deleted volume loses its data. Propose a delete sign for calls with prune."
+
+  - op_id: azure.network.dns.recordset.upsert
+    connector_id: azure-arm-2026.10
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or replaces one record set in an Azure public DNS zone."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The approval card shows the current and the new values, so a second call can put the old values back."
+
+  - op_id: azure.role.assignment.create
+    connector_id: azure-arm-2026.10
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Gives a principal a blob data role on a storage account or container."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives rights and removes nothing."
+
+  - op_id: bind9.config.apply_file
+    connector_id: bind9-ssh-9.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Replaces one bind9 config file and reloads the DNS server."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "A failed change is rolled back. A good change can be undone with a second call, and bind9 has a backup operation."
+
+  - op_id: bind9.config.apply_views
+    connector_id: bind9-ssh-9.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Replaces several bind9 config files and reloads the DNS server."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "A failed change is rolled back. A good change can be undone with a second call, and bind9 has a backup operation."
+
+  - op_id: freeipa.role.member.add
+    connector_id: freeipa-jsonrpc-4.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Adds users, groups or hosts to a FreeIPA role; they get its rights."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives rights and removes nothing."
+
+  - op_id: gcloud.iam.service_accounts.binding.add
+    connector_id: gcloud-rest-1.0
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Adds one member to one role on a Google Cloud service account."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives rights and removes nothing."
+
+  - op_id: gcloud.iam.workload_identity_pools.providers.create
+    connector_id: gcloud-rest-1.0
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes an OIDC provider that a workload identity pool trusts."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It lets an outside issuer in and removes nothing."
+
+  - op_id: gcloud.iam.workload_identity_pools.providers.update_keys
+    connector_id: gcloud-rest-1.0
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Replaces the public keys of an OIDC provider."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old keys are public and can be read first and put back with a second call."
+
+  - op_id: gcloud.storage.buckets.access.add
+    connector_id: gcloud-rest-1.0
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Adds one member to one role on a Cloud Storage bucket."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives rights and removes nothing."
+
+  - op_id: gh.composite.branch_commit_files
+    connector_id: gh-rest-3
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Writes files to a GitHub branch as one new commit."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old content stays in the Git history, and the branch moves only when nobody changed it in between."
+
+  - op_id: hyperv.checkpoints.revert
+    connector_id: hyperv-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Sets a Hyper-V VM back to a checkpoint."
+    level_with_switch: destructive
+    applies: proposed
+    fixed_rules: [destructive_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: overwrites
+    delete_sign_proposed: false
+    why: "The VM's current state is lost for good unless a new checkpoint was made first. Propose destructive."
+
+  - op_id: keycloak.group.create
+    connector_id: keycloak-admin-26.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes a Keycloak group with attributes, for example a tenant role group."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds a group and removes nothing."
+
+  - op_id: keycloak.user.disable
+    connector_id: keycloak-admin-26.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns a Keycloak user off without deleting it."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "keycloak.user.enable turns the user on again."
+
+  - op_id: linux.firewall.load
+    connector_id: linux-ssh-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Checks, then loads a new firewall rule set on a Linux host."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It can roll back on a timer, and the rules for boot stay unless linux.firewall.confirm saves the new ones."
+
+  - op_id: linux.sysctl.write
+    connector_id: linux-ssh-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Sets one kernel setting on a Linux host and keeps it after a reboot."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "A second call sets the old value back."
+
+  - op_id: mssql.backup.restore
+    connector_id: mssql-tds-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Restores a SQL Server database from a backup file and can overwrite it."
+    level_with_switch: destructive
+    applies: proposed
+    fixed_rules: [destructive_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: overwrites
+    delete_sign_proposed: false
+    why: "With replace on, the data now in the database is lost for good. Propose destructive."
+
+  - op_id: mssql.databases.create
+    connector_id: mssql-tds-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes a SQL Server database."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds a database and removes nothing."
+
+  - op_id: mssql.databases.drop
+    connector_id: mssql-tds-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Deletes a SQL Server database and its files."
+    level_with_switch: destructive
+    applies: proposed
+    fixed_rules: [destructive_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: deletes
+    delete_sign_proposed: false
+    why: "The database is gone for good. Propose destructive; the name .drop is not a delete name today."
+
+  - op_id: pfsense.filter.rule.add
+    connector_id: pfsense-ssh-2.7
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Adds one firewall rule on pfSense."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds a rule and removes nothing; a rule that could block MEHO's own access is refused."
+
+  - op_id: pfsense.openvpn.rule.sync
+    connector_id: pfsense-ssh-2.7
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Adds missing VPN pass rules on pfSense; never deletes or edits a rule."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds rules and removes nothing."
+
+  - op_id: pfsense.user.disable
+    connector_id: pfsense-ssh-2.7
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns one pfSense local user off."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "pfsense.user.enable turns the user on again."
+
+  - op_id: pfsense.user.enable
+    connector_id: pfsense-ssh-2.7
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns one pfSense local user on again."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives back access and removes nothing."
+
+  - op_id: phpipam.address.release
+    connector_id: phpipam-rest-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Deletes the reservation of one IP address in phpIPAM; DNS records stay."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: deletes
+    delete_sign_proposed: true
+    why: "It sends a delete. The address can be reserved again, but its notes are lost and another host may take it. Propose a delete sign."
+
+  - op_id: rke2.node.service.restart
+    connector_id: rke2-ssh-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Restarts the RKE2 server or agent service on a node."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The service starts again by itself after a short break."
+
+  - op_id: vault.auth.approle.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or changes a Vault AppRole and its token rules."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old settings can be read first and put back with a second call."
+
+  - op_id: vault.auth.jwt.role.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or changes a Vault JWT or OIDC login role."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "Fields that are not sent keep their value; the old settings can be put back with a second call."
+
+  - op_id: vault.auth.userpass.disable
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns a Vault userpass login off; can also end its tokens."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "vault.auth.userpass.enable turns the login on again; ended tokens only mean a new login."
+
+  - op_id: vault.auth.userpass.enable
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns a Vault userpass login on again."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives back access and removes nothing."
+
+  - op_id: vault.identity.entity.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or changes a Vault identity entity and its policies."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old settings can be read first and put back with a second call."
+
+  - op_id: vault.identity.entity_alias.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Links a login to a Vault identity entity, so it gets the entity's policies."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It gives rights and removes nothing."
+
+  - op_id: vault.identity.group.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or changes a Vault identity group, its policies and members."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old members and policies can be read first and put back with a second call."
+
+  - op_id: vault.sys.auth.enable
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns on a new Vault login method at a path."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds a way in and removes nothing."
+
+  - op_id: vault.sys.mounts.enable
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Turns on a new Vault secret store at a path."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It adds a store and removes nothing."
+
+  - op_id: vault.sys.policy.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or replaces a Vault access policy."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old policy can be read first and put back with a second call."
+
+  - op_id: vault.token.role.write
+    connector_id: vault-1.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Makes or changes a Vault token role."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The old settings can be read first and put back with a second call."
+
+  - op_id: winsrv.power.reboot
+    connector_id: winsrv-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Restarts a Windows server."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "The server comes back by itself after the restart."
+
+  - op_id: winsrv.power.shutdown
+    connector_id: winsrv-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Shuts a Windows server down; it stays off."
+    level_with_switch: destructive
+    applies: proposed
+    fixed_rules: [destructive_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: stops
+    delete_sign_proposed: false
+    why: "Only someone with power access can start the server again; MEHO cannot. Propose destructive."
+
+  - op_id: wsfc.groups.offline
+    connector_id: wsfc-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Stops a clustered role on a Windows failover cluster."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "wsfc.groups.online starts the role again."
+
+  - op_id: wsfc.groups.online
+    connector_id: wsfc-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Starts a clustered role on a Windows failover cluster."
+    level_with_switch: dangerous
+    applies: proposed
+    fixed_rules: []
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: nothing
+    delete_sign_proposed: false
+    why: "It starts a stopped role and removes nothing."
+
+  - op_id: wsfc.nodes.evict
+    connector_id: wsfc-ssh-2022.x
+    group: 3
+    level_today: dangerous
+    mark_today: plain
+    does: "Removes a node from a Windows failover cluster."
+    level_with_switch: destructive
+    applies: proposed
+    fixed_rules: [destructive_waits]
+    approves_today: [Admin]
+    approves_with_switch: [Admin]
+    loses: deletes
+    delete_sign_proposed: false
+    why: "The node leaves the cluster for good; joining again is a full new setup. Propose destructive."

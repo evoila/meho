@@ -331,6 +331,28 @@ column. A row with the scope "whole install" holds for every tenant and
 shows the install's values; a tenant's own rules can make the operation
 stricter for that tenant. The page says so.
 
+## The table of marked operations (nothing reads it yet)
+
+`backend/src/meho_backplane/policy/marked_operations.yaml` gives a risk
+level to each marked built-in typed operation, for when the switch
+`CUSTOM_POLICY` is on. With that switch on, the plain "always ask" mark
+goes away, and the risk level decides
+([the custom policy model](../decisions/2026-11-25-custom-policy-model.md),
+decision 10). The table has three groups:
+
+1. `caution` with the plain mark. Each one becomes `dangerous`. What waits
+   stays the same, but only an Admin approves another person's request.
+2. "Approve each call" (`declare_per_call_approval`). Proposed levels only.
+3. `dangerous` with the plain mark. Proposed levels only, with what a call
+   loses for good (deletes, stops or overwrites).
+
+A level in the table is never lower than the level in the code. Nothing
+reads the table until a later step of the switch `CUSTOM_POLICY`; until
+then every operation behaves as today. `tests/test_marked_operations_table.py`
+builds the three groups from the registered operations and fails when an
+operation has no row, or a row does not match the code. The failure text
+shows the row to add.
+
 ## Known limits
 
 - The policy file import (`policy.apply`, see [policy.md](policy.md))

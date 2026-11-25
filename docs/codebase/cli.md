@@ -901,7 +901,7 @@ field, so a response from an older backplane prints as it always did.
 | `DB: …` | `db` | `DB: migrated, revision 0115` |
 | `Server time: …` | `server_time` | `Server time: 2026-10-31T14:34:28Z` — the server's time in UTC (#5504); also printed for a login that chose no tenant |
 | `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
-| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Approvals: …` | `approvals` | `Approvals: you may approve your own changes (a change of rights only with a click in the web console); decisions on someone else's instruction are refused; approval key configured` (the first part follows your role in the current tenant; with no tenant or an unknown role it is neutral) |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
 | `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |

@@ -271,6 +271,44 @@ Prove the whole chain:
 meho status
 ```
 
+### If you are the only admin
+
+The first login is an Admin, and an Admin may approve their own changes,
+at every risk level. This is on purpose, so one person can use MEHO. Read
+the rule in
+[Who may approve](../guides/approvals-and-break-glass.md#who-may-approve).
+Do not turn on the emergency switch for this.
+
+- A change of rights (who may do what in MEHO) runs only with a click in
+  the web console.
+- `meho status` shows the rule for your own role on its `Approvals` line.
+
+To add a second admin:
+
+1. Route the Keycloak admin console. This is one upgrade, with the same
+   chart version you installed:
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=true
+    ```
+
+2. Log in to the console as the console admin. Its steps are in
+   [The console admin](keycloak-realm.md#the-console-admin).
+3. Create the person and join them to the group **MEHO-Admins**. The
+   steps are in [Local users](login/local-users.md).
+4. Set the route back when you are done:
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=false
+    ```
+
+If your values file already sets `coreKeycloak.ingress.exposeAdmin`,
+change it there and run the install command of Step 4 instead.
+
 **You now have a running MEHO and a logged-in operator.** Go on with
 [the setup page and the settings file](setup-page.md).
 

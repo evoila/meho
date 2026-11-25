@@ -114,7 +114,7 @@ jobs:
 
       - name: Install cosign
         # Same pin as image.yml, chart.yml and cli-release.yml (cosign v3.0.6).
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Read the image and chart digests
         id: digests
@@ -213,7 +213,7 @@ jobs:
       - name: Install Trivy
         # The setup action and the Trivy version that trivy-action v0.36.0
         # uses, the action of the image job.
-        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514  # v0.2.6
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567  # v0.3.1
         with:
           version: v0.70.0
 

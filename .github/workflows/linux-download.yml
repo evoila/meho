@@ -76,7 +76,7 @@ jobs:
 
       - name: Install cosign
         # Same pin as cli-release.yml and chart.yml (cosign v3.0.6).
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Decide what to build
         id: plan
@@ -150,7 +150,7 @@ jobs:
 
       - name: Set up Go
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           # Same Go as cli-release.yml.
           go-version: '1.26.11'
@@ -243,7 +243,7 @@ jobs:
         run: sha256sum -c SHA256SUMS-linux
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Sign SHA256SUMS-linux
         # The same keyless signing as SHA256SUMS-mcpb in cli-release.yml. The
@@ -267,7 +267,7 @@ jobs:
         # GoReleaser created the release in cli-release.yml's `release` job.
         # Same pinned action as the .mcpb attach step there; it streams the
         # file, so the tar of about 1.8 GiB is not read into memory.
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           tag_name: ${{ inputs.tag }}
           files: |

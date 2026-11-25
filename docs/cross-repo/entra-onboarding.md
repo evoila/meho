@@ -174,7 +174,16 @@ Vault identity, so the Vault policy must let your operators read this path
    next call after a refused login, without a restart.
 
 The key must be an RSA key without a password, in PEM form. MEHO works out
-the certificate's thumbprint by itself.
+the certificate's thumbprint by itself. MEHO checks the key and the
+certificate each time it reads the secret, before it calls Microsoft:
+
+| Message says | What to fix |
+| --- | --- |
+| "not a readable PEM" | the key or the certificate is not PEM text, or the key has a password: write them again from `key.pem` and `cert.pem` |
+| "must be RSA" | make the pair with `rsa:2048` as in step 1 |
+| "does not belong to the certificate" | the key and the certificate come from two different pairs: write the matching pair |
+
+After you fix the secret, the next call reads it, without a restart.
 
 **Client secret.**
 

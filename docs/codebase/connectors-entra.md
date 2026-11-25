@@ -149,9 +149,12 @@ errors). With a certificate, the request holds `client_assertion_type` and
 Microsoft's page on certificate credentials describes it: `PS256`, header
 `x5t#S256` (the SHA-256 thumbprint of the certificate, worked out from it),
 `aud` the token address of the tenant, `iss` and `sub` the client ID, a new
-`jti` for each request, `nbf` and `iat` now, `exp` five minutes later. MEHO
-refuses a key that does not belong to the certificate before it calls
-Microsoft. When Microsoft refuses the login, the error names the way used
+`jti` for each request, `nbf` and `iat` now, `exp` five minutes later.
+`parse_credentials` checks the pair when it reads the secret
+(`check_certificate_pair`: a readable PEM, a key without a password, RSA, and
+a key that belongs to the certificate). A bad pair raises
+`EntraSecretShapeError` with the target and the secret path, so it never goes
+into the secret cache and a corrected secret is read on the next call. When Microsoft refuses the login, the error names the way used
 (for a certificate it says what to check: the certificate is uploaded to the
 app, has not run out, and the key belongs to it). The certificate login lives
 in `_shared/` so the Azure connector and later connector packages can use the

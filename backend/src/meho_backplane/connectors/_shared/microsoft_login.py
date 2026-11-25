@@ -76,11 +76,13 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 __all__ = [
     "LOGIN_HOSTS",
     "CertificateCredentials",
+    "CertificatePairError",
     "ClientSecretCredentials",
     "MicrosoftAccessToken",
     "MicrosoftCredentials",
     "MicrosoftLoginError",
     "build_client_assertion",
+    "check_certificate_pair",
     "fetch_client_credentials_token",
 ]
 
@@ -199,6 +201,45 @@ class MicrosoftAccessToken:
     roles: tuple[str, ...] | None = None
 
 
+class CertificatePairError(ValueError):
+    """The private key or the certificate of a certificate login is not usable.
+
+    The message says what is wrong in one sentence. It names no target and never
+    holds the key: the caller adds the target and the secret path.
+    """
+
+
+def check_certificate_pair(
+    private_key: str, certificate: str
+) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
+    """Read the PEM key and certificate and check that they belong together.
+
+    Callers run this when they read the secret, so a secret with a bad pair is
+    refused before it is kept. Raises :class:`CertificatePairError` when a value
+    is not a readable PEM, the key has a password, either one is not RSA, or the
+    key does not belong to the certificate.
+    """
+    try:
+        loaded_certificate = x509.load_pem_x509_certificate(certificate.encode())
+        loaded_key = serialization.load_pem_private_key(private_key.encode(), password=None)
+    except (ValueError, TypeError):
+        raise CertificatePairError(
+            "The certificate or the private key is not a readable PEM (an unencrypted "
+            "RSA key without a password, and its X.509 certificate)."
+        ) from None
+    public_key = loaded_certificate.public_key()
+    if not isinstance(loaded_key, rsa.RSAPrivateKey) or not isinstance(
+        public_key, rsa.RSAPublicKey
+    ):
+        raise CertificatePairError(
+            "The certificate and the private key must be RSA (Microsoft checks the "
+            "proof with PS256)."
+        )
+    if loaded_key.public_key().public_numbers() != public_key.public_numbers():
+        raise CertificatePairError("The private key does not belong to the certificate.")
+    return loaded_key, loaded_certificate
+
+
 def build_client_assertion(
     credentials: CertificateCredentials, *, audience: str, now: float | None = None
 ) -> str:
@@ -210,32 +251,12 @@ def build_client_assertion(
     ``sub`` = the client ID, a new ``jti``, ``nbf`` and ``iat`` = now, ``exp``
     five minutes later.
 
-    Raises :class:`MicrosoftLoginError` when the key or the certificate cannot be
-    read, or the key does not belong to the certificate. The message never
-    holds the key.
+    Raises :class:`CertificatePairError` when the key or the certificate cannot
+    be read, or the key does not belong to the certificate.
     """
-    try:
-        certificate = x509.load_pem_x509_certificate(credentials.certificate.encode())
-        private_key = serialization.load_pem_private_key(
-            credentials.private_key.encode(), password=None
-        )
-    except (ValueError, TypeError):
-        raise MicrosoftLoginError(
-            "The certificate or the private key in the secret is not a readable PEM "
-            "(an unencrypted RSA key and its X.509 certificate)."
-        ) from None
-    public_key = certificate.public_key()
-    if not isinstance(private_key, rsa.RSAPrivateKey) or not isinstance(
-        public_key, rsa.RSAPublicKey
-    ):
-        raise MicrosoftLoginError(
-            "The certificate and the private key in the secret must be RSA (Microsoft "
-            "signs the proof with PS256)."
-        )
-    if private_key.public_key().public_numbers() != public_key.public_numbers():
-        raise MicrosoftLoginError(
-            "The private key in the secret does not belong to the certificate in the secret."
-        )
+    private_key, certificate = check_certificate_pair(
+        credentials.private_key, credentials.certificate
+    )
     thumbprint = base64.urlsafe_b64encode(certificate.fingerprint(hashes.SHA256())).rstrip(b"=")
     issued = int(time.time() if now is None else now)
     claims = {
@@ -281,8 +302,15 @@ async def fetch_client_credentials_token(
         "scope": scope,
     }
     if isinstance(credentials, CertificateCredentials):
+        try:
+            assertion = build_client_assertion(credentials, audience=url)
+        except CertificatePairError as exc:
+            raise MicrosoftLoginError(
+                f"Target {target_name!r}: the secret at {secret_ref!r} has an unusable "
+                f"certificate login. {exc}"
+            ) from None
         form["client_assertion_type"] = CLIENT_ASSERTION_TYPE
-        form["client_assertion"] = build_client_assertion(credentials, audience=url)
+        form["client_assertion"] = assertion
     else:
         form["client_secret"] = credentials.client_secret
     try:

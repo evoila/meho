@@ -15,26 +15,30 @@ import logging
 from typing import Any
 from urllib.parse import parse_qs
 
+import httpx
 import jwt
 import pytest
 import respx
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
 from meho_backplane.connectors._shared.microsoft_login import (
     CLIENT_ASSERTION_TYPE,
     LOGIN_HOSTS,
     CertificateCredentials,
+    CertificatePairError,
     ClientSecretCredentials,
     MicrosoftLoginError,
     build_client_assertion,
     fetch_client_credentials_token,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.entra.connector import EntraConnector
 from meho_backplane.connectors.entra.session import EntraSecretShapeError, parse_credentials
-from tests._azure_fixtures import CLIENT_A, SECRET_A, TENANT_A, fake_jwt, token_url
+from tests._azure_fixtures import CLIENT_A, SECRET_A, TENANT_A, fake_jwt, operator, token_url
+from tests._entra_fixtures import ENTRA_SECRET_REF, EntraTargetStub
 
 _TOKEN_URL = token_url()
 _SCOPE = "https://graph.microsoft.com/.default"
@@ -161,8 +165,6 @@ def _stand_in(public_certificate: x509.Certificate) -> Any:
     """A token address that checks the proof's signature like Microsoft does."""
 
     def answer(request: Any) -> Any:
-        import httpx
-
         form = parse_qs(request.content.decode())
         try:
             jwt.decode(
@@ -239,7 +241,7 @@ def test_a_key_that_does_not_fit_the_certificate_is_refused_without_the_key(
     credentials = CertificateCredentials(
         TENANT_A, CLIENT_A, other_pair.private_key, pair.certificate
     )
-    with pytest.raises(MicrosoftLoginError) as raised:
+    with pytest.raises(CertificatePairError) as raised:
         build_client_assertion(credentials, audience=_TOKEN_URL)
     assert "does not belong" in str(raised.value)
     assert other_pair.private_key not in str(raised.value)
@@ -248,10 +250,35 @@ def test_a_key_that_does_not_fit_the_certificate_is_refused_without_the_key(
 def test_an_unreadable_key_is_refused_without_the_key(pair: _Pair) -> None:
     marker = "MARKER-NOT-A-KEY-9f3a"
     credentials = CertificateCredentials(TENANT_A, CLIENT_A, marker, pair.certificate)
-    with pytest.raises(MicrosoftLoginError) as raised:
+    with pytest.raises(CertificatePairError) as raised:
         build_client_assertion(credentials, audience=_TOKEN_URL)
     assert marker not in str(raised.value)
     assert raised.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_a_bad_pair_at_the_token_request_names_the_target_and_the_secret(
+    pair: _Pair, other_pair: _Pair
+) -> None:
+    credentials = CertificateCredentials(
+        TENANT_A, CLIENT_A, other_pair.private_key, pair.certificate
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(_TOKEN_URL)
+        with pytest.raises(MicrosoftLoginError) as raised:
+            await fetch_client_credentials_token(
+                credentials,
+                login_host=LOGIN_HOSTS["AzureCloud"],
+                scope=_SCOPE,
+                target_name="entra-a",
+                secret_ref="tenants/example/entra-login-a",
+            )
+    text = str(raised.value)
+    assert "'entra-a'" in text
+    assert "'tenants/example/entra-login-a'" in text
+    assert "does not belong" in text
+    assert other_pair.private_key not in text
+    assert not route.called
 
 
 def test_the_private_key_is_in_no_repr_and_no_log_line(
@@ -266,7 +293,6 @@ def test_the_private_key_is_in_no_repr_and_no_log_line(
     assert body not in caplog.text
 
 
-_GUID_T = TENANT_A
 _BASE = {"tenant_id": TENANT_A, "client_id": CLIENT_A}
 
 
@@ -283,6 +309,7 @@ def test_the_secret_with_a_certificate_gives_a_certificate_login(pair: _Pair) ->
     assert isinstance(credentials, CertificateCredentials)
     assert credentials.private_key == pair.private_key.strip()
     assert credentials.client_id == CLIENT_A
+    assert jwt.get_unverified_header(build_client_assertion(credentials, audience=_TOKEN_URL))
 
 
 def test_the_secret_with_a_client_secret_still_gives_a_client_secret_login() -> None:
@@ -317,3 +344,89 @@ def test_a_certificate_without_its_key_is_refused(pair: _Pair) -> None:
         _parse({"certificate": pair.certificate})
     assert "'private_key'" in str(raised.value)
     assert pair.certificate not in str(raised.value)
+
+
+def _encrypted_key(pair: _Pair) -> str:
+    key = serialization.load_pem_private_key(pair.private_key.encode(), password=None)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(b"made-up-password"),
+    ).decode()
+
+
+def _ec_key() -> str:
+    return (
+        ec.generate_private_key(ec.SECP256R1())
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "words"),
+    [
+        ("other-pair", "does not belong to the certificate"),
+        ("unreadable", "not a readable PEM"),
+        ("password", "not a readable PEM"),
+        ("not-rsa", "must be RSA"),
+    ],
+)
+def test_a_bad_pair_is_refused_when_the_secret_is_read(
+    pair: _Pair, other_pair: _Pair, kind: str, words: str
+) -> None:
+    key = {
+        "other-pair": other_pair.private_key,
+        "unreadable": "MARKER-NOT-A-KEY-9f3a",
+        "password": _encrypted_key(pair),
+        "not-rsa": _ec_key(),
+    }[kind]
+    with pytest.raises(EntraSecretShapeError) as raised:
+        _parse({"private_key": key, "certificate": pair.certificate})
+    text = str(raised.value)
+    assert words in text
+    assert "'entra-a'" in text
+    assert "'tenants/example/entra-login-a'" in text
+    assert key.strip() not in text
+    assert raised.value.__cause__ is None
+
+
+class _SecretStore:
+    """A secret loader that parses a secret a person can change between calls."""
+
+    def __init__(self, secret: dict[str, object]) -> None:
+        self.secret = secret
+        self.calls = 0
+
+    async def __call__(self, target: Any, operator: Any) -> Any:
+        self.calls += 1
+        return parse_credentials(self.secret, target_name=target.name, secret_ref=target.secret_ref)
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_key_is_read_on_the_next_call_without_a_restart(
+    pair: _Pair, other_pair: _Pair
+) -> None:
+    store = _SecretStore(
+        {**_BASE, "private_key": other_pair.private_key, "certificate": pair.certificate}
+    )
+    connector = EntraConnector(credentials_loader=store)
+    target = EntraTargetStub()
+    assert target.secret_ref == ENTRA_SECRET_REF
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(_TOKEN_URL).mock(side_effect=_stand_in(pair.certificate_obj))
+        with pytest.raises(EntraSecretShapeError):
+            await connector.auth_headers(target, operator())
+        assert not route.called
+
+        store.secret = {**_BASE, "private_key": pair.private_key, "certificate": pair.certificate}
+        headers = await connector.auth_headers(target, operator())
+
+    assert store.calls == 2
+    assert route.call_count == 1
+    assert headers["Authorization"].startswith("Bearer ")

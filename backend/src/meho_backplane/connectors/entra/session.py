@@ -53,8 +53,10 @@ from meho_backplane.connectors._shared.credential_backend import CredentialsRead
 from meho_backplane.connectors._shared.microsoft_login import (
     LOGIN_HOSTS,
     CertificateCredentials,
+    CertificatePairError,
     ClientSecretCredentials,
     MicrosoftCredentials,
+    check_certificate_pair,
 )
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
@@ -272,7 +274,9 @@ def parse_credentials(
 
     Every value is stripped of surrounding white space (a trailing newline is
     the most common storage mistake). Raises :class:`EntraSecretShapeError`
-    naming the first missing or unusable key.
+    naming the first missing or unusable key. A certificate login is checked
+    here too (readable PEM, RSA, key belongs to the certificate), so a secret
+    with a bad pair is never kept in the connector's cache.
     """
     values: dict[str, str] = {}
     for key in (*_SECRET_KEYS, *_SECRET_WAY, *_CERTIFICATE_WAY):
@@ -297,12 +301,7 @@ def parse_credentials(
             f"client_secret and no certificate keys. {_NEEDS}"
         )
     if present_certificate:
-        for key in _CERTIFICATE_WAY:
-            if not values[key]:
-                raise EntraSecretShapeError(
-                    f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has no "
-                    f"{key!r} key. A certificate login needs private_key and certificate."
-                )
+        _check_certificate_way(values, target_name=target_name, secret_ref=secret_ref)
     guids: dict[str, str] = {}
     for key in _SECRET_KEYS:
         checked = _guid(values[key])
@@ -324,6 +323,25 @@ def parse_credentials(
         client_id=guids["client_id"],
         client_secret=values["client_secret"],
     )
+
+
+def _check_certificate_way(
+    values: Mapping[str, str], *, target_name: str, secret_ref: str | None
+) -> None:
+    """Fail unless the secret holds a usable private key and certificate pair."""
+    for key in _CERTIFICATE_WAY:
+        if not values[key]:
+            raise EntraSecretShapeError(
+                f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has no "
+                f"{key!r} key. A certificate login needs private_key and certificate."
+            )
+    try:
+        check_certificate_pair(values["private_key"], values["certificate"])
+    except CertificatePairError as exc:
+        raise EntraSecretShapeError(
+            f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has an "
+            f"unusable certificate login. {exc}"
+        ) from None
 
 
 async def load_credentials_from_vault(target: EntraTargetLike, operator: Operator) -> EntraLogin:

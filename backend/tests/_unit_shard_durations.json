@@ -991,6 +991,8 @@
   "tests/test_realm_users.py": 3.41,
   "tests/test_recall.py": 5.93,
   "tests/test_redaction_command_line.py": 0.38,
+  "tests/test_redaction_compare_judge.py": 2.92,
+  "tests/test_redaction_compare_snapshot.py": 12.05,
   "tests/test_redaction_engine.py": 3.12,
   "tests/test_redaction_hash_action.py": 1.42,
   "tests/test_redaction_middleware.py": 1.77,

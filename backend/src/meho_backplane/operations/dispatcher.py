@@ -1073,6 +1073,7 @@ async def _execute_and_audit(
         # An approved call runs under the approver, but the trace belongs to
         # the requester, the same owner as its result handle.
         owner_sub=handle_owner_sub_var.get(),
+        params=params,
     )
     try:
         # A multi-step run keeps a log of its steps, so its error result is

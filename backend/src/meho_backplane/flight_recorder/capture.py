@@ -73,10 +73,11 @@ from meho_backplane.flight_recorder._capture_util import (
     coerce_uuid,
     elapsed_ms,
     header_value,
+    mask_path_values,
     now_utc,
+    path_values,
     request_id,
     response_content,
-    safe_origin,
     safe_url,
     transport_fault_phase,
 )
@@ -145,6 +146,9 @@ class _OpContext:
     # The class stored on the row of an ingested op (a connector's safety
     # floor sets it). A stored ``credential_read`` records no body.
     stored_op_class: str | None = None
+    # The texts of the call's parameter values. For an operation that sends a
+    # secret, a path segment that holds one of them is masked on the span.
+    path_values: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)
@@ -240,12 +244,17 @@ async def begin_dispatch_capture(
     descriptor: Any,
     connector_id: str,
     owner_sub: str | None = None,
+    params: Any = None,
 ) -> CaptureHandle:
     """Open (or join) the capture scope for one dispatch. Never raises (F7).
 
     *owner_sub* is the login stored as the caller of the trace. It is the
     requester when a call runs after a person approved it; else ``None``,
     and the caller is ``operator.sub``.
+
+    *params* are the call's parameters. For an operation that sends a
+    secret, a span address masks each path segment that holds one of their
+    values.
 
     * **Root dispatch** (no active scope): consults :func:`should_capture`
       (F1 precedence + kill switch, fail-open) and, when enabled, binds a fresh
@@ -262,7 +271,7 @@ async def begin_dispatch_capture(
         existing = _active_capture_var.get()
         if existing is not None:
             # Nested composite child: join the parent trace, no new machinery.
-            op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
+            op_token = _op_context_var.set(_op_context_from(descriptor, connector_id, params))
             _record_composite_step(existing, descriptor, connector_id)
             return CaptureHandle(owns=False, scope=existing, op_token=op_token, cap_token=None)
 
@@ -281,7 +290,7 @@ async def begin_dispatch_capture(
             operator_sub=owner_sub or getattr(operator, "sub", None),
         )
         cap_token = _active_capture_var.set(scope)
-        op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
+        op_token = _op_context_var.set(_op_context_from(descriptor, connector_id, params))
         return CaptureHandle(owns=True, scope=scope, op_token=op_token, cap_token=cap_token)
     except Exception:
         _log.warning("flight_recorder_begin_capture_failed", exc_info=True)
@@ -477,16 +486,18 @@ def _redact_vendor_call(
 
 
 def _span_url(url: Any) -> str:
-    """The address put on a vendor-call span.
+    """The address put on a vendor-call span: scheme, host, port and path.
 
-    For an operation that sends a secret, only the scheme, host and port are
-    kept: a path parameter of the call can carry the secret. The test is the
-    one the error results use (``operations._vendor_text.sends_secret``).
+    For an operation that sends a secret, each path segment that holds a
+    value of the call's parameters is replaced by a fixed mark; the segments
+    of the operation's own path stay. The test is the one the error results
+    use (``operations._vendor_text.sends_secret``).
     """
+    text = safe_url(url)
     op = _op_context_var.get()
     if op is not None and _op_sends_secret(op):
-        return safe_origin(url)
-    return safe_url(url)
+        return mask_path_values(text, op.path_values)
+    return text
 
 
 def _op_sends_secret(op: _OpContext) -> bool:
@@ -595,7 +606,7 @@ def _record_composite_step(scope: _CaptureScope, descriptor: Any, connector_id: 
         _log.warning("flight_recorder_composite_span_failed", exc_info=True)
 
 
-def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
+def _op_context_from(descriptor: Any, connector_id: str, params: Any = None) -> _OpContext:
     """Build the per-dispatch op context for redaction."""
     tags_raw = getattr(descriptor, "tags", None) or ()
     tags = tuple(str(tag) for tag in tags_raw)
@@ -619,4 +630,5 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
         body_paths=(),
         delete_shaped_patterns=delete_shaped,
         stored_op_class=getattr(descriptor, "op_class", None),
+        path_values=path_values(params),
     )

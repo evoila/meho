@@ -16,9 +16,11 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
+from urllib.parse import unquote
 
 import httpx
 import msgspec
@@ -28,6 +30,7 @@ from meho_backplane.flight_recorder.store import SpanInput
 
 __all__ = [
     "MAX_SPAN_BODY_BYTES",
+    "PATH_VALUE_MARK",
     "approx_bytes",
     "approx_span_bytes",
     "as_mapping",
@@ -35,10 +38,11 @@ __all__ = [
     "coerce_uuid",
     "elapsed_ms",
     "header_value",
+    "mask_path_values",
     "now_utc",
+    "path_values",
     "request_id",
     "response_content",
-    "safe_origin",
     "safe_url",
     "serialize",
     "transport_fault_phase",
@@ -155,18 +159,55 @@ def safe_url(url: Any) -> str:
         return "?"
 
 
-def safe_origin(url: Any) -> str:
-    """Return ``scheme://host[:port]`` only: the :func:`safe_url` without its path.
+#: Stands in for a path segment that holds a value of the call's parameters.
+PATH_VALUE_MARK: Final[str] = "[redacted]"
 
-    Used for a call that sends a secret, where a path parameter can carry
-    the secret.
+#: A parameter value this long is masked also inside a longer path segment
+#: (``/keys/<value>:rotate``). A shorter one is masked only when the whole
+#: segment equals it, so a fixed segment such as ``v1`` stays readable.
+_MIN_VALUE_INSIDE_SEGMENT: Final[int] = 8
+
+
+def path_values(params: Any) -> frozenset[str]:
+    """The texts of the call's top-level parameter values that can stand in a path.
+
+    Strings and whole numbers only; an empty string is left out.
     """
-    text = safe_url(url)
-    scheme_end = text.find("://")
-    if scheme_end == -1:
-        return "?"
-    path_start = text.find("/", scheme_end + 3)
-    return text if path_start == -1 else text[:path_start]
+    if not isinstance(params, Mapping):
+        return frozenset()
+    values: set[str] = set()
+    for value in params.values():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, str | int) and str(value):
+            values.add(str(value))
+    return frozenset(values)
+
+
+def mask_path_values(url_text: str, values: frozenset[str]) -> str:
+    """Replace each path segment of *url_text* that holds one of *values* with a mark.
+
+    *url_text* is a :func:`safe_url` result. A segment is compared after
+    percent-decoding. Segments that hold no value stay as they are.
+    """
+    scheme_end = url_text.find("://")
+    if scheme_end == -1 or not values:
+        return url_text
+    path_start = url_text.find("/", scheme_end + 3)
+    if path_start == -1:
+        return url_text
+    segments = url_text[path_start:].split("/")
+    masked = [
+        PATH_VALUE_MARK if segment and _holds_a_value(unquote(segment), values) else segment
+        for segment in segments
+    ]
+    return url_text[:path_start] + "/".join(masked)
+
+
+def _holds_a_value(segment: str, values: frozenset[str]) -> bool:
+    if segment in values:
+        return True
+    return any(len(value) >= _MIN_VALUE_INSIDE_SEGMENT and value in segment for value in values)
 
 
 def coerce_uuid(value: Any) -> uuid.UUID | None:

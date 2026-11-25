@@ -76,7 +76,6 @@ from ._result_store_helpers import MemoryResultStore
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000c4e1")
 _HOST = "spec-trace-appliance.test.invalid"
-_ORIGIN = f"https://{_HOST}"
 _PRODUCT = "specdeploy"
 _VERSION = "1.x"
 _IMPL_ID = "specdeploy-rest"
@@ -87,11 +86,14 @@ _SPEC_VALIDATE_OP_ID = "specdeploy.spec.validate"
 _SPEC_APPLY_OP_ID = "specdeploy.spec.apply"
 _DEPOT_SET_OP_ID = "specdeploy.depot.set"
 _PROXY_SET_OP_ID = "specdeploy.proxy.set"
+_KEY_SET_OP_ID = "specdeploy.key.set"
 
 #: Made-up values. The test fails if one of them shows up in a trace.
 _PASSWORD = "Made-Up-Pass-4c1e-not-real"
 _LICENCE_KEY = "FAKE0-AAAAA-BBBBB-CCCCC-4C1E0"
 _SECRETS = (_PASSWORD, _LICENCE_KEY)
+#: A made-up value of a path parameter of an operation that sends a secret.
+_KEY_NAME = "made-up-key-name-4c1e"
 
 
 def _deploy_spec() -> dict[str, Any]:
@@ -178,6 +180,18 @@ class _DeployConnector(HttpConnector):
         }
         return await self._post_json(
             target, "/v1/settings/proxy", operator=operator, verb="PATCH", json=body
+        )
+
+    async def key_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Set a key; its name is in the path and its value in the body."""
+        return await self._post_json(
+            target,
+            f"/v1/keys/{params['key_name']}",
+            operator=operator,
+            verb="PUT",
+            json={"value": _PASSWORD},
         )
 
 
@@ -341,12 +355,13 @@ def _operator() -> Operator:
 
 
 async def _register_operations(session: AsyncSession) -> None:
-    """Register the four write operations; turn the tenant's recorder on."""
+    """Register the five write operations; turn the tenant's recorder on."""
     handlers = {
         _SPEC_VALIDATE_OP_ID: (_DeployConnector.spec_validate, False),
         _SPEC_APPLY_OP_ID: (_DeployConnector.spec_apply, True),
         _DEPOT_SET_OP_ID: (_DeployConnector.depot_set, True),
         _PROXY_SET_OP_ID: (_DeployConnector.proxy_set, True),
+        _KEY_SET_OP_ID: (_DeployConnector.key_set, True),
     }
     for op_id, (handler, requires_approval) in handlers.items():
         await register_typed_operation(
@@ -410,20 +425,13 @@ async def _stored_trace(audit_id: UUID) -> tuple[DispatchTrace, list[DispatchTra
 
 
 def _vendor_spans(spans: list[DispatchTraceSpan], case: _Case) -> list[DispatchTraceSpan]:
-    """The spans of the case's vendor call.
-
-    With the tag, the operation sends a secret, so its address keeps only the
-    scheme, host and port. Without the tag it keeps its path.
-    """
+    """The spans of the case's vendor call."""
     return [
         span
         for span in spans
         if span.span_kind == "vendor_call"
         and span.attributes.get("method") == case.call.method
-        and (
-            str(span.attributes.get("url", "")).endswith(case.call.path)
-            or span.attributes.get("url") == _ORIGIN
-        )
+        and str(span.attributes.get("url", "")).endswith(case.call.path)
     ]
 
 
@@ -459,8 +467,6 @@ async def test_the_trace_and_the_agent_copy_hold_no_body(
     vendor_spans = _vendor_spans(spans, case)
     assert len(vendor_spans) == 1, "the trace should hold the vendor call"
     span = vendor_spans[0]
-    assert span.attributes["url"] == _ORIGIN
-    assert case.call.path not in _as_text(spans)
     assert span.attributes["body_recorded"] is False
     assert span.attributes["request_body"] == SECRET_FAMILY_OMITTED_MARKER
     assert span.attributes["response_body"] == SECRET_FAMILY_OMITTED_MARKER
@@ -469,7 +475,7 @@ async def test_the_trace_and_the_agent_copy_hold_no_body(
     # The trace is still certain, so the agent gets its copy, without the bodies.
     assert trace.redaction_uncertain is False
     agent_copy = await _agent_copy(result)
-    assert _ORIGIN in agent_copy, "the agent copy should hold the vendor call"
+    assert case.call.path in agent_copy, "the agent copy should hold the vendor call"
     _assert_no_made_up_value("the agent copy", agent_copy)
     stored = b"".join(result_store.client.values.values()).decode()
     _assert_no_made_up_value("the result store", stored)
@@ -507,9 +513,42 @@ async def test_without_the_tag_the_trace_would_hold_the_body(
 
     assert result.audit_id is not None
     _, spans = await _stored_trace(result.audit_id)
-    vendor_spans = _vendor_spans(spans, case)
-    assert all(span.attributes["body_recorded"] for span in vendor_spans)
-    assert all(str(span.attributes["url"]).endswith(case.call.path) for span in vendor_spans)
+    assert all(span.attributes["body_recorded"] for span in _vendor_spans(spans, case))
     assert "[REDACTED:param_name]" in _as_text(spans)
     assert _PASSWORD not in _as_text(spans)
     assert _PASSWORD not in await _agent_copy(result)
+
+
+@pytest.mark.parametrize("redirected", [False, True], ids=["plain", "after-a-307"])
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_path_value_of_an_operation_that_sends_a_secret(
+    redirected: bool, session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    await _register_operations(session)
+    path = f"/v1/keys/{_KEY_NAME}"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        if redirected:
+            mock.put(path).respond(307, headers={"Location": f"{path}/"})
+            mock.put(f"{path}/").respond(200, json={"ok": True})
+        else:
+            mock.put(path).respond(200, json={"ok": True})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_KEY_SET_OP_ID,
+            target=_Target(),
+            params={"key_name": _KEY_NAME},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/keys/[redacted]"
+    assert urls == ([masked, f"{masked}/"] if redirected else [masked])
+    agent_copy = await _agent_copy(result)
+    assert masked in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert _KEY_NAME not in text, f"the path value is in {label}"
+        _assert_no_made_up_value(label, text)

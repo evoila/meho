@@ -588,7 +588,7 @@ async def test_login_blocked_before_a_followed_keycloak_write_redirect_gets_no_s
     assert second.call_count == 0
 
 
-def _real_capture(op_id: str, tags: tuple[str, ...] = ()) -> Any:
+def _real_capture(op_id: str, tags: tuple[str, ...] = (), params: Any = None) -> Any:
     """Turn on the real trace recorder for one operation; yield its stored entries."""
     scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
     op = capture._OpContext(
@@ -600,6 +600,7 @@ def _real_capture(op_id: str, tags: tuple[str, ...] = ()) -> Any:
         body_paths=(),
         # Set (not None) so the classifier does not read app settings.
         delete_shaped_patterns=(),
+        path_values=capture.path_values(params),
     )
 
     @contextlib.contextmanager
@@ -622,49 +623,72 @@ def _dumped(spans: list[Any]) -> str:
     )
 
 
+_SECRET_NAME = "sent-secret-value"
+_MASKED = f"{_BASE}/keys/[redacted]"
+
+
+def _secret_capture() -> Any:
+    return _real_capture("PUT:/keys/{name}", tags=("secret",), params={"name": _SECRET_NAME})
+
+
 @pytest.mark.asyncio
-async def test_trace_of_an_operation_that_sends_a_secret_keeps_only_the_origin() -> None:
+async def test_trace_of_an_operation_that_sends_a_secret_masks_the_path_value() -> None:
     conn = _Conn()
-    with _real_capture("PUT:/keys/{name}", tags=("secret",)) as spans:
+    with _secret_capture() as spans:
         async with respx.mock(base_url=_BASE) as mock:
-            mock.put("/keys/sent-secret-value").respond(
-                307, headers={"Location": "/keys/sent-secret-value/"}
-            )
-            mock.put("/keys/sent-secret-value/").respond(200, json={"ok": True})
+            mock.put(f"/keys/{_SECRET_NAME}").respond(200, json={"ok": True})
             await conn._post_json(
-                _target(), "/keys/sent-secret-value", operator=_operator(), verb="PUT"
+                _target(), f"/keys/{_SECRET_NAME}", operator=_operator(), verb="PUT"
+            )
+    await conn.aclose()
+
+    assert [(span.name, span.attributes["url"]) for span in spans] == [(f"PUT {_MASKED}", _MASKED)]
+    assert _SECRET_NAME not in _dumped(spans)
+
+
+@pytest.mark.asyncio
+async def test_trace_of_an_operation_that_sends_a_secret_masks_the_path_value_after_307() -> None:
+    conn = _Conn()
+    with _secret_capture() as spans:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.put(f"/keys/{_SECRET_NAME}").respond(
+                307, headers={"Location": f"/keys/{_SECRET_NAME}/"}
+            )
+            mock.put(f"/keys/{_SECRET_NAME}/").respond(200, json={"ok": True})
+            await conn._post_json(
+                _target(), f"/keys/{_SECRET_NAME}", operator=_operator(), verb="PUT"
             )
     await conn.aclose()
 
     assert [(span.name, span.status) for span in spans] == [
-        (f"PUT {_BASE}", "307"),
-        (f"PUT {_BASE}", "200"),
+        (f"PUT {_MASKED}", "307"),
+        (f"PUT {_MASKED}/", "200"),
     ]
-    assert [span.attributes["url"] for span in spans] == [_BASE, _BASE]
-    assert "sent-secret-value" not in _dumped(spans)
+    assert [span.attributes["url"] for span in spans] == [_MASKED, f"{_MASKED}/"]
+    assert _SECRET_NAME not in _dumped(spans)
 
 
 @pytest.mark.asyncio
-async def test_trace_of_an_operation_that_sends_a_secret_keeps_only_the_origin_on_error() -> None:
+async def test_trace_of_an_operation_that_sends_a_secret_masks_the_path_value_on_error() -> None:
     def fail(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
     conn = _Conn()
-    with _real_capture("PUT:/keys/{name}", tags=("secret",)) as spans:
+    with _secret_capture() as spans:
         async with respx.mock(base_url=_BASE) as mock:
-            mock.put("/keys/sent-secret-value").mock(side_effect=fail)
+            mock.put(f"/keys/{_SECRET_NAME}").mock(side_effect=fail)
             with (
                 patch("asyncio.sleep", new=AsyncMock()),
                 pytest.raises(httpx.ConnectError),
             ):
                 await conn._post_json(
-                    _target(), "/keys/sent-secret-value", operator=_operator(), verb="PUT"
+                    _target(), f"/keys/{_SECRET_NAME}", operator=_operator(), verb="PUT"
                 )
     await conn.aclose()
 
     assert spans
-    assert {span.attributes["url"] for span in spans} == {_BASE}
-    assert "sent-secret-value" not in _dumped(spans)
+    assert {span.attributes["url"] for span in spans} == {_MASKED}
+    assert _SECRET_NAME not in _dumped(spans)
 
 
 @pytest.mark.asyncio

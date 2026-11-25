@@ -1337,9 +1337,13 @@ signed-URL/client-identity header is absent by construction:
 
 **Query strings** (`query.py`, #3841). The vendor-call seam drops the
 query and the user part from a recorded URL (`_capture_util.py::safe_url`,
-for a parsed URL and for a plain string). For an operation that sends a
-secret it also drops the path (`safe_origin`), because a path parameter can
-carry the secret. A URL inside a recorded body
+for a parsed URL and for a plain string). Every entry keeps the scheme,
+host, port and path. For an operation that sends a secret, each path segment
+that holds a value of a parameter of the call (compared after
+percent-decoding) is replaced by the mark `[redacted]`
+(`mask_path_values`); the segments of the operation's own path stay. This
+holds for the first request, each followed redirect and a request that ends
+in a network error. A URL inside a recorded body
 keeps its query; the credential-shape net hides its user part and its
 secret query values (`url_secret`). A transport that needs the query on the span
 (Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,

@@ -165,8 +165,8 @@ async def _load_entries(
     return frozenset((str(sub), str(scope)) for sub, scope in rows)
 
 
-async def _entries() -> frozenset[tuple[str, str]]:
-    """Return the cached list, or read the table when it is older than the limit."""
+async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> frozenset[tuple[str, str]]:
+    """Return the cached list, or read the table when it is older than *max_age*."""
     global _cache
     sessionmaker = get_sessionmaker()
     cached = _cache
@@ -174,7 +174,7 @@ async def _entries() -> frozenset[tuple[str, str]]:
     if (
         cached is not None
         and cached.owner is sessionmaker
-        and 0 <= now - cached.loaded_at < BLOCK_CACHE_SECONDS
+        and 0 <= now - cached.loaded_at < max_age
     ):
         return cached.entries
     try:
@@ -187,12 +187,17 @@ async def _entries() -> frozenset[tuple[str, str]]:
     return entries
 
 
-async def is_principal_blocked(sub: str, tenant_id: uuid.UUID | None) -> bool:
+async def is_principal_blocked(
+    sub: str, tenant_id: uuid.UUID | None, *, max_age: float = BLOCK_CACHE_SECONDS
+) -> bool:
     """True when *sub* is blocked everywhere or in *tenant_id*.
+
+    The list copy may be *max_age* seconds old at most (default
+    :data:`BLOCK_CACHE_SECONDS`).
 
     Raises :class:`PrincipalBlockUnavailableError` when the list cannot be read.
     """
-    entries = await _entries()
+    entries = await _entries(max_age)
     if (sub, BLOCK_SCOPE_ALL) in entries:
         return True
     return tenant_id is not None and (sub, str(tenant_id)) in entries

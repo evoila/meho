@@ -41,7 +41,7 @@ from meho_backplane.auth.principal_block import (
 )
 from meho_backplane.auth.principal_block_run import tracking_run
 from meho_backplane.connectors.adapters import ssh as ssh_module
-from meho_backplane.connectors.adapters.http import _note_request_sent
+from meho_backplane.connectors.adapters.http import HttpConnector, _note_request_sent
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
@@ -495,31 +495,53 @@ async def test_http_request_hook_stops_the_request_of_a_blocked_login(
     assert transport_calls == ["/one"]
 
 
-async def test_http_request_hook_runs_after_a_slow_credential_wait(
-    session: AsyncSession,
-) -> None:
-    transport_calls: list[str] = []
+class _SlowCredentialConnector(HttpConnector):
+    """A connector whose credentials arrive after an admin blocked the caller."""
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        transport_calls.append(request.url.path)
-        return httpx.Response(200, json={})
+    product = "slow-credentials"
 
-    async def _credentials_arrive_after_the_block() -> dict[str, str]:
+    def __init__(self, calls: list[str]) -> None:
+        super().__init__()
+        self._calls = calls
+
+    async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
         # The wait for credentials ends after the block took effect.
         await _block_the_caller()
         reset_block_cache()
         return {"Authorization": "x"}
 
-    async with httpx.AsyncClient(
-        base_url="https://target.test",
-        transport=httpx.MockTransport(_handler),
-        event_hooks={"request": [_note_request_sent]},
-    ) as client:
-        operator = _operator()
-        with tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)):
-            headers = await _credentials_arrive_after_the_block()
-            with pytest.raises(PrincipalBlockedStepError):
-                await client.post("/write", headers=headers)
+    async def _http_client(self, target: Any) -> httpx.AsyncClient:
+        def _handler(request: httpx.Request) -> httpx.Response:
+            self._calls.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        return httpx.AsyncClient(
+            base_url="https://target.test",
+            transport=httpx.MockTransport(_handler),
+            event_hooks={"request": [_note_request_sent]},
+        )
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> Any:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:  # type: ignore[override]
+        raise NotImplementedError
+
+
+async def test_post_json_stops_after_a_slow_credential_wait(session: AsyncSession) -> None:
+    transport_calls: list[str] = []
+    connector = _SlowCredentialConnector(transport_calls)
+    operator = _operator()
+    target = SimpleNamespace(name="t", host="target.test", port=443)
+
+    with (
+        tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)),
+        pytest.raises(PrincipalBlockedStepError),
+    ):
+        await connector._post_json(target, "/write", operator=operator, json={})
 
     assert transport_calls == []
 
@@ -607,6 +629,25 @@ async def test_feed_stream_ends_once_the_login_is_blocked(session: AsyncSession)
     assert await liveness.alive()
 
     await _block_the_caller()
+
+    assert not await liveness.alive()
+
+
+async def test_feed_stream_ends_within_five_seconds_of_a_block(session: AsyncSession) -> None:
+    from meho_backplane.api.v1.feed import _BLOCK_COPY_MAX_AGE_SECONDS
+
+    liveness = token_liveness(_operator())
+    assert await liveness.alive()
+    # The longest wait of the stream plus the oldest copy of the list it accepts.
+    worst_case_seconds = liveness.wait_ms() / 1000 + _BLOCK_COPY_MAX_AGE_SECONDS
+    assert worst_case_seconds <= 5.0
+
+    # The check after the longest wait finds an old copy of the list in place.
+    old_copy = principal_block._cache
+    assert old_copy is not None
+    await _block_the_caller()
+    principal_block._cache = old_copy
+    old_copy.loaded_at -= _BLOCK_COPY_MAX_AGE_SECONDS + 0.1
 
     assert not await liveness.alive()
 

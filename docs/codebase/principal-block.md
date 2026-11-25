@@ -119,7 +119,8 @@ live stream (`/ui/broadcast/stream`) and `GET /api/v1/feed` each read the
 block list in their liveness check (`StreamLiveness.still_valid`), at every
 check and not only at the session check. A list that cannot be read ends the
 stream as well. A stream that waits for an announcement checks again after
-2 seconds at the latest.
+2 seconds at the latest, and its check accepts a copy of the list that is
+at most 2 seconds old. So a block ends the stream within 4 seconds.
 
 A hosted agent run acts as the person who started it, so it stops when
 that person is blocked. A scheduled run acts as the agent's own login, so

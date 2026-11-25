@@ -151,10 +151,11 @@ _REQUIRE_OPERATOR = Depends(require_role(TenantRole.OPERATOR))
 #: takes to land in the generator.
 _WAIT_MS: Final[int] = 30_000
 
-#: The longest archive wait of a stream that checks the block list. The
-#: stream asks the list between two waits, so a block ends it soon after
-#: the list's own few seconds.
+#: The longest archive wait of a stream that checks the block list, and the
+#: oldest list copy such a check accepts. A block ends the stream within
+#: the sum of the two: 4 seconds, inside the 5 seconds of the block rule.
 _BLOCK_POLL_MS: Final[int] = 2_000
+_BLOCK_COPY_MAX_AGE_SECONDS: Final[float] = 2.0
 
 #: Idle time after which the generator emits an SSE comment heartbeat.
 #: Common proxy idle timeouts are 60 s (nginx ``proxy_read_timeout``,
@@ -265,12 +266,14 @@ def token_liveness(operator: Operator) -> StreamLiveness:
 async def login_not_blocked(operator: Operator) -> bool:
     """``False`` when an admin blocked the login, or when the block list cannot be read.
 
-    The list is the one of :mod:`meho_backplane.auth.principal_block`, a few
-    seconds old at most, so a call costs no database read when its copy is
-    fresh.
+    The list is the one of :mod:`meho_backplane.auth.principal_block`, with a
+    copy at most 2 seconds old, so a stream that checks every 2 seconds ends
+    within 4 seconds of a block.
     """
     try:
-        blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
+        blocked = await is_principal_blocked(
+            operator.sub, operator.tenant_id, max_age=_BLOCK_COPY_MAX_AGE_SECONDS
+        )
     except PrincipalBlockUnavailableError:
         return False
     return not blocked

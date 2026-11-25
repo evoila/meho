@@ -317,7 +317,7 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		want    string
 	}{
 		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced",
-			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, and one you sent with a token needs a second person who is a platform admin)"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in)"},
 		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
 			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
 		{"reader", withRole(api.TenantRoleReadOnly), "four_eyes_enforced",
@@ -326,7 +326,7 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		{"empty role", withRole(api.TenantRole("")), "four_eyes_enforced", neutral},
 		{"no current tenant", api.OperatorIdentity{Sub: "s", TenantRole: api.TenantRoleTenantAdmin}, "four_eyes_enforced", neutral},
 		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass",
-			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, and one you sent with a token needs a second person who is a platform admin); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
 		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
 			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
 		{"reader, break-glass", withRole(api.TenantRoleReadOnly), "single_operator_break_glass",

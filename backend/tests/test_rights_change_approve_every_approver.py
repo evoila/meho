@@ -83,7 +83,8 @@ _GUIDE = (
     "#changes-of-rights-need-another-admin"
 )
 _NOTE = (
-    "This change is in MEHO's own login realm, so a platform admin must approve it. "
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not read its realm. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
     f"web console. MEHO found no other admin in this tenant. See {_GUIDE}"
 )

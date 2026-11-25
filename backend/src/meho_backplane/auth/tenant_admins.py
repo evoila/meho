@@ -3,13 +3,15 @@
 
 """Count the admins of one tenant, for the note on a change of rights.
 
-In MEHO's own login realm, a change of rights waits for a platform admin.
+A change of rights waits for a platform admin when it is in MEHO's own
+login realm, in ``master`` or in the target's admin realm, or when MEHO could
+not read its realm (the approval card's ``login_realm`` fact is true).
 The person who asked approves it only when they are a platform admin and
 asked for it in the web console
 (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
 So when the person who asked is the only admin of the tenant, nobody else in
-the tenant can approve it. Outside that realm, the person who asked approves
-the change in the web console, so it needs no other admin.
+the tenant can approve it. In every other realm, the person who asked
+approves the change in the web console, so it needs no other admin.
 
 MEHO stores no list of people. :func:`tenant_admin_ids` reads them from
 MEHO's own sign-in realm with the backplane's Keycloak admin client
@@ -35,7 +37,9 @@ The answer is ``None`` ("not known") when MEHO cannot count:
 
 * :func:`only_admin_note` at request time. The caller
   (:func:`~meho_backplane.operations.approval_queue.rights_change_note`)
-  asks for it only for a change of rights in MEHO's own login realm;
+  asks for it only for a change of rights in MEHO's own login realm, in
+  ``master`` or in the target's admin realm, or in a realm MEHO could not
+  read;
 * the doctor line of ``meho doctor`` (``approvals.rights_change_admins`` in
   ``/api/v1/health``), which warns that some changes of rights in that realm
   need a platform admin other than the person who asked.
@@ -72,10 +76,14 @@ __all__ = [
     "tenant_admin_ids",
 ]
 
-#: Who approves a waiting change of rights in MEHO's own login realm: the first
-#: part of the note. An answer about an approved request leaves it out.
+#: Who approves a waiting change of rights in MEHO's own login realm, in
+#: ``master`` or in the target's admin realm, or in a realm MEHO could not
+#: read: the first part of the note. An answer about an approved request
+#: leaves it out.
 LOGIN_REALM_APPROVER: Final[str] = (
-    "This change is in MEHO's own login realm, so a platform admin must approve it. "
+    "A platform admin must approve this change. "
+    "It is in MEHO's own login realm, in `master` or in the target's admin realm, "
+    "or MEHO could not read its realm. "
     "You can approve it yourself only if you are a platform admin and asked for it "
     "in the web console."
 )
@@ -258,10 +266,12 @@ async def admin_count(tenant_id: uuid.UUID) -> int | None:
 
 
 async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
-    """The note for a waiting change of rights in MEHO's own login realm, else ``None``.
+    """The note for a waiting change of rights a platform admin must approve, else ``None``.
 
     The note shows only when *requester_sub* is the only admin of the tenant.
-    The caller asks only for a change of rights in MEHO's own login realm.
+    The caller asks only for a change of rights in MEHO's own login realm, in
+    ``master`` or in the target's admin realm, or in a realm MEHO could not
+    read.
     ``None`` when another admin is found, when the person who asked is not
     an admin, and when the count is not known: then MEHO says nothing new.
     """

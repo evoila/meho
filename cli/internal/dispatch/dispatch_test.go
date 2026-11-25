@@ -971,7 +971,8 @@ func TestWriteErrorTrailerNamesIDsOnlyForNotFound(t *testing.T) {
 // extras.approval_note; the human line shows it. Without a note the hint is
 // unchanged.
 func TestWriteParkedHintShowsTheNote(t *testing.T) {
-	note := "This change is in MEHO's own login realm, so a platform admin must approve it. " +
+	note := "A platform admin must approve this change. " +
+		"It is in MEHO's own login realm, in `master` or in the target's admin realm, or MEHO could not read its realm. " +
 		"You can approve it yourself only if you are a platform admin and asked for it in the web console. " +
 		"MEHO found no other admin in this tenant."
 	var with, without bytes.Buffer

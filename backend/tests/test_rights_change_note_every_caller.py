@@ -14,6 +14,10 @@ Keycloak. The cases are every mix of:
 * 2 realms: MEHO's own login realm, and another realm;
 * 3 admin counts: one admin, two admins, and "not known".
 
+Two more cases run the member add on a target whose managed realm is
+``master``, and on one whose managed realm is its ``admin_realm``. There too
+the note shows, and another tenant Admin may not approve.
+
 With one admin, the one admin is the person who asked. For the Operator,
 agent and service callers it is another person.
 
@@ -33,17 +37,21 @@ from typing import Any
 
 import pytest
 import respx
+from sqlalchemy import update
 
 from meho_backplane.auth import tenant_admins
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ServicePrincipalGrant
+from meho_backplane.db.models import ServicePrincipalGrant, Target
+from meho_backplane.operations.approval_queue import ApprovalError, approve_request
 from meho_backplane.operations.meta_tools import call_operation
+from tests.test_rights_change_approve_every_approver import _PLATFORM_ADMIN
 from tests.test_rights_change_console_run import (
     _ADD,
     _CONNECTOR_ID,
+    _GROUP_UUID,
     _KC_BASE_URL,
     _LOGIN_REALMS,
     _OLD_SIGN_IN_AGE,
@@ -52,6 +60,7 @@ from tests.test_rights_change_console_run import (
     _REALM,
     _TARGET_NAME,
     _TENANT_ID,
+    _USER_UUID,
     _add,
     _mount,
     _requests,
@@ -67,7 +76,8 @@ _GUIDE = (
 )
 #: The whole note, word for word.
 _NOTE = (
-    "This change is in MEHO's own login realm, so a platform admin must approve it. "
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not read its realm. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
     f"web console. MEHO found no other admin in this tenant. See {_GUIDE}"
 )
@@ -230,6 +240,70 @@ async def test_who_runs_at_once_who_waits_and_when_the_note_shows(
     else:
         assert "approval_note" not in result["extras"]
         assert result["error"] == _WAITING
+
+
+async def _manage(realm: str, *, admin_realm: str | None) -> None:
+    """Point the seeded target at *realm*, with *admin_realm* when set."""
+    extras: dict[str, str] = {"managed_realm": realm}
+    if admin_realm is not None:
+        extras["admin_realm"] = admin_realm
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(Target).where(Target.name == _TARGET_NAME).values(extras=extras)
+        )
+        await session.commit()
+
+
+def _mount_realm(mock: respx.MockRouter, realm: str) -> respx.Route:
+    """Keycloak answers for a member add in *realm*. Returns the PUT."""
+    for token_realm in {"master", realm}:
+        mock.post(f"/realms/{token_realm}/protocol/openid-connect/token").respond(
+            200, json={"access_token": "kc-admin-token-realm", "expires_in": 300}
+        )
+    base = f"/admin/realms/{realm}"
+    mock.get(base).respond(200, json={"realm": realm})
+    group_path = f"{base}/groups/{_GROUP_UUID}"
+    mock.get(group_path).respond(200, json={"id": _GROUP_UUID, **_PLAIN_GROUP})
+    mock.get(f"{group_path}/members").respond(200, json=[])
+    mock.get(f"{base}/users/{_USER_UUID}").respond(
+        200, json={"id": _USER_UUID, "username": "operator-a"}
+    )
+    mock.get(f"{base}/users/{_USER_UUID}/groups").respond(200, json=[])
+    return mock.put(f"{base}/users/{_USER_UUID}/groups/{_GROUP_UUID}").respond(204)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("realm", "admin_realm"),
+    [("master", None), ("site-admins", "site-admins")],
+    ids=["master", "the-target-s-admin-realm"],
+)
+async def test_the_note_shows_in_master_and_in_the_target_s_admin_realm(
+    keycloak: KeycloakConnector,  # noqa: F811
+    admin_count: Any,
+    realm: str,
+    admin_realm: str | None,
+) -> None:
+    caller = _CALLERS[0]
+    await _manage(realm, admin_realm=admin_realm)
+    admin_count(frozenset({_ASKER}))
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        put = _mount_realm(mock, realm)
+        result = await _add(caller.operator())
+
+    assert result["status"] == "awaiting_approval", result
+    assert not put.called
+    assert result["extras"]["approval_note"] == _NOTE
+    assert result["error"] == f"{_WAITING}. {_NOTE}"
+    (request,) = await _requests()
+    another_admin = caller.operator().model_copy(update={"sub": _OTHER_ADMIN})
+    with pytest.raises(ApprovalError) as refused:
+        async with get_sessionmaker()() as session:
+            await approve_request(session, request.id, operator=another_admin, params=_PARAMS)
+    refusal = getattr(refused.value, "reason_text", None) or str(refused.value)
+    assert _PLATFORM_ADMIN in refusal, refusal
+    assert [r.status for r in await _requests()] == ["pending"]
 
 
 def test_the_cases_are_every_mix() -> None:

@@ -750,3 +750,23 @@ func TestHelpListsTree(t *testing.T) {
 		}
 	}
 }
+
+// TestKVPutHelpNamesClassAndTenantPaths — the put help names the audit
+// class MEHO records and uses only paths under tenants/<tenant-id>/.
+func TestKVPutHelpNamesClassAndTenantPaths(t *testing.T) {
+	cmd := newKVPutCmd()
+	if !strings.Contains(cmd.Long, "op_class=credential_write") {
+		t.Errorf("put Long does not name op_class=credential_write:\n%s", cmd.Long)
+	}
+	if strings.Contains(cmd.Long, "op_class=write") {
+		t.Errorf("put Long still names op_class=write:\n%s", cmd.Long)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(cmd.Example), "\n") {
+		if !strings.Contains(line, " secret tenants/<tenant-id>/") {
+			t.Errorf("put example uses a path outside tenants/<tenant-id>/: %q", line)
+		}
+		if !strings.Contains(line, "--data @") {
+			t.Errorf("put example does not read --data from a file: %q", line)
+		}
+	}
+}

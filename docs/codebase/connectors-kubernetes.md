@@ -765,6 +765,29 @@ as stored, counting every entry. A document that does not fit whole
 keeps only its identity; when not even that fits, one closing entry
 counts the documents left out.
 
+**The `k8s.apply` agent hint and the switch `K8S_APPLY_ONE_APPROVAL_HINT`.**
+A call of `k8s.apply` with `dry_run="server"` waits for approval, like the
+real call. The old hint told the agent to dry-run first, so each manifest
+cost two approvals. With the switch on
+(`Settings.k8s_apply_one_approval_hint`, off by default),
+`register_operations()` stores the op with a new hint
+(`with_apply_hint()` in `_apply_hint.py`). It tells the agent to:
+
+- look at the manifests first with `preview_operation`. That needs no
+  approval and does not contact the cluster. It shows the manifests the call
+  would apply (`plan_shown` is false). The approval request of the real call
+  shows the result of a server dry run;
+- put all manifests of one deploy into one `k8s.apply` call. The call applies
+  them in order and needs one approval.
+
+An object in a namespace that the same call creates fails its dry run on the
+approval request, because the namespace does not exist yet. The real apply
+still works, because the namespace is applied first. The hint says this.
+Nothing else changes: the risk level, the approval rule and the parameters
+stay. With the switch off, the op is described as before.
+`tests/test_k8s_write_hint_no_dry_run_first.py` fails when the hint of any
+Kubernetes write operation tells the agent to dry-run it first.
+
 **`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
 each field of an object. `k8s.apply` applies under the owner `meho`. When
 an object was applied before by another tool (`kubectl apply`, Helm), a

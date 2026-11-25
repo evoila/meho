@@ -47,6 +47,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "embedding_model_health_check",
         "group_listing_operations",
         "jsonflux_answer_ready",
+        "k8s_apply_one_approval_hint",
         "k8s_node_list_resources",
         "file_ref_params",
         "kb_search_plain_sentences",

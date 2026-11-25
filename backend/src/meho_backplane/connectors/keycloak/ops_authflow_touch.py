@@ -120,6 +120,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.operations._preview import PreviewContext
 
@@ -358,6 +359,7 @@ async def _ensure_loa_map(
     """Map ``meho-touch`` to level 3 in the realm; whether this run changed it."""
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     before = await connector._get_admin_json(target, realm_path, operator=operator)
+    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, before, target)
     mapping = _loa_map(before)
     if TOUCH_ACR in mapping:
         if str(mapping[TOUCH_ACR]) != str(TOUCH_LEVEL):
@@ -417,6 +419,7 @@ async def _check_verification(
             done="Keycloak refused (HTTP 403) to read the realm's passkey policy. "
             "Nothing was changed.",
         ) from exc
+    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     have = realm_rep.get(_POLICY_UV)
     if have != "required":
         raise KeycloakTouchFlowError(
@@ -528,6 +531,7 @@ async def _ensure_redirect(
     realm_rep = await connector._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
     )
+    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     browser = str(realm_rep.get("browserFlow") or "browser")
     if browser == TOUCH_FLOW_ALIAS:
         return False
@@ -652,6 +656,7 @@ async def _bind(
     realm_rep = await connector._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
     )
+    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     browser = str(realm_rep.get("browserFlow") or BUILT_IN_BROWSER_FLOW)
     client = await connector._get_admin_json(target, client_path, operator=operator)
     overrides = client.get("authenticationFlowBindingOverrides")

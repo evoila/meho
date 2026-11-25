@@ -308,7 +308,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
-from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
 from meho_backplane.auth.principal_block_run import (
     mark_request_sent,
     raise_if_step_was_refused,
@@ -447,6 +447,7 @@ from meho_backplane.operations._preview import (
     build_permission_preflight,
     build_proposed_effect,
     describe_preview_provenance,
+    grant_preview_var,
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
@@ -533,6 +534,10 @@ from meho_backplane.operations.reducer import (
     full_result_capture_var,
     handle_owner_sub_var,
 )
+from meho_backplane.operations.required_fields import (
+    REQUIRED_FIELDS_CONTEXT_KEY,
+    required_fields,
+)
 from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_AUDIT_VALUE,
@@ -565,7 +570,7 @@ from meho_backplane.redaction import (
     manifest_to_audit_payload,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.targets.keycloak_realm_warnings import target_warnings
+from meho_backplane.targets.keycloak_realm_warnings import target_managed_realm, target_warnings
 
 _log = structlog.get_logger(__name__)
 
@@ -906,6 +911,10 @@ async def _run_source_kind_handler(
     extended the bind to the direct seam so its parked children are no
     longer orphaned).
     """
+    # The check right before the handler starts, for every kind of handler:
+    # a login blocked while the call waited for its policy gate or its
+    # credentials gets no handler run (``auth.principal_block``).
+    await raise_if_send_refused()
     if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
         # Only the HTTP connector base notes each request it sends. Any other
         # client (SSH, a vendor library) counts as sent from its start.
@@ -1067,7 +1076,11 @@ async def _execute_and_audit(
         with (
             track_composite_steps(audit_id, enabled=descriptor.source_kind == "composite"),
             # What this operation sent, and the step the block list refused.
-            tracking_run(is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL),
+            tracking_run(
+                is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
+                login=(operator.sub, operator.tenant_id),
+                op_id=op_id,
+            ),
         ):
             result = await _execute_and_audit_inner(
                 op_id=op_id,
@@ -3440,6 +3453,12 @@ def _build_reducer_context(
     result_handle = _result_handle_from_descriptor(descriptor)
     if result_handle is not None:
         reducer_context["result_handle"] = result_handle
+    # The fields a connector keeps in every shortened answer. They do not come
+    # from ``llm_instructions``: an admin can edit those, and the operation
+    # detail shows them.
+    kept = required_fields(descriptor.product)
+    if kept:
+        reducer_context[REQUIRED_FIELDS_CONTEXT_KEY] = kept
     return reducer_context
 
 
@@ -3556,6 +3575,11 @@ async def _build_proposed_effect(
             # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
+        # The realm a Keycloak target works on, so the reviewer sees it
+        # in the first lines of the card.
+        realm_of_target = target_managed_realm(target)
+        if realm_of_target is not None:
+            base["target_realm"] = realm_of_target
         # A setting of the target that is allowed but risky, for example a
         # Keycloak target that manages MEHO's own sign-in realm. A write that
         # creates or changes a target gives its own lines, from the target as
@@ -3803,7 +3827,10 @@ async def destructive_binding_evidence(
     )
     if refusal is not None or proposed_effect is None:
         return None
-    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
+    blast_radius = proposed_effect[BLAST_RADIUS_KEY]
+    # The handler compares the object it reads right before the delete with this preview.
+    grant_preview_var.set((op_id, {BLAST_RADIUS_KEY: blast_radius}))
+    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: blast_radius}
 
 
 def _preflight_denied_refusal(
@@ -4588,6 +4615,8 @@ async def _dispatch_now(
     # (``composite.enforce_subop_policy``). A child dispatch inherits it and
     # reads it after its policy gate below.
     _approved_run_token = approved_run_var.set(True) if _approved else None
+    # The fresh preview that clears a delete grant belongs to this dispatch only.
+    _grant_preview_token = grant_preview_var.set(None)
     # #5211: ``audit_*`` keys the handler binds belong to this dispatch's
     # row only; the ``finally`` puts the caller's keys back.
     _audit_extras = snapshot_audit_extras()
@@ -4969,6 +4998,7 @@ async def _dispatch_now(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        grant_preview_var.reset(_grant_preview_token)
         if _approved_run_token is not None:
             approved_run_var.reset(_approved_run_token)
         restore_audit_extras(_audit_extras)

@@ -274,6 +274,64 @@ Prove the whole chain:
 meho status
 ```
 
+### If you are the only admin
+
+The first login is an Admin, and an Admin may approve their own changes,
+at every risk level. This is on purpose, so one person can use MEHO. Read
+the rule in
+[Who may approve](../guides/approvals-and-break-glass.md#who-may-approve).
+Do not turn on the emergency switch for this.
+
+- A change of rights (who may do what in MEHO) runs only with a click in
+  the web console.
+- `meho status` shows the rule for your own role on its `Approvals` line.
+
+To add a second admin:
+
+1. Route the Keycloak admin console. This is one upgrade, with the same
+   chart version you installed. If you did not pin a version, run
+   `helm list -n meho` and read it from the `CHART` column (for example
+   `meho-chart-1.2.3` is version `1.2.3`):
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=true
+    ```
+
+2. Log in to the console as the console admin. Its steps are in
+   [The console admin](keycloak-realm.md#the-console-admin).
+3. Create the person and join them to the group **MEHO-Admins**. The
+   steps are in [Local users](login/local-users.md). An admin alone
+   cannot approve a change of rights that someone sent with a token in MEHO's own login realm. Only a second
+   person who is a platform admin approves it. If this person should do
+   that, also join them to the group **MEHO-Platform-Admins**. The rule
+   is in
+   [More rules for a change of one login or one group](../guides/approvals-and-break-glass.md#more-rules-for-a-change-of-one-login-or-one-group).
+4. Set the route back when you are done:
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=false
+    ```
+
+If your values file already sets `coreKeycloak.ingress.exposeAdmin`,
+change it there instead: `true` to open the admin console, `false` to
+close it. Each time, run the install command of Step 4 with these
+options, so the chart stays at the version you run:
+
+- `--version <chart-version>`: the version you installed (item 1 above
+  says how to find it);
+- the same `-f` values files you used for the installation, in the same
+  order.
+
+```bash
+helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+  --namespace meho --version <chart-version> \
+  -f values.yaml
+```
+
 **You now have a running MEHO and a logged-in operator.** Go on with
 [the setup page and the settings file](setup-page.md).
 

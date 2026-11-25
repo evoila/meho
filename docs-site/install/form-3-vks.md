@@ -535,7 +535,7 @@ Logged in as <your email> (sub: ...)
   Vault: reachable, read OK (version=1)
   DB:    migrated, revision 0137
   Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)
-  Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured
+  Approvals: you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in); decisions on someone else's instruction are refused; approval key configured
   Features: all configured
   Connector packages: none
 ```

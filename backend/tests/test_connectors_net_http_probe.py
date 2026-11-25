@@ -399,6 +399,63 @@ async def test_redirect_to_non_allowlisted_host_is_blocked_and_never_dialed(
     assert metadata.hits == []
 
 
+async def test_blocked_redirect_log_holds_host_name_only(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_http_probe_op: None,
+) -> None:
+    """The refused-redirect log event holds a host name, never a path, query or user part.
+
+    The walk follows one allowed hop, then refuses a second hop. The address
+    of the refused hop is read from the second answer, so it carries made-up
+    marker values in its user part, path and query.
+    """
+    from structlog.testing import capture_logs
+
+    second = await _start_http_server(
+        {
+            "/hop2?x=QUERYMARK1": _Route(
+                status=302,
+                # The user part is built from pieces so no full credential URL is in the file.
+                headers={
+                    "Location": "http://"
+                    + "USERMARK"
+                    + ":"
+                    + "PASSMARK"
+                    + "@127.0.0.1:9/PATHMARK2?q=QUERYMARK2"
+                },
+            )
+        },
+        host="127.0.0.1",
+    )
+    first = await _start_http_server(
+        {
+            "/hop1": _Route(
+                status=302,
+                headers={"Location": f"http://localhost:{second.port}/hop2?x=QUERYMARK1"},
+            )
+        },
+        host="127.0.0.1",
+    )
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "localhost")
+    try:
+        with capture_logs() as captured:
+            result = await _dispatch_probe(
+                {"url": f"http://localhost:{first.port}/hop1", "method": "GET"}
+            )
+    finally:
+        for srv in (first, second):
+            srv.server.close()
+            await srv.server.wait_closed()
+
+    assert result.result["reason"] == "blocked_redirect", result.result
+    event = next(e for e in captured if e["event"] == "net.http_probe.blocked_redirect")
+    assert event["from_url"] == "localhost"
+    assert event["blocked_redirect"] == "127.0.0.1"
+    rendered = repr(captured)
+    for mark in ("USERMARK", "PASSMARK", "PATHMARK2", "QUERYMARK1", "QUERYMARK2"):
+        assert mark not in rendered
+
+
 # ---------------------------------------------------------------------------
 # Initial-host gating + audit row records the final URL
 # ---------------------------------------------------------------------------

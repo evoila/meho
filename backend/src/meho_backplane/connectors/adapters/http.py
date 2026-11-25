@@ -103,6 +103,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -777,32 +778,15 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
-def _origin_and_path(url: httpx.URL) -> str:
-    """Return ``scheme://host[:port]/path`` -- query, fragment, and userinfo dropped.
-
-    A guest-transfer / session URL carries a one-time ticket in its query string
-    (and could carry credentials in its userinfo). This scrubs both so the ticket
-    never reaches a log line, while still naming the origin + path that was
-    refused for diagnosis.
-    """
-    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
-
-
-def _scrub_location_header(location: str | None) -> str | None:
-    """Scrub a raw ``Location`` header the same way :func:`_origin_and_path` does.
-
-    The refused cross-origin redirect destination is attacker-chosen and may
-    itself carry a secret in its own query string (or userinfo), so the header
-    is reduced to ``scheme://host[:port]/path`` before it reaches a log line.
-    A relative or absolute ``Location`` both parse; a value ``httpx`` cannot
-    parse is logged as a placeholder rather than verbatim.
-    """
-    if location is None:
-        return None
-    try:
-        return _origin_and_path(httpx.URL(location))
-    except httpx.InvalidURL:
-        return "<unparseable-location>"
+def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> None:
+    """Warn that MEHO does not follow a redirect; *location* is a host name or a fixed mark."""
+    logger.warning(
+        "connector_redirect_not_followed_cross_origin",
+        method=request.method,
+        # Vendor-supplied addresses are logged as host name only.
+        from_url=host_for_log(request.url),
+        location=location,
+    )
 
 
 class _SameOriginRedirectClient(httpx.AsyncClient):
@@ -849,6 +833,18 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             response.stream = _StopSafeCloseStream(response.stream)
         return response
 
+    def _build_redirect_request(
+        self, request: httpx.Request, response: httpx.Response
+    ) -> httpx.Request:
+        # httpx builds the next request inside ``send`` and raises (closing the
+        # answer) when it cannot read the Location address. Log the fixed mark
+        # for that address, then raise the same error to the caller.
+        try:
+            return super()._build_redirect_request(request, response)
+        except (httpx.RemoteProtocolError, httpx.InvalidURL, UnicodeError):
+            _log_redirect_not_followed(request, UNPARSEABLE_ADDRESS)
+            raise
+
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:
@@ -869,16 +865,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 # follow. Returning the 3xx unfollowed means no header or
                 # body — and so no ``X-XSRF-TOKEN`` / credential — is ever
                 # replayed to the off-origin ``Location``.
-                logger.warning(
-                    "connector_redirect_not_followed_cross_origin",
-                    method=request.method,
-                    # Scheme+host+path only: a guest-transfer / session URL
-                    # carries a one-time ticket in its query string, so the
-                    # full URL must never land in a log line. The refused
-                    # (attacker-chosen) Location destination is scrubbed the
-                    # same way -- its own query could carry a secret too.
-                    from_url=_origin_and_path(request.url),
-                    location=_scrub_location_header(response.headers.get("Location")),
+                location_header = response.headers.get("Location")
+                _log_redirect_not_followed(
+                    request,
+                    host_for_log(location_header) if location_header is not None else None,
                 )
                 return response
             await response.aclose()

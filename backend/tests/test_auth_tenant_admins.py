@@ -26,6 +26,8 @@ from meho_backplane.auth import tenant_admins
 from meho_backplane.auth.approval_sign_in_flow import ApprovalSignInStatus
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.tenant_admins import (
+    NEEDS_SECOND_ADMIN,
+    NO_ADMIN,
     ONLY_ONE_ADMIN,
     RIGHTS_CHANGE_GUIDE_URL,
     admin_count,
@@ -309,6 +311,17 @@ async def test_the_note_for_the_only_admin_holds_the_sentence_and_the_link(
     assert note == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
 
 
+async def test_the_note_for_no_admin_says_so_and_holds_the_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _known(monkeypatch, set())
+    note = await only_admin_note(_TENANT, _ADMIN_A)
+    assert note == f"This tenant has no admin. See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert NO_ADMIN in note
+    assert "only one admin" not in note
+    assert "second admin" not in note
+
+
 @pytest.mark.parametrize(
     ("ids", "requester"),
     [({_ADMIN_A, _ADMIN_B}, _ADMIN_A), ({_ADMIN_A}, "user-operator"), (None, _ADMIN_A)],
@@ -388,6 +401,66 @@ async def test_the_only_admin_asks_for_a_change_of_rights_and_reads_the_sentence
     assert ONLY_ONE_ADMIN in (result.error or "")
     assert result.extras["approval_note"] == f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
     assert result.extras["approval_request_id"]
+
+
+async def test_a_waiting_change_of_rights_with_no_admin_reads_no_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _known(monkeypatch, set())
+    result = await _ask(monkeypatch)
+    note = f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    assert result.status == "awaiting_approval"
+    assert result.extras["approval_note"] == note
+    assert result.error == (
+        f"awaiting_approval: {_RIGHTS_OP!r} requires approval before execution. {note}"
+    )
+    assert NEEDS_SECOND_ADMIN not in (result.error or "")
+
+
+async def test_a_step_with_no_admin_reads_no_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
+    _known(monkeypatch, set())
+    operator = Operator(
+        sub=_ADMIN_A,
+        raw_jwt="<jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+    )
+    result = await enforce_subop_policy(
+        operator=operator,
+        connector_id="demo-rest-1.0",
+        op_id=_RIGHTS_OP,
+        safety_level="dangerous",
+        requires_approval=True,
+        target=None,
+        params={"user": "someone"},
+    )
+    assert result is not None
+    assert result.extras["approval_note"] == f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+
+
+@pytest.mark.parametrize(
+    ("ids", "note"),
+    [
+        (set(), f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"),
+        ({_ADMIN_A}, f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"),
+    ],
+    ids=["no admin", "one admin"],
+)
+async def test_the_approved_retry_note_for_each_count(
+    monkeypatch: pytest.MonkeyPatch, ids: set[str], note: str
+) -> None:
+    """Only the sentence that is false for an approved request goes; the rest stays."""
+    _known(monkeypatch, ids)
+    returned = await only_admin_note(_TENANT, _ADMIN_A)
+    result = result_awaiting_approval(
+        _RIGHTS_OP, uuid.uuid4(), 1.0, note=returned, already_approved=True
+    )
+    kept = note.removeprefix(NEEDS_SECOND_ADMIN).lstrip()
+    assert result.extras["approval_note"] == kept
+    assert NEEDS_SECOND_ADMIN not in (result.error or "")
+    assert (result.error or "").endswith(f". {kept}")
 
 
 @pytest.mark.parametrize("ids", [{_ADMIN_A, _ADMIN_B}, None], ids=["two admins", "not known"])

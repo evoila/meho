@@ -1599,12 +1599,33 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        # On a pull request or a merge-queue run, HEAD is a merge commit.
-        # Its first parent (HEAD^1) is the base branch, so depth 2 is enough.
+        # Pull request run: HEAD is the merge commit of the pull request into
+        # the base branch, and HEAD^1 is the base branch.
+        # Merge queue run: the queue squashes, so HEAD is one commit that holds
+        # the pull request, and HEAD^1 is the base it is queued on (the branch
+        # tip, or the entry ahead of it). The job needs the queue's squash
+        # method: with a rebase method HEAD^1 would be a commit of the same
+        # pull request, not the base.
+        # Depth 2 is enough for both.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 2
           persist-credentials: false
+
+      - name: Docker Hub login (for the image pull)
+        # Same login as the other jobs of this workflow (see the one in
+        # python-tests for the reasons): the job pulls one image, and a
+        # login gives it the Docker Hub rate-limit headroom. Skipped when
+        # the secret is empty (Dependabot runs), and a failed login does not
+        # fail the job: the pull then runs unauthenticated.
+        if: env.DOCKERHUB_USERNAME != ''
+        continue-on-error: true
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
         # Same pinned uv as the other Python jobs (see python-lint).

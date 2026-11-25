@@ -849,6 +849,174 @@ stamp is a request side effect, and central enforcement is on by
 default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
 `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER` (default 3).
 
+## Runner login with a key pair made at the site
+
+A runner logs in in one of two modes. Which one runs is decided at start by
+`runner.login.open_signed_jwt_login`:
+
+- A login record (`runner-login.json`) in `MEHO_RUNNER_KEY_DIR`: key mode.
+- Else `MEHO_RUNNER_ENROLLMENT_CODE` set: enroll first, then key mode.
+- Else `MEHO_RUNNER_TOKEN` set: the fixed token mode (unchanged; no key,
+  no renewal).
+- Else a `RunnerConfigError` that names the variables.
+
+In key mode `MEHO_RUNNER_CENTRAL_URL` and the token address (from central, or
+`MEHO_RUNNER_TOKEN_URL`) must be https. Plain http works only for an address on
+the same machine, and then no proxy from the environment is used
+(`runner/login.py::check_https`). The check runs before the first request.
+
+**Enrollment.**
+
+- `RunnerPrincipalService.register` makes a one-time code
+  `<runner id hex>.<secret>` (`auth/runner_enrollment.py::new_enrollment_code`)
+  and returns it once in `RunnerPrincipalRegistered`. Only its SHA-256 and
+  its expiry (30 minutes) are stored (`runner_principal.enrollment_code_hash`,
+  `enrollment_code_expires_at`, migration `0188`).
+- The runner makes an EC P-256 key (`runner/login.py::load_or_create_private_key`;
+  the file `runner-key.pem` has mode `0600`) and posts the public key (a JWK)
+  with the code to `POST /api/v1/runner-principals/enroll`
+  (`api/v1/runner_enrollment.py`). That route has no login: the code is the
+  proof.
+- `enroll_runner_key` refuses a wrong, empty, used, expired or revoked code
+  (all give 403 `enrollment_code_invalid`). An expired code with no key yet
+  gets this 403 before the name and the key are checked. A used code gets it
+  for any key other than its own, before the name is checked. With a good,
+  unused code it refuses a private member in the key, a key that is not P-256
+  and a value that is no JWK object or is missing (422
+  `runner_public_key_invalid`, the list shape of every other validation error).
+- The runner sends its `MEHO_RUNNER_ID` as `runner_name`. When the code
+  belongs to a runner with another name, the route answers 409
+  `enrollment_code_for_another_runner` before anything changes, so the code
+  stays usable for its own runner.
+- The code enrolls one key, in two steps. First MEHO commits which key the
+  code accepted: `runner_principal.enrolled_key_id` (the RFC 7638 thumbprint,
+  `runner/key_id.py`). A key is accepted only before the code's end. Then,
+  under the lock again, MEHO puts the key on the Keycloak client and commits
+  `key_enrolled_at`. From the first step on, another key is refused. The
+  accepted key can finish the second step at any time, also after the code's
+  end: when Keycloak failed, or stored the key and the answer was lost, the
+  runner keeps its key, has no login record yet, and asks again at its next
+  start. A repeat after `key_enrolled_at` gives the same answer and changes
+  nothing.
+- Enrollment and revocation of one runner take turns: both hold one advisory
+  lock (`take_runner_lock`) from the read of the row until the commit.
+- `KeycloakAdminClient.set_client_signed_jwt_key` sets the client to
+  `client-jwt` and stores the key set in `jwks.string`. Its write leaves out
+  `enabled`, and Keycloak keeps a field that a `PUT` leaves out, so this write
+  never turns a disabled client on. When a call to Keycloak ends without an
+  answer and Keycloak applies the write after a revoke, it finds no client:
+  revoke deletes it.
+
+**The saved login.** The runner uses the login record only when it is for
+`MEHO_RUNNER_ID` and its key id is the one of the private key on disk. When the
+record is damaged, or the key is missing or another one, the runner enrolls
+with `MEHO_RUNNER_ENROLLMENT_CODE`. Without a code it stops with an error that
+says how to recover: put the files back, or register a new runner under a new
+name with a new, empty `MEHO_RUNNER_SPOOL_DIR` (the old spool's results carry
+the old name, and central refuses them under the new one). It never makes a
+new key for an old record without a code. The record is written in one step, so a stop leaves no half record.
+
+**Renewal.** `SignedJwtTokenProvider` signs a 60-second JWT (ES256, `kid`,
+`iss`=`sub`=client id, `aud`=issuer, unique `jti`) and posts it to the token
+endpoint with the `client_credentials` grant. It keeps the token and gets a new
+one when less than a quarter of its life (at least 30 seconds) is left.
+`RunnerClient` uses it through an `httpx.Auth` (`_ProviderAuth`): after a
+`401` it gets a new token and sends the call once more. Nothing in the module
+logs a key, a code, an assertion or a token.
+
+**The standard and Keycloak's way.** The key login follows RFC 7523 (a JWT
+as the proof of a client's login) and Keycloak's "Signed JWT" client
+authenticator. The lines the code follows:
+
+- RFC 7523
+  [section 2.2](https://www.rfc-editor.org/rfc/rfc7523#section-2.2): "The
+  value of the "client_assertion_type" is
+  "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"." The runner sends
+  this value with the `client_credentials` grant
+  (`runner/login.py::_ASSERTION_TYPE`, `SignedJwtTokenProvider._fetch`).
+- RFC 7523 [section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3),
+  the claims, all set in `SignedJwtTokenProvider._assertion`:
+  - item 1: "The JWT MUST contain an "iss" (issuer) claim" and item 2.B:
+    "For client authentication, the subject MUST be the "client_id" of the
+    OAuth client." `iss` and `sub` are the client id `runner:<name>`.
+  - item 3: "The JWT MUST contain an "aud" (audience) claim containing a value
+    that identifies the authorization server". `aud` is the realm's issuer
+    address that central returns at enrollment.
+  - item 4: "The JWT MUST contain an "exp" (expiration time) claim that limits
+    the time window during which the JWT can be used." `exp` is `iat` + 60
+    seconds (`_ASSERTION_LIFETIME_SECONDS`).
+  - item 6: "The JWT MAY contain an "iat" (issued at) claim". `iat` is the
+    time of signing.
+  - item 7: "The JWT MAY contain a "jti" (JWT ID) claim that provides a unique
+    identifier for the token." `jti` is a new random id for each request.
+  - item 9: "The JWT MUST be digitally signed". The runner signs with its
+    P-256 key, `ES256`, and names the key in `kid`.
+- Keycloak, [Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials):
+  - "*Signed JWT* allows a client to authenticate with self-signed client
+    assertions. This enables the client to authenticate without a shared
+    secret." `KeycloakAdminClient.set_client_signed_jwt_key` sets the client's
+    authenticator to `client-jwt`.
+  - "In this authenticator you can enforce the *Signature algorithm* used by
+    the client (any algorithm is valid by default) and the *Max expiration*
+    allowed for the JWT token (... tokens should be issued right before the
+    authentication, 60 seconds by default)." MEHO sets the signing type of the
+    client to `ES256` (`token.endpoint.auth.signing.alg`). The runner signs
+    each request right before it sends it, with a life of 60 seconds.
+  - "The client uses the private key to sign the JWT, while Keycloak uses the
+    certificate or public key to verify the signature. Keycloak does not need
+    and does not store the client's private key." The runner keeps its
+    private key in `MEHO_RUNNER_KEY_DIR`; MEHO stores only the public key on
+    the client, as a key set in `jwks.string`.
+
+The system it is proven on: the live test
+`backend/tests/integration/test_runner_key_login_keycloak.py` runs in CI
+against the Keycloak image `keycloak/keycloak:26.0` (the value of
+`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). The proof on an
+operator's own Keycloak comes with a later step on a real install.
+
+**The key file.** `runner/login.py::_read_key_file` checks the mode of the
+open key file before it reads the key. Any right for the group or for
+other users (any of the last six mode bits) stops the runner with a
+`RunnerLoginError` that names the file and its mode, says to set mode `0600`
+and names the docs page; no request is sent. Any other mode works (for example
+`0600` and `0400`). From the Kubernetes docs
+([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
+In a Kubernetes pod with
+`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
+the runner then stops. Mount the key so that it keeps mode `0600`: set no
+`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
+volume driver that does not change file rights.
+
+**Register.** Only a person with `tenant_admin` can register a runner, because
+the answer carries the enrollment code. A service login or an agent login
+gets 403 `human_principal_required`, and a runner login gets 403
+`runner_scope_violation`, before anything is made. Before the Keycloak
+client is made, `RunnerPrincipalService.register` looks for a row with the
+same Keycloak client id, also a revoked row and a row of another tenant; when
+one exists it answers 409 `runner_principal_already_exists`, and no client and
+no Vault secret is made.
+
+**Refused enrollments.** When the code in a request matches a runner's stored
+code and the enrollment is still refused, `enroll_runner_key` writes one audit
+row in that runner's tenant (path `runner.principal.key_enrollment_refused`).
+It holds the runner's name, the answer's status, a reason (`runner_name_mismatch`
+409, `public_key_invalid` 422 for a key in any wrong form, `code_expired` 403,
+`code_used_by_another_key` 403, `runner_revoked` 403 for a revoke that ran
+while the enrollment waited) and the id of the offered key when the key can
+be read. It holds no code and no key. A code that matches no runner writes no
+audit row; the route writes a log line.
+
+**Revoke.** Revoke works the same for every runner, with a key or with a fixed
+token. `RunnerPrincipalService.revoke` turns the runner's Keycloak client off,
+then deletes the client. With the client, its public key and its Keycloak
+secret are gone. The runner row stays and is marked revoked, and its
+enrollment code is cleared. `meho runner-principal list` shows it only with
+revoked runners included; `show` shows it as revoked. The name stays taken: a
+new register of the same name gets 409. A revoked runner cannot be brought
+back: the deleted client cannot be turned on again. A new runner needs a new
+name and a new enrollment code. A token the runner already has works until it
+ends.
+
 ## Dependencies
 
 - `httpx` (already a direct backend dependency) for the poll/report
@@ -880,8 +1048,8 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
   #2901 / #3187).
 - Heartbeat + central stale/unknown flipping — #2501.
 - The scoped per-runner service principal + credential scoping — #2502.
-  `MEHO_RUNNER_TOKEN` is the seam it fills; this chassis treats it as an
-  opaque bearer.
+  `MEHO_RUNNER_TOKEN` is the fixed-token seam; this chassis treats it as an
+  opaque bearer. The key mode above renews its own token.
 - Change ops over the gateway, any inbound listener, arbitrary TCP
   proxying — out of scope by the initiative's design principles.
 

@@ -217,7 +217,10 @@ def test_the_secret_is_stripped_and_its_ids_are_lower_case() -> None:
     ("secret", "words"),
     [
         ({"client_id": CLIENT_A, "client_secret": SECRET_A}, "has no 'tenant_id' key"),
-        ({"tenant_id": TENANT_A, "client_id": CLIENT_A, "client_secret": " "}, "'client_secret'"),
+        (
+            {"tenant_id": TENANT_A, "client_id": CLIENT_A, "client_secret": " "},
+            "has no client_secret and no certificate keys",
+        ),
         ({"tenant_id": TENANT_A, "client_id": "app", "client_secret": SECRET_A}, "must be a GUID"),
     ],
 )

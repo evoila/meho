@@ -4073,3 +4073,54 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
     assert "Approved, but the run failed" not in body
     assert "did not succeed" not in body
     assert "Request approved" not in body
+
+
+# ---------------------------------------------------------------------------
+# New requests appear without a reload (#6932)
+# ---------------------------------------------------------------------------
+
+
+def test_pending_list_carries_the_count_it_was_drawn_with() -> None:
+    """The waiting list holds the bell's count and a "Show" button for the list."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.one")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.two")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
+        page = client.get("/ui/approvals?tab=pending")
+
+    for body in (response.text, page.text):
+        assert 'data-approvals-new-notice data-baseline="2"' in body
+        # "Show" fetches the same list a tab does; nothing is polled for it.
+        assert body.count('hx-trigger="meho:approval-bump from:body, meho:approval-decided') == 1
+    assert 'hx-get="/ui/approvals/list?tab=pending"\n          hx-target="#approvals-history"' in (
+        response.text
+    )
+
+
+def test_other_views_have_no_new_requests_line() -> None:
+    """Decided tabs, and the "Load more" rows get no new-requests line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        approved = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+        rows = client.get("/ui/approvals/list?tab=pending&partial=rows", headers=_HX_HEADERS)
+
+    assert "data-approvals-new-notice" not in approved.text
+    assert "data-approvals-new-notice" not in rows.text
+
+
+def test_bell_script_shows_the_line_from_the_polled_count_only() -> None:
+    """The script reads the badge swap; it adds no timer and no request."""
+    script = (static_root_dir() / "src" / "app" / "approvals-bell.js").read_text(encoding="utf-8")
+    assert script.count("setInterval(") == 1
+    assert "htmx:afterSwap" in script
+    assert "data-approvals-new-notice" in script
+    for request_marker in ("fetch(", "XMLHttpRequest", "htmx.ajax", "hx-get"):
+        assert request_marker not in script.split("// Show the new-requests line", 1)[1]

@@ -30,6 +30,12 @@
 //   * When the tab becomes visible again, refresh at once.
 //   * After a decision (the approve/deny POST returns
 //     ``HX-Trigger: meho:approval-decided``), close the modal and refresh.
+// New requests (#6932): the history list is not fetched by the poll (that
+// would drop its "Load more" pages). Instead, when a badge swap brings a
+// count that differs from ``data-baseline`` on the list's new-requests line,
+// the line shows "N new requests" (or "The waiting list changed") with a
+// "Show" button that fetches the list. This reads the count the badge
+// already polls; it sends no request of its own.
 // Plain JS timers, not ``hx-trigger="every 5s [filter]"``: htmx evaluates
 // trigger filters with ``eval``, which the console's CSP does not allow.
 
@@ -76,4 +82,34 @@ document.addEventListener("alpine:init", () => {
       this.bumpBadge();
     },
   }));
+});
+
+// Show the new-requests line of the Approvals page when a bell badge swap
+// brings a count that differs from the count the list was drawn with.
+document.addEventListener("htmx:afterSwap", (event) => {
+  const target = event.detail && event.detail.target;
+  if (!target || typeof target.id !== "string" || !target.id.endsWith("-approvals-badge")) {
+    return;
+  }
+  const counter = target.querySelector("[data-pending-count]");
+  const notice = document.querySelector("[data-approvals-new-notice]");
+  if (!counter || !notice) {
+    return;
+  }
+  const count = Number(counter.dataset.pendingCount);
+  const baseline = Number(notice.dataset.baseline);
+  if (Number.isNaN(count) || Number.isNaN(baseline)) {
+    return;
+  }
+  const text = notice.querySelector("[data-approvals-new-notice-text]");
+  if (count === baseline) {
+    notice.hidden = true;
+    return;
+  }
+  const added = count - baseline;
+  text.textContent =
+    added > 0
+      ? `${added} new request${added === 1 ? "" : "s"}.`
+      : "The waiting list changed.";
+  notice.hidden = false;
 });

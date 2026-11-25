@@ -708,6 +708,27 @@ def build_approvals_router() -> APIRouter:
     return router
 
 
+async def _badge_count(session: UISessionContext) -> tuple[int, bool]:
+    """Return the number the bell badge shows, and whether it is "for you"."""
+    operator = await _operator_or_none(session) if routing_enabled() else None
+    if operator is not None:
+        # Approver routing: count only what this person may approve.
+        return await _count_waiting_for(session, operator), True
+    return len(await _list_pending_for_session(session)), False
+
+
+async def _with_waiting_count(session: UISessionContext, context: dict[str, object]) -> None:
+    """Add the bell's count to the context of a waiting list (first page).
+
+    The list shows it as the point the page starts from. The script that
+    reads the bell compares its newer counts with it, and offers a refresh
+    when they differ (#6932). Other tabs and the refused-filter page do not
+    show waiting requests, so they get no count and no refresh offer.
+    """
+    if context["work_ref_error"] is None and context["active_tab"] in ("pending", _FOR_YOU_TAB):
+        context["waiting_count"] = (await _badge_count(session))[0]
+
+
 async def _render_badge(request: Request, session: UISessionContext) -> HTMLResponse:
     """Render the bell badge fragment with the live pending count.
 
@@ -716,12 +737,7 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
     a recent backlog, not the full pending set). Tenant-scoped via the
     session.
     """
-    operator = await _operator_or_none(session) if routing_enabled() else None
-    if operator is not None:
-        # Approver routing: count only what this person may approve.
-        count, for_you = await _count_waiting_for(session, operator), True
-    else:
-        count, for_you = len(await _list_pending_for_session(session)), False
+    count, for_you = await _badge_count(session)
     context: dict[str, object] = {"pending_count": count, "for_you": for_you}
     return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
 
@@ -904,6 +920,7 @@ def _history_view(
         "next_offset": offset + _HISTORY_PAGE_SIZE,
         "has_more": has_more,
         "in_order_work_ref": in_order_work_ref,
+        "waiting_count": None,
     }
 
 
@@ -933,6 +950,7 @@ async def _render_index(
     context = await _build_history_context(session, tab, work_ref, offset, order)
     context["active_surface"] = "approvals"
     context["page_title"] = "Approvals"
+    await _with_waiting_count(session, context)
     return _history_response(
         get_templates().TemplateResponse(request, "approvals/index.html", context), context
     )
@@ -966,6 +984,7 @@ async def _render_history(
         return get_templates().TemplateResponse(
             request, "approvals/_history_rows_oob.html", context
         )
+    await _with_waiting_count(session, context)
     response = get_templates().TemplateResponse(request, "approvals/_history.html", context)
     if refused and partial == _HISTORY_PARTIAL_ROWS:
         # The "Load more" button appends into the rows list; the refused

@@ -25,6 +25,11 @@ a credential (a vCenter download URL, a pre-signed URL, a token in the
 query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
 its scheme and host before the bridge writes it.
 
+The HTTP stack below httpx (``httpcore``, ``h2``, ``hpack``) writes the
+response header lines of every call at DEBUG. :func:`_bridge_stdlib_logging`
+holds these three loggers at WARNING, whatever the root level is, so no
+response header value, redirect address or query reaches a log line.
+
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
 replaced, not stacked). Tests that need a clean slate call it again
@@ -47,6 +52,11 @@ from structlog.tracebacks import ExceptionDictTransformer
 #: line). Named rather than clearing all root handlers, so pytest's own
 #: ``caplog`` handler survives a mid-test :func:`configure_logging` call.
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
+
+
+#: Loggers of the HTTP stack below httpx. Their DEBUG lines hold response
+#: header names and values, so they stay at WARNING at every root level.
+_HTTP_STACK_LOGGERS = ("httpcore", "h2", "hpack")
 
 
 class _HttpxUrlFilter(logging.Filter):
@@ -173,6 +183,8 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     root.addHandler(handler)
     root.setLevel(level)
     logging.getLogger("httpx").addFilter(_HTTPX_URL_FILTER)
+    for name in _HTTP_STACK_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     for name in ("uvicorn", "uvicorn.error"):
         bridged = logging.getLogger(name)

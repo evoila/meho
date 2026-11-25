@@ -745,6 +745,7 @@
   "tests/test_lessons_upkeep.py": 6.05,
   "tests/test_live_test_cells.py": 0.45,
   "tests/test_live_tests_record.py": 1.98,
+  "tests/test_logging_http_stack_quiet.py": 1.5,
   "tests/test_loop_schedule.py": 1.77,
   "tests/test_maturity_propagation.py": 6.55,
   "tests/test_maturity_surface_drift.py": 7.79,

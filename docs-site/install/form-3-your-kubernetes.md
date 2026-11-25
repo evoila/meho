@@ -286,7 +286,9 @@ Do not turn on the emergency switch for this.
 To add a second admin:
 
 1. Route the Keycloak admin console. This is one upgrade, with the same
-   chart version you installed:
+   chart version you installed. If you did not pin a version, run
+   `helm list -n meho` and read it from the `CHART` column (for example
+   `meho-chart-1.2.3` is version `1.2.3`):
 
     ```bash
     helm upgrade meho oci://ghcr.io/evoila/meho-chart \

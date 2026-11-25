@@ -625,17 +625,20 @@ const (
 		"(a change of rights only with a click in the web console)"
 	approvalsOperator = "a second person approves your changes; you may approve " +
 		"your own `caution` change that waited because you sent it with a token, " +
-		"with a click in the web console"
+		"with a click in the web console; a change of rights is not covered"
 	approvalsReader = "you cannot run changes"
 	approvalsOther  = "who may approve depends on your group in the current tenant " +
 		"(see Who may approve in the approvals guide)"
 
 	breakGlassOperator = "break-glass is on: you may approve your own `safe` or " +
-		"`caution` change; `dangerous` and `destructive` changes still need a second person"
+		"`caution` change; `dangerous` and `destructive` changes still need a second person; " +
+		"a change of rights is not covered"
 	breakGlassAdmin = approvalsAdmin +
-		"; break-glass is on: anyone may approve their own `safe` or `caution` change"
-	breakGlassOther = "break-glass is on: a person may approve their own `safe` or " +
-		"`caution` change; the group rules still apply"
+		"; break-glass is on: anyone may approve their own `safe` or `caution` change; " +
+		"a change of rights is not covered"
+	breakGlassOther = "break-glass is on: a person who may run changes may approve " +
+		"their own `safe` or `caution` change; a change of rights is not covered; " +
+		"the group rules still apply"
 )
 
 // approvalsPosture says who may approve what, for the caller's role in

@@ -162,3 +162,72 @@ def test_a_comment_after_a_value_is_not_part_of_the_value(tmp_path: Path) -> Non
 def test_an_unknown_risk_level_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="unknown risk level"):
         _judge(tmp_path, [_row()], [_row(risk_level="mild")])
+
+
+@pytest.mark.parametrize(
+    "reason", ["|", ">", "|-", ">+", "&anchor", "*anchor", "!tag x", "[a]", "{a: b}"]
+)
+def test_an_entry_with_an_unsupported_yaml_reason_is_refused(tmp_path: Path, reason: str) -> None:
+    approved = _entry("removed", reason=reason, op_id="vault.kv.get")
+    with pytest.raises(SystemExit, match="unsupported YAML value"):
+        _judge(tmp_path, [_row(), _row("vault.kv.get")], [_row()], approved)
+
+
+def test_a_removal_with_an_empty_block_reason_fails(tmp_path: Path) -> None:
+    approved = _entry("removed", reason="|", op_id="vault.kv.get") + "\n"
+    with pytest.raises(SystemExit):
+        _judge(tmp_path, [_row(), _row("vault.kv.get")], [_row()], approved)
+
+
+@pytest.mark.parametrize("separator", ["\t", " \t", "\t "])
+def test_editing_only_the_comment_after_a_tab_approves_nothing(
+    tmp_path: Path, separator: str
+) -> None:
+    base_entry = _entry("removed", reason="it is retired # old note", op_id="vault.kv.get")
+    head_entry = _entry(
+        "removed", reason=f"it is retired{separator}# new note", op_id="vault.kv.get"
+    )
+    base, head = [_row(), _row("vault.kv.get")], [_row()]
+    assert _judge(tmp_path, base, head, head_entry, base_approved=base_entry) == 1
+
+
+def test_two_apostrophes_in_a_quoted_reason_are_one(tmp_path: Path) -> None:
+    approved = tmp_path / "read.yaml"
+    approved.write_text(_entry("removed", reason="'It''s retired.' # note"), encoding="utf-8")
+    assert judge_module.read_approved(approved)[0]["reason"] == "It's retired."
+
+
+def test_reasons_that_differ_after_an_apostrophe_are_two_entries(tmp_path: Path) -> None:
+    base_entry = _entry("removed", reason="'It''s retired.'", op_id="vault.kv.get")
+    head_entry = _entry("removed", reason="'It''s replaced.'", op_id="vault.kv.get")
+    base, head = [_row(), _row("vault.kv.get")], [_row()]
+    assert _judge(tmp_path, base, head, head_entry, base_approved=base_entry) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plain text",
+        "plain text # note",
+        "a#b",
+        "'It''s here.'",
+        '"say \\"hi\\""',
+        '"tab\\there" # note',
+        "''",
+    ],
+)
+def test_a_value_reads_as_yaml_reads_it(text: str) -> None:
+    # PyYAML refuses a tab before a comment, so the tab cases have their own tests.
+    yaml = pytest.importorskip("yaml")
+    assert judge_module._value(text) == (yaml.safe_load(f"k: {text}")["k"] or "")
+
+
+def test_a_tab_before_a_comment_ends_the_value() -> None:
+    assert judge_module._value("plain text\t# note") == "plain text"
+    assert judge_module._value("'It''s here.'\t# note") == "It's here."
+
+
+@pytest.mark.parametrize("text", ["'open", '"open', "'a' b", '"a" b'])
+def test_a_broken_quoted_value_is_refused(text: str) -> None:
+    with pytest.raises(SystemExit):
+        judge_module._value(text)

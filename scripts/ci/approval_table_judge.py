@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 LEVELS = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 CREDENTIAL_CLASSES = {"credential_read", "credential_write", "credential_mint"}
+# The first character of a YAML value that the judge does not read.
+_UNSUPPORTED_START = set("|>&*!%@`[]{},?")
 
 
 def load(path: Path) -> dict[tuple[str, str], dict]:
@@ -70,15 +73,55 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
 
 
 def _value(text: str) -> str:
-    """A YAML scalar: the text in quotes, or the plain text without a ``#`` comment."""
-    text = text.strip()
-    if text and text[0] in "\"'":
-        end = text.find(text[0], 1)
-        if end > 0:
-            return text[1:end]
-    if text.startswith("#"):
-        return ""
-    return text.split(" #", 1)[0].strip()
+    """A YAML scalar: quoted text, or plain text without a ``#`` comment.
+
+    A comment starts at a ``#`` after a space or a tab. Any other YAML form
+    (a block such as ``|`` or ``>``, an anchor, a tag, a list or a map) stops
+    the judge, so the value it reads is always the value YAML reads.
+    """
+    text = text.strip(" \t")
+    if text[:1] == "'":
+        value, rest = _single_quoted(text)
+    elif text[:1] == '"':
+        value, rest = _double_quoted(text)
+    else:
+        plain = re.split(r"[ \t]#|^#", text, maxsplit=1)[0].rstrip(" \t")
+        if plain[:1] and plain[0] in _UNSUPPORTED_START:
+            sys.exit(f"approved file: unsupported YAML value {text!r}")
+        return plain
+    rest = rest.lstrip(" \t")
+    if rest and not rest.startswith("#"):
+        sys.exit(f"approved file: unsupported YAML value {text!r}")
+    return value
+
+
+def _single_quoted(text: str) -> tuple[str, str]:
+    """``'It''s here.'`` is ``It's here.``: two apostrophes stand for one."""
+    index = 1
+    while True:
+        end = text.find("'", index)
+        if end < 0:
+            sys.exit(f"approved file: no closing quote in {text!r}")
+        if text[end + 1 : end + 2] != "'":
+            return text[1:end].replace("''", "'"), text[end + 1 :]
+        index = end + 2
+
+
+def _double_quoted(text: str) -> tuple[str, str]:
+    """The text up to the closing quote that no backslash escapes."""
+    index = 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == '"':
+            try:
+                value = json.loads(text[: index + 1])
+            except json.JSONDecodeError:
+                sys.exit(f"approved file: unsupported escape in {text!r}")
+            return str(value), text[index + 1 :]
+        index += 1
+    sys.exit(f"approved file: no closing quote in {text!r}")
 
 
 def read_approved(path: Path) -> list[dict]:

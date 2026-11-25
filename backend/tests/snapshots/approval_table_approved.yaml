@@ -11,6 +11,9 @@
 #     change: lowered_level
 #     reason: one line that says why the change is wanted
 #
+# Each value is on one line, as plain text or in quotes. A block value
+# ("|" or ">") stops the job.
+#
 # "change" is one of: lowered_level, lost_approval, lost_never,
 # left_credential, removed.
 approved: []

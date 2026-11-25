@@ -6055,7 +6055,10 @@ of this file.
   `lost_never`, `left_credential` or `removed`) and `reason`. Only entries
   that the pull request adds count. An entry that matches no change is
   stale and fails the job. An entry already on the base branch approves
-  nothing and never fails.
+  nothing and never fails. Write each value on one line: plain text, or
+  text in quotes. The judge stops on an empty reason and on any other YAML
+  form (for example a block that starts with `|` or `>`). A `#` after a
+  space or a tab starts a comment, which is not part of the value.
 - **The judge tests.** `backend/tests/test_approval_table_judge.py` runs the
   judge on hand-made table pairs.
 

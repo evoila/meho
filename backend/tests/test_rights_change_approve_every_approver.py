@@ -28,6 +28,7 @@ made up.
 
 from __future__ import annotations
 
+import importlib
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -36,11 +37,8 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.policy
-import meho_backplane.connectors.secret.move_preview  # noqa: F401 -- registers secret.move
 from meho_backplane.auth import tenant_admins
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector  # noqa: F401 -- registers writes
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations._validate import compute_params_hash
@@ -61,6 +59,15 @@ from tests.test_people_behind_approve import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
     _surfaces_agree,
 )
+
+# Loading these modules registers the operations the cases call:
+# policy.apply, secret.move and the Keycloak writes.
+for _module in (
+    "meho_backplane.connectors.policy",
+    "meho_backplane.connectors.secret.move_preview",
+    "meho_backplane.connectors.keycloak",
+):
+    importlib.import_module(_module)
 
 _ASKER = "11111111-1111-1111-1111-11111111aaaa"
 _UNLINKED_ADMIN = "11111111-1111-1111-1111-11111111bbbb"

@@ -89,10 +89,15 @@ async def _render(request: Request, *, session_ctx: UISessionContext) -> HTMLRes
     principals = await RunnerPrincipalService().list_(
         tenant_id, include_revoked=True, limit=_LIST_LIMIT
     )
+    # MEHO keeps the set-aside count only with runner checks on, so the
+    # column shows only then.
+    show_set_aside = get_settings().runner_checks_enabled
+    set_aside_map: dict[str, tuple[int, datetime | None]] = {}
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         stale_map = await repository.get_stale_markers(session, tenant_id=tenant_id)
-        set_aside_map = await repository.get_set_aside_markers(session, tenant_id=tenant_id)
+        if show_set_aside:
+            set_aside_map = await repository.get_set_aside_markers(session, tenant_id=tenant_id)
     rows = [
         project_runner_to_row(
             p, stale_at=stale_map.get(p.name), set_aside=set_aside_map.get(p.name, (0, None))
@@ -103,6 +108,7 @@ async def _render(request: Request, *, session_ctx: UISessionContext) -> HTMLRes
         "page_title": "Runners",
         "active_surface": "runners",
         "rows": rows,
+        "show_set_aside": show_set_aside,
         "stale_threshold_seconds": _stale_threshold_seconds(),
         # Shared "now" so the relative-time macro stays consistent across
         # rows within one render.

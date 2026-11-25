@@ -64,6 +64,7 @@
             <span class="text-subtle">—</span>
           {% endif %}
         </td>
+        {% if show_set_aside %}
         <td class="text-xs">
           {% if row.set_aside_count %}
             {{ badge(row.set_aside_count ~ " set aside", variant="warning", title="newest set aside " ~ (row.set_aside_last_at.isoformat() if row.set_aside_last_at else "")) }}
@@ -71,6 +72,7 @@
             <span class="text-subtle">0</span>
           {% endif %}
         </td>
+        {% endif %}
         <td class="text-xs">
           {% if row.revoked %}
             {{ badge("revoked", variant="neutral") }}
@@ -89,7 +91,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="8" class="text-center text-sm text-subtle py-6">
+      <td colspan="{{ 8 if show_set_aside else 7 }}" class="text-center text-sm text-subtle py-6">
         No runners registered yet. Register one via
         <code>meho runner-principal register &lt;name&gt;</code>.
       </td>

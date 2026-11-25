@@ -121,7 +121,7 @@ def _double_quoted(text: str) -> tuple[str, str]:
                 sys.exit(f"approved file: unsupported escape in {text!r}")
             return str(value), text[index + 1 :]
         index += 1
-    sys.exit(f"approved file: no closing quote in {text!r}")
+    raise SystemExit(f"approved file: no closing quote in {text!r}")
 
 
 def read_approved(path: Path) -> list[dict]:

@@ -1555,7 +1555,11 @@ curl -sf https://meho.example.lab/api/v1/auth-config | jq .
 #   "cli_client_id": "meho-cli"
 # }
 
-# 2. CLI device-code flow completes.
+# 2. CLI device-code flow completes. The CLI prints an address and a
+#    short code. Open the address on any device with a browser, enter
+#    the code and log in. No browser opens on the CLI machine and the
+#    browser does not send you back to the CLI: the CLI waits and sees
+#    the login by itself.
 meho login https://meho.example.lab
 # Logged in to https://meho.example.lab; token stored in keyring.
 

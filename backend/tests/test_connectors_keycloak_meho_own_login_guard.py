@@ -376,6 +376,30 @@ def _refused_before_approval(call: dict[str, Any], words: str) -> None:
     _no_advice(call["error"])
 
 
+def _refused_by_realm_check(call: dict[str, Any], words: str) -> None:
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "refused_before_approval", call
+    assert words in call["error"], call["error"]
+
+
+async def _run_refused_by_realm_check(
+    connector: KeycloakConnector,
+    result: dict[str, Any],
+    params: dict[str, Any],
+    target: str,
+    words: str,
+) -> None:
+    """The run is refused by the realm check: its exception class and its words.
+
+    MEHO withholds the text of a keycloak.realm.update error from the result,
+    so the words are read from the handler.
+    """
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "ValueError", result
+    with pytest.raises(ValueError, match=re.escape(words)):
+        await connector.realm_update(_person(), await _target(target), params)
+
+
 def _refused_on_run(result: dict[str, Any], code: str) -> None:
     assert result["status"] != "ok", result
     assert result["extras"]["exception_class"] == "MehoAccessRefusedError", result
@@ -388,6 +412,8 @@ def _refused_on_run(result: dict[str, Any], code: str) -> None:
 
 _OWN_CLIENT_WORDS = "this client is one that MEHO itself signs in with"
 _LOGIN_REALM_WORDS = "this realm is the realm MEHO itself signs in with"
+_OTHER_REALM_FENCE_WORDS = f"this target works on the realm '{_OTHER_REALM}' only"
+_LOGIN_REALM_FENCE_WORDS = f"this target works on the realm '{_LOGIN_REALM}' only"
 
 #: Each refused write: (op_id, params, the words of the refusal, the code).
 _REFUSED: list[tuple[str, dict[str, Any], str, str]] = [
@@ -774,6 +800,7 @@ async def test_the_login_realm_named_by_the_realm_param_is_refused(
     kc: KeycloakConnector,  # noqa: F811
     named: str,
 ) -> None:
+    """A target works on its managed realm only, so the realm check refuses first."""
     params = {"realm": named, "representation": {"enabled": False}}
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         api = _Keycloak(mock, named)
@@ -781,22 +808,23 @@ async def test_the_login_realm_named_by_the_realm_param_is_refused(
         call = await _call(_REALM_UPDATE, params, target=_OTHER_REALM_TARGET)
         result = await _run(_REALM_UPDATE, params, target=_OTHER_REALM_TARGET)
         written = _writes(mock)
-    _refused_before_approval(call, _LOGIN_REALM_WORDS)
-    _refused_on_run(result, "meho_login_realm")
+    _refused_by_realm_check(call, _OTHER_REALM_FENCE_WORDS)
+    await _run_refused_by_realm_check(
+        kc, result, params, _OTHER_REALM_TARGET, _OTHER_REALM_FENCE_WORDS
+    )
     assert written == []
 
 
 @pytest.mark.parametrize(
     "representation",
     [
-        {"realm": "renamed"},
         {"sslRequired": "all"},
         {"attributes": {"frontendUrl": "https://elsewhere.invalid"}},
         {"browserFlow": "made-up-flow"},
         {"defaultSignatureAlgorithm": "HS256"},
         {"displayName": "New name", "enabled": False},
     ],
-    ids=["rename", "ssl", "frontend-url", "browser-flow", "signature", "mixed"],
+    ids=["ssl", "frontend-url", "browser-flow", "signature", "mixed"],
 )
 async def test_changes_of_the_target_login_realm_are_refused(
     kc: KeycloakConnector,  # noqa: F811
@@ -810,6 +838,23 @@ async def test_changes_of_the_target_login_realm_are_refused(
         written = _writes(mock)
     _refused_before_approval(call, _LOGIN_REALM_WORDS)
     _refused_on_run(result, "meho_login_realm")
+    assert written == []
+
+
+async def test_a_rename_of_the_target_login_realm_is_refused(
+    kc: KeycloakConnector,  # noqa: F811
+) -> None:
+    """A new realm name is another realm, so the realm check refuses first."""
+    params = {"representation": {"realm": "renamed"}}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _Keycloak(mock, _LOGIN_REALM)
+        call = await _call(_REALM_UPDATE, params)
+        result = await _run(_REALM_UPDATE, params)
+        written = _writes(mock)
+    _refused_by_realm_check(call, _LOGIN_REALM_FENCE_WORDS)
+    await _run_refused_by_realm_check(
+        kc, result, params, _LOGIN_REALM_TARGET, _LOGIN_REALM_FENCE_WORDS
+    )
     assert written == []
 
 

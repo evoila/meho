@@ -17,7 +17,9 @@ moved (the same pattern as ``secret.move`` in :mod:`.move_preview`).
 
 The export also has a params check: a source kind the export refuses
 (:data:`~.handoff.EXPORT_REFUSED_SOURCE_KINDS`) is refused before the call
-waits for approval.
+waits for approval. A ``keycloak:`` source on another realm than the managed
+realm of its target is refused then too, by the same check as in
+``secret.move`` (:func:`~.move_preview.check_secret_move_realms`).
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ from typing import Any
 
 from meho_backplane.connectors.secret.endpoints import parse_secret_ref
 from meho_backplane.connectors.secret.handoff import EXPORT_REFUSED_SOURCE_KINDS
+from meho_backplane.connectors.secret.move_preview import check_secret_move_realms
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations._validate import params_problem, register_params_check
 
@@ -97,5 +101,6 @@ def check_secret_handoff_export_source(params: dict[str, Any]) -> dict[str, Any]
 
 
 register_params_check("secret.handoff.export", check_secret_handoff_export_source)
+register_park_check("secret.handoff.export", check_secret_move_realms)
 register_preview_builder("secret.handoff.export", build_secret_handoff_export_preview)
 register_preview_builder("secret.handoff.import", build_secret_handoff_import_preview)

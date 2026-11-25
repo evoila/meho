@@ -1173,13 +1173,35 @@ enough on its own. MEHO checks sign-in tokens itself, so a token that
 was already issued keeps working until it ends. Block the person in MEHO
 too: `meho principal block <sub> --reason "<why>"`. MEHO then refuses
 every new request of that person within 5 seconds, on every MEHO
-process. An open live stream is not cut at once: the console's live
-stream ends at its next session check (at most
-`ui_session_read_revalidation_seconds`, 300 seconds by default), and
-`GET /api/v1/feed` ends when the person's token ends.
+process. MEHO checks the block again at fixed points while a call runs.
+A call that reaches such a point ends with the block refusal, and the
+answer says whether a part of it may have run. A request that is
+already on its way to a system runs to its end. To be sure, also end
+the person's sessions in the login server. An open live stream of the
+person (the console's live stream and `GET /api/v1/feed`) ends within
+4 seconds.
 `<sub>` is the person's login id (the user id in Keycloak). To undo it,
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.
+
+Who blocks whom:
+
+- A tenant admin blocks a person in their own tenant.
+- A platform admin blocks a person in every tenant. To block a platform
+  admin, another platform admin runs
+  `meho principal block <sub> --reason "<why>"`. Only a platform admin
+  can remove that block.
+- A platform admin whom a tenant admin blocked can remove that block on
+  their own login: `meho principal unblock <sub> --reason "<why>"`. MEHO
+  first asks for a fresh sign-in in the browser. The audit log keeps the
+  reason and the sign-in.
+- The way back uses the approval sign-in client of the login server
+  (`meho-cli-approve` in MEHO's own setup). An install without that
+  client has no way back; another platform admin or a tenant admin of
+  that tenant removes the block then.
+- To stop a platform admin for sure, also take the platform admin role
+  away in Keycloak and end the person's sessions and long logins (see
+  "To end a person's long login" above).
 
 If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login

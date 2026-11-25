@@ -102,8 +102,9 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.principal_block_run import (
-    mark_request_sent,
+    mark_step_sent,
     raise_if_step_was_refused,
     request_was_sent,
 )
@@ -951,8 +952,9 @@ async def enforce_subop_policy(
             params=params,
         )
         if refused is None:
+            await raise_if_send_refused()
             journal.start(connector_id, op_id, target, params, may_send_again=True)
-            mark_request_sent()
+            mark_step_sent(op_id)
         return refused
     # The rows the gate writes for this step hold only what the step read.
     with track_secret_read_as():
@@ -969,11 +971,15 @@ async def enforce_subop_policy(
         )
     if isinstance(gated, OperationResult):
         return gated
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     if journal is not None:
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
         )
-    mark_request_sent()
+    mark_step_sent(op_id)
     return None
 
 
@@ -1071,12 +1077,16 @@ async def run_governed_subop(
         if isinstance(gated, OperationResult):
             return SubopStep(stopped=gated)
         may_send_again = gated is _GoAhead.NO_PERSON
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     entry = (
         journal.start(connector_id, op_id, target, params, may_send_again=may_send_again)
         if journal is not None
         else None
     )
-    mark_request_sent()
+    mark_step_sent(op_id)
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)
@@ -1457,21 +1467,27 @@ async def _gate_subop(
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
                     install_category=descriptor.policy_install_category,
+                    # A step always gets its own request.
+                    allow_same_call_reuse=False,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed
-            # transaction; the helper is fail-open.
-            await record_approval_step_event(
-                tenant_id=operator.tenant_id,
-                request=request,
-                decision="pending",
-                audit_id=request._audit_id,  # type: ignore[attr-defined]
-            )
+            # transaction; the helper is fail-open. A request that was
+            # reused (not made here) already had its step event.
+            reused = bool(getattr(request, "_reused", False))
+            if not reused:
+                await record_approval_step_event(
+                    tenant_id=operator.tenant_id,
+                    request=request,
+                    decision="pending",
+                    audit_id=request._audit_id,  # type: ignore[attr-defined]
+                )
             return result_awaiting_approval(
                 op_id,
                 request.id,
                 duration_ms,
-                audit_id=request.request_audit_id,
+                reused=reused,
+                audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
                 note=await rights_change_note(request),
             )
 

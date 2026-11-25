@@ -10380,6 +10380,8 @@ type RunnerPrincipalRead struct {
 	OwnerSub           string             `json:"owner_sub"`
 	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
+	SetAsideCount      *int               `json:"set_aside_count,omitempty"`
+	SetAsideLastAt     *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	WireVersion        *string            `json:"wire_version"`
@@ -10402,6 +10404,8 @@ type RunnerPrincipalRegistered struct {
 	OwnerSub                string             `json:"owner_sub"`
 	PackageSetDigest        *string            `json:"package_set_digest"`
 	Revoked                 bool               `json:"revoked"`
+	SetAsideCount           *int               `json:"set_aside_count,omitempty"`
+	SetAsideLastAt          *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId                openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt               time.Time          `json:"updated_at"`
 	WireVersion             *string            `json:"wire_version"`
@@ -10450,7 +10454,10 @@ type RunnerResult_Result struct {
 // “set_aside“ names the results of batches the runner set aside since its
 // last notice. “set_aside_total“ and “set_aside_last_at“ say how many
 // batches are in the runner's set-aside folder and when the newest one was
-// set aside. All three stay empty on a batch without a notice.
+// set aside. All three stay empty on a batch without a notice. MEHO reads at
+// most the first 1,000 entries of “set_aside“. It keeps a “set_aside_total“
+// from 0 to 2147483647 and a “set_aside_last_at“ with a time zone; it drops
+// any other value of these two and still takes the batch.
 type RunnerResultBatch struct {
 	Results        *[]RunnerResult   `json:"results,omitempty"`
 	RunnerId       string            `json:"runner_id"`

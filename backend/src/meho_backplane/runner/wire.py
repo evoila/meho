@@ -53,10 +53,17 @@ treats it purely as a cache key — it never parses it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
+)
 
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 
@@ -64,6 +71,7 @@ __all__ = [
     "FEATURES_HEADER",
     "FEATURE_SCHEDULED_CHECKS",
     "SCHEMA_VERSION",
+    "SET_ASIDE_NOTICES_MAX",
     "WIRE_VERSION_HEADER",
     "WIRE_VERSION_MISMATCH",
     "WIRE_VERSION_WHEN_MISSING",
@@ -339,6 +347,19 @@ class RefusedResult(BaseModel):
     reason: str
 
 
+#: The most set-aside notices of one post: 1,000. The runner sends no more in
+#: one post, and MEHO reads only the first 1,000.
+SET_ASIDE_NOTICES_MAX = 1000
+
+
+def _none_when_unreadable(value: object, read: ValidatorFunctionWrapHandler) -> Any:
+    """The value as its field's type, or ``None`` when it has another type."""
+    try:
+        return read(value)
+    except ValidationError:
+        return None
+
+
 class SetAsideNotice(BaseModel):
     """A result of a batch that MEHO refused every time, so the runner set it aside.
 
@@ -362,7 +383,10 @@ class RunnerResultBatch(BaseModel):
     ``set_aside`` names the results of batches the runner set aside since its
     last notice. ``set_aside_total`` and ``set_aside_last_at`` say how many
     batches are in the runner's set-aside folder and when the newest one was
-    set aside. All three stay empty on a batch without a notice.
+    set aside. All three stay empty on a batch without a notice. MEHO reads at
+    most the first 1,000 entries of ``set_aside``. It keeps a ``set_aside_total``
+    from 0 to 2147483647 and a ``set_aside_last_at`` with a time zone; it drops
+    any other value of these two and still takes the batch.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -370,5 +394,5 @@ class RunnerResultBatch(BaseModel):
     runner_id: str
     results: list[RunnerResult] = Field(default_factory=list)
     set_aside: list[SetAsideNotice] = Field(default_factory=list)
-    set_aside_total: int | None = None
-    set_aside_last_at: datetime | None = None
+    set_aside_total: Annotated[int | None, WrapValidator(_none_when_unreadable)] = None
+    set_aside_last_at: Annotated[datetime | None, WrapValidator(_none_when_unreadable)] = None

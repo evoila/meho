@@ -67,6 +67,7 @@ from meho_backplane.gateway.errors import (
 )
 from meho_backplane.gateway.repository import ingest_results, lock_assignment_row
 from meho_backplane.gateway.runner_checks import (
+    SetAsideNotSavedError,
     ingest_and_count,
     mark_left_off_sensors,
     record_set_aside,
@@ -212,6 +213,23 @@ async def get_assignment(
     return assignment
 
 
+async def _record_set_aside(tenant_id: UUID, batch: wire.RunnerResultBatch) -> None:
+    """Record the set-aside notices of *batch*; a save that fails is a 503."""
+    try:
+        await record_set_aside(
+            tenant_id=tenant_id,
+            runner_name=batch.runner_id,
+            notices=list(batch.set_aside),
+            total=batch.set_aside_total,
+            last_at=batch.set_aside_last_at,
+        )
+    except SetAsideNotSavedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "set_aside_not_saved"},
+        ) from exc
+
+
 @router.post("/results", response_model=ResultIngestResponse, response_model_exclude_none=True)
 async def post_results(
     batch: wire.RunnerResultBatch,
@@ -224,7 +242,9 @@ async def post_results(
     The runner submits only its own results (``batch.runner_id`` is the
     runner name; :func:`assert_runner_scope` binds it to the token's
     ``runner_id``). ``received_at`` is central-stamped; re-posts from the
-    runner's retry spool are deduped by ``result_uid``.
+    runner's retry spool are deduped by ``result_uid``. When MEHO cannot save
+    the set-aside notices of the batch, it answers 503 with the code
+    ``set_aside_not_saved``; the results of the batch are stored.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_CHECKS_OP_IDS["post_results"],
@@ -259,13 +279,7 @@ async def post_results(
                 received_at=received_at,
             )
             if batch.set_aside:
-                await record_set_aside(
-                    tenant_id=operator.tenant_id,
-                    runner_name=batch.runner_id,
-                    notices=list(batch.set_aside),
-                    total=batch.set_aside_total,
-                    last_at=batch.set_aside_last_at,
-                )
+                await _record_set_aside(operator.tenant_id, batch)
             if screened.refused and len(screened.refused) == len(results):
                 raise HTTPException(
                     status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,

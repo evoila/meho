@@ -310,16 +310,19 @@ async def _send_notices(
     that the result was refused, and shows the count of set-aside batches. The
     notice goes out in the tick that set the batch aside, also while other
     batches wait in the spool. It holds no result, so it never passes a waiting
-    one, and MEHO keeps a newer counted result of the check. The notice stays
-    queued when the send fails, and the next tick sends it again.
+    one, and MEHO keeps a newer counted result of the check. One post holds at
+    most ``wire.SET_ASIDE_NOTICES_MAX`` notices; the rest go out on the next
+    tick. The notices stay queued when the send fails (also when MEHO answers
+    503 because it could not save them), and the next tick sends them again.
     """
     if not state.notices:
         return
+    sending = state.notices[: wire.SET_ASIDE_NOTICES_MAX]
     total, last_at = spool.set_aside_summary()
     batch = RunnerResultBatch(
         runner_id=runner_id,
         results=[],
-        set_aside=list(state.notices),
+        set_aside=sending,
         set_aside_total=total,
         set_aside_last_at=last_at,
     )
@@ -330,7 +333,7 @@ async def _send_notices(
     except RunnerClientError as exc:
         _log().warning("runner_set_aside_notice_failed", error=str(exc))
         return
-    state.notices.clear()
+    del state.notices[: len(sending)]
 
 
 async def _run_loop(settings: RunnerSettings) -> None:

@@ -856,7 +856,9 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   name, status and code. In the same tick, also while other batches wait in the retry folder,
   the runner posts a batch without results that carries
   `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
-  `set_aside_last_at`. When that post fails, the next tick sends it again.
+  `set_aside_last_at`. One post holds at most 1,000 notices
+  (`wire.SET_ASIDE_NOTICES_MAX`); the rest go out on the next tick. When that
+  post fails, the next tick sends it again.
   `runner_checks.record_set_aside` shows each such check
   as `unknown` with the reason `result_refused`, the status and the code,
   and stores the count and the time on the runner's assignment row
@@ -865,9 +867,22 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   and underscores (the runner keeps a code in the same form), and a status
   must be 400 to 499. A notice with another `result_uid` is skipped, another
   code is stored as no code, another status as 0, and the post still answers
-  200. A notice without `produced_at` never replaces a counted result. With
+  200. MEHO reads the first 1,000 notices of a post, skips the rest and logs
+  `runner_set_aside_notices_skipped` with the runner and the number. It keeps
+  `set_aside_total` only from 0 to 2147483647 and `set_aside_last_at` only
+  with a time zone; another value leaves the stored one as it is, and the
+  post still answers 200. A notice without `produced_at` never replaces a
+  counted result. The readings, the count and the time are saved in one
+  transaction. When that save fails, MEHO keeps nothing of the notices and
+  the post answers 503 with `detail.code` `set_aside_not_saved`; the results
+  of the same post are stored before. The runner keeps its notices and sends
+  them again on the next tick. With
   `RUNNER_CHECKS_ENABLED` on, the console page `/ui/runners` has a "Set
-  aside" column with both; with the switch off it has no such column.
+  aside" column with both, and the list and get answers of
+  `/api/v1/runner-principals` hold `set_aside_count` and `set_aside_last_at`
+  (0 and no time for a runner without a row), which `meho runner-principal
+  list` and `show` print; with the switch off the page has no such column and
+  the answers have neither field.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
   `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
   result is added after its transaction commits, so a result that rolls

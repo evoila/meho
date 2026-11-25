@@ -96,7 +96,12 @@ from meho_backplane.gateway.repository import ingest_new_results, lock_assignmen
 from meho_backplane.metrics import RUNNER_CHECK_RESULTS_TOTAL
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.runner.result_clean import clean_result
-from meho_backplane.runner.wire import RefusedResult, RunnerResult, SetAsideNotice
+from meho_backplane.runner.wire import (
+    SET_ASIDE_NOTICES_MAX,
+    RefusedResult,
+    RunnerResult,
+    SetAsideNotice,
+)
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.settings import get_settings
 
@@ -106,6 +111,7 @@ __all__ = [
     "RESULT_MAX_BYTES",
     "CountedSensor",
     "ScreenedBatch",
+    "SetAsideNotSavedError",
     "after_commit",
     "ingest_and_count",
     "mark_left_off_sensors",
@@ -715,6 +721,41 @@ def _kept_notice(notice: SetAsideNotice) -> SetAsideNotice | None:
     return notice.model_copy(update={"code": code, "status": status})
 
 
+#: The largest set-aside count the integer column holds.
+_SET_ASIDE_COUNT_MAX = 2_147_483_647
+
+
+class SetAsideNotSavedError(Exception):
+    """The set-aside notices of a post were not saved; nothing of them is kept."""
+
+
+def _first_notices(runner_name: str, notices: list[SetAsideNotice]) -> list[SetAsideNotice]:
+    """The first :data:`SET_ASIDE_NOTICES_MAX` notices of one post; the rest is skipped."""
+    skipped = len(notices) - SET_ASIDE_NOTICES_MAX
+    if skipped > 0:
+        _log.warning("runner_set_aside_notices_skipped", runner=runner_name, skipped=skipped)
+    return notices[:SET_ASIDE_NOTICES_MAX]
+
+
+def _kept_time(value: datetime | None) -> datetime | None:
+    """*value* in UTC, or ``None`` without a time zone or when UTC cannot hold it."""
+    if value is None or value.utcoffset() is None:
+        return None
+    try:
+        return value.astimezone(UTC)
+    except OverflowError:
+        return None
+
+
+def _keep_summary(row: RunnerAssignmentRow, total: int | None, last_at: datetime | None) -> None:
+    """Store the runner's count and time on *row*; a value outside the limits changes nothing."""
+    if total is not None and 0 <= total <= _SET_ASIDE_COUNT_MAX:
+        row.set_aside_count = total
+    kept_at = _kept_time(last_at)
+    if kept_at is not None:
+        row.set_aside_last_at = kept_at
+
+
 async def record_set_aside(
     *,
     tenant_id: uuid.UUID,
@@ -731,11 +772,18 @@ async def record_set_aside(
     these values are kept (:func:`_kept_notice`); another value never makes
     MEHO refuse the post. A check that already has a newer counted result of
     the runner, or already shows this refusal, is not written again. A notice
-    without a runner time never replaces a counted result. The count and the
-    time of the newest set-aside batch are stored on the runner's assignment
-    row. A failure is logged and answers the
-    runner like a batch without a notice.
+    without a runner time never replaces a counted result. Only the first
+    :data:`SET_ASIDE_NOTICES_MAX` notices of one post are read. The count and
+    the time of the newest set-aside batch are stored on the runner's assignment
+    row, the count only from 0 to 2147483647 and the time only with a time zone.
+
+    Everything is saved in one transaction. When the save fails, nothing is
+    kept, no mail goes out, the failure is logged and
+    :class:`SetAsideNotSavedError` is raised. The endpoint then answers 503
+    with the code ``set_aside_not_saved``, and the runner keeps its notices and
+    sends them again.
     """
+    notices = _first_notices(runner_name, notices)
     try:
         counted: list[CountedSensor] = []
         async with get_sessionmaker()() as session:
@@ -749,9 +797,8 @@ async def record_set_aside(
                 )
                 .execution_options(populate_existing=True)
             )
-            if row is not None and total is not None:
-                row.set_aside_count = max(total, 0)
-                row.set_aside_last_at = last_at
+            if row is not None:
+                _keep_summary(row, total, last_at)
             kept = [n for n in map(_kept_notice, notices) if n is not None]
             for notice in sorted(kept, key=lambda n: n.check_ref):
                 sensor = await _runner_sensor_by_ref(session, tenant_id, runner_name, notice)
@@ -769,9 +816,10 @@ async def record_set_aside(
                     )
                 )
             await session.commit()
-        await after_commit(tenant_id, counted)
-    except Exception:
+    except Exception as exc:
         _log.warning("runner_set_aside_record_failed", runner=runner_name, exc_info=True)
+        raise SetAsideNotSavedError from exc
+    await after_commit(tenant_id, counted)
 
 
 async def _runner_sensor_by_ref(

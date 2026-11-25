@@ -20484,6 +20484,127 @@
         }
       }
     },
+    "/ui/blocked-people": {
+      "get": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Index",
+        "operationId": "_index_ui_blocked_people_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Block",
+        "operationId": "_block_ui_blocked_people_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__block_ui_blocked_people_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/blocked-people/unblock": {
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Unblock",
+        "operationId": "_unblock_ui_blocked_people_unblock_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__unblock_ui_blocked_people_unblock_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/runs": {
       "get": {
         "tags": [
@@ -30036,6 +30157,26 @@
         "title": "BlockRead",
         "description": "One block of the list."
       },
+      "Body__block_ui_blocked_people_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body__block_ui_blocked_people_post"
+      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -30193,6 +30334,25 @@
         },
         "type": "object",
         "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
+      },
+      "Body__unblock_ui_blocked_people_unblock_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub"
+        ],
+        "title": "Body__unblock_ui_blocked_people_unblock_post"
       },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {

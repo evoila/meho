@@ -4049,3 +4049,20 @@ through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required
 time-bounded expiry. Service principals have no registry or stored display
 name, so their stored JWT subject intentionally remains the fail-open label.
+
+## Blocked people (`/ui/blocked-people`)
+
+`meho_backplane.ui.routes.principal_blocks` ships the console page of the
+admin block list (`docs/codebase/principal-block.md`):
+
+- `GET /ui/blocked-people` -- the blocks the admin may see, and the
+  block form.
+- `POST /ui/blocked-people` -- block a login (`sub`, `reason`). A refused
+  form answers 422 and draws the form again with the typed values.
+- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`).
+
+The three routes need a person with `tenant_admin`
+(`resolve_human_admin_or_403`). They call `list_blocked`,
+`block_principal` and `unblock_principal`, the same functions as the REST
+routes, so a tenant admin works in their own tenant, a platform admin in
+every tenant, and nobody blocks their own login. The page adds no MCP tool.

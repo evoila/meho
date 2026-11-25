@@ -35,6 +35,8 @@ The text names no admin and no reason.
   sent, and the step the block list refused in it.
 - `meho_backplane/agent/principal_block_gate.py`: the check for hosted
   agent runs (`PrincipalBlockGate`).
+- `meho_backplane/ui/routes/principal_blocks.py`: the console page
+  `/ui/blocked-people`.
 - CLI: `cli/internal/cmd/principal/`.
 
 ## Control flow
@@ -132,6 +134,17 @@ REST routes (`/api/v1/principals/blocked`):
 
 CLI: `meho principal block <sub> --reason <text>`,
 `meho principal unblock <sub>`, `meho principal blocked`.
+
+Console: the page `/ui/blocked-people` lists the blocks the admin may see
+(login id, tenant, reason, who blocked, when), blocks a login with a
+reason, and unblocks a login after a confirm step. It calls the same
+functions as the REST routes, so the rules are the same: only a person
+with `tenant_admin` may open the page or send a form (403 for anyone
+else), a tenant admin works in their own tenant, a platform admin in
+every tenant, and blocking your own login shows a refusal and writes no
+block. Every form carries the console's CSRF token. Each block and
+unblock writes one audit row. A refused form answers 422 and shows the
+message next to its field.
 
 ## Dependencies
 

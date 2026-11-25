@@ -3890,10 +3890,14 @@ the Keycloak admin console, realm <code>meho</code>, open <strong>Clients &gt;
 </div>
 <h3 id="4-check-that-it-works">4. Check that it works<a class="headerlink" href="#4-check-that-it-works" title="Permanent link">&para;</a></h3>
 <ol>
-<li><strong>Command line.</strong> Run <code>meho login https://meho.example.com</code>. Open the
-   link it prints. Keycloak sends you to authentik. Log in with your
-   password and MFA. Keycloak may ask once "Grant Access to …": click
-   <strong>Yes</strong>. Then run <code>meho status</code>. It must show your tenant and role.</li>
+<li><strong>Command line.</strong> Run <code>meho login https://meho.example.com</code>. The CLI
+   prints an address and a short code. Open the address on any device
+   with a browser and enter the code. Keycloak sends you to authentik.
+   Log in with your password and MFA. Keycloak may ask once "Grant
+   Access to …": click <strong>Yes</strong>. No browser opens on the machine where
+   the CLI runs, and the browser does not send you back to the CLI: the
+   CLI sees the login by itself. Then run <code>meho status</code>. It must show
+   your tenant and role.</li>
 <li><strong>Web console.</strong> Open <code>https://meho.example.com/ui/</code>. You land on
    authentik, then on the MEHO dashboard with your name and role.</li>
 <li><strong>Claude Code.</strong> Log in with the MEHO plugin

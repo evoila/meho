@@ -4555,9 +4555,11 @@ then keeps it in its own folder:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">XDG_CONFIG_HOME</span><span class="o">=</span><span class="nv">$W</span>/cli<span class="w"> </span><span class="nv">MEHO_KEYRING_DISABLE</span><span class="o">=</span><span class="m">1</span>
 meho<span class="w"> </span>login<span class="w"> </span>https://<span class="nv">$HOST</span>
 </code></pre></div>
-<p>The command prints an address and a code. Open the address in your
-<strong>normal</strong> browser window, enter the code and sign in as <code>admin</code> with
-its temporary password. Then you should see
+<p>The command prints an address and a short code. Open the address in a
+<strong>normal</strong> browser window on any device, enter the code and sign in as
+<code>admin</code> with its temporary password. No browser opens on the machine
+where the CLI runs, and nothing comes back to it from the browser: the
+CLI sees the login by itself. Then you should see
 <code>Logged in to https://meho.apps...</code>.</p>
 <p>Keep the two <code>export</code> settings in this terminal for every later <code>meho</code>
 command. Check the whole chain:</p>

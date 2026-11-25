@@ -3588,8 +3588,11 @@ meho<span class="w"> </span>version
 <h2 id="step-3-log-in">Step 3: log in<a class="headerlink" href="#step-3-log-in" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
 </code></pre></div>
-<p>The command prints a web address and a code. Open the address in your
-browser, enter the code and log in. Then check the connection:</p>
+<p>The command prints a web address and a short code. Open the address on
+any device with a browser, enter the code and log in. No browser opens
+on the machine where the CLI runs, and the browser does not send you
+back to the CLI: the CLI sees the login by itself. Then check the
+connection:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>status
 </code></pre></div>
 <p>A clean answer means the command line, your login, the network and the

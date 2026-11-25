@@ -3060,6 +3060,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#version-flag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Version flag
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#login-session" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -10652,6 +10663,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#version-flag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Version flag
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#login-session" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -18178,6 +18200,8 @@
 <li><code>--verbose</code>, <code>-v</code> — enable verbose output.</li>
 <li><code>--work-ref</code> — external change-ticket reference, any ticket id on one line (for example <code>gh:evoila/meho#13</code> or <code>CHG0012345</code>; default: <code>$MEHO_WORK_REF</code>). The CLI sends it as the <code>Meho-Work-Ref</code> header on every backplane request, so the audit rows carry it. Five commands have their own <code>--work-ref</code> flag that tags the run with the reference: <code>operation call</code>, <code>scheduler create</code>, <code>runbook start</code>, <code>agent run</code>, and <code>broadcast announce</code>. On those commands only <code>$MEHO_WORK_REF</code> is sent as the header. List commands filter by reference with <code>--filter-work-ref</code>. The backplane cleans every ticket id with one rule: it removes white space at both ends, refuses an empty value, control characters (also a tab inside the id) and invisible characters, allows at most 256 characters, and stores the text in Unicode form NFC.</li>
 </ul>
+<h2 id="version-flag">Version flag<a class="headerlink" href="#version-flag" title="Permanent link">&para;</a></h2>
+<p><code>meho --version</code> prints the CLI version line, the same line as <code>meho version</code>, and exits. It does not contact a backplane and has no short form. The flag works only on <code>meho</code> itself, not on a subcommand: some subcommands, such as <code>meho targets add</code>, have their own <code>--version</code> flag for a product version.</p>
 <h2 id="login-session">Login session<a class="headerlink" href="#login-session" title="Permanent link">&para;</a></h2>
 <p><code>meho login</code> makes a random id for the login session and stores it with the login. Every command sends it in the <code>Meho-Session-Id</code> header, next to <code>Meho-Work-Ref</code>. MEHO stores it as the session id of the audit rows of the request and marks those rows with <code>session_from_client: true</code>, so a CLI call is not counted as an agent session. A token refresh keeps the id; the next <code>meho login</code> makes a new one.</p>
 <h2 id="current-tenant">Current tenant<a class="headerlink" href="#current-tenant" title="Permanent link">&para;</a></h2>

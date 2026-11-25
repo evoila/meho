@@ -3419,8 +3419,10 @@
 <p>The <code>meho</code> CLI is a single static Go binary and the <strong>starting point</strong>
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
-authenticates with the OAuth 2.0 device-code flow — so it works on
-private networks with no browser redirect back to the client.</p>
+authenticates with the OAuth 2.0 device-code flow. The CLI prints an
+address and a short code. You open the address on any device with a
+browser. So it works on private networks and on machines with no
+browser, because nothing comes back to the CLI.</p>
 <p>Install it and log in before wiring any MCP client. You register
 targets and secrets with the CLI, the operator console or REST. The
 default agent surface has no tool for this, so a useful agent session
@@ -3547,9 +3549,13 @@ curl<span class="w"> </span>-sf<span class="w"> </span>https://keycloak.example.
 </code></pre></div>
 <p>This runs the device-code flow: the CLI discovers the realm and the
 public <code>meho-cli</code> client id from the backplane's
-<code>/api/v1/auth-config</code> endpoint, prints a verification URL and code, you
-approve it in a browser as a realm user, and the resulting token is
-stored in your OS keyring (Keychain / Secret Service / Wincred).</p>
+<code>/api/v1/auth-config</code> endpoint, and prints an address and a short code.
+Open the address on any device with a browser, enter the code, and sign
+in as a realm user. No browser opens on the machine where the CLI runs,
+and nothing comes back to it. The CLI waits, then stores the resulting
+token in your OS keyring (Keychain / Secret Service / Wincred).</p>
+<p><code>meho approvals approve</code> is different. It opens a browser sign-in on
+the same machine, for the approval only.</p>
 <p>The CLI also writes the backplane URL to <code>~/.config/meho/config.json</code>
 (<code>$XDG_CONFIG_HOME/meho/config.json</code> when set) so later subcommands do
 not need the URL re-typed. That file holds <strong>only</strong> the backplane URL —
@@ -3581,7 +3587,10 @@ MEHO's built-in login server it ends after 48 hours without use, or
 after 7 days at most. Then run <code>meho login</code> again.</p>
 <ul>
 <li><code>meho login --offline=false</code> asks for a short login instead. It ends
-  after 30 minutes without use (the realm's default).</li>
+  at the realm's SSO Session Idle limit: 1 hour on a realm the MEHO
+  chart created new.
+  A realm made by hand starts with Keycloak's default of 30 minutes.
+  An older realm keeps the limit it already has: ask your admin.</li>
 <li>If the login server does not offer the long login (an older realm),
   <code>meho login</code> logs in without it and prints one line that says so. Ask
   your admin to fix the realm: see

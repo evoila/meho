@@ -5630,7 +5630,7 @@ login client, such as <code>meho-mcp</code>.</p>
 <td><code>meho-cli</code></td>
 <td><code>meho login --offline=false</code></td>
 <td>Short login</td>
-<td>At the realm's SSO Session Idle limit (30 minutes by default).</td>
+<td>At the realm's SSO Session Idle limit: 1 hour (<code>3600</code>) on a realm the MEHO chart created new. An older realm or a realm made by hand keeps its own limit (Keycloak's default is 30 minutes).</td>
 </tr>
 <tr>
 <td><code>meho-mcp</code></td>
@@ -5711,8 +5711,10 @@ above: 48 hours with the recommended setting. Using MEHO renews the
 token, which starts the 48 hours again. If your realm turns on <strong>Offline
 Session Max Limited</strong>, that maximum also applies.</p>
 <p>Without <code>offline_access</code>, the refresh token ends at the realm's <strong>SSO
-Session Idle</strong> limit, which is 30 minutes by default. After that, the next
-MEHO call needs a new browser login.</p>
+Session Idle</strong> limit. A realm the MEHO chart created new has 1 hour.
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has, so check it once.
+After that, the next MEHO call needs a new login.</p>
 <p>Two more things must be true:</p>
 <ul>
 <li>The user has the realm role <code>offline_access</code>. Keycloak gives it to every
@@ -5758,8 +5760,13 @@ too. So set the realm's SSO session to the same values:</p>
 </tr>
 </tbody>
 </table>
-<p>Keycloak's defaults are 30 minutes and 10 hours. With them, the console
-session ends after 30 minutes without use.</p>
+<p>A realm that the MEHO chart creates new gets these values: 1 hour and
+10 hours. An existing realm keeps the values it already has, also after
+an upgrade, because Keycloak reads the realm file only when it creates
+the realm. So check every existing realm once (see "On an existing
+realm, set the two values once" below).
+A realm made by hand starts with Keycloak's defaults: 30 minutes and 10 hours.
+In a realm made by hand, a console session ends after 30 minutes without use.</p>
 <p>When the session ends, the console shows "Your session ended. Please
 sign in again." and a <strong>Sign in</strong> button. After the login, the person is
 back on the same page.</p>

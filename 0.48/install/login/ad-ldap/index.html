@@ -3637,7 +3637,18 @@ on (it is by default). At their first login, each person scans a QR
 code with an authenticator app (for example Microsoft Authenticator or
 FreeOTP). After that, every login asks for the code.</p>
 <p>The same flow runs for <code>meho login</code>, the web UI and Claude (MCP): all
-three log in through the browser.</p>
+three log in through a browser. For <code>meho login</code>:</p>
+<ol>
+<li>The CLI prints an address and a short code.</li>
+<li>Open the address on any device with a browser.</li>
+<li>Enter the short code from the CLI. This is not the authenticator
+   code.</li>
+<li>Log in with the directory account. Then enter the code from the
+   authenticator app.</li>
+</ol>
+<p>No browser opens on the machine where the CLI runs, and the browser
+does not send you back to the CLI. The CLI waits and sees the login by
+itself.</p>
 <h2 id="lab-test">Lab test<a class="headerlink" href="#lab-test" title="Permanent link">&para;</a></h2>
 <p>Use a test person from the directory who is not an admin.</p>
 <ul>

@@ -4236,10 +4236,12 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </
 <p>Log in with the command line:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
 </code></pre></div>
-<p>The command prints an address and a code. Open the address in a
-browser, enter the code and sign in as <code>admin</code> with its temporary
-password. Keycloak asks for a new password, a name and an email. Then
-you should see <code>Logged in to https://meho.example.com</code>.</p>
+<p>The command prints an address and a short code. Open the address on
+any device with a browser, enter the code and sign in as <code>admin</code> with
+its temporary password. Keycloak asks for a new password, a name and an
+email. No browser opens on the machine where the CLI runs, and nothing
+comes back to it from the browser: the CLI sees the login by itself.
+Then you should see <code>Logged in to https://meho.example.com</code>.</p>
 <div class="admonition warning">
 <p class="admonition-title"><code>meho login</code> changes your default MEHO</p>
 <p>The command line keeps one login. If you already use another MEHO,

@@ -3800,8 +3800,10 @@ file <code>meho-ca.crt</code> from Step 5. How to add it to the store is in
 MEHO, later commands go to the new one. Run <code>meho status</code> after the
 login to see which backplane you talk to.</p>
 </div>
-<p>The CLI prints a verification URL and a code. You approve it in a
-browser. The install made one Admin login with a temporary password
+<p>The CLI prints an address and a short code. Open the address on any
+device with a browser and enter the code. No browser opens on the
+machine where the CLI runs, and nothing comes back to it.</p>
+<p>The install made one Admin login with a temporary password
 (<code>admin</code>, in <code>MEHO-Admins</code> and <code>MEHO-Platform-Admins</code>). It is in the
 Secret <code>meho-core-first-login</code>. Read the admin's login with:</p>
 <div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span>meho-core-first-login<span class="w"> </span><span class="se">\</span>

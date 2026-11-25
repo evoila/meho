@@ -74,6 +74,7 @@ class _Central:
         self.token_url = _TOKEN_URL
         self.refuse_enrollment = False
         self.refuse_name = False
+        self.signing_alg = "ES256"
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -93,7 +94,7 @@ class _Central:
                     "client_id": self.client_id,
                     "issuer": _ISSUER,
                     "token_endpoint": self.token_url,
-                    "signing_alg": "ES256",
+                    "signing_alg": self.signing_alg,
                     "key_id": ec_key_id(body["public_key"]),
                 },
             )
@@ -484,6 +485,38 @@ async def test_a_missing_key_with_the_used_code_says_how_to_recover(tmp_path: Pa
         await open_signed_jwt_login(settings, transport=central.transport())
     assert "runner-principal register" in str(caught.value)
     assert (tmp_path / LOGIN_FILE_NAME).read_text() == record
+
+
+@pytest.mark.asyncio
+async def test_the_runner_reads_only_es256_in_the_answer_and_in_the_saved_login(
+    tmp_path: Path,
+) -> None:
+    central = _Central()
+    central.signing_alg = "RS256"
+    with pytest.raises(RunnerLoginError, match=r"signing type RS256.*only ES256"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert not (tmp_path / LOGIN_FILE_NAME).exists()
+    assert [r.url.path for r in central.requests] == ["/api/v1/runner-principals/enroll"]
+
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+    )
+    record = json.loads((tmp_path / LOGIN_FILE_NAME).read_text())
+    record["signing_alg"] = "HS256"
+    (tmp_path / LOGIN_FILE_NAME).write_text(json.dumps(record))
+    central.requests.clear()
+    with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
+        await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    assert central.requests == []
+    with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert central.requests == []
+    assert json.loads((tmp_path / LOGIN_FILE_NAME).read_text())["signing_alg"] == "HS256"
 
 
 @pytest.mark.asyncio

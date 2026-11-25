@@ -336,22 +336,27 @@ It sets:
 - `ingress.className: traefik`, and the annotation
   `traefik.ingress.kubernetes.io/router.entrypoints: websecure`. MEHO
   then answers on HTTPS only.
-- `networkPolicy.ingressControllerNamespace: kube-system`. Only Traefik
-  may reach MEHO.
+- `networkPolicy.ingressControllerNamespace: kube-system`. Only pods in
+  `kube-system`, where Traefik runs, may reach MEHO. This rule names the
+  namespace, not the Traefik pods, so every pod in `kube-system` can reach
+  MEHO.
 - `networkPolicy.ingressControllerEgress.podLabels` with the label
   `app.kubernetes.io/name: traefik`. MEHO can then reach its own address
   through Traefik, on the pod port 8443.
 - `uiConsole.enabled: true` and `config.uiKeycloakClientId: meho-web`:
   the web console.
 - `coreKeycloak.networkPolicy` and `coreVault.networkPolicy`, on. Only
-  MEHO, the setup Jobs and Traefik (Keycloak only) reach them.
+  MEHO and the setup Jobs reach them. Keycloak also lets in every pod in
+  `kube-system`, where Traefik runs, for browser and CLI logins.
 - `corePostgres.persistence.storageClass` and
   `coreVault.persistence.storageClass`, empty. The disks use the default
   class of k3s, `local-path`.
 
-In your own `values.yaml` from Step 3, leave out the `ingress.className`
-line and the `uiConsole` and `config.uiKeycloakClientId` lines. The
-example file sets them. Then pass both files in Step 4, the example file
+In your own `values.yaml` from Step 3, remove only the line
+`className: nginx`. The example file sets the class. Keep the `uiConsole`
+and `config` lines: they set the same values as the example file. If you
+remove them, an empty `config:` is left, Helm reads it as no value, and
+the install fails. Then pass both files in Step 4, the example file
 first:
 
 ```bash

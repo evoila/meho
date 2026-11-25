@@ -34,7 +34,10 @@ ingress:
     # point of the Traefik chart that k3s ships.
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
 networkPolicy:
-  # Only Traefik may reach the backplane. k3s runs it in kube-system.
+  # Only pods in kube-system may reach the backplane. k3s runs Traefik there.
+  # The rule names the namespace, not the Traefik pods, so every pod in
+  # kube-system can reach MEHO. The Traefik pod label below limits only the
+  # calls that MEHO makes to its own address.
   ingressControllerNamespace: kube-system
   # MEHO reaches its own console address through Traefik. The first-start
   # checks `dns` and `certificate` need it. The rule is checked after the
@@ -70,9 +73,10 @@ corePostgres:
     # Empty = the cluster's default StorageClass (local-path on k3s).
     storageClass: ""
 coreKeycloak:
-  # Off by default. On: only the backplane, OpenBao, the setup Jobs and
-  # Traefik (for browser and CLI logins) reach Keycloak. k3s enforces network
-  # rules.
+  # Off by default. On: only the backplane, OpenBao, the setup Jobs and the
+  # pods in kube-system reach Keycloak. Traefik runs in kube-system and needs
+  # it for browser and CLI logins. The rule names the namespace, so every pod
+  # in kube-system can reach Keycloak. k3s enforces network rules.
   networkPolicy:
     enabled: true
     extraFrom:

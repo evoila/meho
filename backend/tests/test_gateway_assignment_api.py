@@ -559,6 +559,39 @@ async def test_results_batch_idempotent(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_revoked_runner_token_works_until_it_ends_then_the_call_gets_401(
+    client: TestClient,
+) -> None:
+    """After revoke, the token the runner holds works until it ends; an ended one gets 401."""
+    await _seed_identities()
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(RunnerPrincipal).where(RunnerPrincipal.id == _RUNNER_A_ID).values(revoked=True)
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        held = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+        ended_token = mint_token(
+            key,
+            sub="runner-sub",
+            tenant_id=DEFAULT_TENANT_ID,
+            tenant_role="read_only",
+            principal_kind="runner",
+            runner_id=str(_RUNNER_A_ID),
+            extra_claims={"iat": 1_000_000, "nbf": 1_000_000, "exp": 1_000_300},
+        )
+        ended = {"Authorization": f"Bearer {ended_token}"}
+        while_valid = client.get("/api/v1/checks/assignment?runner=runner-a", headers=held)
+        after_end = client.get("/api/v1/checks/assignment?runner=runner-a", headers=ended)
+
+    assert while_valid.status_code in (200, 304)
+    assert after_end.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_runner_scoping(client: TestClient) -> None:
     """A runner reaches only its own assignment/results; PUT is tenant-admin-only; 401 unauth."""
     await _seed_identities()

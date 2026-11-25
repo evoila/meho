@@ -581,9 +581,13 @@ def test_list_full_page_renders_seeded_targets() -> None:
     body = response.text
     # G0.15-T10 #1218 -- page title uses the backend taxonomy "Targets"
     # so the noun on the page matches the row's underlying table; the
-    # sidebar label stays "Connectors" for operator-facing parity with
-    # the URL path (Option B in the issue body).
+    # sidebar label also says "Targets"; the web address stays
+    # /ui/connectors.
     assert "<title>Targets" in body
+    # Menu: "Targets" links to /ui/connectors, "Connectors" to the registry.
+    assert re.search(r'href="/ui/connectors"[^>]*>(?:(?!</a>).)*?Targets', body, re.S)
+    assert re.search(r'href="/ui/connectors/registry"[^>]*>(?:(?!</a>).)*?Connectors', body, re.S)
+    assert "Connector Registry" not in body
     assert "vmware-prod" in body
     assert "vmware-dev" in body
     # Sidebar link to /ui/connectors carries the active highlight.

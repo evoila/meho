@@ -301,7 +301,7 @@ async def _render(
 
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context: dict[str, Any] = {
-        "page_title": "Connector Registry",
+        "page_title": "Connectors",
         "active_surface": "connectors-registry",
         "rows": [_row_context(item) for item in items],
         "product_options": _distinct_products(items),

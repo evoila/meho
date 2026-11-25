@@ -45,11 +45,27 @@ from meho_backplane.auth.runner_enrollment_limits import (
 
 __all__ = ["router"]
 
-#: The only names a body error may carry in its ``loc``. Any other name is a
-#: field the sender added, so it is not repeated.
-_KNOWN_LOC_PARTS: frozenset[str] = frozenset(
-    {"body", "enrollment_code", "public_key", "runner_name"}
-)
+#: The field names a body error may carry in its ``loc`` after the leading
+#: ``body`` marker. Any other name is a field the sender added, so it is not
+#: repeated.
+_FIELD_NAMES: frozenset[str] = frozenset({"enrollment_code", "public_key", "runner_name"})
+
+
+def _answer_loc(error: Any) -> list[int | str]:
+    """The ``loc`` of *error* with each name the sender chose replaced.
+
+    Only the first part may be the framework's ``body`` marker. An
+    ``extra_forbidden`` error names the sender's field in its last part, which
+    always becomes ``extra_field``.
+    """
+    loc = list(error.get("loc", ()))
+    extra = error.get("type") == "extra_forbidden"
+    answer: list[int | str] = []
+    for index, part in enumerate(loc):
+        marker = index == 0 and part == "body"
+        field = part in _FIELD_NAMES and not (extra and index == len(loc) - 1)
+        answer.append(part if isinstance(part, int) or marker or field else "extra_field")
+    return answer
 
 
 def _answer_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
@@ -61,11 +77,11 @@ def _answer_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
     """
     answer: list[dict[str, Any]] = []
     for error in errors:
-        loc = [
-            part if isinstance(part, int) or part in _KNOWN_LOC_PARTS else "extra_field"
-            for part in error.get("loc", ())
-        ]
-        item: dict[str, Any] = {"type": error["type"], "loc": loc, "msg": error["msg"]}
+        item: dict[str, Any] = {
+            "type": error["type"],
+            "loc": _answer_loc(error),
+            "msg": error["msg"],
+        }
         ctx = {
             key: value
             for key, value in (error.get("ctx") or {}).items()
@@ -115,11 +131,14 @@ class _EnrollRoute(APIRoute):
             try:
                 return await handler(request)
             except RequestValidationError as exc:
-                await audit_refused_body(await _sent_code(request))
-                return JSONResponse(
+                answer = JSONResponse(
                     status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
                     content={"detail": _answer_errors(exc.errors())},
                 )
+            # The audit runs after the handler is left, so an audit error does
+            # not carry the body check error (and the sent body) with it.
+            await audit_refused_body(await _sent_code(request))
+            return answer
 
         return limited
 
@@ -181,7 +200,13 @@ class RunnerEnrollResponse(BaseModel):
     response_model=RunnerEnrollResponse,
     responses={
         429: {"description": "Too many requests from this source address."},
-        503: {"description": "The request counter or Keycloak cannot be reached."},
+        502: {"description": "Keycloak cannot be reached or answers with an error."},
+        503: {
+            "description": (
+                "The request counter cannot be reached, or the Keycloak admin "
+                "client is not configured."
+            )
+        },
     },
 )
 async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
@@ -197,6 +222,9 @@ async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     than ``RUNNER_ENROLL_RATE_PER_MINUTE`` gets 429 ``enrollment_rate_limited``.
     When the counter cannot be reached the route answers 503
     ``enrollment_limit_unavailable``; the runner's next start tries again.
+    When the Keycloak admin client is not configured it answers 503
+    ``keycloak_admin_not_configured``. When Keycloak cannot be reached or
+    answers with an error it answers 502 ``keycloak_admin_error``.
     A body that fails the body check gets 422 without any value the sender sent.
     """
     try:

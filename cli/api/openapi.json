@@ -10508,7 +10508,7 @@
           "runner-principals"
         ],
         "summary": "Enroll Runner",
-        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``, whatever the name and\nthe key are. A used code with another key gets the same 403. A good code of\na runner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good, unused code with a\nbad key gets 422. A repeat of a used code with the key it enrolled gives\nthe same answer again. A source address that sends more requests per minute\nthan ``RUNNER_ENROLL_RATE_PER_MINUTE`` gets 429 ``enrollment_rate_limited``.\nWhen the counter cannot be reached the route answers 503\n``enrollment_limit_unavailable``; the runner's next start tries again.\nA body that fails the body check gets 422 without any value the sender sent.",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``, whatever the name and\nthe key are. A used code with another key gets the same 403. A good code of\na runner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good, unused code with a\nbad key gets 422. A repeat of a used code with the key it enrolled gives\nthe same answer again. A source address that sends more requests per minute\nthan ``RUNNER_ENROLL_RATE_PER_MINUTE`` gets 429 ``enrollment_rate_limited``.\nWhen the counter cannot be reached the route answers 503\n``enrollment_limit_unavailable``; the runner's next start tries again.\nWhen the Keycloak admin client is not configured it answers 503\n``keycloak_admin_not_configured``. When Keycloak cannot be reached or\nanswers with an error it answers 502 ``keycloak_admin_error``.\nA body that fails the body check gets 422 without any value the sender sent.",
         "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
         "requestBody": {
           "content": {
@@ -10534,8 +10534,11 @@
           "429": {
             "description": "Too many requests from this source address."
           },
+          "502": {
+            "description": "Keycloak cannot be reached or answers with an error."
+          },
           "503": {
-            "description": "The request counter or Keycloak cannot be reached."
+            "description": "The request counter cannot be reached, or the Keycloak admin client is not configured."
           },
           "422": {
             "description": "Validation Error",

@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import json
+import traceback
+import uuid
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
@@ -25,6 +27,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.runner_enrollment_limits import give_back_refusal_slot, take_refusal_slot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, RunnerPrincipal
 from meho_backplane.main import app
@@ -333,7 +336,7 @@ async def test_a_request_with_no_client_address_counts_under_unknown(
 
 @pytest.mark.asyncio
 async def test_an_unreachable_counter_gives_503_with_a_fixed_text(client: TestClient) -> None:
-    with patch(f"{LIMITS}.get_broadcast_client", lambda: BrokenValkey()):
+    with patch(f"{LIMITS}.get_broadcast_client", BrokenValkey):
         resp = client.post(_ENROLL, json={"enrollment_code": "x"})
     assert resp.status_code == 503
     assert resp.json() == {"detail": "enrollment_limit_unavailable"}
@@ -425,7 +428,7 @@ async def test_a_refusal_row_is_written_when_the_counter_cannot_be_reached(
 
     with (
         patch("meho_backplane.api.v1.runner_enrollment.enforce_enroll_request_limit", _open),
-        patch(f"{LIMITS}.get_broadcast_client", lambda: BrokenValkey()),
+        patch(f"{LIMITS}.get_broadcast_client", BrokenValkey),
     ):
         assert client.post(_ENROLL, json=bad).status_code == 422
         assert client.post(_ENROLL, json=bad).status_code == 422
@@ -500,3 +503,128 @@ async def test_another_route_keeps_the_input_of_its_validation_errors(
     assert resp.status_code in (401, 403, 422)
     if resp.status_code == 422:
         assert any("input" in e for e in resp.json()["detail"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bad_body_audit_keeps_the_code_out_of_the_logged_error(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    code = (await _register(client, "site-audit-log"))["enrollment_code"]
+    key = _jwk(tmp_path)
+    with (
+        patch(
+            "meho_backplane.auth.runner_enrollment.write_internal_audit_row",
+            side_effect=RuntimeError("audit write failed"),
+        ),
+        pytest.raises(RuntimeError) as raised,
+    ):
+        client.post(_ENROLL, json={"enrollment_code": code, "public_key": key})
+    # The request logger writes this exception with its whole chain.
+    logged = "".join(traceback.format_exception(raised.value))
+    assert raised.value.__context__ is None
+    for part in (code.partition(".")[2], key["x"], key["y"]):
+        assert part not in logged
+
+
+@pytest.mark.asyncio
+async def test_an_extra_field_named_body_is_not_named_in_the_answer(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    sent = {
+        "enrollment_code": "x",
+        "public_key": _jwk(tmp_path),
+        "runner_name": "site-extra-body",
+        "body": "made-up-extra-value",
+    }
+    resp = client.post(_ENROLL, json=sent)
+    assert resp.status_code == 422
+    assert [e["loc"] for e in resp.json()["detail"]] == [["body", "extra_field"]]
+    assert "made-up-extra-value" not in resp.text
+
+
+def _surrogate_body(code: str, **fields: Any) -> bytes:
+    """A JSON body whose code is the runner's id, a dot and a lone surrogate."""
+    text = json.dumps({"enrollment_code": f"{code.partition('.')[0]}.abc", **fields})
+    return text.replace(".abc", ".abc\\ud800").encode()
+
+
+@pytest.mark.asyncio
+async def test_a_code_with_a_lone_surrogate_is_refused_as_invalid_and_writes_no_row(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    name = "site-surrogate"
+    code = (await _register(client, name))["enrollment_code"]
+    headers = {"Content-Type": "application/json"}
+    before = len(await _refused_rows())
+    bad_body = client.post(_ENROLL, content=_surrogate_body(code), headers=headers)
+    assert bad_body.status_code == 422
+    full = _surrogate_body(code, public_key=_jwk(tmp_path), runner_name=name)
+    resp = client.post(_ENROLL, content=full, headers=headers)
+    assert resp.status_code == 403
+    assert resp.json() == {"detail": "enrollment_code_invalid"}
+    assert len(await _refused_rows()) == before
+
+
+@pytest.mark.asyncio
+async def test_a_right_code_with_a_lone_surrogate_in_the_name_gets_422_and_one_row(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    name = "site-surrogate-name"
+    code = (await _register(client, name))["enrollment_code"]
+    text = json.dumps({"enrollment_code": code, "public_key": _jwk(tmp_path), "runner_name": "s"})
+    body = text.replace('"runner_name": "s"', '"runner_name": "s\\ud800"').encode()
+    before = len(await _refused_rows())
+    resp = client.post(_ENROLL, content=body, headers={"Content-Type": "application/json"})
+    assert resp.status_code == 422
+    rows = await _refused_rows()
+    assert len(rows) == before + 1
+    assert any(
+        r.payload == {"runner": name, "reason": "request_body_invalid", "key_id": None}
+        for r in rows
+    )
+
+
+_RUNNER = uuid.UUID(int=7)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_refusals_give_back_only_the_slot_that_was_taken(
+    valkey: FakeValkey,
+) -> None:
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
+        first = await take_refusal_slot(_RUNNER, "r")
+        assert first is not None and first.left_out == 0
+        assert await take_refusal_slot(_RUNNER, "r") is None
+        await give_back_refusal_slot(_RUNNER, "r", first)
+        retry = await take_refusal_slot(_RUNNER, "r")
+    assert retry is not None and retry.left_out == 1
+
+
+@pytest.mark.asyncio
+async def test_a_slot_given_back_after_the_minute_changed_frees_its_own_minute(
+    valkey: FakeValkey,
+) -> None:
+    start = 1_700_000_030.0
+    with patch(f"{LIMITS}.time.time", return_value=start):
+        first = await take_refusal_slot(_RUNNER, "r")
+    assert first is not None
+    with patch(f"{LIMITS}.time.time", return_value=start + 60):
+        second = await take_refusal_slot(_RUNNER, "r")
+        assert second is not None
+        await give_back_refusal_slot(_RUNNER, "r", first)
+        assert await take_refusal_slot(_RUNNER, "r") is None
+    assert first.key not in valkey.store and second.key in valkey.store
+    with patch(f"{LIMITS}.time.time", return_value=start):
+        assert await take_refusal_slot(_RUNNER, "r") is not None
+
+
+@pytest.mark.asyncio
+async def test_the_left_out_count_is_kept_until_a_row_records_it(valkey: FakeValkey) -> None:
+    start = 1_700_000_030.0
+    with patch(f"{LIMITS}.time.time", return_value=start):
+        assert await take_refusal_slot(_RUNNER, "r") is not None
+        assert await take_refusal_slot(_RUNNER, "r") is None
+        assert await take_refusal_slot(_RUNNER, "r") is None
+    with patch(f"{LIMITS}.time.time", return_value=start + 45 * 24 * 3600):
+        later = await take_refusal_slot(_RUNNER, "r")
+    assert later is not None and later.left_out == 2

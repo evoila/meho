@@ -112,7 +112,9 @@ class RunnerEnrollment:
 
 
 def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+    # "surrogatepass": a lone surrogate (valid in JSON, not in UTF-8) is hashed
+    # as its own bytes, so such a code matches no stored code and is refused.
+    return hashlib.sha256(code.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def new_enrollment_code(runner_id: uuid.UUID) -> tuple[str, str, datetime]:
@@ -324,13 +326,13 @@ async def _audit_refusal(
     refusals were left out since the row before. When the row cannot be written,
     the slot and the count are given back.
     """
-    left_out = await take_refusal_slot(row.id, reason)
-    if left_out is None:
+    slot = await take_refusal_slot(row.id, reason)
+    if slot is None:
         return
     try:
-        await _write_refusal(row, status_code, reason, public_jwk, left_out)
+        await _write_refusal(row, status_code, reason, public_jwk, slot.left_out)
     except BaseException:
-        await give_back_refusal_slot(row.id, reason, left_out)
+        await give_back_refusal_slot(row.id, reason, slot)
         raise
 
 

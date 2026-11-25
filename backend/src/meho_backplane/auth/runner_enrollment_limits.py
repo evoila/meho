@@ -16,20 +16,24 @@ numbers:
   call is made. When Valkey cannot be reached, the error goes up and the route
   answers 503, as the event intake route does.
 * **Refusal rows per runner and reason.** :func:`take_refusal_slot` lets one
-  audit row per runner and reason through each minute. Each refusal that is
-  left out is added to one counter of that runner and reason. The next row that
-  is written takes the whole count, however late it comes. When the row cannot
-  be written, :func:`give_back_refusal_slot` gives the slot and the count back.
-  When Valkey cannot be reached here, the row is written anyway.
+  audit row per runner and reason through each minute. The row's slot is one
+  key per minute, set with ``SET NX``: the first refusal of the minute gets it,
+  every other refusal is left out and added to one counter of that runner and
+  reason. That counter has no end time. The next row that is written takes the
+  whole count, however late it comes. When the row cannot be written,
+  :func:`give_back_refusal_slot` deletes the exact slot key that was taken and
+  gives the count back. When Valkey cannot be reached here, the row is written
+  anyway.
 
-The counters use ``INCR`` and ``EXPIRE`` in one transaction, as the event
-intake counters do (``events/ingest/rate_limit.py``).
+The request counters use ``INCR`` and ``EXPIRE`` in one transaction, as the
+event intake counters do (``events/ingest/rate_limit.py``).
 """
 
 from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
@@ -42,6 +46,7 @@ __all__ = [
     "ENROLL_RATE_LIMIT_DETAIL",
     "ENROLL_WINDOW_SECONDS",
     "EnrollRateLimitError",
+    "RefusalSlot",
     "enforce_enroll_request_limit",
     "give_back_refusal_slot",
     "take_refusal_slot",
@@ -52,9 +57,6 @@ ENROLL_WINDOW_SECONDS: Final[int] = 60
 
 #: The fixed text of the 429 answer.
 ENROLL_RATE_LIMIT_DETAIL: Final[str] = "enrollment_rate_limited"
-
-#: How long a count of left-out refusals is kept without a new refusal.
-_LEFT_OUT_TTL_SECONDS: Final[int] = 30 * 24 * 3600
 
 #: The fixed text of the 503 answer when the counter cannot be reached.
 ENROLL_LIMIT_UNAVAILABLE_DETAIL: Final[str] = "enrollment_limit_unavailable"
@@ -95,41 +97,63 @@ async def enforce_enroll_request_limit(source: str) -> None:
         raise EnrollRateLimitError(ENROLL_WINDOW_SECONDS - (now % ENROLL_WINDOW_SECONDS))
 
 
-def _refusal_keys(runner_id: uuid.UUID, reason: str) -> tuple[str, str]:
-    base = f"meho:ratelimit:runner-enroll-refusal:{runner_id.hex}:{reason}"
-    return f"{base}:{int(time.time()) // ENROLL_WINDOW_SECONDS}", f"{base}:left-out"
+@dataclass(frozen=True)
+class RefusalSlot:
+    """The refusal row slot one request took.
+
+    ``key`` is the slot key of the minute the slot was taken in, or ``None``
+    when Valkey could not be reached. ``left_out`` is the count of refusals
+    left out since the last row, for the row to carry.
+    """
+
+    key: str | None
+    left_out: int
 
 
-async def take_refusal_slot(runner_id: uuid.UUID, reason: str) -> int | None:
+def _refusal_base(runner_id: uuid.UUID, reason: str) -> str:
+    return f"meho:ratelimit:runner-enroll-refusal:{runner_id.hex}:{reason}"
+
+
+async def take_refusal_slot(runner_id: uuid.UUID, reason: str) -> RefusalSlot | None:
     """Ask for the one refusal row of this runner and reason in this minute.
 
     Returns ``None`` when the minute already has its row: write nothing, the
-    refusal is added to the count. Otherwise returns the count of refusals left
-    out since the last row (``0`` when none) and resets it, for the row to
-    carry. When Valkey cannot be reached it returns ``0``: the row is written.
+    refusal is added to the count. Otherwise returns the slot with the count of
+    refusals left out since the last row (``0`` when none), and resets the
+    count. When Valkey cannot be reached the row is written, with the count
+    that could be read.
     """
-    window_key, left_out_key = _refusal_keys(runner_id, reason)
-    try:
-        if await _count(window_key) > 1:
-            client = get_broadcast_client()
-            await client.incr(left_out_key)
-            await client.expire(left_out_key, _LEFT_OUT_TTL_SECONDS)
-            return None
-        taken = await get_broadcast_client().getdel(left_out_key)
-    except Exception:
-        _log.warning("runner_enroll_limit_unavailable", exc_info=True)
-        return 0
-    return int(taken or 0)
-
-
-async def give_back_refusal_slot(runner_id: uuid.UUID, reason: str, left_out: int) -> None:
-    """Undo :func:`take_refusal_slot` after the row could not be written."""
-    window_key, left_out_key = _refusal_keys(runner_id, reason)
+    base = _refusal_base(runner_id, reason)
+    slot_key = f"{base}:{int(time.time()) // ENROLL_WINDOW_SECONDS}"
+    left_out_key = f"{base}:left-out"
     try:
         client = get_broadcast_client()
-        await client.decr(window_key)
-        if left_out:
-            await client.incrby(left_out_key, left_out)
-            await client.expire(left_out_key, _LEFT_OUT_TTL_SECONDS)
+        taken = await client.set(slot_key, "1", nx=True, ex=2 * ENROLL_WINDOW_SECONDS)
+    except Exception:
+        _log.warning("runner_enroll_limit_unavailable", exc_info=True)
+        return RefusalSlot(key=None, left_out=0)
+    try:
+        if not taken:
+            await client.incr(left_out_key)
+            return None
+        left_out = await client.getdel(left_out_key)
+    except Exception:
+        _log.warning("runner_enroll_limit_unavailable", exc_info=True)
+        return RefusalSlot(key=slot_key if taken else None, left_out=0)
+    return RefusalSlot(key=slot_key, left_out=int(left_out or 0))
+
+
+async def give_back_refusal_slot(runner_id: uuid.UUID, reason: str, slot: RefusalSlot) -> None:
+    """Undo :func:`take_refusal_slot` after the row could not be written.
+
+    Deletes the slot key that was taken (not the key of the current minute)
+    and adds the count back, so the next refusal writes the row.
+    """
+    try:
+        client = get_broadcast_client()
+        if slot.key is not None:
+            await client.delete(slot.key)
+        if slot.left_out:
+            await client.incrby(f"{_refusal_base(runner_id, reason)}:left-out", slot.left_out)
     except Exception:
         _log.warning("runner_enroll_limit_unavailable", exc_info=True)

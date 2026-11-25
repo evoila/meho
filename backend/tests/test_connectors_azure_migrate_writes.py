@@ -1961,6 +1961,61 @@ async def test_a_group_put_that_names_no_state_counts_as_done() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_pending_add_with_no_link_is_read_until_it_succeeds_before_the_remove() -> None:
+    sent: list[str] = []
+
+    def update(request: httpx.Request) -> httpx.Response:
+        kind = json.loads(request.content)["properties"]["operationType"]
+        sent.append(kind)
+        return httpx.Response(200, json=_group_state("Updating" if kind == "Add" else "Succeeded"))
+
+    def read(_: httpx.Request) -> httpx.Response:
+        sent.append("GET")
+        state = "Succeeded" if sent.count("GET") > 1 else "Updating"
+        return httpx.Response(200, json=_group_state(state))
+
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.update.mock(side_effect=update)
+        routes.get.mock(side_effect=read)
+        result = await _connector().migrate_group_update(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "add": ["m-1"], "remove": ["m-2"]}
+        )
+
+    # The Add answered Updating with no link: the group is read until it is
+    # Succeeded, and only then is the Remove sent. The last GET is the read-back.
+    assert sent == ["Add", "GET", "GET", "Remove", "GET"]
+    assert result["steps"][0]["done"] is True
+    assert result["steps"][1]["sent"] is True
+    assert result["not_sent"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_add_still_pending_when_the_wait_is_over_sends_no_remove() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _Group(mock)
+        routes.update.respond(
+            200, headers={"Retry-After": "3600"}, json=_group_state("Updating")
+        )
+        result = await _connector().migrate_group_update(
+            operator(), AzureTargetStub(), {**GROUP_PARAMS, "add": ["m-1"], "remove": ["m-2"]}
+        )
+
+    assert routes.update.call_count == 1
+    assert result["steps"][0]["done"] is False
+    assert "had not finished the resource" in result["steps"][0]["poll_error"]
+    assert result["steps"][1] == {
+        "operation_type": "Remove",
+        "machines": 1,
+        "sent": False,
+        "done": False,
+        "operation": None,
+        "poll_error": None,
+    }
+    assert "Taking machines out was not sent" in result["not_sent"]
+
+
+@pytest.mark.asyncio
 async def test_a_pending_import_site_with_no_link_is_read_until_it_succeeds() -> None:
     with respx.mock(assert_all_called=False) as mock:
         routes = _Import(mock)

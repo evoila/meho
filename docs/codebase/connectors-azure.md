@@ -2163,7 +2163,9 @@ the mixin to its own.
   Azure's `Retry-After`, until it ends or MEHO's wait is over. `done` is true
   only for `Succeeded`; `Failed` and `Canceled` raise an error with Azure's
   reason. An answer with no state counts as done. This holds for every `PUT`
-  of these writes, and for an import site that already exists: a retry that
+  of these writes, for the `updateMachines` `POST` of `group.create` and
+  `group.update` (MEHO then reads the group), and for an import site that
+  already exists: a retry that
   finds the site still running goes no further. When Azure has not confirmed the
   import site or the import collector after MEHO's wait, the import stops
   before it asks for an upload link. When Azure has not confirmed the group

@@ -213,6 +213,11 @@ async def arm_write(
 ) -> WriteOutcome:
     """Send one write. When Azure starts a long-running operation, wait for it.
 
+    An answer with no link to follow but a ``provisioningState`` that has not
+    ended is read again at *resource_id* until it ends: for a ``PUT`` that is
+    the written resource, for a ``POST`` such as ``updateMachines`` the
+    resource it changes (the group).
+
     *repeatable* says whether the write may be sent again after a lost answer
     or a 5xx: true for a ``PUT`` (same name, same body, same result), false
     for a ``POST``. A failed operation raises :class:`AzureRequestError` with
@@ -233,7 +238,7 @@ async def arm_write(
     payload = json_payload_or_empty(response)
     reference = operation_reference(target, response, resource_id=resource_id)
     if reference is None:
-        if provisioning_state(payload) is None or method != "PUT" or resource_id is None:
+        if provisioning_state(payload) is None or resource_id is None:
             return WriteOutcome(response.status_code, payload, None, True)
         return await wait_until_provisioned(
             connector,

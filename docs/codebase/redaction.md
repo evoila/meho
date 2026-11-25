@@ -409,6 +409,107 @@ scanned: they hold made-up secret shapes on purpose. The check runs in the
 required unit test job, and its own tests prove that it fails on a planted
 capture.
 
+## Secret values of a call, hidden by value
+
+A vendor system can repeat a secret value of the request in its answer, most
+often in an error text. The key-name walk and the Tier-1 shapes find a secret
+by its name or its form. `redaction/call_secrets.py` knows the value itself.
+
+A call has a set of known secret values. The dispatcher opens the set when
+the call starts (`bind_call_secrets`) and closes it when the call ends. A step
+of a multi-step operation starts with the values of its parent. The set holds:
+
+* the values of the params under a secret name, at any depth;
+* the `value` of a name/value pair whose `name` is a secret name
+  (`{"name": "PASSWORD", "value": "..."}`), the same rule the answer walk uses;
+* the values at a place the operation's parameter schema marks as secret
+  (`writeOnly` or `format: password`). The mark holds at its own path only
+  (`marked_secret_paths`): marking `login.value` does not hide `display.value`.
+  The mark is read on the schema at each place, also when it comes through a
+  local `$ref`, an array's `items` or a combiner. A path holds the array
+  positions too: a mark on one `prefixItems` entry holds only at that
+  position, so a public label next to it stays public. A mark on
+  `patternProperties` holds for the keys that match the name pattern. A mark
+  on `additionalProperties` holds only for keys the schema does not declare
+  next to it and that match none of its name patterns, so a declared `label`
+  stays public;
+* the values MEHO reads from the secret store for the call: the secret-named
+  fields under the names the connector reads, after the target's
+  `secret_field_map`, both as stored and with surrounding whitespace removed
+  (`_note_secret_fields` in `connectors/_shared/vault_creds.py`). A user name
+  is not one of them.
+
+The value pass runs last, after the rules that read the vendor's own field
+names and after MEHO decided the outcome of the call. So a vendor label that
+equals a known value cannot stop a field-name rule, and a known value cannot
+change whether a multi-step operation failed. The message of a failed
+multi-step operation, and the error issues kept in the short answer, are
+picked by the severity the step returned, before its values are hidden. The
+field names MEHO reads in that answer (`status`, `summary`, `issues`,
+`severity`, `message`) stay as they are, and its code (the `status` the
+step returned) is checked like any other text.
+
+A policy rule can replace only part of a known value (a value with `?token=`
+in it), or hide more than the value (a whole `Bearer` token when the value is
+the word `Bearer`). `keep_call_secrets_whole` compares each text that holds a
+known value with the rule's result, word by word. A part the rule changed
+shows what the rule wrote. A known value, with every change that touches it,
+becomes one mark. When the rule hid the value whole (one change holds it, and
+the rule's text holds no four characters in a row of it), the rule's own label
+stays instead. Every other part is the same in both texts. So the text
+keeps everything the rule hid, and no part of the value. A word is the unit,
+so a letter of a hidden word never lines up with a letter of the rule's
+label. Texts with more than 20,000 words together are not compared: such a
+text is hidden whole. The connector-boundary redaction
+(`_apply_redaction_middleware`), the default view and the error cleanup in
+`_protect_secret_values`, `redact_error_payload`, `_sanitize_free_text`, the
+Azure error text and the trace body (`redact_body`) use it. The redaction
+manifest paths name keys of the answer, so each key in them is named as in
+the stored answer (`scrub_call_secret_path`), with the same counter when two
+masked keys meet.
+
+Every place where vendor text
+leaves the connector layer replaces each known value with
+`[REDACTED:call_secret]`:
+
+| Place | Where |
+| --- | --- |
+| The answer and the audit row of a success, and of a multi-step error | end of `_protect_secret_values` |
+| The error text, `extras` (with `upstream_message`) and `result` of an error | `redact_error_result` |
+| A vendor or exception text that is cut to a length | `_sanitize_free_text`, the Vault error texts, and the texts the phpIPAM, Azure, FreeIPA, Keycloak, Hetzner Robot and HTTP probe connectors cut themselves, before the cut |
+| The `audit_*` fields a handler adds to the audit row | `_add_handler_extras_and_error` |
+| The whole stored span: name, status and every attribute (URL, headers, bodies, reasons) | `_CaptureScope.add` |
+
+The pass covers strings, keys and numbers. A key that stays as it is keeps
+its name. A key that becomes the mark gets a counter at its end when its name
+is taken, in either order, so no entry is lost. A number that holds a known
+value becomes the mark as text. The top-level names of an error's `extras`
+and its `error_code` stay as MEHO set them, so the caller and the audit
+writer can read them. A result a handler returns itself is checked first
+(`hide_call_secrets_in_returned_result`): its text, its `result`, the names
+of its `extras` and its `error_code`. Only the names MEHO reads from a result
+(`MEHO_RESULT_NAMES`) stay as they are there. A connector text is checked
+before it is trimmed or cut, so a value that ends in a space is found.
+
+A value is found in the forms a vendor may send back: as it is, JSON-escaped
+(once and twice, with and without `\/` and `\u` escapes in each round), percent-encoded
+(`%20` and `+`, with `/` encoded or kept, upper and lower case), and as base64
+of the whole value (standard and URL-safe, with and without padding). A value
+shorter than four characters is not known: it would hide parts of ordinary
+words.
+
+Matcher: one pattern holds every form, longest first, inside a look-ahead,
+so one scan finds each place where a form starts, also inside an earlier hit.
+The spans are merged as the scan goes, so two values that overlap, or where
+one is a part of the other, leave no part. The pattern is built without
+Python's pattern cache (`re._compiler.compile`), so the values leave memory
+with the call.
+
+Cost: a call with no known value does no work at all. Otherwise each string,
+key and number of the answer is scanned once, and only one with a hit is
+rewritten. There is no size cut. When a rule changed a text that holds a
+known value, that text is compared word by word with the rule's result.
+
 ## Action semantics
 
 | Action | Replacement |

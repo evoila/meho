@@ -90,6 +90,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from meho_backplane.redaction.call_secrets import keep_call_secrets_whole
 from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.flight_recorder._xml_digest import xml_fault_digest
 from meho_backplane.redaction.flight_recorder.verdict import (
@@ -226,6 +227,9 @@ def redact_body(
         path_redacted = _apply_path_redaction(parsed, paths)
         prop_redacted = _redact_ovf_property_values(path_redacted)
         scrubbed, _fired = scrub_content(prop_redacted)
+        # While the whole body is here: a rule that changed a secret value of
+        # the call leaves no part of it, and what the rule hid stays hidden.
+        scrubbed = keep_call_secrets_whole(parsed, scrubbed)
     except Exception as exc:  # any walk/glob/scrub fault fails closed (F2 uncertainty)
         # Covers a RecursionError from an adversarially deep pre-parsed
         # body handed straight in (bypassing the guarded JSON parse), so

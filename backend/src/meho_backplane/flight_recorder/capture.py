@@ -58,7 +58,7 @@ from __future__ import annotations
 import time
 import uuid
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
 
@@ -80,6 +80,7 @@ from meho_backplane.flight_recorder._capture_util import (
 )
 from meho_backplane.flight_recorder.config import should_capture
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
+from meho_backplane.redaction.call_secrets import scrub_call_secrets, scrub_call_secrets_tree
 from meho_backplane.redaction.flight_recorder import redact_span
 
 __all__ = [
@@ -161,7 +162,18 @@ class _CaptureScope:
     overflow: dict[str, int] = field(default_factory=dict)
 
     def add(self, span: SpanInput) -> None:
-        """Append *span* under the F3 caps; overflow collapses, never errors."""
+        """Append *span* under the F3 caps; overflow collapses, never errors.
+
+        The secret values of the call are hidden in the whole span first: its
+        name and every attribute (the URL, the headers, the bodies and the
+        reasons a body was left out).
+        """
+        span = replace(
+            span,
+            name=scrub_call_secrets(span.name),
+            status=scrub_call_secrets(span.status) if span.status is not None else None,
+            attributes=scrub_call_secrets_tree(dict(span.attributes)),
+        )
         if len(self.spans) >= _MAX_SPANS:
             self._collapse(span.span_kind)
             return

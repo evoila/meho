@@ -31,6 +31,7 @@ from typing import Any, Final
 import httpx
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.redaction.call_secrets import keep_call_secrets_whole, scrub_call_secrets
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -140,12 +141,13 @@ def clean_azure_text(message: object) -> str | None:
     if not isinstance(message, str) or not message:
         return None
     try:
-        cleaned = redact(message, get_default_policy()).redacted
+        cleaned = keep_call_secrets_whole(message, redact(message, get_default_policy()).redacted)
     except Exception:  # never let Azure's raw text through on the error path
         return _TEXT_WITHHELD
     if not isinstance(cleaned, str):
         return _TEXT_WITHHELD
-    return cleaned[:_MESSAGE_CAP]
+    # The secret values of the call go before the cut, so no part of one stays.
+    return scrub_call_secrets(cleaned)[:_MESSAGE_CAP]
 
 
 def azure_error_body(response: httpx.Response) -> tuple[str | None, str | None]:

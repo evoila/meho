@@ -25,6 +25,7 @@ import httpx
 
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
 
 __all__ = [
     "AUTH_REMEDIATION",
@@ -90,7 +91,9 @@ def phpipam_message(response: httpx.Response) -> str | None:
     message = body.get("message") if isinstance(body, dict) else None
     if not isinstance(message, str) or not message.strip():
         return None
-    return message.strip()[:_MESSAGE_CAP]
+    # The secret values of the call go before the trim and the cut, so no
+    # part of one stays (a value may end in a space).
+    return scrub_call_secrets(message).strip()[:_MESSAGE_CAP]
 
 
 def auth_error(

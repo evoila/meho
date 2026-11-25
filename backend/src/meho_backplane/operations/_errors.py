@@ -68,6 +68,7 @@ from meho_backplane.operations.uncertain_outcome import (
     UNCERTAIN_OUTCOME,
     request_may_have_reached_vendor,
 )
+from meho_backplane.redaction.call_secrets import keep_call_secrets_whole, scrub_call_secrets
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
@@ -199,11 +200,16 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     it behind a quote.
     """
     try:
-        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
+        cleaned = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
+        # A rule that replaces part of a secret value of the call does not
+        # leave the rest, and what the rule hid stays hidden.
+        redacted = keep_call_secrets_whole(text, cleaned)
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
         return _TEXT_WITHHELD
+    # The secret values of the call go before the cut, so no part of one stays.
+    redacted = scrub_call_secrets(redacted)
     if len(redacted) > cap:
         return redacted[:cap] + "...<truncated>"
     return redacted
@@ -2168,7 +2174,9 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
         if isinstance(message, str) and message.strip():
             return _sanitize_free_text(message, cap=_UPSTREAM_MESSAGE_CAP)
     try:
-        text = (response.text or "").strip()
+        # The secret values of the call go before the trim: a value may end
+        # in a space the trim would take away.
+        text = scrub_call_secrets(response.text or "").strip()
     except httpx.StreamError:
         return None
     if not text:
@@ -3067,7 +3075,7 @@ def result_connector_vault_forbidden(
             "convention."
         )
         # Target-less denial: the raw Vault text is the only detail.
-        msg = str(exc)
+        msg = scrub_call_secrets(str(exc))
         if len(msg) > _EXC_MESSAGE_CAP:
             msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
         if msg:
@@ -3159,7 +3167,7 @@ def result_connector_vault_write_forbidden(
     secret material — and tails the operator-facing string under the
     :data:`_EXC_MESSAGE_CAP` discipline.
     """
-    msg = str(exc)
+    msg = scrub_call_secrets(str(exc))
     if len(msg) > _EXC_MESSAGE_CAP:
         msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
     path_clause = f" on {write_path!r}" if write_path else ""

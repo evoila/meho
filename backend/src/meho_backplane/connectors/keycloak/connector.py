@@ -132,6 +132,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
 
 __all__ = ["KeycloakAdminTokenError", "KeycloakConnector", "KeycloakWriteResult"]
 
@@ -310,6 +311,7 @@ def _upstream_token_error_detail(response: httpx.Response) -> str:
     parts = [f"error={error!r}"]
     description = body.get("error_description")
     if isinstance(description, str) and description:
+        description = scrub_call_secrets(description)
         truncated = description[:_MAX_ERROR_DESCRIPTION_CHARS]
         if len(description) > _MAX_ERROR_DESCRIPTION_CHARS:
             truncated += "…"

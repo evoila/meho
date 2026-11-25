@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
+from meho_backplane.redaction.call_secrets import scrub_call_secrets
+
 __all__ = [
     "API_VERSION",
     "AUTOMEMBER_ADD_COMMAND",
@@ -186,7 +188,7 @@ def build_request(
 
 
 def _short(value: Any) -> str:
-    text = value if isinstance(value, str) else repr(value)
+    text = scrub_call_secrets(value if isinstance(value, str) else repr(value))
     return text if len(text) <= _ERROR_TEXT_LIMIT else text[:_ERROR_TEXT_LIMIT] + "..."
 
 

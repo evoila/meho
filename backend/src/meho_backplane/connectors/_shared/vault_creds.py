@@ -103,6 +103,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.credential_backend import (
     WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
@@ -117,6 +118,7 @@ from meho_backplane.connectors._shared.gsm_creds import (
     gsm_project_of,
     is_gsm_project_allowed,
 )
+from meho_backplane.redaction.call_secrets import note_call_secrets
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -706,6 +708,22 @@ async def _resolve_and_load(
     return store_ref, secret_data
 
 
+def _note_secret_fields(secret_data: Mapping[str, object]) -> None:
+    """Tell the call the secret values a connector gets from the store.
+
+    *secret_data* is the view the connector reads: the field names after the
+    target's ``secret_field_map``. Each secret-named field counts as stored
+    and as sent (surrounding whitespace removed,
+    :func:`strip_credential_value`), so a vendor text that repeats either
+    form is hidden by value.
+    """
+    values: set[str] = set()
+    for name, value in secret_data.items():
+        if is_secret_param_name(str(name)) and isinstance(value, str | int | float):
+            values |= {str(value), strip_credential_value(value)}
+    note_call_secrets(values)
+
+
 async def load_basic_credentials(
     target: BasicCredentialsTargetLike,
     operator: Operator,
@@ -777,8 +795,10 @@ async def load_basic_credentials(
     # scheme-stripped ref, named in a missing-field error.
     store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
     field_map = _field_map_for_read(target)
+    view = _apply_secret_field_map(secret_data, field_map)
+    _note_secret_fields(view)
     credentials = _extract_fields(
-        _apply_secret_field_map(secret_data, field_map),
+        view,
         fields,
         target_name=target.name,
         secret_ref=store_ref,
@@ -835,6 +855,7 @@ async def load_vault_secret_data(
     """
     _store_ref, raw_data = await _resolve_and_load(target, operator, mount=mount)
     secret_data = _apply_secret_field_map(raw_data, _field_map_for_read(target))
+    _note_secret_fields(secret_data)
 
     # Log only the field-name set (no values). Sorted for a stable log
     # shape that diff-friendly observability tooling can pattern-match

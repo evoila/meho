@@ -1338,18 +1338,27 @@ signed-URL/client-identity header is absent by construction:
 **Query strings** (`query.py`, #3841). The vendor-call seam drops the
 query and the user part from a recorded URL (`_capture_util.py::safe_url`,
 for a parsed URL and for a plain string). Every entry keeps the scheme,
-host, port and path. For an operation that sends a secret, the path stays
+host, port and path. The host and port are HTTPX's `netloc`, as sent: a
+port that is not the scheme's default stays, and an IPv6 host keeps its
+brackets. For an operation that sends a secret, the path stays
 percent-encoded as it was sent, and each path segment that holds a value of
 a parameter of the call is replaced by the mark `[redacted]`
 (`mask_path_values`). For an ingested operation, the segments are the ones
 where its path template puts a parameter (also a value with a `/`, or a
 value inside a segment such as `{key}:rotate`); its fixed segments stay,
-also when one equals a value of the call. A typed operation builds its path
-in code, so MEHO cannot tell its fixed segments from its values: a segment is
-masked when, after percent-decoding, it holds a value of the call as a word
-of its own, or a value of eight characters or more anywhere. The same value
-rule holds for an address that does not follow the template, such as a
-redirect to another path. This holds for the first request, each followed
+also when one equals a value of the call. The template matches in any
+letter case, because a change follows a 307 or 308 to the same path in
+another letter case. A typed operation builds its path in code, so MEHO
+reads its path values by value: a segment is masked when, after
+percent-decoding and in any letter case, it holds a value of the call as a
+word of its own, or a value of eight characters or more anywhere. A value
+that the request body carries is not a path value (`request_body_values`,
+set by `_request_json`, `_post_json` and `_send_traced`), so a fixed
+segment such as `proxy` in `/v1/settings/proxy` stays when the proxy user
+name in the body is `proxy`; a value under a secret key of the body
+(`is_secret_param_name`) still counts. The same value rule holds for an
+address that does not follow the template, such as a redirect to another
+path. This holds for the first request, each followed
 redirect and a request that ends in a network error. A URL inside a recorded body
 keeps its query; the credential-shape net hides its user part and its
 secret query values (`url_secret`). A transport that needs the query on the span

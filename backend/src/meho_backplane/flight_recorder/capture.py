@@ -55,8 +55,10 @@ operator-only degrade).
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
+from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,11 +66,12 @@ from typing import Any, Final
 
 import structlog
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import classify_op, is_secret_param_name
 from meho_backplane.flight_recorder._capture_util import (
     approx_bytes,
     approx_span_bytes,
     as_mapping,
+    body_values,
     cap_body,
     coerce_uuid,
     elapsed_ms,
@@ -229,6 +232,10 @@ _active_capture_var: ContextVar[_CaptureScope | None] = ContextVar(
 _op_context_var: ContextVar[_OpContext | None] = ContextVar(
     "flight_recorder_op_context", default=None
 )
+
+#: The body of the operation request the HTTP seam is sending now
+#: (:func:`request_body_values`). Read only to build a trace address.
+_request_body_var: ContextVar[Any] = ContextVar("flight_recorder_request_body", default=None)
 
 _INACTIVE_HANDLE: Final[CaptureHandle] = CaptureHandle(
     owns=False, scope=None, op_token=None, cap_token=None
@@ -489,6 +496,22 @@ def _redact_vendor_call(
     return redaction, _span_url(request_url), req_truncated or resp_truncated
 
 
+@contextlib.contextmanager
+def request_body_values(body: Any) -> Iterator[None]:
+    """Name the body of the operation request sent inside, for the trace address.
+
+    The HTTP seam wraps one request in it: the first send, each followed
+    redirect and a network error. A value that this body carries was put
+    into the body, not into the path, so the trace does not mask a path
+    segment because of it (a value under a secret key still counts).
+    """
+    token = _request_body_var.set(body)
+    try:
+        yield
+    finally:
+        _request_body_var.reset(token)
+
+
 def _span_url(url: Any) -> str:
     """The address put on a vendor-call span: scheme, host, port and path.
 
@@ -496,11 +519,14 @@ def _span_url(url: Any) -> str:
     value of the call's parameters is replaced by a fixed mark
     (:func:`mask_path_values`); the path is then kept percent-encoded, as it
     was sent. The test is the one the error results use
-    (``operations._vendor_text.sends_secret``).
+    (``operations._vendor_text.sends_secret``). Without a path template (a
+    typed operation), a value that the request body carries is not a path
+    value, so a fixed segment with the same text stays.
     """
     op = _op_context_var.get()
     if op is not None and _op_sends_secret(op):
-        return mask_path_values(encoded_safe_url(url), op.path_values, op.path_template)
+        values = op.path_values - body_values(_request_body_var.get(), is_secret_param_name)
+        return mask_path_values(encoded_safe_url(url), values, op.path_template)
     return safe_url(url)
 
 

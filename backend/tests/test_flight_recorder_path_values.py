@@ -8,10 +8,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.flight_recorder._capture_util import (
+    body_values,
     encoded_safe_url,
     mask_path_values,
     path_values,
+    safe_url,
 )
 
 _ORIGIN = "https://svc.example.com"
@@ -108,3 +111,43 @@ def test_an_address_that_does_not_follow_the_template_is_masked_by_value() -> No
 def test_encoded_safe_url_keeps_the_encoded_path_only() -> None:
     url = httpx.URL("https://user:pw@svc.example.com:8443/v1/keys/a%2Fb?ticket=t#frag")
     assert encoded_safe_url(url) == "https://svc.example.com:8443/v1/keys/a%2Fb"
+
+
+def test_a_redirect_in_another_letter_case_keeps_the_template_position() -> None:
+    url = f"{_ORIGIN}/V1/keys/pab"
+    masked = mask_path_values(url, frozenset({"ab"}), "/v1/keys/p{key}")
+    assert masked == f"{_ORIGIN}/V1/keys/[redacted]"
+
+
+def test_a_value_in_another_letter_case_is_masked_without_a_template() -> None:
+    url = f"{_ORIGIN}/v1/keys/K1"
+    assert mask_path_values(url, frozenset({"k1"})) == f"{_ORIGIN}/v1/keys/[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        ("https://svc.example.com:80/v1/a?t=1", "https://svc.example.com:80/v1/a"),
+        ("http://svc.example.com:443/v1/a", "http://svc.example.com:443/v1/a"),
+        ("https://svc.example.com:443/v1/a", "https://svc.example.com/v1/a"),
+        ("https://svc.example.com:8443/v1/a", "https://svc.example.com:8443/v1/a"),
+        ("https://user:pw@[2001:db8::1]:8443/v1/a#f", "https://[2001:db8::1]:8443/v1/a"),
+        ("https://[2001:db8::1]/v1/a", "https://[2001:db8::1]/v1/a"),
+    ],
+)
+def test_a_trace_address_keeps_the_host_and_port_as_sent(sent: str, kept: str) -> None:
+    assert safe_url(httpx.URL(sent)) == kept
+    assert encoded_safe_url(httpx.URL(sent)) == kept
+
+
+def test_body_values_leave_out_values_under_a_secret_key() -> None:
+    body = {
+        "username": "proxy",
+        "password": "made-up-password",
+        "nested": [{"port": 3128, "on": True}, {"token": {"id": "made-up-token"}}],
+    }
+    assert body_values(body, is_secret_param_name) == frozenset({"proxy", "3128"})
+
+
+def test_body_values_of_no_body_is_empty() -> None:
+    assert body_values(None, is_secret_param_name) == frozenset()

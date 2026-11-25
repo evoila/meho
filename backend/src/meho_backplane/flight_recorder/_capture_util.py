@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -138,12 +138,12 @@ def safe_url(url: Any) -> str:
     """
     try:
         scheme = getattr(url, "scheme", None)
-        host = getattr(url, "host", None)
+        netloc = getattr(url, "netloc", None)
         path = getattr(url, "path", None)
-        if scheme and host:
-            port = getattr(url, "port", None)
-            netloc = host if port in (None, 80, 443) else f"{host}:{port}"
-            return f"{scheme}://{netloc}{path or ''}"
+        if scheme and isinstance(netloc, bytes) and netloc:
+            # ``netloc`` is the host and port as sent: a port that is not the
+            # scheme's default stays, and an IPv6 host keeps its brackets.
+            return f"{scheme}://{netloc.decode('ascii')}{path or ''}"
         text = str(url)
         scheme_end = text.find("://")
         if scheme_end == -1:
@@ -168,11 +168,10 @@ def encoded_safe_url(url: Any) -> str:
     """
     try:
         raw_path = getattr(url, "raw_path", None)
-        if isinstance(raw_path, bytes):
-            port = getattr(url, "port", None)
-            host = url.host if port in (None, 80, 443) else f"{url.host}:{port}"
+        netloc = getattr(url, "netloc", None)
+        if isinstance(raw_path, bytes) and isinstance(netloc, bytes):
             path = raw_path.split(b"?", 1)[0].decode("ascii")
-            return f"{url.scheme}://{host}{path}"
+            return f"{url.scheme}://{netloc.decode('ascii')}{path}"
     except Exception:
         return "?"
     return safe_url(url)
@@ -203,6 +202,30 @@ def path_values(params: Any) -> frozenset[str]:
             continue
         if isinstance(value, str | int) and str(value):
             values.add(str(value))
+    return frozenset(values)
+
+
+def body_values(body: Any, is_secret_key: Callable[[str], bool]) -> frozenset[str]:
+    """The texts of the values a request body carries, under a key that is not secret.
+
+    Walks a JSON or form body (mappings and lists) and keeps strings and
+    whole numbers. A value under a key that *is_secret_key* names a secret
+    (or under any key below one) is left out.
+    """
+    values: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if not (isinstance(key, str) and is_secret_key(key)):
+                    walk(value)
+        elif isinstance(node, list | tuple):
+            for item in node:
+                walk(item)
+        elif isinstance(node, str | int) and not isinstance(node, bool) and str(node):
+            values.add(str(node))
+
+    walk(body)
     return frozenset(values)
 
 
@@ -258,7 +281,9 @@ def _template_segments(path: str, template: str) -> set[int] | None:
         pattern.append("(.*?)" if match.group(1) in ("+", "#") else "([^/]*)")
         position = match.end()
     pattern.append(re.escape(template[position:]))
-    found = re.search("".join(pattern) + "/?$", path)
+    # The client follows a change's redirect to the same path in another
+    # letter case, so the fixed parts of the template match in any case.
+    found = re.search("".join(pattern) + "/?$", path, re.IGNORECASE)
     if found is None:
         return None
     masked: set[int] = set()
@@ -277,6 +302,9 @@ def _value_segments(segments: list[str], values: frozenset[str]) -> set[int]:
     """
     decoded = [unquote(segment) for segment in segments]
     joined = "/".join(decoded)
+    folded = _fold(joined)
+    if folded != joined:
+        joined, values = folded, frozenset(_fold(value) for value in values)
     masked: set[int] = set()
     for value in values:
         start = joined.find(value)
@@ -286,6 +314,17 @@ def _value_segments(segments: list[str], values: frozenset[str]) -> set[int]:
                 masked |= _segment_indexes(decoded, start, end)
             start = joined.find(value, start + 1)
     return masked
+
+
+def _fold(text: str) -> str:
+    """*text* in lower case, when that keeps its length; else *text* itself.
+
+    The client follows a redirect to the same path in another letter case,
+    so a value is found in any case. A path whose lower case has another
+    length is compared as it is, so the segment positions stay right.
+    """
+    lowered = text.lower()
+    return lowered if len(lowered) == len(text) else text
 
 
 def _stands_alone(text: str, start: int, end: int) -> bool:

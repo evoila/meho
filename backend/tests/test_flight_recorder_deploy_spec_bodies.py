@@ -629,3 +629,78 @@ async def test_the_trace_masks_a_path_value_where_the_template_puts_it(
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
         for form in sent_forms:
             assert form not in text, f"the path value is in {label}"
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_in_another_letter_case_still_masks_the_path_value(
+    session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """A followed 307 to the same path in upper case keeps the value masked."""
+    await _register_operations(session)
+    await _register_ingested_key_operation(session)
+    upper = "/V1/PROXY/KEYS/ZQ7:ROTATE"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        first = mock.put("/v1/proxy/keys/zq7:rotate").respond(307, headers={"Location": upper})
+        second = mock.put(upper).respond(200, json={"ok": 1})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            target=_Target(),
+            params={"key_name": "zq7", "label": "proxy"},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+    assert (first.call_count, second.call_count) == (1, 1)
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    assert urls == [
+        f"https://{_HOST}/v1/proxy/keys/[redacted]",
+        f"https://{_HOST}/V1/PROXY/KEYS/[redacted]",
+    ]
+    agent_copy = await _agent_copy(result)
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert "zq7" not in text.lower(), f"the path value is in {label}"
+        assert f"https://{_HOST}/V1/PROXY/KEYS/[redacted]" in text, label
+
+
+@pytest.mark.parametrize("redirected", [False, True], ids=["plain", "after-a-307"])
+@pytest.mark.asyncio
+async def test_a_typed_operation_keeps_a_fixed_segment_equal_to_a_body_value(
+    redirected: bool, session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """The proxy user name ``proxy`` goes into the body, so ``/v1/settings/proxy`` stays."""
+    await _register_operations(session)
+    path = "/v1/settings/proxy"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        if redirected:
+            mock.patch(path).respond(307, headers={"Location": f"{path}/"})
+            mock.patch(f"{path}/").respond(202, json=_TASK)
+        else:
+            mock.patch(path).respond(202, json=_TASK)
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_PROXY_SET_OP_ID,
+            target=_Target(),
+            params={
+                "host": "proxy.test.invalid",
+                "username": "proxy",
+                "password_secret_ref": "kv/proxy",
+            },
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    sent = f"https://{_HOST}{path}"
+    assert urls == ([sent, f"{sent}/"] if redirected else [sent])
+    agent_copy = await _agent_copy(result)
+    assert sent in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert "[redacted]" not in text, f"a fixed segment is masked in {label}"
+        _assert_no_made_up_value(label, text)

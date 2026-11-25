@@ -1518,36 +1518,37 @@ class HttpConnector(Connector):
         # captured too. A transport fault (timeout, refused connection) has no
         # response, so it records an error span and re-raises (#3408). Each
         # retry attempt is its own vendor call and gets its own span.
-        _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _operation_request.set(True)
-        try:
-            resp = await _read_capped_json_response(
-                client,
-                method,
-                path,
-                params=params,
-                json=json,
-                headers=headers,
-                extensions=self._request_extensions(target),
+        with flight_recorder_capture.request_body_values(json):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await _read_capped_json_response(
+                    client,
+                    method,
+                    path,
+                    params=params,
+                    json=json,
+                    headers=headers,
+                    extensions=self._request_extensions(target),
+                )
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, method), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            # After a followed redirect the last request can have another method
+            # (an OPTIONS answered with a 303 is followed by a GET).
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if resp.request.method == method else None,
+                request_content_type="application/json" if json is not None else None,
+                response_body=self._trace_response_body(_fr_start, resp),
             )
-        except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(
-                _fr_start, method=_failed_method(exc, method), exc=exc
-            )
-            raise
-        finally:
-            _operation_request.reset(trace_hops)
-        # After a followed redirect the last request can have another method
-        # (an OPTIONS answered with a 303 is followed by a GET).
-        flight_recorder_capture.record_vendor_call(
-            _fr_start,
-            method=resp.request.method,
-            request_headers=headers,
-            response=resp,
-            request_body=json if resp.request.method == method else None,
-            request_content_type="application/json" if json is not None else None,
-            response_body=self._trace_response_body(_fr_start, resp),
-        )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
 
@@ -1638,36 +1639,37 @@ class HttpConnector(Connector):
         # The request body is whichever of ``json`` / ``data`` was sent, with
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
-        _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _operation_request.set(True)
-        try:
-            resp = await _read_capped_json_response(
-                client,
-                verb,
-                path,
-                params=params,
-                json=json,
-                data=data,
-                headers=headers,
-                extensions=self._request_extensions(target),
-                timeout=timeout,
+        with flight_recorder_capture.request_body_values(json if json is not None else data):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await _read_capped_json_response(
+                    client,
+                    verb,
+                    path,
+                    params=params,
+                    json=json,
+                    data=data,
+                    headers=headers,
+                    extensions=self._request_extensions(target),
+                    timeout=timeout,
+                )
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, verb), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if json is not None else data,
+                request_content_type=_post_body_content_type(json, data),
+                response_body=self._trace_response_body(_fr_start, resp),
             )
-        except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(
-                _fr_start, method=_failed_method(exc, verb), exc=exc
-            )
-            raise
-        finally:
-            _operation_request.reset(trace_hops)
-        flight_recorder_capture.record_vendor_call(
-            _fr_start,
-            method=resp.request.method,
-            request_headers=headers,
-            response=resp,
-            request_body=json if json is not None else data,
-            request_content_type=_post_body_content_type(json, data),
-            response_body=self._trace_response_body(_fr_start, resp),
-        )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
 
@@ -1689,26 +1691,27 @@ class HttpConnector(Connector):
         login, so login traffic stays out of the trace. The answer is
         returned as it is; the caller checks its status.
         """
-        _fr_start = flight_recorder_capture.span_start()
-        trace_hops = _operation_request.set(True)
-        try:
-            resp = await client.request(method, path, json=json, headers=headers)
-        except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(
-                _fr_start, method=_failed_method(exc, method), exc=exc
+        with flight_recorder_capture.request_body_values(json):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await client.request(method, path, json=json, headers=headers)
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, method), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if resp.request.method == method else None,
+                request_content_type="application/json" if json is not None else None,
+                response_body=self._trace_response_body(_fr_start, resp),
             )
-            raise
-        finally:
-            _operation_request.reset(trace_hops)
-        flight_recorder_capture.record_vendor_call(
-            _fr_start,
-            method=resp.request.method,
-            request_headers=headers,
-            response=resp,
-            request_body=json if resp.request.method == method else None,
-            request_content_type="application/json" if json is not None else None,
-            response_body=self._trace_response_body(_fr_start, resp),
-        )
         return resp
 
     async def aclose(self) -> None:

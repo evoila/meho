@@ -88,6 +88,7 @@ from meho_backplane.gateway.queue import (
     enqueue_command,
     record_result,
 )
+from meho_backplane.operations._audit import resolve_audit_session_id
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -246,13 +247,7 @@ async def _refuse_remote_write(
     runner_id: str,
     approval_request_id: uuid.UUID | None,
 ) -> MintResult:
-    """Log, audit and build a fail-closed ``remote-write`` mint refusal.
-
-    One audit row is written in the caller's session and the caller commits
-    it, like every other gateway audit row. It names the caller, the approval
-    request id the caller sent, the runner, the operation and the refusal
-    code. It holds no params. No command row is written.
-    """
+    """Log, audit and build a fail-closed ``remote-write`` mint refusal."""
     structlog.get_logger(__name__).warning(
         "gateway_command_mint_refused_remote_write",
         reason=code.value,
@@ -260,6 +255,35 @@ async def _refuse_remote_write(
         operator_sub=operator.sub,
         runner_id=runner_id,
     )
+    return await _audit_remote_write_refusal(
+        code,
+        reason,
+        session=session,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
+
+
+async def _audit_remote_write_refusal(
+    code: MintRefusalCode,
+    reason: str,
+    *,
+    session: AsyncSession,
+    op_id: str,
+    operator: Operator,
+    runner_id: str,
+    approval_request_id: uuid.UUID | None,
+) -> MintResult:
+    """Write the one audit row of a refused ``remote-write`` mint and build the refusal.
+
+    The row is a ``policy_decision`` row in the caller's tenant, written in the
+    caller's session; the caller commits it, like every other gateway audit
+    row. It carries the session id of the call. It names the caller, the
+    approval request id the caller sent, the runner, the operation and the
+    refusal code. It holds no params. No command row is written.
+    """
     payload: dict[str, Any] = {
         "op_id": op_id,
         "runner_id": runner_id,
@@ -277,6 +301,8 @@ async def _refuse_remote_write(
         status_code=_MINT_REFUSED_AUDIT_STATUS,
         duration_ms=0.0,
         payload=payload,
+        event_class=AuditEventClass.POLICY_DECISION,
+        agent_session_id=resolve_audit_session_id(),
     )
     return MintResult(refusal_code=code, refusal_reason=reason, refusal_audit_id=audit_id)
 
@@ -311,10 +337,11 @@ def _refuse_unvalidatable_params(
     params: dict[str, Any],
     op_id: str,
     operator_sub: str,
-) -> MintResult | None:
+) -> tuple[MintRefusalCode, str] | None:
     """Mint ladder Step 3: refuse when params fail — or cannot be — validated.
 
-    ``None`` means the params validated cleanly and the ladder proceeds.
+    ``None`` means the params validated cleanly and the ladder proceeds;
+    otherwise the refusal code and reason.
     Two refusal shapes, distinguished because the fault differs:
 
     * :attr:`MintRefusalCode.INVALID_PARAMS` — the caller's params
@@ -334,7 +361,7 @@ def _refuse_unvalidatable_params(
             operator_sub=operator_sub,
             missing_ref=exc.missing_ref,
         )
-        return _refused(
+        return (
             MintRefusalCode.INVALID_OP_SCHEMA,
             f"stored parameter_schema for op {op_id!r} contains an "
             f"unresolvable $ref ({exc.missing_ref}); re-ingest the "
@@ -347,7 +374,7 @@ def _refuse_unvalidatable_params(
             op_id=op_id,
             operator_sub=operator_sub,
         )
-        return _refused(
+        return (
             MintRefusalCode.INVALID_PARAMS,
             f"params failed schema validation for op {op_id!r}",
         )
@@ -365,6 +392,8 @@ async def _write_gateway_audit_row(
     payload: dict[str, Any],
     target_id: uuid.UUID | None = None,
     parent_audit_id: uuid.UUID | None = None,
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
+    agent_session_id: uuid.UUID | None = None,
 ) -> None:
     """Insert one synchronous ``audit_log`` row for a gateway command event.
 
@@ -379,12 +408,13 @@ async def _write_gateway_audit_row(
     """
     row = AuditLog(
         id=audit_id,
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        event_class=event_class,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         tenant_id=operator.tenant_id,
         target_id=target_id,
         parent_audit_id=parent_audit_id,
+        agent_session_id=agent_session_id,
         method=_AUDIT_METHOD,
         path=path,
         status_code=status_code,
@@ -511,19 +541,31 @@ async def mint_gateway_command(
         )
 
     # --- Step 3: parameter_schema validation -----------------------------
+    # Classified first so a refused remote-write call (also one with invalid
+    # params) writes its audit row; the order of the refusals is unchanged.
+    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
+    audit_refusal = functools.partial(
+        _audit_remote_write_refusal,
+        session=session,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
     params_refusal = _refuse_unvalidatable_params(
         descriptor=descriptor, params=params, op_id=op_id, operator_sub=operator.sub
     )
     if params_refusal is not None:
-        return params_refusal
+        if tier is SatelliteMintTier.REMOTE_WRITE:
+            return await audit_refusal(*params_refusal)
+        return _refused(*params_refusal)
 
     # --- Satellite-mint tier ladder (#3188) ------------------------------
     # The safe-only wall generalised, bound to the real op-identity metadata
-    # read straight off the descriptor (dispatcher.py:1772). Classified against
-    # the single source of truth shared with the edge executor and the
+    # read straight off the descriptor (dispatcher.py:1772). ``tier`` above is
+    # classified against the single source of truth shared with the edge executor and the
     # assignment materialiser (defence in depth), before the policy gate so a
     # refused op is never parked.
-    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
@@ -556,7 +598,7 @@ async def mint_gateway_command(
                 operator_sub=operator.sub,
                 runner_id=runner_id,
             )
-            return _refused(
+            return await audit_refusal(
                 MintRefusalCode.RUNNER_REVOKED,
                 f"runner {runner_id!r} is revoked; no remote-write capability "
                 "is minted to a revoked runner",

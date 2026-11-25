@@ -30,11 +30,14 @@ from sqlalchemy import func, select, update
 from structlog.testing import capture_logs
 
 import meho_backplane.operations.gateway_commands as gc
+from meho_backplane.audit_query.query import query_audit
+from meho_backplane.audit_query.schemas import AuditQueryFilters
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditEventClass,
     AuditLog,
     EndpointDescriptor,
     GatewayCommand,
@@ -49,6 +52,7 @@ from meho_backplane.gateway.queue import (
     claim_next_command,
     enqueue_command,
 )
+from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.operations._validate import compute_audit_params_hash, compute_params_hash
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.operations.approval_queue import create_pending_request
@@ -673,27 +677,38 @@ async def test_mint_remote_write_uses_approval_only_for_the_asker(
     assert own.minted
 
 
-async def test_refused_remote_write_mint_writes_one_audit_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A refusal for a login that did not ask leaves one audit row, with no params."""
-    approval_id = await _seed_committed_approval()
-    await _seed_write_allowlist()
-    stranger = _caller("other-login", PrincipalKind.USER)
-
-    result = await _mint_caution(monkeypatch, approval_id=approval_id, operator=stranger)
-
-    assert not result.minted
+async def _mint_refusal_rows() -> list[AuditLog]:
     async with get_sessionmaker()() as session:
-        rows = (
+        return list(
             (await session.execute(select(AuditLog).where(AuditLog.path == "gateway.command.mint")))
             .scalars()
             .all()
         )
+
+
+async def test_refused_remote_write_mint_writes_one_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal for a login that did not ask leaves one policy-decision row, with no params."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+    stranger = _caller("other-login", PrincipalKind.USER)
+    agent_session = uuid.uuid4()
+
+    token = agent_session_id_var.set(agent_session)
+    try:
+        result = await _mint_caution(monkeypatch, approval_id=approval_id, operator=stranger)
+    finally:
+        agent_session_id_var.reset(token)
+
+    assert not result.minted
+    rows = await _mint_refusal_rows()
     assert len(rows) == 1
     audit = rows[0]
     assert audit.id == result.refusal_audit_id
     assert audit.tenant_id == _TENANT
+    assert audit.event_class == AuditEventClass.POLICY_DECISION
+    assert audit.agent_session_id == agent_session
     assert audit.operator_sub == "other-login"
     assert audit.payload["caller_sub"] == "other-login"
     assert audit.payload["approval_request_id"] == str(approval_id)
@@ -702,6 +717,82 @@ async def test_refused_remote_write_mint_writes_one_audit_row(
     assert audit.payload["result_status"] == MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED.value
     assert "params" not in audit.payload
     assert "params_hash" not in audit.payload
+
+    async with get_sessionmaker()() as session:
+        decisions = await query_audit(
+            AuditQueryFilters(event_class=AuditEventClass.POLICY_DECISION),
+            tenant_id=_TENANT,
+            session=session,
+        )
+        executions = await query_audit(
+            AuditQueryFilters(event_class=AuditEventClass.OPERATION_EXECUTION),
+            tenant_id=_TENANT,
+            session=session,
+        )
+        by_session = await query_audit(
+            AuditQueryFilters(agent_session_id=agent_session),
+            tenant_id=_TENANT,
+            session=session,
+        )
+    assert [e.id for e in decisions.rows] == [audit.id]
+    assert audit.id not in {e.id for e in executions.rows}
+    assert [e.id for e in by_session.rows] == [audit.id]
+
+
+_PORT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"port": {"type": "integer"}},
+    "required": ["port"],
+}
+_GHOST_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"host": {"$ref": "#/components/schemas/Ghost"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "revoked", "code"),
+    [
+        (None, True, MintRefusalCode.RUNNER_REVOKED),
+        (_PORT_SCHEMA, False, MintRefusalCode.INVALID_PARAMS),
+        (_GHOST_SCHEMA, False, MintRefusalCode.INVALID_OP_SCHEMA),
+    ],
+)
+async def test_early_remote_write_refusal_writes_one_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+    schema: dict[str, object] | None,
+    revoked: bool,
+    code: MintRefusalCode,
+) -> None:
+    """A revoked runner and bad params or schema keep their code and write one row."""
+    await _seed_tenant()
+    await _seed_runner_principal(revoked=revoked)
+    approval_id = await _seed_committed_approval()
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution", parameter_schema=schema))
+
+    async with get_sessionmaker()() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=dict(_PARAMS),
+            runner_id=_RUNNER,
+            approval_request_id=approval_id,
+        )
+        await session.commit()
+
+    assert not result.minted
+    assert result.refusal_code is code
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+    rows = await _mint_refusal_rows()
+    assert [row.id for row in rows] == [result.refusal_audit_id]
+    assert rows[0].event_class == AuditEventClass.POLICY_DECISION
+    assert rows[0].payload["result_status"] == code.value
+    assert rows[0].payload["approval_request_id"] == str(approval_id)
+    assert "params" not in rows[0].payload
 
 
 async def test_mint_remote_write_needs_the_named_request(
@@ -1282,7 +1373,7 @@ async def test_result_audit_links_to_mint_row(monkeypatch: pytest.MonkeyPatch) -
 async def test_mint_refuses_remote_write_for_revoked_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A revoked runner gets no new remote-write mint — RUNNER_REVOKED, no rows.
+    """A revoked runner gets no new remote-write mint — RUNNER_REVOKED, no command.
 
     The write-tier revocation check fires *before* the composed gate, so a
     revoked runner reads the specific ``RUNNER_REVOKED`` refusal rather than

@@ -253,13 +253,15 @@ work item, plus approval-bound minting.
   (never later than the clean-up job's limit); it also refuses while the asker
   is blocked (`asker_blocked`) or the block list cannot be read
   (`asker_block_unreadable`). The mint audit row names the asker, the caller
-  and the approval. A refused remote-write mint writes one audit row in the
-  same tenant (path `gateway.command.mint`, status 403) with the caller, the
-  approval request id the caller sent, the runner, the operation and the
-  refusal code, and no params; no command row is written and the approval
-  stays unused. The other refusals (unknown operation, invalid params,
-  operation not allowed for a runner, revoked runner, policy) write a log
-  line only.
+  and the approval. Every refused mint of a remote-write operation (also for
+  invalid params, a broken stored schema or a revoked runner) writes one
+  audit row in the same tenant: event class `policy_decision`, path
+  `gateway.command.mint`, status 403, the session id of the call, and in the
+  payload the caller, the approval request id the caller sent, the runner,
+  the operation and the refusal code, and no params. No command row is
+  written and the approval stays unused. The refusals of other operations
+  (unknown operation, an operation not allowed for a runner, a read refused
+  by policy) write a log line only.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the

@@ -21,7 +21,7 @@ The Azure connector has typed (hand-written) operations only. There is
 nothing to ingest and nothing to review: the operations are stored when
 MEHO starts.
 
-The connector has 71 operations in 12 groups. These three in the group
+The connector has operations in 12 groups. These three in the group
 `account` are the ones to try first:
 
 | Group | Operation | What it does |
@@ -36,14 +36,29 @@ operations, run `meho operation groups azure-arm-2026.10` and
 `meho operation search azure-arm-2026.10 "<what you need>"`. The engineering
 page lists every operation.
 
-69 operations are reads (`safe`) and need no approval. Two operations
-change something in Azure. They are `caution`, and each one waits until a
-second person approves it:
+Most operations are reads (`safe`) and need no approval. The operations
+below change something in Azure. They are `caution`, and each one waits until
+a second person approves it:
 
-| Operation | What it does |
-| --- | --- |
-| `azure.tag.update` | Changes the tags of one resource |
-| `azure.patching.assessment.start` | Checks one Azure VM or Arc machine for missing updates now (it installs nothing) |
+| Operation | What it does | What a repeated call does |
+| --- | --- | --- |
+| `azure.tag.update` | Changes the tags of one resource | sets the same tags again |
+| `azure.patching.assessment.start` | Checks one Azure VM or Arc machine for missing updates now (it installs nothing) | starts one more check |
+| `azure.migrate.import.start` | Imports a CSV file of servers into an Azure Migrate project (makes an import site and an import collector if they are missing) | uploads the same file only once: a tag on the import site records it, and a repeat follows the first import job |
+| `azure.migrate.group.create` | Makes a group of machines in a project and can add machines | makes no second group: the name is yours |
+| `azure.migrate.group.update` | Adds machines to a group or takes them out | adding a machine that is in the group, or removing one that is not, changes nothing |
+| `azure.migrate.assessment.create` | Makes an Azure VM assessment of a group | makes no second assessment: a same-named one with the same settings is followed, one with other settings is refused |
+
+If a step did not finish, the answer says so. Read the state first
+(`azure.migrate.job.list`, `azure.migrate.group.list`,
+`azure.migrate.assessment.list` or `azure.operation.status`) before you send
+the call again.
+
+Each file of `azure.migrate.import.start` keeps one tag on the import site.
+Azure allows at most 50 tags on a resource, so one import site holds the
+records of at most 50 files. At the limit the call stops and uploads nothing.
+Use another `site` name, or remove tags that are not needed (MEHO's own tags
+start with `meho-csv-`).
 
 One target is one subscription. For two subscriptions, make two targets.
 They may share one login.
@@ -86,6 +101,7 @@ same display name. Pick a name that is not used yet.
 | blob list and file read (`azure.storage.blob.list`, `azure.storage.blob.read`) | `Storage Blob Data Reader` (`Reader` alone gives no access to files) | the storage account or the container |
 | `azure.tag.update` (only if you use it) | a role that may write tags, for example `Tag Contributor` | the resources to tag |
 | `azure.patching.assessment.start` (only if you use it) | a role that may check a machine for updates, for example `Virtual Machine Contributor` for a VM | the machines |
+| the Migrate writes (`azure.migrate.import.start`, `azure.migrate.group.create`, `azure.migrate.group.update`, `azure.migrate.assessment.create`; only if you use them) | `Azure Migrate Decide and Plan Expert`; the import also needs the right to make an import site and write its tags | the resource group of the Migrate project |
 
 The command in step 1 already gives `Reader` on the subscription. Never
 give the login `Contributor` or `Owner` for reads. The engineering page

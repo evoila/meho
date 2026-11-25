@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ from meho_backplane.connectors.azure._errors import (
     AzureUrlRefusedError,
     clean_azure_text,
 )
-from meho_backplane.connectors.azure._http import send
+from meho_backplane.connectors.azure._http import retry_after_seconds, send
 from meho_backplane.connectors.azure._paths import (
     MIGRATE_API_VERSION,
     MIGRATE_ASSESSMENT_PATH,
@@ -89,6 +90,8 @@ __all__ = [
     "lock_key",
     "poll_error_text",
     "poll_until",
+    "provisioning_state",
+    "wait_until_provisioned",
 ]
 
 #: Most machines one group call names. Longer lists are split by the caller.
@@ -132,7 +135,12 @@ POLL_ERRORS: Final[tuple[type[Exception], ...]] = (
     AzureUrlRefusedError,
     ConnectorAuthError,
     httpx.HTTPError,
+    json.JSONDecodeError,
 )
+
+#: Azure's ``provisioningState`` values after which a resource does not change
+#: any more (lower case). Any other value means it is still being made.
+_PROVISIONING_FAILED: Final[frozenset[str]] = frozenset({"failed", "canceled", "cancelled"})
 
 
 def lock_key(kind: str, resource_id: str) -> int:
@@ -147,6 +155,8 @@ def poll_error_text(exc: Exception) -> str:
     """MEHO's own text for a read that failed. A lost connection gets a fixed text."""
     if isinstance(exc, httpx.HTTPError):
         return f"Azure did not answer ({type(exc).__name__})."
+    if isinstance(exc, json.JSONDecodeError):
+        return "Azure's answer was not JSON."
     return str(clean_azure_text(str(exc)) or type(exc).__name__)
 
 
@@ -223,7 +233,18 @@ async def arm_write(
     payload = json_payload_or_empty(response)
     reference = operation_reference(target, response, resource_id=resource_id)
     if reference is None:
-        return WriteOutcome(response.status_code, payload, None, True)
+        if provisioning_state(payload) is None or method != "PUT" or resource_id is None:
+            return WriteOutcome(response.status_code, payload, None, True)
+        return await wait_until_provisioned(
+            connector,
+            operator,
+            target,
+            resource_id,
+            api_version,
+            payload,
+            status_code=response.status_code,
+            first_wait=retry_after_seconds(response),
+        )
     try:
         state = await wait_for_operation(connector, target, reference, operator=operator)
     except POLL_ERRORS as exc:
@@ -246,6 +267,91 @@ async def arm_write(
             remediation="Read the object with its list operation, then try again.",
         )
     return WriteOutcome(response.status_code, payload, state["operation"], bool(state["done"]))
+
+
+def provisioning_state(payload: object) -> str | None:
+    """The ``properties.provisioningState`` of an Azure resource answer, or ``None``."""
+    props = payload.get("properties") if isinstance(payload, Mapping) else None
+    state = props.get("provisioningState") if isinstance(props, Mapping) else None
+    return state if isinstance(state, str) and state else None
+
+
+def _failed_provisioning(target: AzureTargetLike, payload: object, state: str) -> AzureRequestError:
+    """The error for a resource that Azure ended as failed or canceled."""
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    code = error.get("code") if isinstance(error, Mapping) else None
+    message = error.get("message") if isinstance(error, Mapping) else None
+    return AzureRequestError(
+        f"Azure target {target.name!r}: Azure ended the resource with state "
+        f"{clean_azure_text(state)}. Read it again to see where it stands.",
+        http_status=502,
+        azure_error_code=code if isinstance(code, str) else None,
+        azure_message=clean_azure_text(message),
+        remediation="Read the object with its list operation, then try again.",
+    )
+
+
+async def wait_until_provisioned(
+    connector: AzureConnector,
+    operator: Operator,
+    target: AzureTargetLike,
+    resource_id: str,
+    api_version: str,
+    payload: dict[str, Any],
+    *,
+    status_code: int,
+    first_wait: float | None,
+) -> WriteOutcome:
+    """Read a resource until its ``provisioningState`` ends, or MEHO's wait is over.
+
+    For an answer that has no link to follow but whose state has not ended
+    (Azure may answer 201 with ``Provisioning`` or ``Running``). *payload* is
+    the answer read last. Reads the resource with ``GET``, waits Azure's
+    ``Retry-After`` (or :data:`DEFAULT_POLL_SECONDS`) between reads, and
+    returns ``done`` true only for ``Succeeded``. ``Failed`` and ``Canceled``
+    raise :class:`AzureRequestError`. When the wait is over, or a read fails,
+    ``done`` is false and ``poll_error`` says why.
+    """
+    started = _monotonic()
+    wait = first_wait
+    while True:
+        state = provisioning_state(payload)
+        if state is not None and state.casefold() == "succeeded":
+            return WriteOutcome(status_code, payload, None, True)
+        if state is not None and state.casefold() in _PROVISIONING_FAILED:
+            raise _failed_provisioning(target, payload, state)
+        interval = wait or DEFAULT_POLL_SECONDS
+        if _monotonic() - started + interval > DEFAULT_WAIT_SECONDS:
+            return WriteOutcome(
+                status_code,
+                payload,
+                None,
+                False,
+                "Azure had not finished the resource after MEHO's wait "
+                f"(state {clean_azure_text(state) or 'not given'}). Read it again before the "
+                "next step.",
+            )
+        await _sleep(interval)
+        try:
+            response = await send(
+                connector,
+                target,
+                "GET",
+                resource_id,
+                operator=operator,
+                params={"api-version": api_version},
+            )
+            payload = json_payload_or_empty(response)
+        except POLL_ERRORS as exc:
+            return WriteOutcome(
+                status_code,
+                payload,
+                None,
+                False,
+                f"Azure accepted the write, but the resource could not be read: "
+                f"{poll_error_text(exc)} Read it with its list operation.",
+            )
+        wait = retry_after_seconds(response)
 
 
 def _subscription(target: AzureTargetLike) -> str:
@@ -340,8 +446,9 @@ def _not_sent(operation_type: str, machines: list[str]) -> dict[str, Any]:
 def _waiting_text(before: str, after: str) -> str:
     return (
         f"{after} was not sent: Azure had not confirmed that {before} finished after MEHO's "
-        "wait. Read the operation of that step with azure.operation.status. When it "
-        "succeeded, send the same call again."
+        "wait. Read the operation of that step with azure.operation.status, or the group with "
+        "azure.migrate.group.list when the step has no operation. When it succeeded, send "
+        "the same call again."
     )
 
 

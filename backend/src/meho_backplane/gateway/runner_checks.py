@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
@@ -124,6 +125,22 @@ BATCH_MAX_BYTES = 4 * 1024 * 1024
 _ANSWER_TOO_LARGE = "answer too large"
 
 _FUTURE_TIME = "future_time"
+
+#: How many refused results this process remembers, so that one refused
+#: result is counted once however often its batch is sent.
+_REFUSED_SEEN_MAX = 10_000
+_refused_seen: OrderedDict[tuple[uuid.UUID, str, str], None] = OrderedDict()
+
+
+def _count_refused_once(tenant_id: uuid.UUID, runner_name: str, result_uid: str) -> None:
+    """Raise the counter for a refused result the first time it is seen."""
+    key = (tenant_id, runner_name, result_uid)
+    if key in _refused_seen:
+        return
+    _refused_seen[key] = None
+    while len(_refused_seen) > _REFUSED_SEEN_MAX:
+        _refused_seen.popitem(last=False)
+    _count(_FUTURE_TIME)
 
 #: How far a result's runner time may be ahead of MEHO's clock: 30 seconds.
 #: Two clocks that are set by network time still differ by a few seconds, and
@@ -537,8 +554,8 @@ async def ingest_and_count(
             _count(label)
         if counted is not None:
             await after_commit(tenant_id, [counted])
-    for _refused in screened.refused:
-        _count(_FUTURE_TIME)
+    for refused in screened.refused:
+        _count_refused_once(tenant_id, runner_name, refused.result_uid)
     return accepted, len(screened.results) - accepted
 
 

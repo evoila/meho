@@ -383,6 +383,22 @@ async def test_runner_time_in_the_future_is_refused(client: TestClient, switch_o
 
 
 @pytest.mark.asyncio
+async def test_a_refused_future_result_is_counted_once_however_often_it_is_sent(
+    client: TestClient, switch_on: None
+) -> None:
+    await _seed_identities()
+    sensor_id = await _seed_sensor()
+    before = _outcome("future_time")
+    future = datetime.now(UTC) + timedelta(hours=1)
+    result = _result(sensor_id, uid="future-3x", payload={"count": 50}, produced_at=future)
+
+    for _ in range(3):
+        assert _post(client, _RUNNER_A_ID, "runner-a", result).status_code == 422
+
+    assert _outcome("future_time") - before == 1
+
+
+@pytest.mark.asyncio
 async def test_replayed_and_old_results_are_dropped(client: TestClient, switch_on: None) -> None:
     await _seed_identities()
     sensor_id = await _seed_sensor()

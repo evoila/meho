@@ -4086,9 +4086,15 @@ when you leave it out.</p>
 <h2 id="find-targets-whose-secret-is-outside-the-tenants-folder">Find targets whose secret is outside the tenant's folder<a class="headerlink" href="#find-targets-whose-secret-is-outside-the-tenants-folder" title="Permanent link">&para;</a></h2>
 <p>MEHO keeps each tenant's secrets under the tenant's own folder in the
 secret store (Vault or OpenBao). When a target's <code>secret_ref</code> points
-outside that folder, MEHO writes a warning to the server log, at most once
-an hour for each target. The call still works. Move the secret into the
-tenant's folder.</p>
+outside that folder, MEHO writes a warning to the server log. It writes the
+warning at most once an hour for each target in each server process. After
+a restart, or with more than one server process, the warning can come more
+often. The warning never stops the read: the call still works. Move the
+secret into the tenant's folder.</p>
+<p>A target is listed, and a read of its secret warns, when its secret path
+lies outside the tenant's folder, whoever built the path. A target of a
+tenant with its own store role is listed too. A read of its secret is
+refused, with no warning.</p>
 <p>To list these targets, run this as an admin:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>outside-folder
 </code></pre></div>

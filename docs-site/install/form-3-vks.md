@@ -24,7 +24,7 @@ Two people take part. They can be the same person.
 | **The cluster admin** | Admin of the whole VKS cluster. `kubectl vsphere login` gives this. | [Step 1](#step-1-what-the-cluster-admin-does-first) and part of [Step 2](#step-2-with-no-internet-your-own-registry) |
 | **You, the installer** | Admin of one namespace only | Steps 2 to 8 |
 
-**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. In MEHO's own login realm, a change asked with a token, the command line, MCP or an agent, a change of the approval sign-in or of most realm settings, and a move of a secret into your own password need a platform admin other than you. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. In MEHO's own login realm, these changes need a platform admin other than you: a change you asked for with a token, the command line or MCP; a change of the approval sign-in or of most realm settings; and a move of a secret into your own password. A change in that realm that an agent asked for needs a platform admin in the web console. This may be a platform admin who stands behind the agent, for example who set it up, owns it or gave it a grant. A change of the approval sign-in that an agent asked for needs a platform admin who does not stand behind the agent. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 The page uses these example values. Use your own in their place.
 

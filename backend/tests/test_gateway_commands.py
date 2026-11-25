@@ -27,6 +27,7 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 import meho_backplane.operations.gateway_commands as gc
@@ -830,9 +831,19 @@ async def _refusal_case_setup(
         monkeypatch.setenv("SATELLITE_WRITE_SIGNING_KEY", "")
         get_settings.cache_clear()
     elif case == "used_by_concurrent_mint":
+        real_claim = gc.consume_remote_write_approval
 
-        async def _other_mint_was_first(_session: object, _approval: object) -> bool:
-            return False
+        async def _other_mint_was_first(session: AsyncSession, approval: ApprovalRequest) -> bool:
+            # Another mint claims the approval and commits first, so the real
+            # conditional UPDATE of this mint matches zero rows.
+            async with get_sessionmaker()() as other:
+                await other.execute(
+                    update(ApprovalRequest)
+                    .where(ApprovalRequest.id == approval.id)
+                    .values(resumed_at=datetime.now(UTC))
+                )
+                await other.commit()
+            return await real_claim(session, approval)
 
         monkeypatch.setattr(gc, "consume_remote_write_approval", _other_mint_was_first)
     return approval_id
@@ -891,7 +902,9 @@ async def test_every_remote_write_refusal_writes_one_audit_row(
     assert rows[0].status_code == 403
     assert rows[0].payload["result_status"] == code.value
     assert await _count(GatewayCommand) == 0
-    assert await _approval_resumed_at(approval_id) is None
+    # The other mint of the race case used the approval; no case uses it here.
+    used_by_other = case == "used_by_concurrent_mint"
+    assert (await _approval_resumed_at(approval_id) is not None) is used_by_other
 
     async with get_sessionmaker()() as session:
         denied = await query_audit(
@@ -932,6 +945,39 @@ async def test_refusal_audit_row_stays_when_the_caller_rolls_back(
     assert len(stored) == 1
     assert await _count(GatewayCommand) == 0
     assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_lost_claim_refusal_row_stays_when_the_caller_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mint that loses the claim race stores one refusal row through a caller rollback.
+
+    The other mint commits its claim first, so the real conditional UPDATE
+    of this mint matches zero rows.
+    """
+    approval_id = await _seed_committed_approval()
+    await _seed_tenant()
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+    named = await _refusal_case_setup(monkeypatch, "used_by_concurrent_mint", approval_id)
+
+    async with get_sessionmaker()() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=dict(_PARAMS),
+            runner_id=_RUNNER,
+            approval_request_id=named,
+        )
+        await session.rollback()
+
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert result.refusal_audit_id is not None
+    rows = await _mint_refusal_rows()
+    assert [row.id for row in rows] == [result.refusal_audit_id]
+    assert await _count(GatewayCommand) == 0
 
 
 async def test_refusal_stays_when_its_audit_write_fails(

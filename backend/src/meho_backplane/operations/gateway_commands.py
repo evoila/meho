@@ -830,6 +830,23 @@ async def _screen_remote_write(
     return approval, signing_key, None
 
 
+async def _sqlite_driver_without_writes(session: AsyncSession) -> Any | None:
+    """Return the SQLite driver connection when the caller has written nothing yet.
+
+    Pending rows of the caller are flushed first, so a driver connection
+    that is not in a transaction holds no caller work. Returns ``None`` on
+    any other database, or when the caller's transaction has writes.
+    """
+    await session.flush()
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return None
+    driver = (await connection.get_raw_connection()).driver_connection
+    if driver is None or driver.in_transaction:
+        return None
+    return driver
+
+
 async def _mint_remote_write(
     session: AsyncSession,
     *,
@@ -873,7 +890,13 @@ async def _mint_remote_write(
     # _screen_remote_write); claim the single-use latch only now the mint is
     # certain to proceed. A racing mint that already claimed this approval loses
     # (touches zero rows), so an approval binds at most one capability.
+    sqlite_driver = await _sqlite_driver_without_writes(session)
     if not await consume_remote_write_approval(session, approval):
+        if sqlite_driver is not None:
+            # On SQLite the lost claim's zero-row UPDATE holds the database
+            # write lock, and the refusal audit row is written in its own
+            # session. The UPDATE changed nothing, so end its transaction.
+            await sqlite_driver.rollback()
         return await _refuse_remote_write(
             MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
             f"remote-write op {op_id!r} refused: the binding approval "

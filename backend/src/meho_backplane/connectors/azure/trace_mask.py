@@ -31,7 +31,9 @@ __all__ = ["LEFT_OUT", "SECRET_FIELDS", "mask_answer"]
 #: * ``keys``, ``primaryKey``, ``secondaryKey``: the access keys a ``listKeys``
 #:   answer holds (storage accounts, Automation accounts);
 #: * ``parameters`` (job schedules, runbooks, deployments), ``publishContentLink``
-#:   and ``draft`` (runbooks): values of any shape and signed download links.
+#:   and ``draft`` (runbooks): values of any shape and signed download links;
+#: * ``uri``, ``blobSasUri``, ``errorSasUri``, ``sasUri``: signed upload and
+#:   download links (the Azure Migrate import link and its job answers).
 SECRET_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "serviceKey",
@@ -43,6 +45,10 @@ SECRET_FIELDS: Final[frozenset[str]] = frozenset(
         "parameters",
         "publishContentLink",
         "draft",
+        "uri",
+        "blobSasUri",
+        "errorSasUri",
+        "sasUri",
     }
 )
 

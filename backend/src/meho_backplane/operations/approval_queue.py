@@ -153,6 +153,7 @@ from meho_backplane.operations._target_connector_limit import (
 )
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
+    compute_audit_params_hash,
     params_hash_candidates,
     params_hash_matches,
 )
@@ -1328,13 +1329,18 @@ async def _link_reuse_key(
 
 
 async def _write_reuse_audit_row(
-    session: AsyncSession, operator: Operator, request: ApprovalRequest
+    session: AsyncSession,
+    operator: Operator,
+    request: ApprovalRequest,
+    params: dict[str, Any],
 ) -> None:
     """Write the ``approval.reuse`` audit row of a call that got *request*.
 
     Same transaction as the call. The row names the reused request and the
-    caller's own session. Its id is kept in ``request._reuse_audit_id``, so
-    the answer's ``audit_id`` is this row and not the first call's
+    caller's own session. Its payload has the ``params_hash`` of the call's
+    own *params* (:func:`compute_audit_params_hash`, so secret values are
+    masked before the hash). Its id is kept in ``request._reuse_audit_id``,
+    so the answer's ``audit_id`` is this row and not the first call's
     ``approval.request`` row.
     """
     audit_id = uuid.uuid4()
@@ -1347,9 +1353,29 @@ async def _write_reuse_audit_row(
         path=_REUSE_PATH,
         status_code=_APPROVAL_STATUS_CODE,
         duration_ms=0.0,
+        extra_payload={"params_hash": compute_audit_params_hash(params)},
         caller_session=True,
     )
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
+
+
+async def _reuse_for_key_retry(
+    session: AsyncSession,
+    operator: Operator,
+    reused: ApprovalRequest,
+    params: dict[str, Any],
+) -> ApprovalRequest:
+    """Give a retry with the same key its own audit row when the switch is on.
+
+    Needs ``APPROVAL_RETRY_OWN_AUDIT_ROW``. The row is the same
+    ``approval.reuse`` row that the same-call path writes. With the switch
+    off, the retry writes no row and the answer is the first call's.
+    """
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_retry_own_audit_row:
+        await _write_reuse_audit_row(session, operator, reused, params)
+    return reused
 
 
 def _is_composite_step() -> bool:
@@ -2068,7 +2094,11 @@ async def create_pending_request(
         idempotency_key: Optional client-chosen retry key (#3486). When the
             same principal in the same tenant already has a ``pending`` or
             ``approved`` request with this key, that request is returned
-            instead of a new one: no new row, no new audit row. The
+            instead of a new one, with no new request row. When
+            ``APPROVAL_RETRY_OWN_AUDIT_ROW`` is off, the retry writes no
+            audit row. When it is on, the retry writes one
+            ``approval.reuse`` audit row and the request carries its id as
+            ``_reuse_audit_id`` (see ``_reuse_for_key_retry``). The
             returned row carries the transient attr ``_reused = True`` (and
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past
@@ -2173,7 +2203,7 @@ async def create_pending_request(
             ),
         )
         if live is not None:
-            return _reuse(live)
+            return await _reuse_for_key_retry(session, operator, _reuse(live), params)
 
     if _same_call_reuse_applies(run_id, resume_parent, requester):
         same_call = await _find_same_call_pending_request(
@@ -2190,7 +2220,7 @@ async def create_pending_request(
         if same_call is not None:
             reused = _reuse(same_call)
             await _link_reuse_key(session, reused, idempotency_key)
-            await _write_reuse_audit_row(session, operator, reused)
+            await _write_reuse_audit_row(session, operator, reused, params)
             return reused
 
     if proposed_effect is None:
@@ -2329,7 +2359,7 @@ async def create_pending_request(
             session, request, idempotency_key=idempotency_key, asker=asker
         )
         if winner is not None:
-            return _reuse(winner)
+            return await _reuse_for_key_retry(session, operator, _reuse(winner), params)
     request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(

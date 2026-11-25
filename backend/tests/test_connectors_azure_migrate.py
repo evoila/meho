@@ -42,6 +42,7 @@ from meho_backplane.connectors.azure.migrate_rows import (
     migrate_name_param,
     resource_group_param,
 )
+from meho_backplane.connectors.azure.migrate_write_ops import WRITE_OPS
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
@@ -970,7 +971,8 @@ async def test_every_migrate_read_is_registered_safe_with_its_group(_dispatch_en
     assert set(rows) == {op.op_id for op in OPS}
     assert group.when_to_use == WHEN_TO_USE["migrate"]
     assert group.review_status == "enabled"
-    for op in OPS:
+    # The writes and the job list are registered too; their own tests check them.
+    for op in (op for op in OPS if op not in WRITE_OPS):
         row = rows[op.op_id]
         assert row.safety_level == "safe" and row.requires_approval is False
         assert row.handler_ref is not None

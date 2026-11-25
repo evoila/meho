@@ -8982,6 +8982,22 @@ type OutcomeUnknownView struct {
 	RunStartedAt *string              `json:"run_started_at"`
 }
 
+// OutsideTenantFolderItem One target whose secret path is outside the tenant's folder, and why.
+type OutsideTenantFolderItem struct {
+	Name      string             `json:"name"`
+	Reason    string             `json:"reason"`
+	SecretRef string             `json:"secret_ref"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+}
+
+// OutsideTenantFolderList The targets outside the folder; “all_tenants“ says how far the list goes.
+type OutsideTenantFolderList struct {
+	AllTenants bool                      `json:"all_tenants"`
+	CheckOff   bool                      `json:"check_off"`
+	Items      []OutsideTenantFolderItem `json:"items"`
+	Message    *string                   `json:"message"`
+}
+
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
 //
 // “addon_contract_version“ is the contract version the add-on speaks;
@@ -14548,6 +14564,12 @@ type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams defines parameters for OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet.
+type OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams struct {
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // DiscoverTargetsApiV1TargetsDiscoverGetParams defines parameters for DiscoverTargetsApiV1TargetsDiscoverGet.
 type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
 	Product       string  `form:"product" json:"product"`
@@ -18466,6 +18488,9 @@ type ClientInterface interface {
 
 	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet request
 	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet request
+	OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22937,6 +22962,18 @@ func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *Creat
 
 func (c *Client) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -41633,6 +41670,70 @@ func NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(server strin
 	return req, nil
 }
 
+// NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest generates requests for OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet
+func NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest(server string, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/checks/outside-tenant-folder")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDiscoverTargetsApiV1TargetsDiscoverGetRequest generates requests for DiscoverTargetsApiV1TargetsDiscoverGet
 func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *DiscoverTargetsApiV1TargetsDiscoverGetParams) (*http.Request, error) {
 	var err error
@@ -56155,6 +56256,9 @@ type ClientWithResponsesInterface interface {
 	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request
 	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error)
 
+	// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse request
+	OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error)
+
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
 
@@ -61992,6 +62096,29 @@ func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OutsideTenantFolderList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -70435,6 +70562,15 @@ func (c *ClientWithResponses) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmG
 		return nil, err
 	}
 	return ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp)
+}
+
+// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse request returning *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse
+func (c *ClientWithResponses) OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error) {
+	rsp, err := c.OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse(rsp)
 }
 
 // DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request returning *DiscoverTargetsApiV1TargetsDiscoverGetResponse
@@ -80641,6 +80777,39 @@ func ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest KeycloakRealmCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse parses an HTTP response from a OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse call
+func ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse(rsp *http.Response) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OutsideTenantFolderList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -176,9 +176,11 @@ def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
 class SessionLoginRedirectError(SessionLoginError, ConnectorOwnMessage):
     """The login before an operation got a redirect, so the operation was not sent.
 
-    Raised only while the switch ``redirect_on_change_result`` is on. With it
-    off, the login's ``httpx.HTTPStatusError`` reaches the dispatcher, which
-    gives the generic ``connector_error`` answer for that status.
+    Raised for any 3xx answer to the login while the switch
+    ``redirect_on_change_result`` is on. With it off, an
+    ``httpx.HTTPStatusError`` that names only the login's origin reaches the
+    dispatcher, which gives the generic ``connector_error`` answer for that
+    status.
 
     The message is a fixed sentence of MEHO with only the HTTP status. It
     names no address: a login address can come from the credential (an
@@ -192,6 +194,26 @@ class SessionLoginRedirectError(SessionLoginError, ConnectorOwnMessage):
             f"The login of this connector got HTTP {status_code}, a redirect. "
             "MEHO did not follow it and did not send the operation."
         )
+
+
+def _login_redirect_status_error(exc: httpx.HTTPStatusError) -> httpx.HTTPStatusError:
+    """The status error of a login that got a redirect, while the switch is off.
+
+    It has httpx's text for the status, but names only the login's scheme,
+    host and port. The new error holds no ``Location`` and no body, so the
+    dispatcher gives the generic ``connector_error`` answer for the status
+    without any part of the login address or the redirect answer.
+    """
+    url = exc.request.url
+    request = httpx.Request(exc.request.method, f"{url.scheme}://{url.netloc.decode('ascii')}/")
+    status_code = exc.response.status_code
+    response = httpx.Response(status_code, request=request)
+    message = (
+        f"Redirect response '{status_code} {response.reason_phrase}' for url '{request.url}'\n"
+        f"For more information check: "
+        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status_code}"
+    )
+    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 class _CachedSessionToken:
@@ -560,12 +582,15 @@ class ProfiledRestConnector(HttpConnector):
             auth_error = session_establish_auth_error(exc, message=message, target=target)
             if auth_error is not None:
                 raise auth_error from exc
-            if exc.response.is_redirect and get_settings().redirect_on_change_result:
-                # The login, not the operation, got the redirect. The error
-                # names the login request, and says the operation was not sent,
-                # so the dispatcher does not take it for the operation's answer.
-                # With the switch off, the generic answer for the status stays.
-                raise SessionLoginRedirectError(exc.response.status_code) from exc
+            if 300 <= exc.response.status_code < 400:
+                # The login, not the operation, got the redirect, with or
+                # without a ``Location``. Neither error holds the login path
+                # (it can come from the credential), the ``Location`` or the
+                # body. With the switch on, the error says the operation was
+                # not sent; with it off, it is the generic status error.
+                if get_settings().redirect_on_change_result:
+                    raise SessionLoginRedirectError(exc.response.status_code) from exc
+                raise _login_redirect_status_error(exc) from exc
             raise
         return resp.json(), established_path
 

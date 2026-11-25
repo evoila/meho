@@ -44,7 +44,7 @@ from meho_backplane.connectors.profile import (
     FingerprintSpec,
     PaginationSpec,
 )
-from meho_backplane.connectors.profiled import ProfiledRestConnector
+from meho_backplane.connectors.profiled import ProfiledRestConnector, SessionLoginRedirectError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.settings import get_settings
 
@@ -740,7 +740,7 @@ async def test_session_login_redirect_names_the_login_and_sends_no_operation(
 async def test_with_the_switch_off_a_session_login_redirect_keeps_its_status_error(
     status: int, answer_switch: Any
 ) -> None:
-    """With the switch off, the login's own status error reaches the dispatcher.
+    """With the switch off, a status error of the login reaches the dispatcher.
 
     The dispatcher then gives the generic ``connector_error`` answer for that
     status. The operation's request is never sent.
@@ -761,6 +761,72 @@ async def test_with_the_switch_off_a_session_login_redirect_keeps_its_status_err
     assert login.call_count == 1
     assert operation.call_count == 0
     await connector.aclose()
+
+
+#: Made-up values in the login's redirect answer. None may reach the answer.
+_LOGIN_MARKERS = ("marker-login-location", "marker-login-body", "/api/v2/sessions")
+
+
+def _login_redirect(status: int, with_location: bool) -> httpx.Response:
+    headers = {"Location": "/marker-login-location?t=1"} if with_location else {}
+    return httpx.Response(
+        status, headers=headers, json={"message": "marker-login-body", "code": "marker-login-body"}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_location", [True, False], ids=["location", "no-location"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
+    on: bool, status: int, with_location: bool, answer_switch: Any
+) -> None:
+    """A read whose login gets a redirect: the answer holds no part of the login's answer.
+
+    The login path, the ``Location`` and the body of the login's answer stay
+    out in both modes, with and without a ``Location``. The read is not sent.
+    """
+    from meho_backplane.operations._errors import result_connector_error
+    from meho_backplane.operations.dispatcher import _classify_http_status_error
+
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").mock(
+            return_value=_login_redirect(status, with_location)
+        )
+        operation = mock.get("/api/v2/items").respond(200, json={})
+        with pytest.raises(Exception) as exc_info:
+            await connector._request_json(target, "GET", "/api/v2/items", operator=_operator())
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert operation.call_count == 0
+    exc = exc_info.value
+    if on:
+        assert isinstance(exc, SessionLoginRedirectError)
+        answer = result_connector_error("op.read", exc, 1.0)
+    else:
+        assert isinstance(exc, httpx.HTTPStatusError)
+        answer = _classify_http_status_error(
+            http_exc=exc, op_id="op.read", connector_instance=None, target=target, duration_ms=1.0
+        )
+        assert answer.error == "connector_error: HTTPStatusError"
+        assert set(answer.extras or {}) == {
+            "error_code",
+            "exception_class",
+            "exception_message",
+            "http_status",
+            "upstream_message",
+        }
+        assert answer.extras is not None
+        assert answer.extras["http_status"] == status
+        assert answer.extras["upstream_message"] is None
+    text = answer.model_dump_json()
+    for marker in _LOGIN_MARKERS:
+        assert marker not in text
 
 
 @pytest.mark.asyncio

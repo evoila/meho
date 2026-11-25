@@ -861,13 +861,13 @@ _operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "meho_operation_request", default=False
 )
 
-#: The caller of the operation request that :meth:`HttpConnector._request_json`
-#: or :meth:`HttpConnector._post_json` sends. Before the client follows a
-#: redirect of that request, it runs the same block check as before the first
-#: send (:func:`raise_if_step_login_blocked`).
-_request_operator: contextvars.ContextVar[Operator | None] = contextvars.ContextVar(
-    "meho_request_operator", default=None
-)
+
+def _failed_method(exc: httpx.TransportError, sent_method: str) -> str:
+    """The method of the request that failed: after a redirect it can differ from the sent one."""
+    try:
+        return exc.request.method
+    except RuntimeError:
+        return sent_method
 
 
 def _encoded_path(url: httpx.URL) -> str:
@@ -1085,11 +1085,8 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             )
             await response.aclose()
             history.append(response)
-            operator = _request_operator.get()
-            if operator is not None:
-                # A followed redirect is a new send: it passes the same block
-                # check as the first one.
-                await raise_if_step_login_blocked(operator)
+            # The send below runs the client's request hook (``_note_request_sent``),
+            # so a followed redirect passes the same block check as the first send.
             request = next_request
             sent_urls.add(_sent_address(request.url))
             hop_start = self._hop_span_start()
@@ -1483,7 +1480,6 @@ class HttpConnector(Connector):
         # retry attempt is its own vendor call and gets its own span.
         _fr_start = flight_recorder_capture.span_start()
         trace_hops = _operation_request.set(True)
-        hop_operator = _request_operator.set(operator)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1495,11 +1491,12 @@ class HttpConnector(Connector):
                 extensions=self._request_extensions(target),
             )
         except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
+            flight_recorder_capture.record_vendor_call_error(
+                _fr_start, method=_failed_method(exc, method), exc=exc
+            )
             raise
         finally:
             _operation_request.reset(trace_hops)
-            _request_operator.reset(hop_operator)
         # After a followed redirect the last request can have another method
         # (an OPTIONS answered with a 303 is followed by a GET).
         flight_recorder_capture.record_vendor_call(
@@ -1603,7 +1600,6 @@ class HttpConnector(Connector):
         # op has its body dropped by the redaction engine's family rules.
         _fr_start = flight_recorder_capture.span_start()
         trace_hops = _operation_request.set(True)
-        hop_operator = _request_operator.set(operator)
         try:
             resp = await _read_capped_json_response(
                 client,
@@ -1617,11 +1613,12 @@ class HttpConnector(Connector):
                 timeout=timeout,
             )
         except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(_fr_start, method=verb, exc=exc)
+            flight_recorder_capture.record_vendor_call_error(
+                _fr_start, method=_failed_method(exc, verb), exc=exc
+            )
             raise
         finally:
             _operation_request.reset(trace_hops)
-            _request_operator.reset(hop_operator)
         flight_recorder_capture.record_vendor_call(
             _fr_start,
             method=resp.request.method,
@@ -1657,7 +1654,9 @@ class HttpConnector(Connector):
         try:
             resp = await client.request(method, path, json=json, headers=headers)
         except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
+            flight_recorder_capture.record_vendor_call_error(
+                _fr_start, method=_failed_method(exc, method), exc=exc
+            )
             raise
         finally:
             _operation_request.reset(trace_hops)

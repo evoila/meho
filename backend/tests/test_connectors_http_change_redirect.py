@@ -395,6 +395,31 @@ async def test_trace_of_an_options_redirect_names_the_get_that_followed() -> Non
 
 
 @pytest.mark.asyncio
+async def test_trace_of_an_options_redirect_names_the_get_that_timed_out() -> None:
+    recorded, (start_patch, record_patch) = _recording()
+    errors: list[str] = []
+
+    def record_error(_start: Any, *, method: str, exc: Exception) -> None:
+        errors.append(method)
+
+    conn = _Conn()
+    with (
+        start_patch,
+        record_patch,
+        patch.object(capture, "record_vendor_call_error", side_effect=record_error),
+    ):
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.options("/items").respond(303, headers={"Location": "/items/"})
+            mock.get("/items/").mock(side_effect=httpx.ReadTimeout("made-up timeout"))
+            with pytest.raises(httpx.ReadTimeout):
+                await conn._request_json(_target(), "OPTIONS", "/items", operator=_operator())
+    await conn.aclose()
+
+    assert recorded == [("OPTIONS", 303, "/items")]
+    assert errors == ["GET"]
+
+
+@pytest.mark.asyncio
 async def test_direct_client_call_puts_no_redirect_into_the_trace() -> None:
     # A login goes to the client directly and stays out of the trace, also
     # when the target redirects it.
@@ -410,50 +435,65 @@ async def test_direct_client_call_puts_no_redirect_into_the_trace() -> None:
     assert recorded == []
 
 
-def _blocked_after_first_send() -> tuple[list[str], Any]:
-    """A block check that lets the first send go and refuses every later one."""
-    checks: list[str] = []
+class _BlockAfterFirstAnswer:
+    """The block check of the caller's login, which refuses once the first answer came back.
 
-    async def check(operator: Operator) -> None:
-        checks.append(operator.sub)
-        if len(checks) > 1:
+    It stands in for main's check before each send
+    (``raise_if_send_refused``, run by the client's request hook), so the
+    caller is blocked between the first answer and the next request.
+    """
+
+    def __init__(self) -> None:
+        self.blocked = False
+        self.checks = 0
+
+    async def check(self) -> None:
+        self.checks += 1
+        if self.blocked:
             raise PrincipalBlockedStepError(unavailable=False)
 
-    return checks, patch(
-        "meho_backplane.connectors.adapters.http.raise_if_step_login_blocked", side_effect=check
-    )
+    def redirect(self, location: str) -> Any:
+        def answer(_request: httpx.Request) -> httpx.Response:
+            self.blocked = True
+            return httpx.Response(307, headers={"Location": location})
+
+        return answer
+
+    def patched(self) -> Any:
+        return patch(
+            "meho_backplane.connectors.adapters.http.raise_if_send_refused",
+            side_effect=self.check,
+        )
 
 
 @pytest.mark.asyncio
 async def test_login_blocked_before_a_followed_change_redirect_gets_no_second_request() -> None:
-    checks, blocked = _blocked_after_first_send()
+    block = _BlockAfterFirstAnswer()
     conn = _Conn()
-    with blocked:
+    with block.patched():
         async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
-            first = mock.put("/items/7").respond(307, headers={"Location": "/items/7/"})
+            first = mock.put("/items/7").mock(side_effect=block.redirect("/items/7/"))
             second = mock.put("/items/7/").respond(200, json={"ok": True})
             with pytest.raises(PrincipalBlockedStepError):
                 await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
     await conn.aclose()
 
-    assert checks == ["test-operator", "test-operator"]
     assert first.call_count == 1
     assert second.call_count == 0
 
 
 @pytest.mark.asyncio
 async def test_login_blocked_before_a_followed_read_redirect_gets_no_second_request() -> None:
-    checks, blocked = _blocked_after_first_send()
+    block = _BlockAfterFirstAnswer()
     conn = _Conn()
-    with blocked:
+    with block.patched():
         async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
-            first = mock.get("/list").respond(307, headers={"Location": "/list/"})
+            first = mock.get("/list").mock(side_effect=block.redirect("/list/"))
             second = mock.get("/list/").respond(200, json={"items": []})
             with pytest.raises(PrincipalBlockedStepError):
                 await conn._request_json(_target(), "GET", "/list", operator=_operator())
     await conn.aclose()
 
-    assert len(checks) == 2
     assert first.call_count == 1
     assert second.call_count == 0
 
@@ -515,6 +555,37 @@ async def test_trace_of_a_keycloak_write_has_each_request_and_no_login() -> None
         ("PUT", 307, "/admin/realms/demo/groups/7"),
         ("PUT", 204, "/admin/realms/demo/groups/7/"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_login_blocked_before_a_followed_keycloak_write_redirect_gets_no_second_request() -> (
+    None
+):
+    # An approved Keycloak write sends its own request through ``_send_traced``.
+    # The caller's login is blocked after the 307: the target gets one write.
+    block = _BlockAfterFirstAnswer()
+    conn = KeycloakConnector(credentials_loader=_kc_loader)
+    with block.patched():
+        async with respx.mock(base_url=_KC_BASE, assert_all_called=False) as mock:
+            mock.post(url__regex=r".*/openid-connect/token$").respond(
+                200, json={"access_token": "made-up-token", "expires_in": 60}
+            )
+            first = mock.put("/admin/realms/demo/groups/7").mock(
+                side_effect=block.redirect("/admin/realms/demo/groups/7/")
+            )
+            second = mock.put("/admin/realms/demo/groups/7/").respond(204)
+            with pytest.raises(PrincipalBlockedStepError):
+                await conn._write_admin(
+                    _kc_target(),
+                    "PUT",
+                    "/admin/realms/demo/groups/7",
+                    operator=_operator(),
+                    json={"name": "widgets"},
+                )
+    await conn.aclose()
+
+    assert first.call_count == 1
+    assert second.call_count == 0
 
 
 def _real_capture(op_id: str, tags: tuple[str, ...] = ()) -> Any:

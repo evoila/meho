@@ -115,6 +115,8 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.answer_realm import name_the_realm
+from meho_backplane.connectors.keycloak.managed_realm_check import ManagedRealmChecks
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -330,6 +332,7 @@ class _CachedToken:
         return now < self.expires_at
 
 
+@name_the_realm
 class KeycloakConnector(HttpConnector):
     """Keycloak 26.x Admin REST API connector with admin-token Bearer auth.
 
@@ -372,6 +375,8 @@ class KeycloakConnector(HttpConnector):
         self._admin_tokens: dict[tuple[str, str, str], _CachedToken] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
+        # The targets whose realm Keycloak just answered with the right name.
+        self._realm_checks = ManagedRealmChecks()
         self._token_lock = asyncio.Lock()
         self._credentials_loader: KeycloakAdminCredentialsLoader = (
             credentials_loader
@@ -540,7 +545,8 @@ class KeycloakConnector(HttpConnector):
         ``extras["error"]`` rather than an unhandled exception.
 
         Transport / auth failure → ``reachable=False`` with
-        ``extras["error"]`` carrying ``"<ExcType>: <message>"``.
+        ``extras["error"]`` carrying ``"<ExcType>: <message>"``, with the
+        configured ``admin_realm`` and ``managed_realm`` next to it.
         """
         from meho_backplane.connectors._shared.system_operator import (
             synthesise_system_operator,
@@ -581,7 +587,7 @@ class KeycloakConnector(HttpConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=probe_method,
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+                extras={"error": f"{type(exc).__name__}: {exc}", **_realm_names(realms)},
             )
 
         server_version = await self._server_version(target, effective_operator)
@@ -688,16 +694,12 @@ class KeycloakConnector(HttpConnector):
         (``GET /admin/realms/{realm}``, one client, role-mappings). The
         admin Bearer is applied by this connector's
         :meth:`auth_headers`; the operator authorises only the Vault read
-        behind the token mint.
+        behind the token mint. The realm is checked first
+        (:class:`.ManagedRealmChecks`), except for a read of the realm itself.
         """
+        await self._realm_checks.ensure(self, target, operator, "GET", path)
         return await self._get_json(target, path, operator=operator, params=params)
 
-    @retry(
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
-        retry=retry_if_exception(_retryable),
-        reraise=True,
-    )
     async def _get_admin_list(
         self,
         target: KeycloakTargetLike,
@@ -719,8 +721,30 @@ class KeycloakConnector(HttpConnector):
         Keycloak occasionally returns as an object) yields an empty list
         so a handler never iterates a dict. With *strict*, a non-list body
         raises :exc:`ValueError` instead, for a caller that must tell an
-        empty list from a list it could not read.
+        empty list from a list it could not read. The realm is checked first
+        (:class:`.ManagedRealmChecks`).
         """
+        await self._realm_checks.ensure(self, target, operator, "GET", path)
+        return await self._fetch_admin_list(
+            target, path, operator=operator, params=params, strict=strict
+        )
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
+        retry=retry_if_exception(_retryable),
+        reraise=True,
+    )
+    async def _fetch_admin_list(
+        self,
+        target: KeycloakTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None,
+        strict: bool,
+    ) -> list[Any]:
+        """The retried request of :meth:`_get_admin_list`."""
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("GET", path, params=params, headers=headers)
@@ -772,6 +796,7 @@ class KeycloakConnector(HttpConnector):
                 f"_write_admin only accepts mutating methods {sorted(_MUTATING_METHODS)}; "
                 f"got {verb!r}"
             )
+        await self._realm_checks.ensure(self, target, operator, verb, path)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await self._send_traced(client, verb, path, json=json, headers=headers)
@@ -1603,6 +1628,7 @@ class KeycloakConnector(HttpConnector):
             for key in target_entry_keys(self._admin_tokens, target):
                 del self._admin_tokens[key]
             self._readers.forget(target)
+            self._realm_checks.forget(target)
 
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.
@@ -1617,7 +1643,13 @@ class KeycloakConnector(HttpConnector):
         async with self._token_lock:
             self._admin_tokens.clear()
             self._readers.clear()
+            self._realm_checks.clear()
         await super().aclose()
+
+
+def _realm_names(realms: RealmConfig) -> dict[str, str]:
+    """The configured realms of a target, side by side."""
+    return {"admin_realm": realms.admin_realm, "managed_realm": realms.managed_realm}
 
 
 def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
@@ -1636,6 +1668,5 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
         "enabled": repr_dict.get("enabled"),
         "ssl_required": repr_dict.get("sslRequired"),
         "login_theme": repr_dict.get("loginTheme"),
-        "admin_realm": realms.admin_realm,
-        "managed_realm": realms.managed_realm,
+        **_realm_names(realms),
     }

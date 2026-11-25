@@ -40,8 +40,9 @@ from meho_backplane.auth.principal_block import (
     checking_logins_for_steps,
     reset_block_cache,
 )
+from meho_backplane.auth.principal_block_run import tracking_run
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, _note_request_sent
 from meho_backplane.connectors.github.composites._git import branch_commit_files_composite
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.registry import clear_registry
@@ -340,7 +341,10 @@ def _github_connector() -> GitHubRestConnector:
 
     connector = GitHubRestConnector()
     client = httpx.AsyncClient(
-        base_url="https://api.github.com", transport=httpx.MockTransport(_answer)
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(_answer),
+        # The hook every connector client carries.
+        event_hooks={"request": [_note_request_sent]},
     )
     connector._http_client = AsyncMock(return_value=client)  # type: ignore[method-assign]
     connector.auth_headers = AsyncMock(return_value={})  # type: ignore[method-assign]
@@ -362,6 +366,8 @@ async def test_branch_commit_files_never_moves_the_branch_once_the_person_is_blo
 
     with (
         checking_logins_for_steps(operator.sub, operator.tenant_id),
+        # The run record the dispatcher keeps while an operation runs.
+        tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)),
         pytest.raises(PrincipalBlockedStepError) as refused,
     ):
         await branch_commit_files_composite(

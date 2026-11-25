@@ -44,6 +44,7 @@ import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
+from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
@@ -53,7 +54,7 @@ from meho_backplane.main import app
 from meho_backplane.operations import dispatch, grant_approval, reset_dispatcher_caches
 from meho_backplane.operations._audit import agent_session_id_var, policy_rule_var, work_ref_var
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, register_preview_builder
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import compute_audit_params_hash, compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     IdempotencyKeyConflictError,
@@ -1232,6 +1233,8 @@ async def test_a_call_that_gets_the_waiting_request_writes_its_own_audit_row(
     assert first["audit_id"] == str(request_row.id)
     assert second["audit_id"] == str(reuse_row.id)
     assert reuse_row.payload["approval_request_id"] == request_id
+    assert reuse_row.payload["params_hash"] == compute_audit_params_hash(_PARAMS)
+    assert "request_state" not in reuse_row.payload
     assert request_row.agent_session_id == first_session
     assert reuse_row.agent_session_id == second_session
     assert reuse_row.parent_audit_id == request_row.id
@@ -1506,3 +1509,314 @@ async def test_retry_of_an_approved_secret_request_says_only_it_is_approved(
     assert fetched.status == "ok", fetched.error
     assert reveal_helpers.SECRET_VALUE in fetched.model_dump_json()
     assert len(_secret_reads) == 1
+
+
+# ---------------------------------------------------------------------------
+# A retry with the same key writes its own audit row (APPROVAL_RETRY_OWN_AUDIT_ROW)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def retry_own_row_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("APPROVAL_RETRY_OWN_AUDIT_ROW", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+async def _approval_audit_rows() -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        return list(
+            (
+                await s.execute(
+                    select(AuditLog)
+                    .where(AuditLog.method == "APPROVAL")
+                    .order_by(AuditLog.occurred_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def _call_twice_with_one_key(
+    embedding: list[float], monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], dict[str, Any], list[str], tuple[uuid.UUID, uuid.UUID]]:
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    events: list[str] = []
+
+    async def _record(**kwargs: Any) -> None:
+        events.append(kwargs["decision"])
+
+    monkeypatch.setattr(approval_queue_module, "record_approval_step_event", _record)
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": "retry-key"}
+    sessions = (uuid.uuid4(), uuid.uuid4())
+    answers = []
+    for session_id in sessions:
+        token = agent_session_id_var.set(session_id)
+        try:
+            answers.append(await call_operation(requester, bound))
+        finally:
+            agent_session_id_var.reset(token)
+    return answers[0], answers[1], events, sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_a_retry_with_the_same_key_writes_its_own_audit_row(
+    embedding: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second, events, (first_session, second_session) = await _call_twice_with_one_key(
+        embedding, monkeypatch
+    )
+
+    request_id = first["extras"]["approval_request_id"]
+    assert second["extras"]["approval_request_id"] == request_id
+    assert second["extras"]["approval_request_reused"] is True
+    rows = await _approval_audit_rows()
+    assert [row.path for row in rows] == ["approval.request", "approval.reuse"]
+    request_row, reuse_row = rows
+    assert first["audit_id"] == str(request_row.id)
+    assert second["audit_id"] == str(reuse_row.id)
+    assert reuse_row.payload["approval_request_id"] == request_id
+    assert reuse_row.payload["params_hash"] == compute_audit_params_hash(_PARAMS)
+    assert reuse_row.payload["request_state"] == "waiting"
+    assert reuse_row.status_code == 202
+    assert reuse_row.parent_audit_id == request_row.id
+    assert request_row.agent_session_id == first_session
+    assert reuse_row.agent_session_id == second_session
+    assert await _approval_row_count() == 1
+    assert events == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_with_the_same_key_writes_no_row_with_the_switch_off(
+    embedding: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second, events, _ = await _call_twice_with_one_key(embedding, monkeypatch)
+
+    assert second["extras"]["approval_request_id"] == first["extras"]["approval_request_id"]
+    rows = await _approval_audit_rows()
+    assert [row.path for row in rows] == ["approval.request"]
+    assert second["audit_id"] == first["audit_id"] == str(rows[0].id)
+    assert events == ["pending"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_a_retry_of_an_approved_request_writes_its_own_audit_row() -> None:
+    a = await _park_same_call(key="key-a")
+    async with get_sessionmaker()() as s:
+        await approve_request(s, a.id, operator=_operator(sub="op-approver"))
+        await s.commit()
+
+    session = uuid.uuid4()
+    token = agent_session_id_var.set(session)
+    try:
+        retry = await _park_same_call(key="key-a")
+    finally:
+        agent_session_id_var.reset(token)
+
+    assert retry.id == a.id
+    reuse_rows = [r for r in await _approval_audit_rows() if r.path == "approval.reuse"]
+    assert len(reuse_rows) == 1
+    assert reuse_rows[0].payload["params_hash"] == compute_audit_params_hash({"name": "web-01"})
+    assert reuse_rows[0].payload["approval_request_id"] == str(a.id)
+    assert reuse_rows[0].payload["request_state"] == "approved_not_started"
+    assert reuse_rows[0].status_code == 200
+    assert reuse_rows[0].agent_session_id == session
+    assert getattr(retry, "_reuse_audit_id", None) == reuse_rows[0].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_the_retry_row_hashes_the_params_with_secret_values_masked() -> None:
+    params = {"name": "web-01", "password": "first-test-value"}
+    first = await _park_same_call(key="key-secret", params=params)
+    retry = await _park_same_call(key="key-secret", params=params)
+
+    assert retry.id == first.id
+    reuse_rows = [r for r in await _approval_audit_rows() if r.path == "approval.reuse"]
+    assert len(reuse_rows) == 1
+    stored = reuse_rows[0].payload["params_hash"]
+    assert stored == compute_audit_params_hash({"name": "web-01", "password": "other-test-value"})
+    assert stored != compute_params_hash(params)
+    assert "first-test-value" not in str(reuse_rows[0].payload)
+
+
+async def _park_with_actor(actor: str | None) -> ApprovalRequest:
+    """Park the same call, with *actor* bound as the acting agent (or none)."""
+    if actor is None:
+        return await _park_same_call()
+    with actor_delegation(actor):
+        return await _park_same_call()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_an_acting_agent_does_not_get_the_request_of_a_direct_call() -> None:
+    direct = await _park_with_actor(None)
+    acting = await _park_with_actor("agent:bot-a")
+
+    assert acting.id != direct.id
+    assert getattr(acting, "_reused", False) is False
+    assert acting.principal_act == "agent:bot-a"
+    assert direct.principal_act is None
+    assert await _approval_row_count() == 2
+    assert await _request_audit_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_direct_call_does_not_get_the_request_of_a_call_with_an_acting_agent() -> None:
+    acting = await _park_with_actor("agent:bot-a")
+    direct = await _park_with_actor(None)
+
+    assert direct.id != acting.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_another_acting_agent_gets_its_own_request() -> None:
+    first = await _park_with_actor("agent:bot-a")
+    other = await _park_with_actor("agent:bot-b")
+
+    assert other.id != first.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_the_same_acting_agent_gets_the_waiting_request() -> None:
+    first = await _park_with_actor("agent:bot-a")
+    again = await _park_with_actor("agent:bot-a")
+
+    assert again.id == first.id
+    assert getattr(again, "_reused", False) is True
+    assert await _approval_row_count() == 1
+    assert await _request_audit_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_person_behind_a_call_with_another_acting_agent_cannot_approve_its_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+    with actor_delegation("agent:bot-a"):
+        second = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert second.principal_act == "agent:bot-a"
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s, second.id, operator=_operator(sub="person-b"))
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, second.id, operator=_operator(sub="person-c"))
+    assert approved.status == ApprovalRequestStatus.APPROVED
+
+
+async def _approved_request_after_a_call(
+    embedding: list[float], run_result: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Park one call with a key, approve it, store *run_result*, then retry."""
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": "state-key"}
+    first = await call_operation(requester, bound)
+    approver = _operator(sub="op-approver").model_copy(update={"self_approver": True})
+    async with get_sessionmaker()() as s:
+        await approve_request(
+            s, uuid.UUID(first["extras"]["approval_request_id"]), operator=approver, params=None
+        )
+        await s.commit()
+    if run_result is not None:
+        async with get_sessionmaker()() as s:
+            row = await s.get(ApprovalRequest, uuid.UUID(first["extras"]["approval_request_id"]))
+            assert row is not None
+            row.resumed_at = datetime.now(UTC)
+            row.resume_result = run_result
+            await s.commit()
+    return first, await call_operation(requester, bound)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+@pytest.mark.parametrize(
+    ("run_result", "state", "code"),
+    [
+        (None, "approved_not_started", 200),
+        ({"status": "ok", "op_id": _OP_ID}, "approved_executed", 200),
+        ({"status": "error", "op_id": _OP_ID, "error": "upstream 500"}, "approved_failed", 200),
+    ],
+)
+async def test_the_retry_row_says_the_state_of_an_approved_request(
+    embedding: list[float], run_result: dict[str, Any] | None, state: str, code: int
+) -> None:
+    first, retry = await _approved_request_after_a_call(embedding, run_result)
+
+    rows = [r for r in await _approval_audit_rows() if r.path != "approval.decision"]
+    assert [row.path for row in rows] == ["approval.request", "approval.reuse"]
+    reuse_row = rows[1]
+    assert retry["audit_id"] == str(reuse_row.id)
+    assert reuse_row.payload["approval_request_id"] == first["extras"]["approval_request_id"]
+    assert reuse_row.payload["request_state"] == state
+    assert reuse_row.status_code == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_a_retry_that_loses_the_insert_race_writes_one_reuse_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    winner = await _park_direct(key="race-key")
+    real_find = approval_queue_module._find_idempotent_request
+    calls = {"n": 0}
+
+    async def _miss_once(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real_find(*args, **kwargs)
+
+    monkeypatch.setattr(approval_queue_module, "_find_idempotent_request", _miss_once)
+    session = uuid.uuid4()
+    token = agent_session_id_var.set(session)
+    try:
+        loser = await _park_direct(key="race-key")
+    finally:
+        agent_session_id_var.reset(token)
+
+    assert loser.id == winner.id
+    assert calls["n"] == 2
+    rows = await _approval_audit_rows()
+    assert [row.path for row in rows] == ["approval.request", "approval.reuse"]
+    assert getattr(loser, "_reuse_audit_id", None) == rows[1].id
+    assert rows[1].payload["request_state"] == "waiting"
+    assert rows[1].status_code == 202
+    assert rows[1].agent_session_id == session
+
+
+@pytest.mark.asyncio
+async def test_with_both_reuse_switches_off_a_retry_writes_no_row_and_keeps_the_first_receipt(
+    embedding: list[float],
+) -> None:
+    first, retry = await _approved_request_after_a_call(embedding, None)
+
+    rows = [r for r in await _approval_audit_rows() if r.path != "approval.decision"]
+    assert [row.path for row in rows] == ["approval.request"]
+    assert retry["audit_id"] == first["audit_id"] == str(rows[0].id)
+    assert rows[0].status_code == 202
+    assert "request_state" not in rows[0].payload

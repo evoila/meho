@@ -38,10 +38,11 @@ construction.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Final
 
 import structlog
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi import status as http_status
 from fastapi.responses import Response
 
@@ -63,13 +64,15 @@ from meho_backplane.gateway.errors import (
     AssignmentTargetUnknownError,
     AssignmentValidationError,
 )
-from meho_backplane.gateway.repository import ingest_results
+from meho_backplane.gateway.repository import ingest_results, lock_assignment_row
+from meho_backplane.gateway.runner_checks import ingest_and_count, screen_batch
 from meho_backplane.gateway.schemas import (
     AssignmentDocument,
     AssignmentDocumentResponse,
     ResultIngestResponse,
 )
 from meho_backplane.runner import wire
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -155,13 +158,16 @@ async def get_assignment(
     wire_version: Annotated[str, _runner_wire_version],
     package_set: Annotated[str, _runner_package_set],
     known_version: Annotated[str | None, Query()] = None,
+    features: Annotated[str | None, Header(alias=wire.FEATURES_HEADER)] = None,
 ) -> wire.RunnerAssignment | Response:
     """Return runner *runner*'s versioned assignment (runner-authenticated).
 
     A runner may fetch only its own assignment
     (:func:`assert_runner_scope`). A runner on another wire version gets a
     409 that names both versions. Work for a connector package is left out
-    when the runner's package set differs from central's (#5038).
+    when the runner's package set differs from central's (#5038). The work
+    of a counted check goes only to a runner that names
+    ``scheduled-checks`` in its ``X-MEHO-Runner-Features`` header.
     ``known_version`` matching the current
     content digest yields ``304 Not Modified`` (empty body); the runner
     keeps its cache.
@@ -185,13 +191,16 @@ async def get_assignment(
             runner_name=runner,
             principal=_principal_from_operator(operator),
             runner_package_set=package_set,
+            runner_features=frozenset(
+                word.strip() for word in (features or "").split(",") if word.strip()
+            ),
         )
     if known_version is not None and known_version == assignment.assignment_version:
         return Response(status_code=http_status.HTTP_304_NOT_MODIFIED)
     return assignment
 
 
-@router.post("/results", response_model=ResultIngestResponse)
+@router.post("/results", response_model=ResultIngestResponse, response_model_exclude_none=True)
 async def post_results(
     batch: wire.RunnerResultBatch,
     operator: Annotated[Operator, _require_runner],
@@ -218,11 +227,33 @@ async def post_results(
             wire_version=wire_version,
             package_set=package_set,
         )
+        results = list(batch.results)
+        if get_settings().runner_checks_enabled:
+            # Clear the stale mark first, under the runner's row lock, then
+            # store and count each result in its own transaction.
+            await lock_assignment_row(
+                session, tenant_id=operator.tenant_id, runner_name=batch.runner_id
+            )
+            await clear_runner_stale(
+                session, tenant_id=operator.tenant_id, runner_name=batch.runner_id
+            )
+            await session.commit()
+            received_at = datetime.now(UTC)
+            screened = screen_batch(results, received_at, runner_name=batch.runner_id)
+            accepted, duplicates = await ingest_and_count(
+                tenant_id=operator.tenant_id,
+                runner_name=batch.runner_id,
+                screened=screened,
+                received_at=received_at,
+            )
+            return ResultIngestResponse(
+                accepted=accepted, duplicates=duplicates, refused=screened.refused or None
+            )
         accepted, duplicates = await ingest_results(
             session,
             tenant_id=operator.tenant_id,
             runner_name=batch.runner_id,
-            results=list(batch.results),
+            results=results,
         )
         # Recovery clear seam (#2501): an accepted result batch proves the
         # runner is alive and reporting, so reset any dead-man flip marker

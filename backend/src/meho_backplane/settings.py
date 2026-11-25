@@ -1677,8 +1677,32 @@ class Settings(BaseModel):
         ``dispatch_child``, or one saved to restart after approval) and a
         re-run for an earlier requester always get their own request, and
         a direct call never gets the request of such a step.
-        When off, every such call makes a new request. Env
-        ``APPROVAL_SAME_CALL_REUSE``.
+        The acting agent must be the same too (none for a direct call).
+        The check of a step of a multi-step operation never uses the reuse.
+        When off, every such call makes a new request. A retry key that was
+        linked to a request while the switch was on keeps finding that
+        request after it is turned off. Env ``APPROVAL_SAME_CALL_REUSE``.
+    approval_retry_own_audit_row:
+        Off by default. When on, a retry that gets the waiting (or approved)
+        request through the same ``idempotency_key`` writes its own
+        ``approval.reuse`` audit row, in the same transaction. The row names
+        the reused request and the retry's own session. The answer's
+        ``audit_id`` is that row, not the row of the first call. There is
+        still no second ``approval.pending`` event. When off, the retry
+        writes no audit row and the answer's ``audit_id`` is the first
+        call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
+    runner_checks_enabled:
+        Off by default. When on, a check bound to a runner counts like a
+        central check: the result a runner posts for its own check sets the
+        state of the check, shows on the dashboard, sends mails on change and
+        recovery and can start the investigator. A dead runner shows its
+        checks as ``unknown``. When off, MEHO only stores runner results.
+        Env ``RUNNER_CHECKS_ENABLED``.
+    runner_check_results_retention_days:
+        Days the clean-up job keeps raw runner result rows while
+        ``RUNNER_CHECKS_ENABLED`` is on (default 7; ``0`` keeps them). With
+        the switch off, the job deletes none. Env
+        ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
     audit_session_links:
         Off by default. When on, an upload of an agent session links its
         MCP calls and ``meho`` commands to their audit rows. Then
@@ -2548,6 +2572,15 @@ class Settings(BaseModel):
     # triggers can match them. Off by default: nothing is written and nothing
     # else changes. Set via ``CHECKS_AGENT_EVENTS``.
     checks_agent_events: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # With this switch on, the results of a runner count like the results of a
+    # central check: they set the state of the check, show on the dashboard,
+    # send mails and can start the investigator. Off by default: results are
+    # only stored. Set via ``RUNNER_CHECKS_ENABLED``.
+    runner_checks_enabled: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    # Days the clean-up job keeps raw ``runner_check_results`` rows while
+    # ``RUNNER_CHECKS_ENABLED`` is on. ``0``, or the switch off, keeps them for
+    # ever. Set via ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+    runner_check_results_retention_days: int = Field(default=7, ge=0, le=3650)
     # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
     # SMTP block shared by the agent-callable ``mail.send`` op and the checks
     # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
@@ -2675,6 +2708,7 @@ class Settings(BaseModel):
     mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_retry_own_audit_row: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -2794,6 +2828,12 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The realm in every Keycloak answer, behind a switch that is off by
+    #: default. When on, each dict answer of a Keycloak operation starts with
+    #: ``managed_realm``: the realm the call acted on
+    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
+    #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
+    keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -3854,6 +3894,10 @@ def get_settings() -> Settings:
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
         checks_agent_events=parse_bool_env(os.environ.get("CHECKS_AGENT_EVENTS", "false")),
+        runner_checks_enabled=parse_bool_env(os.environ.get("RUNNER_CHECKS_ENABLED", "false")),
+        runner_check_results_retention_days=int(
+            os.environ.get("RUNNER_CHECK_RESULTS_RETENTION_DAYS", "7"),
+        ),
         mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
         mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
         mail_smtp_starttls=parse_bool_env(
@@ -3924,6 +3968,9 @@ def get_settings() -> Settings:
         approval_same_call_reuse=parse_bool_env(
             os.environ.get("APPROVAL_SAME_CALL_REUSE"),
         ),
+        approval_retry_own_audit_row=parse_bool_env(
+            os.environ.get("APPROVAL_RETRY_OWN_AUDIT_ROW"),
+        ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
         ),
@@ -3972,6 +4019,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        keycloak_answer_realm=parse_bool_env(
+            os.environ.get("KEYCLOAK_ANSWER_REALM"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

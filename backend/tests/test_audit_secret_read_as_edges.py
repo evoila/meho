@@ -10,7 +10,9 @@
   shared target login loader, the Vault side of the secret broker and the
   Vault read of the pfSense OpenVPN user operations.
 * The read of the sink secret for the approval card of ``secret.move``
-  names the caller on the row of the call that waits for approval.
+  names the caller on the row of the call that waits for approval. The
+  ``approval.reuse`` row of a second call holds the value of its own call,
+  for the same call and for a retry with the same key.
 * A child call that reads names the caller on its own row; the parent
   that reads nothing stays empty.
 * A service login sees the field only on the rows of its own calls.
@@ -38,6 +40,7 @@ from meho_backplane.auth.secret_read_as import (
     CHECK_RUNNER_IDENTITY,
     current_secret_read_as,
     record_caller_secret_read,
+    token_subject,
     track_secret_read_as,
 )
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
@@ -297,6 +300,95 @@ async def test_move_that_waits_for_approval_names_the_caller_of_the_sink_read(
     assert result.status == "awaiting_approval", result.error
     (row,) = await _rows("approval.request")
     assert row.secret_read_as == "person-sub"
+
+
+#: How a second call gets the waiting request: the switch, and the key both calls send.
+_REUSE_WAYS = [
+    pytest.param("APPROVAL_SAME_CALL_REUSE", None, id="same-call"),
+    pytest.param("APPROVAL_RETRY_OWN_AUDIT_ROW", "made-up-key", id="retry-with-the-same-key"),
+]
+
+
+async def _move_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    embedding: AsyncMock,
+    *,
+    switch_on: str | None,
+    key: str | None,
+    second_reads_deleted: bool = False,
+) -> str:
+    """Send one ``secret.move`` twice with a login made up here, and return the login.
+
+    Each call reads the sink secret for its card and waits for approval. The
+    second call gets the request of the first. With *second_reads_deleted*,
+    the second call's read answers a deleted latest version.
+    """
+    for switch in ("APPROVAL_SAME_CALL_REUSE", "APPROVAL_RETRY_OWN_AUDIT_ROW"):
+        monkeypatch.setenv(switch, "true" if switch == switch_on else "false")
+    get_settings.cache_clear()
+    fake = install_fake_vault(monkeypatch)
+    fake.secrets.kv.v2.secret = {"password": "made-up-value-0zzz"}
+    await register_secret_broker_operations(embedding_service=embedding)
+    login = f"person-{uuid.uuid4().hex[:12]}"
+    request_ids = []
+    for is_second in (False, True):
+        if is_second and second_reads_deleted:
+            _deleted_latest_version(fake)
+        reads_before = len(fake.secrets.kv.v2.read_calls)
+        result = await dispatch(
+            operator=_operator(login),
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params={
+                "from": "vault:secret/db/prod#password",
+                "to": "vault:secret/db/replica#password",
+                "reason": "made-up reason",
+            },
+            idempotency_key=key,
+        )
+        assert result.status == "awaiting_approval", result.error
+        assert len(fake.secrets.kv.v2.read_calls) == reads_before + 1
+        request_ids.append(result.extras["approval_request_id"])
+    assert request_ids[0] == request_ids[1]
+    assert {token_subject(call["jwt"], "") for call in fake.auth.jwt.login_calls} == {login}
+    return login
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("switch", "key"), _REUSE_WAYS)
+async def test_second_move_names_the_caller_on_its_reuse_row(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock, switch: str, key: str | None
+) -> None:
+    login = await _move_twice(monkeypatch, embedding, switch_on=switch, key=key)
+    (request_row,) = await _rows("approval.request")
+    (reuse_row,) = await _rows("approval.reuse")
+    assert request_row.secret_read_as == login
+    assert reuse_row.secret_read_as == login
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("switch", "key"), _REUSE_WAYS)
+async def test_second_move_that_reads_a_deleted_secret_leaves_its_reuse_row_empty(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock, switch: str, key: str | None
+) -> None:
+    login = await _move_twice(
+        monkeypatch, embedding, switch_on=switch, key=key, second_reads_deleted=True
+    )
+    (request_row,) = await _rows("approval.request")
+    (reuse_row,) = await _rows("approval.reuse")
+    assert request_row.secret_read_as == login
+    assert reuse_row.secret_read_as is None
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_move_with_the_same_key_and_the_switch_off_writes_no_reuse_row(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    login = await _move_twice(monkeypatch, embedding, switch_on=None, key="made-up-key")
+    (request_row,) = await _rows("approval.request")
+    assert request_row.secret_read_as == login
+    assert await _rows("approval.reuse") == []
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,21 @@ func fallbackResultRender(w io.Writer, r *CallResult) {
 	fmt.Fprintln(w, output.SafeLines(string(r.Result)))
 }
 
+// printManagedRealm prints the realm the call acted on, when the answer
+// names it (`managed_realm`). The server adds that field only while
+// KEYCLOAK_ANSWER_REALM is on; without it nothing is printed.
+func printManagedRealm(w io.Writer, r *CallResult) {
+	var envelope struct {
+		ManagedRealm any `json:"managed_realm"`
+	}
+	if err := json.Unmarshal(r.Result, &envelope); err != nil {
+		return
+	}
+	if realm, ok := envelope.ManagedRealm.(string); ok && realm != "" {
+		fmt.Fprintf(w, "  managed realm: %s\n", output.SafeText(realm))
+	}
+}
+
 // decodeRowsResult decodes the canonical `{"rows": [...], "total": N}`
 // envelope the set-shaped keycloak read ops return (client.list,
 // client_scope.list, user.list).

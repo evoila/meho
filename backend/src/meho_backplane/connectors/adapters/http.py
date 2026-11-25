@@ -96,7 +96,7 @@ from httpx._decoders import SUPPORTED_DECODERS
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.principal_block import raise_if_step_login_blocked
+from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.principal_block_run import mark_request_sent
 from meho_backplane.connectors._shared.cache_key import (
     DEFAULT_PORTS,
@@ -471,7 +471,14 @@ class _WireCappedStream(httpx.AsyncByteStream):
 
 
 async def _note_request_sent(_request: httpx.Request) -> None:
-    """Request hook of every connector client: the running operation sends a request."""
+    """Request hook of every connector client: the check right before a request goes out.
+
+    It runs after the credentials are ready, and again for each request a
+    redirect sends. When the login of the running call is blocked, the
+    request is not sent (:func:`raise_if_send_refused`). Otherwise the
+    running operation notes that it sends a request.
+    """
+    await raise_if_send_refused()
     mark_request_sent()
 
 
@@ -504,7 +511,7 @@ _NO_ANSWER: Any = object()
 async def _close_when_done(
     task: asyncio.Future[Any], discard: Callable[[Any], Awaitable[None]]
 ) -> None:
-    """Wait for a read the caller no longer waits for, then close its answer."""
+    """Wait for a read whose caller has stopped waiting, then close its answer."""
     await asyncio.wait({task})
     if task.cancelled() or task.exception() is not None:
         return
@@ -659,6 +666,9 @@ async def _stream_capped_json_response(
     ``raise_for_status``, and ``json_payload_or_empty`` — sees a response
     byte-identical to the non-streamed path.
     """
+    # The check right before the request goes out, also for a client that has
+    # no request hook (a connector that builds its own client).
+    await raise_if_send_refused()
     mark_request_sent()
     async with client.stream(
         method,
@@ -1459,8 +1469,6 @@ class HttpConnector(Connector):
                 f"_request_json only accepts idempotent methods "
                 f"{sorted(_IDEMPOTENT_METHODS)}; got {method!r}"
             )
-        # Inside a multi-step operation each request checks the block list.
-        await raise_if_step_login_blocked(operator)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         if extra_headers:
@@ -1585,8 +1593,6 @@ class HttpConnector(Connector):
             )
         if json is not None and data is not None:
             raise ValueError("_post_json accepts json= or data=, not both")
-        # Inside a multi-step operation each request checks the block list.
-        await raise_if_step_login_blocked(operator)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         if extra_headers:

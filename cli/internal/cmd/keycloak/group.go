@@ -162,6 +162,7 @@ func printGroupList(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  %-28s %-30s %s\n", "NAME", "PATH", "INTERNAL_ID")
 	for _, row := range rows {
 		name := truncate(stringField(row, "name"), 28)
@@ -436,6 +437,7 @@ func printGroupMemberList(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  %-30s %s\n", "USERNAME", "INTERNAL_ID")
 	for _, row := range rows {
 		fmt.Fprintf(w, "  %-30s %s\n", truncate(stringField(row, "username"), 30), stringField(row, "id"))

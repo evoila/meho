@@ -641,3 +641,69 @@ async def test_a_code_that_matches_no_runner_writes_no_audit_row(
         )
         assert resp.status_code == 403
     assert len(await _refused_rows()) == before
+
+
+_MISSING = object()
+_PEM_TEXT = "-----BEGIN PUBLIC KEY-----\nTUVITy1tYWRlLXVwLWtleQ==\n-----END PUBLIC KEY-----\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sent", "marks"),
+    [
+        ("made-up-key-text", ["made-up-key-text"]),
+        (_PEM_TEXT, ["TUVITy1tYWRlLXVwLWtleQ==", "BEGIN PUBLIC KEY"]),
+        (None, []),
+        (["made-up-list-item", 7], ["made-up-list-item"]),
+        (918273645546372819, ["918273645546372819"]),
+        (True, []),
+        (_MISSING, []),
+        ({"made-up-member": "made-up-value"}, ["made-up-member", "made-up-value"]),
+    ],
+    ids=["text", "key-file-text", "null", "list", "number", "boolean", "missing", "other-object"],
+)
+async def test_a_right_code_with_a_key_in_a_wrong_form_gets_422_and_one_audit_row(
+    client: TestClient, tmp_path: Any, sent: Any, marks: list[str]
+) -> None:
+    name = "site-key-form"
+    code = (await _register(client, name))["enrollment_code"]
+    before = len(await _refused_rows())
+    body: dict[str, Any] = {"enrollment_code": code, "runner_name": name}
+    if sent is not _MISSING:
+        body["public_key"] = sent
+    factory, kc = _kc_mock()
+    with patch("meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings", factory):
+        resp = client.post(_ENROLL, json=body)
+        assert resp.status_code == 422, resp.text
+        kc.set_client_signed_jwt_key.assert_not_awaited()
+        (error,) = HTTPValidationError.model_validate(resp.json()).detail
+        assert error.loc == ["body", "public_key"]
+        assert error.type == "runner_public_key_invalid"
+        rows = await _refused_rows()
+        assert len(rows) == before + 1
+        row = next(r for r in rows if r.payload["runner"] == name)
+        assert row.tenant_id == _TENANT
+        assert row.status_code == 422
+        assert row.payload == {"runner": name, "reason": "public_key_invalid", "key_id": None}
+        _assert_no_secret_in(row, code, {})
+        stored = [
+            json.dumps(getattr(one, column.key), default=str)
+            for one in (row, await _row(name))
+            for column in type(one).__table__.columns
+        ]
+        for mark in (code, *marks):
+            assert mark not in resp.text
+            assert not [text for text in stored if mark in text]
+        ok = client.post(_ENROLL, json={**body, "public_key": _jwk(tmp_path)})
+    assert ok.status_code == 200, ok.text
+    assert (await _row(name)).enrolled_key_id == ok.json()["key_id"]
+
+
+def test_the_published_public_key_is_a_required_object() -> None:
+    schema = app.openapi()["components"]["schemas"]["RunnerEnrollRequest"]
+    assert schema["properties"]["public_key"] == {
+        "additionalProperties": True,
+        "type": "object",
+        "title": "Public Key",
+    }
+    assert "public_key" in schema["required"]

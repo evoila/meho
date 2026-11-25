@@ -31,6 +31,7 @@ import respx
 from cryptography.hazmat.primitives.asymmetric import ec
 from sqlalchemy import select
 
+from meho_backplane.auth import runner_enrollment
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient, KeycloakAdminError
 from meho_backplane.auth.runner_enrollment import (
     EnrollmentCodeInvalidError,
@@ -43,7 +44,7 @@ from meho_backplane.auth.runner_principals import (
     RunnerPrincipalService,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerPrincipal
+from meho_backplane.db.models import AuditLog, RunnerPrincipal
 from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.runner.login import public_jwk
 
@@ -241,18 +242,74 @@ async def test_a_revoke_during_an_enrollment_leaves_the_client_disabled_and_with
     assert row.enrollment_code_hash is None
 
 
+async def _assert_one_revoked_refusal_row(code: str, jwk: dict[str, str]) -> None:
+    """One audit row of the refusal in the runner's tenant, without code or key."""
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(AuditLog).where(AuditLog.path == "runner.principal.key_enrollment_refused")
+        )
+        (row,) = result.scalars().all()
+    assert row.tenant_id == _TENANT
+    assert row.status_code == 403
+    assert row.payload == {
+        "runner": _NAME,
+        "reason": "runner_revoked",
+        "key_id": ec_key_id(jwk),
+    }
+    secret = code.partition(".")[2]
+    for column in AuditLog.__table__.columns:
+        text = json.dumps(getattr(row, column.key), default=str)
+        for sent in (code, secret, jwk["x"], jwk["y"]):
+            assert sent not in text, column.key
+
+
 @_skip_no_docker
 async def test_an_enrollment_during_a_revoke_is_refused(
     pg_engine: None,  # noqa: F811
     keycloak: _Keycloak,
 ) -> None:
     code = await _seed_runner()
+    jwk = _jwk()
     revoke = asyncio.create_task(_revoke())
-    revoked, enrolled = await _overlap(keycloak, revoke, enroll_runner_key(code, _jwk(), _NAME))
+    revoked, enrolled = await _overlap(keycloak, revoke, enroll_runner_key(code, jwk, _NAME))
     assert revoked.revoked is True
     assert isinstance(enrolled, EnrollmentCodeInvalidError)
     assert keycloak.client is None
     assert (await _row()).enrolled_key_id is None
+    await _assert_one_revoked_refusal_row(code, jwk)
+
+
+@_skip_no_docker
+async def test_a_revoke_at_the_lock_after_the_claim_refuses_the_enrollment(
+    pg_engine: None,  # noqa: F811
+    keycloak: _Keycloak,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim is saved, then a revoke gets the lock first."""
+    code = await _seed_runner()
+    jwk = _jwk()
+    keycloak.go.set()
+    real_take = runner_enrollment.take_runner_lock
+    locks = 0
+
+    async def _take(session: Any, runner_id: uuid.UUID) -> None:
+        nonlocal locks
+        locks += 1
+        if locks == 2:
+            revoked = await asyncio.wait_for(_revoke(), timeout=20)
+            assert revoked.revoked is True
+        await real_take(session, runner_id)
+
+    monkeypatch.setattr(runner_enrollment, "take_runner_lock", _take)
+    with pytest.raises(EnrollmentCodeInvalidError):
+        await enroll_runner_key(code, jwk, _NAME)
+    assert locks == 2
+    assert keycloak.client is None
+    row = await _row()
+    assert row.revoked is True
+    assert row.enrolled_key_id == ec_key_id(jwk)
+    assert row.key_enrolled_at is None
+    await _assert_one_revoked_refusal_row(code, jwk)
 
 
 @_skip_no_docker

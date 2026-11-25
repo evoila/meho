@@ -75,8 +75,8 @@ class EnrollmentCodeInvalidError(Exception):
     """The code is wrong, already used, expired, or its runner is revoked.
 
     ``reason`` is set when the code matched a runner and was still refused
-    (``code_expired`` or ``code_used_by_another_key``). It is ``None`` when the
-    code matches no runner.
+    (``code_expired``, ``code_used_by_another_key`` or ``runner_revoked``). It
+    is ``None`` when the code matches no runner.
     """
 
     def __init__(self, reason: str | None = None) -> None:
@@ -131,12 +131,16 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _public_jwks(public_jwk: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _public_jwks(public_jwk: Any) -> tuple[dict[str, Any], str]:
     """Check *public_jwk* and return ``(jwks, key_id)`` for Keycloak.
 
     Accepts only a P-256 public key. A key with a private member is refused,
-    so a private key can never be stored by mistake.
+    so a private key can never be stored by mistake. Any other value (a text,
+    a list, a number, ``None``) is refused as a bad key. No error text holds
+    the value.
     """
+    if not isinstance(public_jwk, dict):
+        raise EnrollmentKeyInvalidError("the public key must be a JWK object")
     if _PRIVATE_JWK_MEMBERS & public_jwk.keys():
         raise EnrollmentKeyInvalidError("send the public key only")
     try:
@@ -195,13 +199,29 @@ async def _row_of_code(session: AsyncSession, code: str) -> RunnerPrincipal:
     return row
 
 
+async def _row_after_wait(
+    session: AsyncSession, matched: RunnerPrincipal, code: str
+) -> RunnerPrincipal:
+    """Read the row of *matched* again, after a wait for the runner's lock.
+
+    *code* matched *matched* at its first read. A revoke that ran during the
+    wait is refused with the reason ``runner_revoked``.
+    """
+    try:
+        return await _row_of_code(session, code)
+    except EnrollmentCodeInvalidError:
+        # The read put the current values into *matched*: the session holds
+        # one object per row.
+        raise EnrollmentCodeInvalidError("runner_revoked" if matched.revoked else None) from None
+
+
 def _check_not_expired(row: RunnerPrincipal) -> None:
     expires = row.enrollment_code_expires_at
     if expires is None or _as_utc(expires) <= datetime.now(UTC):
         raise EnrollmentCodeInvalidError("code_expired")
 
 
-def _claimed_key(row: RunnerPrincipal, public_jwk: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _claimed_key(row: RunnerPrincipal, public_jwk: Any) -> tuple[dict[str, Any], str]:
     """Return ``(jwks, key_id)`` when *public_jwk* is the key the code accepted."""
     try:
         jwks, key_id = _public_jwks(public_jwk)
@@ -230,7 +250,7 @@ async def _claim_key(
     row.updated_at = datetime.now(UTC)
     await session.commit()
     await take_runner_lock(session, row.id)
-    return await _row_of_code(session, code)
+    return await _row_after_wait(session, row, code)
 
 
 async def _store_key(session: AsyncSession, row: RunnerPrincipal, jwks: dict[str, Any]) -> None:
@@ -249,7 +269,7 @@ async def _store_key(session: AsyncSession, row: RunnerPrincipal, jwks: dict[str
     await session.commit()
 
 
-def _offered_key_id(public_jwk: dict[str, Any]) -> str | None:
+def _offered_key_id(public_jwk: Any) -> str | None:
     """The id of the offered key, or ``None`` when the key cannot be read."""
     try:
         return _public_jwks(public_jwk)[1]
@@ -258,7 +278,7 @@ def _offered_key_id(public_jwk: dict[str, Any]) -> str | None:
 
 
 async def _audit_refusal(
-    row: RunnerPrincipal, status_code: int, reason: str, public_jwk: dict[str, Any]
+    row: RunnerPrincipal, status_code: int, reason: str, public_jwk: Any
 ) -> None:
     """One audit row for a refused enrollment whose code matched *row*.
 
@@ -291,7 +311,7 @@ async def _enroll_matched(
     session: AsyncSession,
     row: RunnerPrincipal,
     code: str,
-    public_jwk: dict[str, Any],
+    public_jwk: Any,
     runner_name: str,
 ) -> tuple[RunnerPrincipal, str, bool]:
     """Enroll *public_jwk* for *row*, whose code matched. The lock is held.
@@ -318,9 +338,7 @@ async def _enroll_matched(
     return row, key_id, repeated
 
 
-async def enroll_runner_key(
-    code: str, public_jwk: dict[str, Any], runner_name: str
-) -> RunnerEnrollment:
+async def enroll_runner_key(code: str, public_jwk: Any, runner_name: str) -> RunnerEnrollment:
     """Check *code* and put *public_jwk* on the runner's Keycloak client.
 
     The code enrolls one key: the first good key sent with it. A repeat of the
@@ -329,7 +347,8 @@ async def enroll_runner_key(
     *runner_name* is the name the runner expects. A code of another runner is
     refused before anything changes, so the code stays usable for its runner.
     An ended code that has no key yet, and a used code with another key, get
-    the code refusal before the name or the key is checked.
+    the code refusal before the name or the key is checked. *public_jwk* is the
+    value as it was sent: anything that is not a usable key is a bad key.
 
     When the code matches a runner and the enrollment is still refused, one
     audit row is written in that runner's tenant. A code that matches no
@@ -350,10 +369,10 @@ async def enroll_runner_key(
         # enrollment may have changed it.
         matched = await _row_of_code(session, code)
         await take_runner_lock(session, matched.id)
-        matched = await _row_of_code(session, code)
         try:
+            row = await _row_after_wait(session, matched, code)
             row, key_id, repeated = await _enroll_matched(
-                session, matched, code, public_jwk, runner_name
+                session, row, code, public_jwk, runner_name
             )
         except (
             EnrollmentCodeInvalidError,

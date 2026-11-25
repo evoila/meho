@@ -11,12 +11,12 @@ login. See :mod:`meho_backplane.auth.runner_enrollment`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi import status as http_status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 
 from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.keycloak_admin import (
@@ -49,7 +49,9 @@ class RunnerEnrollRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enrollment_code: str
-    public_key: dict[str, Any]
+    #: The published type is an object. The code is checked before the key, so
+    #: a value of any type reaches :func:`enroll_runner_key`.
+    public_key: Annotated[Any, WithJsonSchema({"type": "object", "additionalProperties": True})]
     runner_name: str = Field(
         min_length=1,
         max_length=256,
@@ -58,6 +60,13 @@ class RunnerEnrollRequest(BaseModel):
             "A code of a runner with another name is refused before anything changes."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _missing_key_is_a_bad_key(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "public_key" not in data:
+            return {**data, "public_key": None}
+        return data
 
 
 class RunnerEnrollResponse(BaseModel):

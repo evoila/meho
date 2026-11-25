@@ -3614,7 +3614,13 @@ credential operation with its own safe preview gives a
 when that preview builds one; otherwise <code>plan_shown</code> is <code>false</code>.
 Without its own safe preview, a destructive one shows the redacted
 params and a <code>preview_hash</code>; any other stays <code>unavailable</code>.
-<code>guest.program.run</code> has none of its own, so it stays <code>unavailable</code>.</p>
+<code>guest.program.run</code> has its own safe preview in the VMware connector
+package. With the switch off (the default) it stays <code>unavailable</code>.
+With the switch on, <code>preview_operation</code> answers <code>ok</code> with a
+<code>preview_hash</code> and a plan. The plan names the VM, the program path,
+the size of the arguments and the names of the environment variables.
+It never shows an argument value or the value of an environment
+variable.</p>
 </div>
 <h2 id="safety-tiers-of-the-write-operations">Safety tiers of the write operations<a class="headerlink" href="#safety-tiers-of-the-write-operations" title="Permanent link">&para;</a></h2>
 <p>Every operation carries a <code>safety_level</code>, set when the connector is

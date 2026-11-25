@@ -1194,8 +1194,8 @@ Who blocks whom:
   reason and the sign-in.
 - The way back uses the approval sign-in client of the login server
   (`meho-cli-approve` in MEHO's own setup). An install without that
-  client has no way back; another platform admin or the login server
-  removes the block then.
+  client has no way back; another platform admin or a tenant admin of
+  that tenant removes the block then.
 - To stop a platform admin for sure, also take the platform admin role
   away in Keycloak and end the person's sessions and long logins (see
   "To end a person's long login" above).

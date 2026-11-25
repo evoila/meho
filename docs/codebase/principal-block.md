@@ -43,8 +43,8 @@ A platform admin's way back:
   (`sign_in`).
 - The way back uses the approval sign-in client of the login server
   (`meho-cli-approve` in MEHO's own setup). An install without that client
-  has no way back; another platform admin or the login server removes the
-  block then.
+  has no way back; another platform admin or a tenant admin of that tenant
+  removes the block then.
 - On their own login, MEHO removes only the block of the current tenant.
   It reads the table for this, not the list it keeps for 5 seconds.
 - A platform admin who is blocked in the current tenant removes only their

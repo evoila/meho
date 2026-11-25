@@ -114,7 +114,14 @@ func newRootCmdFor(args []string) *cobra.Command {
 		// SilenceErrors = true on itself to take over both the JSON
 		// and human error rendering paths.
 		SilenceErrors: false,
+		// `meho --version` prints the same CLI line as `meho version`,
+		// without contacting a backplane.
+		Version: cliVersionLine(),
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
+	// Defined here, with no short form: cobra's own default flag would
+	// take -v, which belongs to --verbose.
+	root.Flags().Bool("version", false, "print the CLI version line and exit")
 
 	// Global flags. Bound to no destination yet — later tasks read
 	// them via cmd.Flags().GetString / GetBool inside their RunE

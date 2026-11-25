@@ -1150,7 +1150,7 @@ login client, such as `meho-mcp`.
 | Client | Who uses it | Login | It ends |
 |---|---|---|---|
 | `meho-cli` | `meho login` (the default) | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
-| `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit (30 minutes by default). |
+| `meho-cli` | `meho login --offline=false` | Short login | After 1 hour without use on MEHO's built-in login server (SSO Session Idle `3600`). On a realm you made by hand, at its SSO Session Idle limit (Keycloak's default is 30 minutes). |
 | `meho-mcp` | The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's `.mcp.json` | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
 | `meho-mcp-code`, `meho-mcp-desktop` | The Claude Code plugin and the Claude Desktop extension, when `MCP_CLIENT_PER_TOOL_KIND` is on | Same as `meho-mcp` | Same as `meho-mcp` |
 | `meho-web` | The web console | Browser session | At the realm's SSO Session limits. |
@@ -1198,8 +1198,9 @@ token, which starts the 48 hours again. If your realm turns on **Offline
 Session Max Limited**, that maximum also applies.
 
 Without `offline_access`, the refresh token ends at the realm's **SSO
-Session Idle** limit, which is 30 minutes by default. After that, the next
-MEHO call needs a new browser login.
+Session Idle** limit. MEHO's built-in login server sets 1 hour. On a realm
+you made by hand, Keycloak's default is 30 minutes. After that, the next
+MEHO call needs a new login.
 
 Two more things must be true:
 

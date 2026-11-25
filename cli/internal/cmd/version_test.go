@@ -169,3 +169,59 @@ func TestVersionCommandRejectsArgs(t *testing.T) {
 		t.Fatalf("unexpected error message on stderr: %q", stderr.String())
 	}
 }
+
+// TestRootVersionFlagPrintsTheCLIVersionLine pins `meho --version`: it
+// prints exactly the CLI line of `meho version`, on stdout, with nothing
+// on stderr. `-v` stays the short form of --verbose, so --version has
+// no short form.
+func TestRootVersionFlagPrintsTheCLIVersionLine(t *testing.T) {
+	origVersion, origCommit, origDate := version.Version, version.Commit, version.Date
+	t.Cleanup(func() {
+		version.Version = origVersion
+		version.Commit = origCommit
+		version.Date = origDate
+	})
+	version.Version = "v9.9.9-test"
+	version.Commit = "deadbeef"
+	version.Date = "2026-05-10T00:00:00Z"
+	withTempXDG(t)
+
+	run := func(args ...string) (string, string) {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	flagOut, flagErr := run("--version")
+	cmdOut, _ := run("version")
+	if flagOut != cmdOut {
+		t.Fatalf("--version differs from `meho version`:\n got: %q\nwant: %q", flagOut, cmdOut)
+	}
+	if want := "meho v9.9.9-test (commit deadbeef, built 2026-05-10T00:00:00Z)\n"; flagOut != want {
+		t.Fatalf("--version output:\n got: %q\nwant: %q", flagOut, want)
+	}
+	if flagErr != "" {
+		t.Fatalf("--version wrote to stderr: %q", flagErr)
+	}
+}
+
+func TestRootVersionFlagHasNoShortForm(t *testing.T) {
+	root := newRootCmdFor(nil)
+	vf := root.Flags().Lookup("version")
+	if vf == nil {
+		t.Fatal("root has no --version flag")
+	}
+	if vf.Shorthand != "" {
+		t.Fatalf("--version has the short form -%s; -v belongs to --verbose", vf.Shorthand)
+	}
+	verbose := root.PersistentFlags().Lookup("verbose")
+	if verbose == nil || verbose.Shorthand != "v" {
+		t.Fatalf("--verbose must keep -v, got %+v", verbose)
+	}
+}

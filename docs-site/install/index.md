@@ -321,9 +321,11 @@ Then log in:
 meho login https://meho.example.com
 ```
 
-This runs the OAuth device-code flow: the CLI prints a verification
-URL and code, you approve it in a browser, and the CLI stores the
-resulting token in your OS keyring.
+This runs the OAuth device-code flow. The CLI prints an address and a
+short code. Open the address on any device with a browser, enter the
+code, and sign in. No browser opens on the machine where the CLI runs,
+and nothing comes back to it. The CLI then stores the resulting token in
+your OS keyring.
 
 **Who logs in.** The install made one Admin login with a temporary password (`admin`, in `MEHO-Admins` and
 `MEHO-Platform-Admins`). It is in the Secret `meho-core-first-login`. Keycloak asks for a new password, a

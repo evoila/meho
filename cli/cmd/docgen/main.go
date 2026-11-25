@@ -167,6 +167,8 @@ func render(root *cobra.Command) string {
 		"identities side by side. `meho login <url> --profile <name>` stores the login " +
 		"under that name. The flag wins over `$MEHO_PROFILE`.\n")
 	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
+	sb.WriteString("- `--version` — print the CLI version line, the same line as `meho version`, " +
+		"and exit. It does not contact a backplane and has no short form.\n")
 	sb.WriteString("- `--work-ref` — external change-ticket reference, any ticket id on one " +
 		"line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). " +
 		"The CLI sends it as the " +

@@ -155,7 +155,9 @@ config:
   #     -o jsonpath='{.subsets[].addresses[].ip}'
   # See `docs/cross-repo/reverse-proxy-contract.md` for per-cluster values
   # and docs-site install/tls-ingress.md § Reverse-proxy trust.
-  forwardedAllowIps: "10.42.0.0/16"   # REPLACE: narrow to the controller /32
+  # This value is the whole pod network of a lab cluster. On a shared
+  # cluster, change it to the ingress controller's own address.
+  forwardedAllowIps: "10.42.0.0/16"
   # Target-destination allowlist (v0.20.0). The default-
   # deny guard refuses to register or dial a target on non-public space,
   # but the example lab registers on-prem appliances on RFC 1918 ranges as a

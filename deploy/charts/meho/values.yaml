@@ -592,13 +592,11 @@ config:
   # (equivalent to the `--forwarded-allow-ips` CLI flag). uvicorn's
   # secure default is `127.0.0.1` only, which fails-closed in a
   # cluster: the Ingress controller's pod IP is never the loopback
-  # and the chain breaks shut. Operators MUST override with the
-  # Ingress controller's pod CIDR (preferred) — e.g. `10.42.0.0/16`
-  # for the RKE2 default pod CIDR, or the specific `nginx-ingress` /
-  # `traefik` namespace pod IPs once they're known. `*` disables the
-  # allow-list entirely and is acceptable only for ephemeral CI
-  # clusters where every connecting peer is the cluster's own proxy
-  # — never for production. See
+  # and the chain breaks shut. Operators MUST override it with the
+  # Ingress controller's own address (a `/32`, or the tightest slice
+  # you have subnetted the controller onto). Never use the whole pod
+  # network, and never `*`: any workload that can reach the backplane
+  # could then forge the client address. See
   # `docs/cross-repo/reverse-proxy-contract.md` for the operator-
   # side trust contract.
   forwardedAllowIps: "127.0.0.1"

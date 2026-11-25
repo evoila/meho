@@ -28,8 +28,9 @@ import pytest
 from pydantic import BaseModel
 from scripts.snapshot_mcp_tools import render_snapshot
 
-from meho_backplane.agent import toolset_discovery
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.agent.invoke import make_invoke_agent_tool
+from meho_backplane.agent.toolset import INVOKE_AGENT, META_TOOL_NAMES, resolve_agent_toolset
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.handlers import handle_tools_call
 from meho_backplane.mcp.registry import (
@@ -38,6 +39,7 @@ from meho_backplane.mcp.registry import (
     _without_null_enum_members,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -122,13 +124,59 @@ def test_nested_enums_lose_null_at_every_depth() -> None:
         "type": "object",
         "properties": {"a": {"type": "array", "items": {"enum": ["x", None]}}},
         "$defs": {"d": {"properties": {"b": {"type": ["string", "null"], "enum": [None, "y"]}}}},
-        "anyOf": [{"enum": [None]}],
+        "anyOf": [{"enum": [None, "z"]}],
     }
     out = _without_null_enum_members(schema)
     assert out["properties"]["a"]["items"]["enum"] == ["x"]
     assert out["$defs"]["d"]["properties"]["b"] == {"type": ["string", "null"], "enum": ["y"]}
-    assert out["anyOf"] == [{}]
+    assert out["anyOf"] == [{"enum": ["z"]}]
     assert schema["properties"]["a"]["items"]["enum"] == ["x", None]
+
+
+def _accepts(schema: dict[str, Any], value: Any) -> bool:
+    return jsonschema.Draft202012Validator(schema).is_valid(value)
+
+
+@pytest.mark.parametrize(
+    ("schema", "sent"),
+    [
+        ({"enum": [None]}, {"const": None}),
+        ({"enum": [None, None]}, {"const": None}),
+        ({"type": ["string", "null"], "enum": [None]}, {"type": ["string", "null"], "const": None}),
+        ({"const": None, "enum": [None]}, {"const": None}),
+        # No value passes both rules, so the sent copy must accept none either.
+        ({"const": "x", "enum": [None]}, {"const": "x", "enum": []}),
+        ({"enum": [None], "const": "x"}, {"enum": [], "const": "x"}),
+    ],
+)
+def test_an_enum_of_only_null_accepts_the_same_values(
+    schema: dict[str, Any], sent: dict[str, Any]
+) -> None:
+    out = _without_null_enum_members(schema)
+    assert out == sent
+    for value in (None, "x", "", 23, False, 0, {}, []):
+        assert _accepts(out, value) == _accepts(schema, value), value
+    nested = {"type": "object", "properties": {"a": schema}, "anyOf": [schema]}
+    assert _wire_safe_input_schema(nested) == {"type": "object", "properties": {"a": sent}}
+
+
+@pytest.mark.parametrize("schema", [{"enum": []}, {"enum": ["x"]}, {"enum": [False, 0, ""]}])
+def test_an_enum_without_null_stays(schema: dict[str, Any]) -> None:
+    assert _without_null_enum_members(schema) is schema
+    nested = {"type": "object", "properties": {"a": schema, "enum": schema}}
+    assert _without_null_enum_members(nested) is nested
+
+
+def test_an_enum_member_is_a_value_and_stays_as_it_is() -> None:
+    literal = {"enum": ["x", None], "properties": {"a": {"enum": [None]}}}
+    array = [{"enum": ["y", None]}, None]
+    only_values: dict[str, Any] = {"enum": [literal, array]}
+    assert _without_null_enum_members(only_values) is only_values
+    out = _without_null_enum_members({"enum": [literal, None, array]})
+    assert out == {"enum": [literal, array]}
+    assert _accepts(out, literal)
+    assert _accepts(out, array)
+    assert not _accepts(out, {"enum": ["x"], "properties": {"a": {}}})
 
 
 def _sample(schema: dict[str, Any]) -> Any:
@@ -385,17 +433,39 @@ async def test_a_value_outside_the_enum_is_still_refused(
         await handle_tools_call(operator, {"name": tool, "arguments": arguments})
 
 
+async def _no_child(**_kwargs: Any) -> Any:
+    raise AssertionError("no child agent runs in this test")
+
+
 def _hosted_agent_schemas() -> dict[str, dict[str, Any]]:
-    specs = (
-        *toolset_discovery.build_discovery_meta_tools(),
-        *toolset_discovery.build_retrieval_meta_tools(),
-        *toolset_discovery.build_write_meta_tools(),
-        *toolset_discovery.build_docs_meta_tools(),
+    """The schema of every tool a hosted run can get, all optional tools on."""
+    operator = Operator(
+        sub="op-agent",
+        name="Agent Operator",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=uuid.UUID(int=1),
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=frozenset({"meho-docs"}),
     )
-    return {spec.name: spec.parameter_schema for spec in specs}
+    resolved = resolve_agent_toolset({"meta_tools": sorted(META_TOOL_NAMES)}, operator)
+    assert not resolved.missing
+    assert not resolved.disabled
+    # The run adds this one itself when the definition names it.
+    invoke_tool = make_invoke_agent_tool(resolver=_no_child, child_runner=_no_child)
+    tools = [*resolved.tools, invoke_tool]
+    return {tool.name: tool.tool_def.parameters_json_schema for tool in tools}
 
 
-def test_hosted_agent_tool_list_has_no_null_in_an_enum() -> None:
+@pytest.mark.parametrize("typed_first", ["false", "true"])
+@pytest.mark.parametrize("from_mcp", ["false", "true"])
+def test_hosted_agent_tool_list_has_no_null_in_an_enum(
+    monkeypatch: pytest.MonkeyPatch, from_mcp: str, typed_first: str
+) -> None:
+    """Both settings pick another form of the operation tools, so each form is checked."""
+    monkeypatch.setenv("AGENT_OPERATION_TOOLS_FROM_MCP", from_mcp)
+    monkeypatch.setenv("SEARCH_TYPED_FIRST", typed_first)
+    get_settings.cache_clear()
     schemas = _hosted_agent_schemas()
-    assert {"search_knowledge", "search_memory"} <= set(schemas)
+    assert set(schemas) == {*META_TOOL_NAMES, INVOKE_AGENT}
     assert {name: _null_enum_paths(s) for name, s in schemas.items() if _null_enum_paths(s)} == {}

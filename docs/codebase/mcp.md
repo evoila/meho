@@ -2337,8 +2337,11 @@ switch. The copy of the schema that `tools/list` sends never has `null` in an
   (`properties`, `items`, `$defs`, and so on) and drops `None` from each
   `enum`. Nothing else changes: a `type` list such as `["string", "null"]`
   stays. Values under `default`, `const` and `examples` are data and stay as
-  they are. An `enum` that would be left empty is removed, so the `type`
-  still limits the value. No registered tool has such an `enum`.
+  they are. The members of an `enum` are data too: only a direct `null` member
+  goes, and an object among the members stays as it is. An `enum` of only
+  `null` becomes `const: null`, so the sent schema does not accept more than
+  the server does. An `enum` without `null`, also an empty one, stays. No
+  registered tool has these special forms.
 - The server checks each call against `inputSchema`, not the wire copy. A
   call that sends `null` for such a field still passes, and the handler
   treats it like a missing field.

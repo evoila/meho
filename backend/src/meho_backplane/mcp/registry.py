@@ -332,9 +332,9 @@ def addon_family_active(
 _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 
 
-#: Keywords whose value is plain data, not a schema. An ``enum`` inside such a
-#: value is not a rule of the schema, so it stays as it is.
-_LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "examples", "example"})
+#: Keywords whose value is plain data, not a schema. An ``enum`` key inside such
+#: a value is not a rule of the schema, so it stays as it is.
+_LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "enum", "examples", "example"})
 
 #: Keywords whose value maps a name to a schema. The names are free text (a
 #: property may be called ``default``), so they are never read as keywords.
@@ -343,16 +343,30 @@ _SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
 )
 
 
+def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[str, Any]:
+    """Return the rule that takes the place of the ``enum`` *members* of *schema*.
+
+    Only the direct ``None`` members go. When nothing else is left, the rule
+    becomes ``const: null``, so the sent schema does not accept more than the
+    server does. When *schema* already has a ``const`` other than ``null``, no
+    value passes both rules, and an empty ``enum`` says so.
+    """
+    kept = [member for member in members if member is not None]
+    if not kept and schema.get("const") is None:
+        return {"const": None}
+    return {"enum": kept}
+
+
 def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
     """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
 
     Used for the wire copy of each tool schema. It goes to any depth. Nothing else
     changes: a ``type`` list such as ``["string", "null"]`` stays, and so do
-    the values under ``default``, ``const`` and ``examples``. An ``enum``
-    that would be left empty is removed: an empty ``enum`` matches nothing,
-    and a strict gateway refuses it too. The ``type`` keyword still limits
-    the value. *node* is not mutated. A node with nothing to change is
-    returned as the same object.
+    the values under ``default``, ``const`` and ``examples``. The members of an
+    ``enum`` are values too, so an object among them stays as it is. An
+    ``enum`` of only ``null`` becomes ``const: null``. An ``enum`` without
+    ``null``, also an empty one, stays. *node* is not mutated. A node with
+    nothing to change is returned as the same object.
 
     *names_are_keys* is true for the value of ``properties`` and the like,
     where the keys are names, not keywords.
@@ -361,19 +375,16 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
         changed = False
         out: dict[str, Any] = {}
         for key, value in node.items():
-            if names_are_keys:
-                new_value: Any = _without_null_enum_members(value)
-            elif key in _LITERAL_KEYWORDS:
-                new_value = value
-            elif key == "enum" and isinstance(value, list) and None in value:
-                new_value = [member for member in value if member is not None]
-            else:
-                new_value = _without_null_enum_members(
-                    value, names_are_keys=key in _SCHEMA_MAP_KEYWORDS
-                )
-            if key == "enum" and not names_are_keys and new_value == []:
+            if not names_are_keys and key == "enum" and isinstance(value, list) and None in value:
+                out.update(_enum_rule_without_null(node, value))
                 changed = True
                 continue
+            if not names_are_keys and key in _LITERAL_KEYWORDS:
+                out[key] = value
+                continue
+            new_value = _without_null_enum_members(
+                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+            )
             changed = changed or new_value is not value
             out[key] = new_value
         return out if changed else node

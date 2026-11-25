@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Get an access token from Microsoft Entra ID with a client id and a client secret.
+"""Get an access token from Microsoft Entra ID with a client secret or a certificate.
 
 The Azure connector and the Entra ID connector use this module. Only the
 scope (the API the token is for) differs: Azure Resource Manager or
@@ -11,8 +11,22 @@ How it works
 ============
 
 One ``POST https://<login host>/<tenant id>/oauth2/v2.0/token`` with the form
-fields ``grant_type=client_credentials``, ``client_id``, ``client_secret`` and
-``scope`` (the OAuth 2.0 client credentials flow). Microsoft answers with
+fields ``grant_type=client_credentials``, ``client_id``, ``scope`` and the proof
+of the app (the OAuth 2.0 client credentials flow). The proof is one of two:
+
+* ``client_secret`` (:class:`ClientSecretCredentials`), or
+* ``client_assertion_type`` and ``client_assertion``
+  (:class:`CertificateCredentials`). The assertion is a short token that MEHO
+  signs with the private key. Microsoft checks it with the public certificate
+  that is uploaded to the app, so the private key never leaves MEHO. Microsoft's
+  page "Microsoft identity platform application authentication certificate
+  credentials" describes the token: header ``alg`` ``PS256`` and ``x5t#S256``
+  (the SHA-256 thumbprint of the certificate), claims ``aud`` (the token
+  address of the tenant), ``iss`` and ``sub`` (the client ID), ``jti`` (new
+  for each request), ``nbf`` and ``iat`` (now) and ``exp`` ("5-10 minutes
+  after nbf at most").
+
+Microsoft answers with
 ``access_token`` and ``expires_in`` (seconds). There is no refresh token in this
 flow: when a token runs out, the caller asks for a new one.
 
@@ -43,6 +57,8 @@ import base64
 import binascii
 import json
 import math
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -50,16 +66,31 @@ from typing import Any, Final
 from urllib.parse import quote
 
 import httpx
+import jwt
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 
 __all__ = [
     "LOGIN_HOSTS",
+    "CertificateCredentials",
     "ClientSecretCredentials",
     "MicrosoftAccessToken",
+    "MicrosoftCredentials",
     "MicrosoftLoginError",
+    "build_client_assertion",
     "fetch_client_credentials_token",
 ]
+
+#: The fixed value of ``client_assertion_type`` for a certificate login.
+CLIENT_ASSERTION_TYPE: Final[str] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+#: How long one assertion is valid, in seconds. Microsoft: "keep it short - 5-10
+#: minutes after nbf at most". MEHO uses a new assertion for each request, so
+#: five minutes is plenty.
+_ASSERTION_LIFETIME_SECONDS: Final[int] = 300
 
 #: The Microsoft Entra ID login host of each Azure cloud, by the cloud names the
 #: Azure CLI uses. Only ``AzureCloud`` is proven on a live tenant.
@@ -123,6 +154,25 @@ class ClientSecretCredentials:
 
 
 @dataclass(frozen=True)
+class CertificateCredentials:
+    """A Microsoft Entra ID login with a certificate: tenant ID, client ID, key and certificate.
+
+    ``private_key`` (PEM) stays in the secret store and in MEHO's memory. Only the
+    public ``certificate`` (PEM) is uploaded to the app registration. The key is
+    left out of ``repr`` so it cannot reach a log line by accident.
+    """
+
+    tenant_id: str
+    client_id: str
+    private_key: str = field(repr=False)
+    certificate: str
+
+
+#: The two ways to prove the app to Microsoft.
+MicrosoftCredentials = ClientSecretCredentials | CertificateCredentials
+
+
+@dataclass(frozen=True)
 class MicrosoftAccessToken:
     """One access token and what MEHO read from it.
 
@@ -149,8 +199,64 @@ class MicrosoftAccessToken:
     roles: tuple[str, ...] | None = None
 
 
+def build_client_assertion(
+    credentials: CertificateCredentials, *, audience: str, now: float | None = None
+) -> str:
+    """Return the signed proof (client assertion) for a certificate login.
+
+    Follows Microsoft's page on certificate credentials: ``PS256``, header
+    ``x5t#S256`` with the SHA-256 thumbprint of the certificate (worked out here
+    from the certificate), ``aud`` = *audience* (the token address), ``iss`` =
+    ``sub`` = the client ID, a new ``jti``, ``nbf`` and ``iat`` = now, ``exp``
+    five minutes later.
+
+    Raises :class:`MicrosoftLoginError` when the key or the certificate cannot be
+    read, or the key does not belong to the certificate. The message never
+    holds the key.
+    """
+    try:
+        certificate = x509.load_pem_x509_certificate(credentials.certificate.encode())
+        private_key = serialization.load_pem_private_key(
+            credentials.private_key.encode(), password=None
+        )
+    except (ValueError, TypeError):
+        raise MicrosoftLoginError(
+            "The certificate or the private key in the secret is not a readable PEM "
+            "(an unencrypted RSA key and its X.509 certificate)."
+        ) from None
+    public_key = certificate.public_key()
+    if not isinstance(private_key, rsa.RSAPrivateKey) or not isinstance(
+        public_key, rsa.RSAPublicKey
+    ):
+        raise MicrosoftLoginError(
+            "The certificate and the private key in the secret must be RSA (Microsoft "
+            "signs the proof with PS256)."
+        )
+    if private_key.public_key().public_numbers() != public_key.public_numbers():
+        raise MicrosoftLoginError(
+            "The private key in the secret does not belong to the certificate in the secret."
+        )
+    thumbprint = base64.urlsafe_b64encode(certificate.fingerprint(hashes.SHA256())).rstrip(b"=")
+    issued = int(time.time() if now is None else now)
+    claims = {
+        "aud": audience,
+        "iss": credentials.client_id,
+        "sub": credentials.client_id,
+        "jti": str(uuid.uuid4()),
+        "nbf": issued,
+        "iat": issued,
+        "exp": issued + _ASSERTION_LIFETIME_SECONDS,
+    }
+    return jwt.encode(
+        claims,
+        private_key,
+        algorithm="PS256",
+        headers={"typ": "JWT", "x5t#S256": thumbprint.decode()},
+    )
+
+
 async def fetch_client_credentials_token(
-    credentials: ClientSecretCredentials,
+    credentials: MicrosoftCredentials,
     *,
     login_host: str,
     scope: str,
@@ -172,9 +278,13 @@ async def fetch_client_credentials_token(
     form = {
         "grant_type": "client_credentials",
         "client_id": credentials.client_id,
-        "client_secret": credentials.client_secret,
         "scope": scope,
     }
+    if isinstance(credentials, CertificateCredentials):
+        form["client_assertion_type"] = CLIENT_ASSERTION_TYPE
+        form["client_assertion"] = build_client_assertion(credentials, audience=url)
+    else:
+        form["client_secret"] = credentials.client_secret
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.post(url, data=form, headers={"Accept": "application/json"})
@@ -187,6 +297,7 @@ async def fetch_client_credentials_token(
                 login_host=login_host,
                 target_name=target_name,
                 secret_ref=secret_ref,
+                certificate=isinstance(credentials, CertificateCredentials),
             ) from exc
         raise MicrosoftLoginError(
             f"The Microsoft login service at {login_host} answered HTTP {status} "
@@ -206,16 +317,27 @@ def _login_refused(
     login_host: str,
     target_name: str,
     secret_ref: str | None,
+    certificate: bool = False,
 ) -> ConnectorAuthError:
     """Build the error for a login that Microsoft Entra ID refused."""
     status = response.status_code
-    remediation = (
-        f"Check tenant_id, client_id and client_secret in the secret at {secret_ref!r}. "
-        "A client secret has an end date; make a new one in Microsoft Entra ID when it "
-        "has run out."
-    )
+    if certificate:
+        way = "the certificate"
+        remediation = (
+            f"Check tenant_id and client_id in the secret at {secret_ref!r}. For the "
+            "certificate check three things: the public certificate is uploaded to the "
+            "app registration, it has not run out, and the private_key in the secret "
+            "belongs to it."
+        )
+    else:
+        way = "the client secret"
+        remediation = (
+            f"Check tenant_id, client_id and client_secret in the secret at {secret_ref!r}. "
+            "A client secret has an end date; make a new one in Microsoft Entra ID when it "
+            "has run out."
+        )
     message = (
-        f"Microsoft Entra ID refused the login for target {target_name!r} "
+        f"Microsoft Entra ID refused the login with {way} for target {target_name!r} "
         f"(HTTP {status}{_error_detail(response)}). {remediation}"
     )
     return ConnectorAuthError(

@@ -23,10 +23,17 @@ points anywhere else fails before any token is made.
 Secret shape
 ============
 
-The target's ``secret_ref`` names a secret with three keys: ``tenant_id``,
-``client_id`` (the application ID of the login) and ``client_secret``. Other
-keys are ignored. It is the same shape as the secret of an Azure target, so
-one login can serve both.
+The target's ``secret_ref`` names a secret with ``tenant_id``, ``client_id``
+(the application ID of the login) and one of two ways to prove the app:
+
+* ``client_secret``, or
+* ``private_key`` and ``certificate`` (both PEM). MEHO signs a short proof with
+  the key. This is the way Microsoft recommends for a program that signs in by
+  itself. Only the public certificate is uploaded to the app.
+
+Both ways in one secret, or neither, is refused. Other keys are ignored. The
+client secret shape is the same as the secret of an Azure target, so one login
+can serve both.
 
 The checks here look like the ones of the Azure connector
 (``connectors/azure/session.py``), but every message names Entra ID, so an
@@ -45,7 +52,9 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.microsoft_login import (
     LOGIN_HOSTS,
+    CertificateCredentials,
     ClientSecretCredentials,
+    MicrosoftCredentials,
 )
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
@@ -58,6 +67,7 @@ __all__ = [
     "EntraCloud",
     "EntraCredentials",
     "EntraCredentialsLoader",
+    "EntraLogin",
     "EntraSecretShapeError",
     "EntraTargetConfig",
     "EntraTargetConfigError",
@@ -72,8 +82,17 @@ __all__ = [
 #: The cloud a target uses when ``extras.cloud`` is not set.
 DEFAULT_CLOUD: Final[str] = "AzureCloud"
 
-#: The keys the secret must hold.
-_SECRET_KEYS: Final[tuple[str, ...]] = ("tenant_id", "client_id", "client_secret")
+#: The keys the secret must always hold.
+_SECRET_KEYS: Final[tuple[str, ...]] = ("tenant_id", "client_id")
+
+#: The keys of the two ways to prove the app. The secret holds all keys of one
+#: way and none of the other.
+_SECRET_WAY: Final[tuple[str, ...]] = ("client_secret",)
+_CERTIFICATE_WAY: Final[tuple[str, ...]] = ("private_key", "certificate")
+
+_NEEDS: Final[str] = (
+    "It needs tenant_id, client_id and either client_secret, or private_key and certificate."
+)
 
 _GUID: Final[re.Pattern[str]] = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -145,14 +164,17 @@ class EntraTargetConfig:
     cloud: EntraCloud
 
 
-#: The login of a target, read from its secret. ``tenant_id`` and
-#: ``client_id`` are lower-case GUIDs.
+#: The client secret login of a target. ``tenant_id`` and ``client_id`` are
+#: lower-case GUIDs.
 EntraCredentials = ClientSecretCredentials
+
+#: The login of a target as read from its secret: a client secret or a certificate.
+EntraLogin = MicrosoftCredentials
 
 
 #: Reads a target's secret and returns its login. Injected into the connector,
 #: so tests can pass a stub.
-EntraCredentialsLoader = Callable[[EntraTargetLike, Operator], Awaitable[EntraCredentials]]
+EntraCredentialsLoader = Callable[[EntraTargetLike, Operator], Awaitable[EntraLogin]]
 
 
 class EntraTargetConfigError(ValueError):
@@ -229,7 +251,7 @@ def _check_endpoint(target: EntraTargetLike, cloud: EntraCloud, extras: Mapping[
 
 
 def check_tenant_match(
-    target: EntraTargetLike, config: EntraTargetConfig, credentials: EntraCredentials
+    target: EntraTargetLike, config: EntraTargetConfig, credentials: EntraLogin
 ) -> None:
     """Fail when the target's tenant is not the tenant of its login.
 
@@ -245,7 +267,7 @@ def check_tenant_match(
 
 def parse_credentials(
     secret_data: Mapping[str, object], *, target_name: str, secret_ref: str | None
-) -> EntraCredentials:
+) -> EntraLogin:
     """Return the login stored in *secret_data*.
 
     Every value is stripped of surrounding white space (a trailing newline is
@@ -253,17 +275,36 @@ def parse_credentials(
     naming the first missing or unusable key.
     """
     values: dict[str, str] = {}
-    for key in _SECRET_KEYS:
+    for key in (*_SECRET_KEYS, *_SECRET_WAY, *_CERTIFICATE_WAY):
         raw = secret_data.get(key)
-        value = strip_credential_value(raw) if raw is not None else ""
-        if not value:
+        values[key] = strip_credential_value(raw) if raw is not None else ""
+    for key in _SECRET_KEYS:
+        if not values[key]:
             raise EntraSecretShapeError(
                 f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has no "
-                f"{key!r} key. It needs tenant_id, client_id and client_secret."
+                f"{key!r} key. {_NEEDS}"
             )
-        values[key] = value
+    has_secret = bool(values["client_secret"])
+    present_certificate = [key for key in _CERTIFICATE_WAY if values[key]]
+    if has_secret and present_certificate:
+        raise EntraSecretShapeError(
+            f"Entra ID target {target_name!r}: the secret at {secret_ref!r} holds both a "
+            f"client_secret and certificate keys. Keep one way only. {_NEEDS}"
+        )
+    if not has_secret and not present_certificate:
+        raise EntraSecretShapeError(
+            f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has no "
+            f"client_secret and no certificate keys. {_NEEDS}"
+        )
+    if present_certificate:
+        for key in _CERTIFICATE_WAY:
+            if not values[key]:
+                raise EntraSecretShapeError(
+                    f"Entra ID target {target_name!r}: the secret at {secret_ref!r} has no "
+                    f"{key!r} key. A certificate login needs private_key and certificate."
+                )
     guids: dict[str, str] = {}
-    for key in ("tenant_id", "client_id"):
+    for key in _SECRET_KEYS:
         checked = _guid(values[key])
         if checked is None:
             raise EntraSecretShapeError(
@@ -271,16 +312,21 @@ def parse_credentials(
                 f"{secret_ref!r} must be a GUID."
             )
         guids[key] = checked
-    return EntraCredentials(
+    if present_certificate:
+        return CertificateCredentials(
+            tenant_id=guids["tenant_id"],
+            client_id=guids["client_id"],
+            private_key=values["private_key"],
+            certificate=values["certificate"],
+        )
+    return ClientSecretCredentials(
         tenant_id=guids["tenant_id"],
         client_id=guids["client_id"],
         client_secret=values["client_secret"],
     )
 
 
-async def load_credentials_from_vault(
-    target: EntraTargetLike, operator: Operator
-) -> EntraCredentials:
+async def load_credentials_from_vault(target: EntraTargetLike, operator: Operator) -> EntraLogin:
     """Read the target's secret as *operator* and return its login.
 
     Uses the shared credential reader, so the read runs under the operator's

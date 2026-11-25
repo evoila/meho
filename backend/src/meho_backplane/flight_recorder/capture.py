@@ -60,7 +60,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
 
@@ -349,22 +349,55 @@ def paused() -> Iterator[None]:
         _active_capture_var.reset(token)
 
 
+#: The span attributes that hold what the vendor or MEHO sent: left out of a span
+#: whose answer did not pass its check (:meth:`HeldSpans.release_status`).
+_UNCHECKED_KEYS: Final = frozenset(
+    {"request_headers", "response_headers", "request_body", "response_body"}
+)
+
+
+def _status_only(span: SpanInput) -> SpanInput:
+    """*span* without its headers and bodies: the call, its status and its time stay."""
+    attributes = {k: v for k, v in span.attributes.items() if k not in _UNCHECKED_KEYS}
+    if "body_recorded" in attributes:
+        attributes["body_recorded"] = False
+    return replace(span, attributes=attributes)
+
+
 class HeldSpans:
-    """The spans of a :func:`held` block, kept out of the trace until :meth:`release`."""
+    """The spans of a :func:`held` block, kept out of the trace until released."""
 
     def __init__(self, outer: _CaptureScope | None, buffer: _CaptureScope | None) -> None:
         self._outer = outer
         self._buffer = buffer
 
     def release(self) -> None:
-        """Add the spans held so far to the trace."""
+        """Add the spans held so far to the trace, after the answer passed its check.
+
+        Only the last span is the answer that was checked; it is added in
+        full. An earlier span (a failed try before a retry) is added with
+        its status only (:meth:`release_status`).
+        """
+        self._add(full_last=True)
+
+    def release_status(self) -> None:
+        """Add the spans held so far with their status only: no header and no body.
+
+        For a call that failed, or whose answer failed its check: the
+        trace shows that the call ran and how it ended.
+        """
+        self._add(full_last=False)
+
+    def _add(self, *, full_last: bool) -> None:
         if self._outer is None or self._buffer is None:
             return
-        for span in self._buffer.spans:
-            self._outer.add(span)
+        spans = self._buffer.spans
+        for index, span in enumerate(spans):
+            last = index == len(spans) - 1
+            self._outer.add(span if full_last and last else _status_only(span))
         for kind, count in self._buffer.overflow.items():
             self._outer.overflow[kind] = self._outer.overflow.get(kind, 0) + count
-        if self._buffer.redaction_uncertain:
+        if full_last and self._buffer.redaction_uncertain:
             self._outer.redaction_uncertain = True
         self._buffer.spans.clear()
         self._buffer.overflow.clear()

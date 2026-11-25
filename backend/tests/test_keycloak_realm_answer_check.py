@@ -755,6 +755,53 @@ async def test_a_later_read_of_another_realm_refuses_every_card(
     assert await _approval_rows() == []
 
 
+def _writes(keycloak: _Keycloak) -> list[str]:
+    return [call for call in keycloak.calls if not call.startswith("GET ")]
+
+
+_OTHER_REALM = {"realm": "other-realm", "displayName": _ANSWER_MARKER}
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+async def test_the_own_client_check_refuses_another_realms_answer_and_sends_no_put(
+    seeded: Operator,
+) -> None:
+    """The handler's check passes; the own-client check's read of the realm gets another realm."""
+    keycloak = _RealmUpdateKeycloak(_OTHER_REALM)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=keycloak)
+        result = await dispatch(
+            operator=seeded,
+            connector_id=_CONNECTOR_ID,
+            op_id="keycloak.client.update",
+            target=await _resolved_target(seeded),
+            params={"id": _ID, "representation": {"description": "new"}},
+            _approved=True,
+        )
+    dumped = json.dumps(result.model_dump(mode="json"), default=str)
+    assert result.status == "error"
+    assert _CARD_REFUSAL in dumped
+    assert keycloak.reads == 2
+    assert _writes(keycloak) == []
+    assert _ANSWER_MARKER not in dumped
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+async def test_a_client_create_card_stops_at_the_first_read_of_another_realm(
+    seeded: Operator,
+) -> None:
+    """The check read passes; the next read of the realm, which decides who approves, does not."""
+    keycloak = _RealmUpdateKeycloak(_OTHER_REALM)
+    result = await _call(seeded, "keycloak.client.create", keycloak)
+    assert result.extras.get("error_code") == "refused_before_approval", result.error
+    assert _CARD_REFUSAL in (result.error or "")
+    assert _ANSWER_MARKER not in json.dumps(result.model_dump(mode="json"), default=str)
+    assert keycloak.reads == 2
+    # Nothing was sent after the read that answered with another realm.
+    assert keycloak.calls[-1] == f"GET {_REALM_PATH}"
+    assert await _approval_rows() == []
+
+
 # ---------------------------------------------------------------------------
 # The caller's rights come before the check read
 # ---------------------------------------------------------------------------
@@ -820,6 +867,25 @@ async def test_an_untrusted_certificate_keeps_the_tls_error_code(seeded: Operato
     result = await _call(seeded, "keycloak.realm.get", _UntrustedCertificate(token_ok=True))
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_tls_verify_failed"
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+@pytest.mark.parametrize("op_id", ["keycloak.user.disable", "keycloak.realm.update"])
+async def test_a_call_that_needs_approval_stops_at_a_check_read_with_no_answer(
+    seeded: Operator, op_id: str
+) -> None:
+    """The check read fails the TLS check: no approval request, and the preview says the same."""
+    keycloak = _UntrustedCertificate(token_ok=True)
+    result = await _call(seeded, op_id, keycloak)
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_tls_verify_failed"
+    assert keycloak.calls == [f"GET {_REALM_PATH}"] * len(keycloak.calls)
+    assert await _approval_rows() == []
+    keycloak = _UntrustedCertificate(token_ok=True)
+    envelope = await _preview(seeded, op_id, keycloak)
+    assert envelope["extras"]["error_code"] == "connector_tls_verify_failed"
+    assert envelope["policy_verdict"] == "deny"
+    assert keycloak.calls == [f"GET {_REALM_PATH}"] * len(keycloak.calls)
 
 
 @pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)

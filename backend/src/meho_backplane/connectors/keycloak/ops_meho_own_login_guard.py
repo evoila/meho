@@ -78,7 +78,10 @@ from meho_backplane.connectors.keycloak.ops_user_meho_access_guard import (
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     CLIENT_DELETE_OP,
     find_client,
-    get_or_none,
+)
+from meho_backplane.connectors.keycloak.realm_params import (
+    is_realm_answer_mismatch,
+    read_answered_realm_or_none,
 )
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._park_check import ParkCheck, register_park_check
@@ -317,19 +320,30 @@ def _may_be_own_client(client: Any, named: str | None) -> bool:
 
 
 async def _answered_login_realm(
-    connector: Any, operator: Any, target: Any, realm: str
+    connector: Any, operator: Any, target: Any, op_id: str, realm: str
 ) -> bool | None:
     """Whether Keycloak answers for *realm* with the name of MEHO's login realm.
 
-    ``None`` when MEHO cannot read the realm or its name.
+    ``None`` when MEHO cannot read the realm. The answer must name exactly
+    *realm* first
+    (:func:`~.realm_params.read_answered_realm_or_none`): any other name
+    raises :class:`ValueError` (:func:`~.realm_params.is_realm_answer_mismatch`), so the write is
+    refused and nothing is sent.
     """
     try:
-        stored = await get_or_none(
-            connector, target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator
+        stored = await read_answered_realm_or_none(
+            connector,
+            op_id,
+            target,
+            fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+            operator=operator,
+            expected=realm,
         )
-    except Exception:
+    except Exception as exc:
+        if is_realm_answer_mismatch(exc):
+            raise
         return None
-    name = _text(stored.get("realm")) if isinstance(stored, dict) else None
+    name = _text(stored.get("realm")) if stored is not None else None
     return None if name is None else is_meho_login_realm(name)
 
 
@@ -361,7 +375,7 @@ async def refuse_own_client_write(
     if not is_meho_login_realm(realm):
         if not _may_be_own_client(client, named_text):
             return
-        answered = await _answered_login_realm(connector, operator, target, realm)
+        answered = await _answered_login_realm(connector, operator, target, op_id, realm)
         if answered is None and refuse_unread:
             raise _not_checked(op_id, "MEHO could not read the realm")
         if not answered:
@@ -469,7 +483,9 @@ async def refuse_scope_mapper_write(
     if uses is False:
         return
     if not is_meho_login_realm(realm):
-        answered = await _answered_login_realm(connector, operator, target, realm)
+        answered = await _answered_login_realm(
+            connector, operator, target, SCOPE_MAPPER_UPDATE_OP, realm
+        )
         if answered is None and refuse_unread:
             raise _not_checked(SCOPE_MAPPER_UPDATE_OP, "MEHO could not read the realm")
         if not answered:
@@ -558,10 +574,17 @@ async def login_realm_park_reason(ctx: PreviewContext) -> str | None:
     if not isinstance(representation, dict):
         return None
     try:
-        stored = await get_or_none(
-            connector, ctx.target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), ctx.operator
+        stored = await read_answered_realm_or_none(
+            connector,
+            REALM_UPDATE_OP,
+            ctx.target,
+            fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+            operator=ctx.operator,
+            expected=realm,
         )
-    except Exception:
+    except Exception as exc:
+        if is_realm_answer_mismatch(exc):
+            return str(exc)
         # A realm MEHO cannot read is left to the run, which checks again.
         return None
     if stored is None:

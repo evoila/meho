@@ -655,22 +655,37 @@ async def test_when_meho_cannot_read_its_settings_the_run_is_refused(
 # ---------------------------------------------------------------------------
 
 
+_ANSWER_WORDS = f"Keycloak did not answer with the realm '{_SPELLED_REALM}'"
+
+
+def _refused_on_run_by_the_answer(result: dict[str, Any]) -> None:
+    """The run is refused because Keycloak answered with another realm name."""
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "ValueError", result
+    message = result["extras"]["exception_message"]
+    # keycloak.realm.update can send a secret, so MEHO withholds its error text.
+    if "withheld" not in message:
+        assert "did not answer with the realm" in message, result
+
+
 @pytest.mark.parametrize(("op_id", "params", "words", "code"), _REFUSED, ids=_REFUSED_IDS)
-async def test_a_target_realm_in_another_spelling_is_the_login_realm(
+async def test_a_login_realm_answer_for_another_spelling_is_refused_by_the_name_check(
     spelled_target: str,
     op_id: str,
     params: dict[str, Any],
     words: str,
     code: str,
 ) -> None:
+    """Keycloak answers for the target's realm with the login realm's name: not the exact name."""
+    del words, code
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         api = _Keycloak(mock, _SPELLED_REALM)
         api.realm["realm"] = _LOGIN_REALM
         call = await _call(op_id, params, target=spelled_target)
         result = await _run(op_id, params, target=spelled_target)
         written = _writes(mock)
-    _refused_before_approval(call, words)
-    _refused_on_run(result, code)
+    _refused_by_realm_check(call, _ANSWER_WORDS)
+    _refused_on_run_by_the_answer(result)
     assert written == []
 
 
@@ -710,7 +725,7 @@ async def test_a_realm_answer_without_its_name_refuses_the_realm_update_on_run(
         result = await _run(_REALM_UPDATE, params, target=spelled_target)
         written = _writes(mock)
     assert call["status"] in {"denied", "awaiting_approval"}, call
-    _refused_on_run(result, "meho_access_not_checked")
+    _refused_on_run_by_the_answer(result)
     assert written == []
 
 
@@ -725,7 +740,7 @@ async def test_a_realm_answer_that_is_a_list_refuses_the_client_update_on_run(
         result = await _run(_CLIENT_UPDATE, params, target=spelled_target)
         written = _writes(mock)
     assert call["status"] in {"denied", "awaiting_approval"}, call
-    _refused_on_run(result, "meho_access_not_checked")
+    _refused_on_run_by_the_answer(result)
     assert written == []
 
 

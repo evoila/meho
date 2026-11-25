@@ -113,6 +113,8 @@ from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
@@ -290,8 +292,13 @@ async def _delete_and_verify(
     op_id: str,
     path: str,
     result: dict[str, Any],
+    read_again: Callable[[], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
-    """Send the DELETE, then read the object again and expect 404."""
+    """Send the DELETE, then read the object again and expect 404.
+
+    *read_again* is the read after the DELETE (default: a GET of *path*);
+    it returns ``None`` for a 404.
+    """
     try:
         await connector._write_admin(
             target, "DELETE", path, operator=operator, idempotent_conflict=False
@@ -301,7 +308,11 @@ async def _delete_and_verify(
             raise
         # Removed by someone else between the lookup and the DELETE.
         return {**result, "deleted": False, "already_absent": True}
-    if await get_or_none(connector, target, path, operator) is not None:
+    if read_again is None:
+        still_there = await get_or_none(connector, target, path, operator)
+    else:
+        still_there = await read_again()
+    if still_there is not None:
         raise KeycloakDeleteVerificationError(
             f"{op_id}: Keycloak answered the DELETE, but the object can still be "
             f"read at {path}. It was not removed."

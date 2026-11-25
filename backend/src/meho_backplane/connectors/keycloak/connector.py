@@ -138,6 +138,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.operations._park_check import CallRefusedError, refusal_noted
 
 __all__ = ["KeycloakAdminTokenError", "KeycloakConnector", "KeycloakWriteResult"]
 
@@ -651,6 +652,22 @@ class KeycloakConnector(HttpConnector):
             reason=str(fp.extras.get("error", "unreachable")),
             probed_at=fp.probed_at,
         )
+
+    # -- one refusal stops the card -------------------------------------
+
+    async def _http_client(self, target: KeycloakTargetLike) -> httpx.AsyncClient:
+        """The pooled client of the target; none once a read refused the call.
+
+        Every request to Keycloak takes its client here. While an approval
+        card or a preview is built, a read can refuse the call
+        (:func:`~meho_backplane.operations._park_check.note_refusal`), for
+        example when Keycloak answers with another realm. Then this raises
+        :class:`~meho_backplane.operations._park_check.CallRefusedError`, so
+        MEHO sends no further request for that card.
+        """
+        if refusal_noted() is not None:
+            raise CallRefusedError("a read already refused this call; no request was sent")
+        return await super()._http_client(target)
 
     # -- flight recorder trace mask -------------------------------------
 

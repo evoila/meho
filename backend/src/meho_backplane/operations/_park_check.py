@@ -43,7 +43,9 @@ own refusal. The approved run skips it: the handler checks again.
 A read inside an approval card can also refuse the call
 (:func:`note_refusal`). The dispatcher and ``preview_operation`` collect
 such refusals while they build the card (:func:`refusal_scope`) and then
-refuse the call with the first one, before anything is stored.
+refuse the call with the first one, before anything is stored. Once a
+refusal is noted, a connector sends no more requests for that card
+(:func:`refusal_noted`, :class:`CallRefusedError`).
 The check is fail-closed: a check that raises refuses the call, with a
 reason that names only the exception class. An expired login during the
 check is renewed once (:func:`_refresh_rejected_session`).
@@ -68,16 +70,19 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "CallRefusedError",
     "ParkCheck",
     "gate_check_refusal",
     "gate_check_registered",
     "note_refusal",
     "park_check_refusal",
     "park_check_registered",
+    "refusal_noted",
     "refusal_scope",
     "register_gate_check",
     "register_park_check",
     "run_park_check",
+    "transport_cause",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -149,6 +154,20 @@ def note_refusal(reason: str) -> None:
         noted.append(reason)
 
 
+def refusal_noted() -> str | None:
+    """The first refusal noted in the current :func:`refusal_scope`, or ``None``.
+
+    A connector reads it before each request it sends while a card is
+    built, and sends nothing more once the call is refused.
+    """
+    noted = _NOTED_REFUSALS.get()
+    return noted[0] if noted else None
+
+
+class CallRefusedError(RuntimeError):
+    """A request was not sent: a read before it already refused the call (:func:`note_refusal`)."""
+
+
 async def _refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
     """Drop the login the vendor rejected; ``True`` when the check can run again.
 
@@ -187,12 +206,15 @@ async def run_park_check(ctx: PreviewContext) -> str | None:
     return await _run_check(ctx, _PARK_CHECKS.get(ctx.descriptor.op_id))
 
 
-async def _run_check(ctx: PreviewContext, check: ParkCheck | None) -> str | None:
+async def _run_check(
+    ctx: PreviewContext, check: ParkCheck | None, *, raise_no_answer: bool = False
+) -> str | None:
     """Run *check* as :func:`run_park_check` describes.
 
     When a read inside the check noted a refusal (:func:`note_refusal`),
     that refusal is the answer, also when the check raised or let the call
-    wait.
+    wait. With *raise_no_answer*, an error of a request that got no answer
+    (:func:`transport_cause`) is raised, not turned into a refusal.
     """
     if check is None:
         return None
@@ -200,6 +222,8 @@ async def _run_check(ctx: PreviewContext, check: ParkCheck | None) -> str | None
         try:
             reason = await _check_with_fresh_login(ctx, check)
         except Exception as exc:
+            if raise_no_answer and not noted and transport_cause(exc) is not None:
+                raise
             # The class name only: a traceback with locals could show a param
             # value, a login header or a vendor text.
             _log.warning(
@@ -270,7 +294,11 @@ async def gate_check_refusal(
     The same as :func:`park_check_refusal`, for the check of
     :func:`register_gate_check`. The check runs only when the caller's
     rights do not refuse the call; else ``None``, and the policy gate
-    refuses it.
+    refuses it. When a request of the check gets no answer (a connection,
+    TLS or timeout error, :func:`transport_cause`), the result is the error
+    the call itself would return for it, for example
+    ``connector_tls_verify_failed``
+    (:func:`~meho_backplane.operations.dispatcher.transport_error_result`).
     """
     if not gate_check_registered(descriptor.op_id):
         return None
@@ -286,16 +314,44 @@ async def gate_check_refusal(
     )
     if denial is not None:
         return None
-    return await _refusal(
-        _GATE_CHECKS.get(descriptor.op_id),
-        op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-        duration_ms=duration_ms,
-    )
+    try:
+        return await _refusal(
+            _GATE_CHECKS.get(descriptor.op_id),
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            duration_ms=duration_ms,
+            raise_no_answer=True,
+        )
+    except Exception as exc:
+        cause = transport_cause(exc)
+        if cause is None:
+            raise
+        # Imported lazily: the dispatcher imports this module.
+        from meho_backplane.operations.dispatcher import transport_error_result
+
+        return await transport_error_result(
+            op_id, cause, descriptor=descriptor, target=target, duration_ms=duration_ms
+        )
+
+
+def transport_cause(exc: BaseException) -> httpx.TransportError | None:
+    """The error of a request that got no answer (a connection, TLS or timeout error) in *exc*.
+
+    *exc* itself, or an exception it was raised from, for example a failed
+    login that wraps the connection error.
+    """
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            return None
+        if isinstance(seen, httpx.TransportError):
+            return seen
+        seen = seen.__cause__ or seen.__context__
+    return None
 
 
 async def _refusal(
@@ -308,6 +364,7 @@ async def _refusal(
     target: Any,
     params: dict[str, Any],
     duration_ms: float,
+    raise_no_answer: bool = False,
 ) -> OperationResult | None:
     """Run *check* for the call; the refusal result, or ``None``."""
     if check is None:
@@ -333,6 +390,7 @@ async def _refusal(
             connector_id=connector_id,
         ),
         check,
+        raise_no_answer=raise_no_answer,
     )
     if reason is None:
         return None

@@ -161,7 +161,8 @@ async def read_merge_write(
     can report what Keycloak holds now. With *read_back_realm* (a realm
     update), the read-back counts only when Keycloak answers with exactly
     that realm name. Any other answer leaves ``read_back_checked`` false and
-    reports no field of it; the flight recorder keeps no span of it either.
+    reports no field of it. The flight recorder then keeps only the status
+    of that read, no header and no body, also when the read fails.
     """
     if before is None:
         before = await connector._get_admin_json(target, path, operator=operator)
@@ -188,12 +189,17 @@ async def read_merge_write(
             CredentialsReadError,
         ):
             # The PUT already succeeded; a failed check must not report the
-            # write as failed. The caller sees read_back_checked=false.
-            spans.release()
+            # write as failed. The caller sees read_back_checked=false. A
+            # realm read-back keeps only its status in the trace.
+            if read_back_realm is None:
+                spans.release()
+            else:
+                spans.release_status()
             return outcome
         if read_back_realm is not None and (
             not isinstance(after, dict) or after.get("realm") != read_back_realm
         ):
+            spans.release_status()
             return outcome
         spans.release()
     if not isinstance(after, dict):

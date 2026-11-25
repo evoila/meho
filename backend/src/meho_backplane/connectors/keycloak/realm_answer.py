@@ -31,10 +31,11 @@ A read inside an approval card that gets another realm's answer refuses the
 call too (:func:`~meho_backplane.connectors.keycloak.realm_params.check_answered_realm`).
 
 When the check read gets no answer at all (for example the TLS certificate
-of the server is not trusted), the check before the policy gate lets the
-call go on. The call then meets the same error and returns it with its own
-error code (for example ``connector_tls_verify_failed``). Every later read
-inside the realm still checks the realm first.
+of the server is not trusted), the call stops there with the error it would
+return for it (for example ``connector_tls_verify_failed``,
+:func:`~meho_backplane.operations._park_check.gate_check_refusal`). So no
+call waits for approval, and no preview says it may go on, without a
+passed check.
 
 ``keycloak.realm.create`` and ``keycloak.realm.delete`` use
 :func:`realm_checked_or_absent` and :data:`ABSENT_OK_OPS`: they also go on
@@ -142,26 +143,9 @@ def realm_gate_check(op_id: str) -> ParkCheck:
             )
         except KeycloakRealmAnswerError as exc:
             return str(exc)
-        except Exception as exc:
-            if _got_no_answer(exc):
-                # The call meets the same error and returns it with its own code.
-                return None
-            raise
         return None
 
     return check
-
-
-def _got_no_answer(exc: BaseException) -> bool:
-    """Whether *exc* comes from a request that got no answer (a connection or TLS error)."""
-    seen: BaseException | None = exc
-    for _ in range(8):
-        if seen is None:
-            return False
-        if isinstance(seen, httpx.TransportError):
-            return True
-        seen = seen.__cause__ or seen.__context__
-    return False
 
 
 def register_realm_gate_checks(op_ids: Iterable[str]) -> None:

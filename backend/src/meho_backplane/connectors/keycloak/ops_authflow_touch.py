@@ -92,6 +92,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
+    ReadBackNotCheckedError,
     ReadBackRefusedError,
     find_client_uuid,
     flow_refused_error,
@@ -379,10 +380,18 @@ async def _ensure_loa_map(
         json=merge_representation(before, {"attributes": {LOA_MAP_ATTRIBUTE: text}}),
         idempotent_conflict=False,
     )
-    with reading_back():
-        after = await read_answered_realm(
-            connector, ENSURE_APPROVAL_TOUCH_OP_ID, target, realm_path, operator=operator
-        )
+    try:
+        with reading_back():
+            after = await read_answered_realm(
+                connector, ENSURE_APPROVAL_TOUCH_OP_ID, target, realm_path, operator=operator
+            )
+    except ReadBackNotCheckedError as exc:
+        raise KeycloakTouchFlowError(
+            "check_failed",
+            f"MEHO wrote {TOUCH_ACR!r} at level {TOUCH_LEVEL} into the realm's ACR to LoA "
+            "mapping, but Keycloak did not read the realm back as the managed realm, so MEHO "
+            "could not check the change. The flow was not bound. Check the realm.",
+        ) from exc
     if str(_loa_map(after).get(TOUCH_ACR)) != str(TOUCH_LEVEL):
         raise KeycloakTouchFlowError(
             "check_failed", f"the realm does not read back with {TOUCH_ACR!r} at level 3"

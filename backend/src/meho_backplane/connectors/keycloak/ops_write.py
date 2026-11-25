@@ -143,12 +143,11 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
 from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
 from meho_backplane.connectors.keycloak.realm_params import (
     REALM_PARAM_OPS,
-    check_answered_realm,
     new_realm_problem,
+    read_answered_realm,
     realm_param,
 )
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
-from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -356,7 +355,7 @@ async def keycloak_realm_update(
     value-free confirmation plus the read-back check. Both realm names must
     be plain names (:mod:`.realm_params`) and are percent-encoded as one
     path segment. A read that answers with another realm than the managed
-    realm is refused before anything is sent (:func:`.check_answered_realm`).
+    realm is refused before anything is sent (:func:`.read_answered_realm`).
 
     The realm's SMTP password comes only from ``smtp_password_secret_ref``
     (see :mod:`.ops_write_realm_smtp`): it is read here and set as
@@ -374,16 +373,10 @@ async def keycloak_realm_update(
     )
     representation = dict(params["representation"])
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
-    # Kept in the trace only when the answer names the realm (as read_answered_realm).
-    with flight_recorder_capture.held() as spans:
-        try:
-            current = await self._get_admin_json(target, path, operator=operator)
-        except Exception:
-            spans.release()
-            raise
-        refuse_login_realm_write(realm_name, current, representation)
-        check_answered_realm("keycloak.realm.update", current, target)
-        spans.release()
+    current = await read_answered_realm(
+        self, "keycloak.realm.update", target, path, operator=operator
+    )
+    refuse_login_realm_write(realm_name, current, representation)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX

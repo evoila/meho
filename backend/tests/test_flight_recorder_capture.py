@@ -14,6 +14,7 @@ JSONFlux, and full-dispatch F7 coverage lives in
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -526,6 +528,56 @@ def test_held_block_puts_capture_back_after_an_error_inside_it() -> None:
         assert len(scope.spans) == 1
     finally:
         capture._active_capture_var.reset(token)
+
+
+_HELD_MARKER = "held-body-marker"
+
+
+def _record_get_with_body(status: int) -> None:
+    capture.record_vendor_call(
+        capture.span_start(),
+        method="GET",
+        request_headers={"Accept": "application/json"},
+        response=httpx.Response(
+            status, request=httpx.Request("GET", "https://kc.test.invalid/admin/realms/example")
+        ),
+        response_body={"note": _HELD_MARKER},
+    )
+
+
+def _held_spans(*statuses: int, release_all_status: bool) -> list[Any]:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.held() as spans:
+            for status in statuses:
+                _record_get_with_body(status)
+            if release_all_status:
+                spans.release_status()
+            else:
+                spans.release()
+        return list(scope.spans)
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def test_a_failed_held_call_keeps_only_its_status() -> None:
+    (span,) = _held_spans(500, release_all_status=True)
+    assert span.status == "500"
+    assert span.name.startswith("GET ")
+    assert _HELD_MARKER not in json.dumps(span.attributes, default=str)
+    assert "response_headers" not in span.attributes
+    assert span.attributes["body_recorded"] is False
+
+
+def test_a_retry_that_passed_keeps_the_body_of_the_last_try_only() -> None:
+    failed, checked = _held_spans(503, 200, release_all_status=False)
+    assert failed.status == "503"
+    assert _HELD_MARKER not in json.dumps(failed.attributes, default=str)
+    assert "response_body" not in failed.attributes
+    assert checked.status == "200"
+    # The last try keeps every attribute the capture recorded for it.
+    assert {"request_headers", "response_headers", "response_body"} <= set(checked.attributes)
 
 
 def test_held_block_without_capture_records_nothing() -> None:

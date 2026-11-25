@@ -4262,13 +4262,23 @@ the vendor for the call.
   read scope). It reads nothing of the vendor. So a call the caller may not
   make reads nothing of the vendor, and the caller gets the policy gate's
   own refusal.
+- **No answer at all.** When a request of the check gets no answer (a
+  connection, TLS or timeout error, `_park_check.transport_cause`), the
+  call stops with the error it would return for it, for example
+  `connector_tls_verify_failed` (`dispatcher.transport_error_result`). The
+  dispatcher writes an `error` audit row for it, and `preview_operation`
+  answers with the same error. Nothing is stored.
 - **A refusal from inside the card.** A read inside an approval card can
   refuse the call with `_park_check.note_refusal(reason)`, also when the
-  card goes on without that read. The dispatcher collects these while it
-  builds the card (`_park_check.refusal_scope`) and then refuses the call
-  with `refused_before_approval` and the first reason. Nothing is stored.
+  card goes on without that read. The dispatcher collects these while the
+  policy gate decides who must approve and while it builds the card
+  (`_park_check.refusal_scope`), and then refuses the call with
+  `refused_before_approval` and the first reason. Nothing is stored.
   `preview_operation` does the same, and so does a check before the wait
-  for approval whose read noted a refusal.
+  for approval whose read noted a refusal. Once a refusal is noted, a
+  connector can send no more requests for the call: the Keycloak connector
+  checks `_park_check.refusal_noted()` before each request and raises
+  `CallRefusedError`.
 - **A refusal** writes one `denied` audit row through
   `_audit_denied_and_return`.
 - **Used by** every Keycloak operation (the realm answer check,

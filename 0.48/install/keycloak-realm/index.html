@@ -5675,6 +5675,25 @@ stream ends at its next session check (at most
 <code>&lt;sub&gt;</code> is the person's login id (the user id in Keycloak). To undo it,
 run <code>meho principal unblock &lt;sub&gt;</code>. <code>meho principal blocked</code> lists the
 blocks.</p>
+<p>Who blocks whom:</p>
+<ul>
+<li>A tenant admin blocks a person in their own tenant.</li>
+<li>A platform admin blocks a person in every tenant. To block a platform
+  admin, another platform admin runs
+  <code>meho principal block &lt;sub&gt; --reason "&lt;why&gt;"</code>. Only a platform admin
+  can remove that block.</li>
+<li>A platform admin whom a tenant admin blocked can remove that block on
+  their own login: <code>meho principal unblock &lt;sub&gt; --reason "&lt;why&gt;"</code>. MEHO
+  first asks for a fresh sign-in in the browser. The audit log keeps the
+  reason and the sign-in.</li>
+<li>The way back uses the approval sign-in client of the login server
+  (<code>meho-cli-approve</code> in MEHO's own setup). An install without that
+  client has no way back; another platform admin or a tenant admin of
+  that tenant removes the block then.</li>
+<li>To stop a platform admin for sure, also take the platform admin role
+  away in Keycloak and end the person's sessions and long logins (see
+  "To end a person's long login" above).</li>
+</ul>
 <p>If the realm does not offer <code>offline_access</code> to <code>meho-cli</code> (an older
 realm), <code>meho login</code> logs in without it. It prints one line: the login
 ends after a short time without use, and how to fix the realm. MEHO's

@@ -36,7 +36,9 @@ no ``harmless_keys_only`` fact does not run either, in every realm.
 Which realm a write changes: the ``realm`` param (and for
 ``keycloak.realm.create`` the ``realm`` of the representation) when the
 write has one, else the target's managed realm
-(:func:`~.ops_write_grant.is_login_realm`). A realm that a param names is
+(:func:`~.ops_write_grant.is_login_realm`). A ``keycloak.realm.create`` that
+names no realm counts as a write in the login realm on every target, so a
+platform admin approves it. A realm that a param names is
 judged by the name Keycloak answers with for it
 (:func:`~.ops_write_grant.named_realm_is_protected`). When MEHO cannot read
 the realm, it counts as the login realm.
@@ -154,14 +156,15 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
             if op_id == "keycloak.realm.create" and isinstance(representation, dict):
                 names.append(_text(representation.get("realm")))
             given = [name for name in names if name is not None]
+            new = op_id == "keycloak.realm.create"
+            if new and not given:
+                # A create that names no realm: a platform admin approves it.
+                return True
             if given:
-                new = op_id == "keycloak.realm.create"
                 for name in given:
                     if await named_realm_is_protected(ctx, name, new=new):
                         return True
                 return False
-            if op_id == "keycloak.realm.create":
-                return True
         return await is_login_realm(ctx)
     except Exception:
         return True

@@ -344,6 +344,9 @@ names (`proposed_effect.blast_radius.object`) with the live one
   not the sibling values the children list.
 - The live card says the object is gone: the run goes ahead and the
   handler answers "already absent" or "not found" itself.
+- A card says the object is there (`present: true`), but its id or key
+  has no value: the run is refused (`REASON_UNREADABLE`). MEHO cannot
+  compare the object, so it is not read as absent.
 - The card does not build now (the op does not resolve, the builder
   declines, or it fails while reading, for example a user is found but
   the read of their groups fails): the run is refused

@@ -636,6 +636,8 @@ class _FakeDescriptor:
 @dataclass
 class _FakeTarget:
     extras: dict[str, Any]
+    id: str = "target-1"
+    tenant_id: str = "tenant-1"
 
 
 def _ctx(

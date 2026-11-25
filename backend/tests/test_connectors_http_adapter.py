@@ -2226,6 +2226,25 @@ def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
     assert host_for_log(location) == UNPARSEABLE_ADDRESS
 
 
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (
+            "https://\u0939\u093f\u0902\u0926\u0940.\u092d\u093e\u0930\u0924/PATHMARK",
+            "\u0939\u093f\u0902\u0926\u0940.\u092d\u093e\u0930\u0924",
+        ),
+        ("https://B\u00fccher.example/PATHMARK", "b\u00fccher.example"),
+        ("https://[::1]:8443/PATHMARK", "::1"),
+    ],
+)
+def test_valid_non_ascii_or_ipv6_host_is_logged(location: str, expected: str) -> None:
+    """A valid host name with a combining mark, or an IPv6 address, is logged as is."""
+    from meho_backplane.connectors._shared.log_host import host_for_log
+
+    assert host_for_log(location) == expected
+    assert host_for_log(httpx.URL(location)) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "location",

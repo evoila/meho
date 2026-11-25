@@ -82,7 +82,7 @@ There is a fifth kind in the code: a **runner**. A runner is a program that runs
    - A change of the policy itself always waits for a person.
    - An agent never approves.
    - A `destructive` operation always waits for approval.
-   - A delete always waits for approval. MEHO knows a delete by its delete sign (see below).
+   - A delete always waits for approval. MEHO knows a delete by its delete sign (see below). This holds on every install that is not in sandbox mode. An install in sandbox mode keeps its exception: there a delete grant lets a service account delete with no person ([sandbox-mode.md](sandbox-mode.md)).
    - A call to an address that the caller gives always waits for approval.
 6. **Two layers.**
    - The platform admin sets the baseline and the outer limit.
@@ -219,7 +219,6 @@ This record does not change it.
   - Today a step of a multi-step operation at the `destructive` level is refused, not held for approval.
   - So each saved setting is checked before it is carried over.
 - **The two edits of today in the policy pages.** When the model is complete, the risk-level raise and "approval off" move into the policy pages, with a carry-over. That is its own step.
-- **Sandbox mode and the delete rule.** On a test install in sandbox mode, a delete grant lets a service account delete without a person. Whether this exception stays next to the fixed rule "a delete always waits" is not decided here.
 - **The list of delete names is a setting** (`SERVICE_GRANT_DELETE_SHAPED_PATTERNS`). Whether an install may change what counts as a delete is not decided here.
 - Whether runners get one of the three names.
 - Whether agent grants move into the policy.

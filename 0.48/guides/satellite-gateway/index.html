@@ -3362,7 +3362,10 @@ what stays central (which is almost everything).</p>
 <ul>
 <li>A central backplane the satellite can reach <strong>outbound</strong> (the
   satellite dials it; the reverse path is never opened).</li>
-<li>Registering and revoking runner principals needs <strong>tenant_admin</strong>.</li>
+<li>Registering a runner principal needs <strong>a person with tenant_admin</strong>,
+  signed in with their own login: the answer carries an enrollment code.
+  A service login or an agent login gets <code>403 human_principal_required</code>.
+  Revoking needs <strong>tenant_admin</strong>.</li>
 <li>The satellite gateway is <strong>Beta</strong> — see the
   <a href="../../reference/maturity/#satellite_gateway">feature-maturity index</a>.</li>
 </ul>
@@ -3480,14 +3483,69 @@ Run changes from the central MEHO, through the normal approval flow.
 satellite's identity (a Keycloak client <code>runner:&lt;name&gt;</code>, tagged
 <code>kind=runner</code>):</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runner-principal<span class="w"> </span>register<span class="w"> </span>edge-dc-a
-<span class="c1"># → the principal: id, Keycloak client runner:edge-dc-a, owner</span>
+<span class="c1"># → the principal: id, Keycloak client runner:edge-dc-a, owner,</span>
+<span class="c1">#   and a one-time enrollment code</span>
 </code></pre></div>
-<p>Register prints no token. MEHO stores the client's secret in Vault
-(under the same path pattern as agent secrets). Set <code>MEHO_RUNNER_ID</code> to
-the runner name (<code>edge-dc-a</code>). <code>MEHO_RUNNER_TOKEN</code> is a bearer token of
-that Keycloak client.</p>
+<p>Register prints a one-time enrollment code. It is shown once, it works
+once, and it ends after 30 minutes. Copy it now. MEHO stores only a hash
+of it. MEHO also stores the client's secret in Vault (under the same path
+pattern as agent secrets). Set <code>MEHO_RUNNER_ID</code> to the runner name
+(<code>edge-dc-a</code>).</p>
 <p><strong>2. Deploy the runner</strong> inside the isolated network — the same image,
-started in runner mode, configured entirely through <code>MEHO_RUNNER_*</code> env:</p>
+started in runner mode, configured entirely through <code>MEHO_RUNNER_*</code> env.
+The runner logs in in one of two ways.</p>
+<p><em>Its own key pair (recommended).</em> On its first start the runner makes a
+key pair, keeps the private key in <code>MEHO_RUNNER_KEY_DIR</code> (default
+<code>/var/lib/meho/runner-key</code>, file mode <code>0600</code>) and sends only the public
+key, with the enrollment code, to central. Central puts the public key on
+the runner's Keycloak client (signed JWT client login). From then on the
+runner signs its own login request and gets a short token. It asks for a
+new token before the old one ends, and once more after a <code>401</code>. No person
+hands it a token. The private key never leaves the site.</p>
+<p>The runner uses the key file only when its group and other users have no
+rights to it (for example mode <code>0600</code> or <code>0400</code>). With any other mode it stops
+with an error that names the file and its mode and says to set mode <code>0600</code>.
+From the Kubernetes docs
+(<a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/">Configure a Security Context</a>):
+In a Kubernetes pod with
+<code>fsGroup</code>, Kubernetes can add group rights to the key file at each mount, and
+the runner then stops. Mount the key so that it keeps mode <code>0600</code>: set no
+<code>fsGroup</code> for that pod, or set <code>fsGroupChangePolicy: OnRootMismatch</code>, or use a
+volume driver that does not change file rights.</p>
+<p>This login follows RFC 7523, a signed JWT as the proof of a client's login
+(<a href="https://www.rfc-editor.org/rfc/rfc7523#section-3">section 3</a>), and
+Keycloak's "Signed JWT" client authenticator
+(<a href="https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials">Keycloak: Confidential client credentials</a>).
+MEHO's live test of this login runs in CI against the Keycloak image
+<code>keycloak/keycloak:26.0</code>. The proof on an operator's own Keycloak comes with
+a later step on a real install.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">MEHO_RUNNER_CENTRAL_URL</span><span class="o">=</span>https://meho.example.com<span class="w"> </span><span class="se">\</span>
+<span class="nv">MEHO_RUNNER_ID</span><span class="o">=</span>edge-dc-a<span class="w"> </span><span class="se">\</span>
+<span class="nv">MEHO_RUNNER_ENROLLMENT_CODE</span><span class="o">=</span>&lt;code-from-register&gt;<span class="w"> </span><span class="se">\</span>
+python<span class="w"> </span>-m<span class="w"> </span>meho_backplane.runner
+</code></pre></div>
+<p>Put <code>MEHO_RUNNER_KEY_DIR</code> on a volume that stays when the runner
+restarts. After the first start the runner finds its key there, so the
+code is not needed again. When the answer to the first start is lost, start
+the runner again with the same code and the same key folder: it finishes the
+enrollment, also after the 30 minutes. <code>MEHO_RUNNER_TOKEN_URL</code> sets the login
+server's token address when the runner must reach it under another name than
+central tells it. Both addresses must be <code>https://</code>. Plain <code>http://</code> works only
+for an address on the same machine.</p>
+<p>The runner sends its <code>MEHO_RUNNER_ID</code> with the code. When the code belongs to
+a runner with another name, central refuses it and changes nothing, so the
+code still works for its own runner. Check which code goes to which site, and
+start again.</p>
+<p>A runner whose key is lost stops with an error. Put the old key file back. Or
+revoke the runner, register a new one under a new name, and start with the new
+<code>MEHO_RUNNER_ID</code> and <code>MEHO_RUNNER_ENROLLMENT_CODE</code>. The same key folder can
+stay: the runner replaces the old login there. Give the new runner a new,
+empty <code>MEHO_RUNNER_SPOOL_DIR</code>, and keep the old spool folder as it is. Each
+result waiting in the spool carries the name of the runner that made it, and
+central refuses it under the new name.</p>
+<p><em>A fixed token.</em> Set <code>MEHO_RUNNER_TOKEN</code> to a bearer token of the runner's
+Keycloak client instead. The runner sends it as it is and does not renew
+it; give it a new one by hand when it ends. This mode works as before.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">MEHO_RUNNER_CENTRAL_URL</span><span class="o">=</span>https://meho.example.com<span class="w"> </span><span class="se">\</span>
 <span class="nv">MEHO_RUNNER_ID</span><span class="o">=</span>edge-dc-a<span class="w"> </span><span class="se">\</span>
 <span class="nv">MEHO_RUNNER_TOKEN</span><span class="o">=</span>&lt;token-of-runner:edge-dc-a&gt;<span class="w"> </span><span class="se">\</span>
@@ -3497,8 +3555,7 @@ python<span class="w"> </span>-m<span class="w"> </span>meho_backplane.runner
 <code>MEHO_RUNNER_SPOOL_DIR</code> and <code>MEHO_RUNNER_SPOOL_MAX_FILES</code> (the retry
 spool bounds).</p>
 <p>There is no chart, package or installer for the runner yet; you write your
-own container setup. The runner does not renew its token; when the token
-expires, give it a new one by hand.</p>
+own container setup.</p>
 <p><strong>3. Confirm central sees it:</strong></p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runner-principal<span class="w"> </span>list
 meho<span class="w"> </span>runner-principal<span class="w"> </span>show<span class="w"> </span>edge-dc-a
@@ -3530,6 +3587,15 @@ silently reporting last-known-good forever. Liveness is enforced on the
 switch:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>runner-principal<span class="w"> </span>revoke<span class="w"> </span>edge-dc-a
 </code></pre></div>
+<p>Revoke works the same for every runner, with a key or with a fixed token.
+It turns the runner's Keycloak client off, then deletes the client. With the
+client, its public key and its Keycloak secret are gone. The runner row stays
+and is marked revoked, and its enrollment code is cleared:
+<code>meho runner-principal list --include-revoked</code> shows it, and <code>show</code> shows it
+as revoked. The name stays taken: a new register of the same name gets <code>409</code>.
+A revoked runner cannot be brought back, because the deleted client cannot be
+turned on again. A new runner needs a new name and a new enrollment code. A
+token the runner already has works until it ends.</p>
 <h2 id="satellite-vs-the-in-process-check-runner">Satellite vs. the in-process check runner<a class="headerlink" href="#satellite-vs-the-in-process-check-runner" title="Permanent link">&para;</a></h2>
 <p>Do not confuse the satellite with the <strong>in-process check runner</strong> that
 evaluates <a href="../sensors-quickstart/">sensors</a> inside the central pod.
@@ -3553,8 +3619,23 @@ tenant_admin writes for each runner (step 4 above) also still works.</p>
 <tbody>
 <tr>
 <td>The runner exits 1 at startup naming a variable</td>
-<td>A required <code>MEHO_RUNNER_*</code> var (<code>CENTRAL_URL</code> / <code>ID</code> / <code>TOKEN</code>) is missing or malformed.</td>
-<td>Set all three; the error names the offender.</td>
+<td>A required <code>MEHO_RUNNER_*</code> var (<code>CENTRAL_URL</code> / <code>ID</code>) is missing or malformed, or it has neither <code>MEHO_RUNNER_TOKEN</code>, nor <code>MEHO_RUNNER_ENROLLMENT_CODE</code>, nor a key in <code>MEHO_RUNNER_KEY_DIR</code>.</td>
+<td>Set the missing one; the error names it.</td>
+</tr>
+<tr>
+<td>The runner exits 1 with <code>runner_login_error</code> and "enrollment was refused"</td>
+<td>The enrollment code is wrong, was used, has ended, or its runner is revoked.</td>
+<td>Start with the key file that enrolled with this code. Or revoke the runner, register a new one under a new name, and use the new name and code.</td>
+</tr>
+<tr>
+<td>The runner exits 1 with <code>runner_login_error</code> and "is missing", "does not match the saved login" or "is for runner:…"</td>
+<td>The login saved in <code>MEHO_RUNNER_KEY_DIR</code> does not fit the key there or <code>MEHO_RUNNER_ID</code>.</td>
+<td>Put the right key file back, or set the right <code>MEHO_RUNNER_ID</code>. Or start with a new runner's name and code.</td>
+</tr>
+<tr>
+<td>The runner exits 1 with "must start with https://"</td>
+<td>The address of central or of the login server is plain <code>http://</code>.</td>
+<td>Use the <code>https://</code> address.</td>
 </tr>
 <tr>
 <td>The runner shows <code>unknown</code> on <code>/ui/runners</code> after the satellite stops</td>
@@ -3573,8 +3654,13 @@ tenant_admin writes for each runner (step 4 above) also still works.</p>
 </tr>
 <tr>
 <td><code>403</code> registering a runner principal</td>
-<td><code>meho runner-principal register</code> / <code>revoke</code> need <strong>tenant_admin</strong>.</td>
-<td>Enroll under a tenant_admin session; <code>show</code> / <code>list</code> are operator-level.</td>
+<td><code>meho runner-principal register</code> needs a person with <strong>tenant_admin</strong>; <code>revoke</code> needs <strong>tenant_admin</strong>. A service login or an agent login gets <code>403 human_principal_required</code> on register.</td>
+<td>Register with your own sign-in as a person with tenant_admin; <code>show</code> / <code>list</code> are operator-level.</td>
+</tr>
+<tr>
+<td>The runner exits 1 with <code>runner_login_error</code> and "has mode", "Set its mode to 0600"</td>
+<td>The group or other users have rights to the key file in <code>MEHO_RUNNER_KEY_DIR</code>. In a Kubernetes pod with <code>fsGroup</code>, Kubernetes can add group rights to the key file at each mount.</td>
+<td>Run <code>chmod 600</code> on the file and start the runner again. In a pod, mount the key so that it keeps mode <code>0600</code>: set no <code>fsGroup</code> for that pod, or set <code>fsGroupChangePolicy: OnRootMismatch</code>, or use a volume driver that does not change file rights.</td>
 </tr>
 </tbody>
 </table>
@@ -3583,7 +3669,7 @@ tenant_admin writes for each runner (step 4 above) also still works.</p>
 <li>Changes through a satellite.</li>
 <li>Reads that need a stored password (the runner has no Vault login of its own).</li>
 <li>Generic operations (made from an API spec) on a satellite.</li>
-<li>A chart or installer, and token renewal.</li>
+<li>A chart or installer.</li>
 <li>The per-check interval.</li>
 <li>A CLI command or page that shows runner results.</li>
 </ul>

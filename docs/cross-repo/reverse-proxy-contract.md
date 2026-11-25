@@ -108,13 +108,12 @@ config:
   forwardedAllowIps: "10.0.4.11/32"
 ```
 
-Recommended values per ingress posture:
+Use the same rule on every cluster: production, shared, single-tenant
+lab or a short-lived test cluster.
 
-| Cluster shape | Recommended value | Rationale |
+| Setting | Value | Why |
 | --- | --- | --- |
-| **Production / multi-tenant** | The ingress controller's own address: a `/32`, or the smallest network the controller has for itself | Only the proxy is trusted. A request from another workload in the cluster cannot set the scheme or the client address |
-| **Single-tenant lab** | The same. The pod network (`10.42.0.0/16` on RKE2; `10.244.0.0/16` on Kind/Calico) is only a convenience for a cluster that runs nothing else | With other workloads in the cluster, use the controller's own address |
-| **Ephemeral CI cluster (`pr-smoke`)** | `"*"` — the list is off, only for this throwaway cluster | The PR-smoke cluster is single-tenant by construction; every connecting peer is the cluster's own proxy. Never use this in production |
+| **Your override** | The ingress controller's own address, as a `/32` | Only the proxy is trusted. A request from another workload in the cluster cannot set the scheme or the client address. Never use the whole pod network and never `"*"` |
 | **Default (no override)** | `"127.0.0.1"` (uvicorn's secure default) | Fails-closed: the Ingress controller's pod IP is never the loopback, so `X-Forwarded-*` is silently ignored and the bug persists. This is the intended behaviour — a misconfigured cluster fails visibly rather than silently downgrading |
 
 ### Anti-pattern: leaving the default in production
@@ -150,7 +149,7 @@ checking, in order:
    be `https`.
 2. **Backplane env var** — `kubectl exec -n <ns> <backplane-pod> --
    printenv FORWARDED_ALLOW_IPS`. The value MUST hold the Ingress
-   controller's own address (or `*` on the throwaway CI cluster).
+   controller's own address.
 3. **uvicorn CMD** — `kubectl exec -n <ns> <backplane-pod> -- ps -ef
    | grep uvicorn`. The CMD MUST include `--proxy-headers`.
 

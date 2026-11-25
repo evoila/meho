@@ -252,7 +252,9 @@ meho login https://meho.example.com
 
 The CLI prints an address and a short code. Open the address on any
 device with a browser and enter the code. No browser opens on the
-machine where the CLI runs, and nothing comes back to it. The install made one Admin login with a temporary password
+machine where the CLI runs, and nothing comes back to it.
+
+The install made one Admin login with a temporary password
 (`admin`, in `MEHO-Admins` and `MEHO-Platform-Admins`). It is in the
 Secret `meho-core-first-login`. Read the admin's login with:
 

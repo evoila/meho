@@ -237,8 +237,9 @@ at session start; restart the session after edits:
   `meho-mcp` client (next section).
 - **`offline_access`** in `scopes` gives a long login that renews
   itself: it ends after 48 hours without use, or after 7 days at most.
-  Without it, the login ends after 30 minutes without use (the realm's
-  default). See
+  Without it, the login ends after 1 hour without use on MEHO's built-in
+  login server. On a realm you made by hand, Keycloak's default is
+  30 minutes. See
   [How long each login lasts](../install/keycloak-realm.md#how-long-each-login-lasts).
 
 ## Work in one tenant

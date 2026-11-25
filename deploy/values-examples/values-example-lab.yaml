@@ -148,15 +148,14 @@ config:
   # SECURITY BASELINE (narrow forwarded-header trust). Trust `X-Forwarded-*`
   # ONLY from the ingress controller's own source address — a `/32` or the
   # tightest slice you have subnetted the controller onto — NOT the whole
-  # pod CIDR. The wide `10.42.0.0/16` below is the lab convenience value; on
-  # a shared or multi-tenant cluster it lets any in-cluster workload forge
-  # the client address, so narrow it. Recover the controller address with
+  # pod CIDR. The wide `10.42.0.0/16` below is the whole pod network of a
+  # lab cluster, a convenience value. On a shared or multi-tenant cluster it
+  # lets any in-cluster workload forge the client address, so change it to
+  # the controller's own address. Recover that address with
   #   kubectl get endpoints <ingress-controller> -n <ns> \
   #     -o jsonpath='{.subsets[].addresses[].ip}'
   # See `docs/cross-repo/reverse-proxy-contract.md` for per-cluster values
   # and docs-site install/tls-ingress.md § Reverse-proxy trust.
-  # This value is the whole pod network of a lab cluster. On a shared
-  # cluster, change it to the ingress controller's own address.
   forwardedAllowIps: "10.42.0.0/16"
   # Target-destination allowlist (v0.20.0). The default-
   # deny guard refuses to register or dial a target on non-public space,

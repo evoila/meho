@@ -552,6 +552,6 @@ EXPOSE 8000
 # ``FORWARDED_ALLOW_IPS`` env var (see
 # ``deploy/charts/meho/values.yaml`` and the operator-side contract
 # at ``docs/cross-repo/reverse-proxy-contract.md``); operators pin
-# the value to their Ingress controller's pod CIDR for production
+# the value to their Ingress controller's own address for production
 # deploys.
 CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

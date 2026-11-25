@@ -53,7 +53,8 @@ records the launcher's contract and invariants.
    `MEHO_MCP_SCOPES` (default `mcp:read mcp:execute offline_access`) are
    read and deleted from `process.env`.
    `offline_access` gets an offline refresh token, so the login outlasts the
-   realm's SSO idle limit (30 minutes by default).
+   realm's SSO idle limit (1 hour on the built-in realm; Keycloak's default
+   is 30 minutes).
    `MEHO_TENANT` (#5242) is read, trimmed, and deleted from `process.env`.
    Empty, whitespace, or an unsubstituted `${user_config.tenant}`
    placeholder means no tenant. A tenant adds

@@ -128,14 +128,15 @@ To see what it would change, run it with `--dry-run`. See
 [Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
 `meho-cli` does not get these scopes by default.
 
-## The MEHO login ends after about 30 minutes with no use
+## The MEHO login ends after a short time with no use
 
-**Symptom.** MEHO tools work, but after about half an hour without a MEHO
+**Symptom.** MEHO tools work, but after 30 to 60 minutes without a MEHO
 call, the next call opens a new browser login or does not answer.
 
 **Wall.** The client did not ask for `offline_access`. Then Keycloak
 issues a normal refresh token, and it ends at the realm's SSO idle limit
-(30 minutes by default). Older versions of the MEHO plugin and the Claude
+(1 hour on MEHO's built-in login server; 30 minutes is Keycloak's default
+on a realm you made by hand). Older versions of the MEHO plugin and the Claude
 Desktop bundle did not ask for it.
 
 **Fix.** Update the MEHO plugin (`claude plugin update meho@meho`, then

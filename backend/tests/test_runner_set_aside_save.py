@@ -164,7 +164,7 @@ def _post_batch(
         "results": results or [],
         "set_aside": list(notices),
         "set_aside_total": total,
-        "set_aside_last_at": last_at or datetime.now(UTC).isoformat(),
+        "set_aside_last_at": datetime.now(UTC).isoformat() if last_at is None else last_at,
     }
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(_KEY))
@@ -297,7 +297,7 @@ async def test_results_of_a_post_with_a_failed_notice_save_are_stored_and_counte
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("total", [2_147_483_648, -1, 10**30, "many", 1.5])
+@pytest.mark.parametrize("total", [2_147_483_648, -1, 10**30, "many", 1.5, True, False])
 async def test_a_count_outside_the_limits_leaves_the_stored_count_and_keeps_the_notice(
     client: TestClient, switch_on: None, sent: dict[str, list[Any]], total: Any
 ) -> None:
@@ -354,6 +354,37 @@ async def test_a_time_outside_the_limits_leaves_the_stored_time_and_keeps_the_no
     assert last_at not in repr((row.last_evidence, sent["mails"], sent["investigations"]))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_at", [0, 1_700_000_000, "0", "1700000000", True, 1.5])
+async def test_a_time_that_is_no_date_time_text_leaves_the_stored_time_and_keeps_the_notice(
+    client: TestClient, switch_on: None, last_at: Any
+) -> None:
+    await _seed_identities()
+    await _add_row(count=5, last_at=_STORED_AT)
+    sensor_id = await _seed_sensor()
+
+    resp = _post_batch(client, _notice(sensor_id), total=6, last_at=last_at)
+
+    assert resp.status_code == 200
+    assert await _stored_summary() == (6, _STORED_AT)
+    assert (await _sensor(sensor_id)).last_state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_a_count_of_true_and_a_time_of_zero_leave_both_stored_values(
+    client: TestClient, switch_on: None
+) -> None:
+    await _seed_identities()
+    await _add_row(count=5, last_at=_STORED_AT)
+    sensor_id = await _seed_sensor()
+
+    resp = _post_batch(client, _notice(sensor_id), total=True, last_at=0)
+
+    assert resp.status_code == 200
+    assert await _stored_summary() == (5, _STORED_AT)
+    assert (await _sensor(sensor_id)).last_state == "unknown"
+
+
 def test_a_time_with_a_zone_is_kept_in_utc() -> None:
     with_zone = datetime.fromisoformat("2026-11-20T10:00:00+02:00")
 
@@ -380,6 +411,27 @@ async def test_meho_reads_the_first_1000_notices_of_a_post_and_skips_the_rest(
     assert unknown == 1000
     assert (await _sensor(ids[0])).last_state == "unknown"
     assert (await _sensor(ids[-1])).last_state == "ok"
+    skips = [e for e in logs if e["event"] == "runner_set_aside_notices_skipped"]
+    assert [(e["runner"], e["skipped"]) for e in skips] == [(_RUNNER, 1)]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_notice_after_the_first_1000_is_skipped_and_the_rest_is_saved(
+    client: TestClient, switch_on: None, sent: dict[str, list[Any]]
+) -> None:
+    await _seed_identities()
+    await _add_row()
+    ids = await _seed_many_sensors(wire.SET_ASIDE_NOTICES_MAX)
+
+    with capture_logs() as logs:
+        resp = _post_batch(client, *(_notice(sensor_id) for sensor_id in ids), {})
+
+    assert resp.status_code == 200
+    async with get_sessionmaker()() as session:
+        unknown = await session.scalar(
+            select(func.count()).select_from(Sensor).where(Sensor.last_state == "unknown")
+        )
+    assert unknown == 1000
     skips = [e for e in logs if e["event"] == "runner_set_aside_notices_skipped"]
     assert [(e["runner"], e["skipped"]) for e in skips] == [(_RUNNER, 1)]
 

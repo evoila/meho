@@ -729,9 +729,14 @@ class SetAsideNotSavedError(Exception):
     """The set-aside notices of a post were not saved; nothing of them is kept."""
 
 
-def _first_notices(runner_name: str, notices: list[SetAsideNotice]) -> list[SetAsideNotice]:
-    """The first :data:`SET_ASIDE_NOTICES_MAX` notices of one post; the rest is skipped."""
-    skipped = len(notices) - SET_ASIDE_NOTICES_MAX
+def _first_notices(
+    runner_name: str, notices: list[SetAsideNotice], skipped: int
+) -> list[SetAsideNotice]:
+    """The first :data:`SET_ASIDE_NOTICES_MAX` notices of one post; the rest is skipped.
+
+    *skipped* counts the notices the post's model already cut off.
+    """
+    skipped += max(0, len(notices) - SET_ASIDE_NOTICES_MAX)
     if skipped > 0:
         _log.warning("runner_set_aside_notices_skipped", runner=runner_name, skipped=skipped)
     return notices[:SET_ASIDE_NOTICES_MAX]
@@ -763,6 +768,7 @@ async def record_set_aside(
     notices: list[SetAsideNotice],
     total: int | None,
     last_at: datetime | None,
+    skipped: int = 0,
 ) -> None:
     """Show the checks of set-aside results as ``unknown``, and keep the runner's count.
 
@@ -773,7 +779,8 @@ async def record_set_aside(
     MEHO refuse the post. A check that already has a newer counted result of
     the runner, or already shows this refusal, is not written again. A notice
     without a runner time never replaces a counted result. Only the first
-    :data:`SET_ASIDE_NOTICES_MAX` notices of one post are read. The count and
+    :data:`SET_ASIDE_NOTICES_MAX` notices of one post are read; *skipped* says
+    how many more the post held, for the log line. The count and
     the time of the newest set-aside batch are stored on the runner's assignment
     row, the count only from 0 to 2147483647 and the time only with a time zone.
 
@@ -783,7 +790,7 @@ async def record_set_aside(
     with the code ``set_aside_not_saved``, and the runner keeps its notices and
     sends them again.
     """
-    notices = _first_notices(runner_name, notices)
+    notices = _first_notices(runner_name, notices, skipped)
     try:
         counted: list[CountedSensor] = []
         async with get_sessionmaker()() as session:

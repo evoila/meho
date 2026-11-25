@@ -222,6 +222,7 @@ async def _record_set_aside(tenant_id: UUID, batch: wire.RunnerResultBatch) -> N
             notices=list(batch.set_aside),
             total=batch.set_aside_total,
             last_at=batch.set_aside_last_at,
+            skipped=batch.set_aside_skipped,
         )
     except SetAsideNotSavedError as exc:
         raise HTTPException(

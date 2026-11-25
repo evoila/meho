@@ -24,7 +24,10 @@ through.
 When nothing was sent yet, the answer says ``not_started``. When an earlier
 step or request of the same operation was sent
 (:mod:`meho_backplane.auth.principal_block_run`), the answer is
-``uncertain``: a part of the operation may have run.
+``uncertain``: a part of the operation may have run. For a blocked login,
+the answer then names the steps that were sent
+(:func:`~meho_backplane.auth.principal_block_run.sent_steps`) and says that
+the steps after them were not sent.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from meho_backplane.auth.principal_block import (
     is_principal_blocked,
     refusal_of_step,
 )
-from meho_backplane.auth.principal_block_run import request_was_sent
+from meho_backplane.auth.principal_block_run import request_was_sent, sent_steps
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 
@@ -80,6 +83,10 @@ def _unavailable(op_id: str, *, earlier_sent: bool = False) -> OperationResult:
 
 def _blocked(op_id: str, *, earlier_sent: bool = False) -> OperationResult:
     text = PRINCIPAL_BLOCKED_MESSAGE
+    steps = sent_steps() if earlier_sent else []
+    if steps:
+        names = ", ".join(f"`{step}`" for step in steps)
+        text = f"{text} These steps were sent: {names}. The steps after them were not sent."
     outcome = _UNCERTAIN_EXTRAS if earlier_sent else {"execution_outcome": "not_started"}
     return OperationResult(
         status="denied",

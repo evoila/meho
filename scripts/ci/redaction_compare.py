@@ -11,13 +11,27 @@
                              sha, rest) of the current code to FILE (run from
                              a backend/ folder with uv run; it imports that
                              folder's own tests.redaction_compare code)
-  --judge BASE HEAD --approved FILE [--base-approved FILE] [--summary-only]
+  --judge BASE HEAD --approved FILE [--base-approved FILE] [--changed FILE]
+          [--summary-only]
                              compare two record files; exit 1 on a difference
                              that the approved file does not list. Only the
                              entries that are not in the base's approved file
                              count. Without --summary-only it prints each
                              difference that is not approved (input id, step,
                              kind) and the counts.
+  --changed FILE             the paths under backend/tests/redaction_compare/,
+                             and backend/tests/__init__.py, that the pull
+                             request changes, each ended by a
+                             NUL byte, as `git diff --name-only --no-renames
+                             -z` writes them (a moved file gives its old and
+                             its new path). Each path is a difference of
+                             kind "changed" and needs an approved entry with
+                             id "compare-package", that path, and part
+                             "changed". The input set and the way the answers
+                             are read are then reviewed, never changed
+                             silently. The file is read as bytes, and each
+                             path is spelled so that two different paths
+                             never get the same spelling (see path_name).
   --summary-only             for the public CI log: print no input id, no
                              step, no part and no number, only one closing
                              line (a stale approved entry is still printed:
@@ -48,6 +62,8 @@ import os
 import sys
 from pathlib import Path
 
+#: The id of an approved entry for a changed file of the compare package.
+COMPARE_PACKAGE = "compare-package"
 SNAPSHOT = Path("tests/snapshots/redaction_compare.jsonl")
 
 
@@ -78,6 +94,36 @@ def differences(base: dict, head: dict) -> list[tuple[str, str, str]]:
     return found
 
 
+def path_name(raw: bytes) -> str:
+    """The spelling of a path from git, as the approved file and the output use it.
+
+    A letter of valid UTF-8 that is printable and is not a space, a quote or a
+    backslash stays as it is. A backslash is written as two backslashes, a byte
+    that is not UTF-8 as ``\\xNN``, and any other letter as ``\\uNNNN`` or
+    ``\\UNNNNNNNN``. So the spelling fits on one line of the approved file, and
+    two different paths always get two different spellings.
+    """
+    out = []
+    for letter in raw.decode("utf-8", "surrogateescape"):
+        code = ord(letter)
+        if 0xDC80 <= code <= 0xDCFF:
+            out.append(f"\\x{code - 0xDC00:02x}")
+        elif letter == "\\":
+            out.append("\\\\")
+        elif letter.isprintable() and not letter.isspace() and letter not in "\"'":
+            out.append(letter)
+        elif code <= 0xFFFF:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(f"\\U{code:08x}")
+    return "".join(out)
+
+
+def read_changed(path: Path) -> list[str]:
+    """The paths of a ``--changed`` file: NUL-ended bytes, each spelled with path_name."""
+    return [path_name(name) for name in path.read_bytes().split(b"\0") if name]
+
+
 def read_approved(path: Path) -> list[dict]:
     """The approved file: ``approved:`` then a list of entries, in the simple form of the file's header."""
     entries: list[dict] = []
@@ -101,6 +147,7 @@ def judge(
     approved_path: Path,
     base_approved_path: Path | None = None,
     summary_only: bool = False,
+    changed: list[str] | None = None,
 ) -> int:
     """Only the entries that the pull request adds can approve a difference or be stale.
 
@@ -116,6 +163,7 @@ def judge(
         if not entry.get("reason"):
             sys.exit(f"approved entry {entry} has no reason")
     found = differences(load(base_path), load(head_path))
+    found += [(COMPARE_PACKAGE, path, "changed") for path in sorted(changed or [])]
     used = set()
     not_approved = 0
     for input_id, path, kind in found:
@@ -176,6 +224,7 @@ def main() -> int:
     parser.add_argument("--judge", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--approved")
     parser.add_argument("--base-approved")
+    parser.add_argument("--changed")
     parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
     if args.write:
@@ -186,12 +235,14 @@ def main() -> int:
         return 0
     if args.judge and args.approved:
         base_approved = Path(args.base_approved) if args.base_approved else None
+        changed = read_changed(Path(args.changed)) if args.changed else None
         return judge(
             Path(args.judge[0]),
             Path(args.judge[1]),
             Path(args.approved),
             base_approved,
             summary_only=args.summary_only,
+            changed=changed,
         )
     parser.error("use --write, --records FILE, or --judge BASE HEAD --approved FILE")
     return 2

@@ -30,6 +30,8 @@ card again against the live system and compares the object with the card:
 * The live card says the object is gone: the run goes ahead, and the
   handler answers as it does for an absent object ("already absent" /
   "not found").
+* A card says the object is there (``present: true``), but its id or key
+  has no value: the run is refused. MEHO cannot compare the object.
 * The card does not build now (the op does not resolve, the builder
   declines or fails): the run is refused. MEHO cannot tell which object
   the handler would find, so an unreadable object is never treated as
@@ -193,6 +195,18 @@ def object_identity(obj: Mapping[str, Any]) -> dict[str, Any] | None:
     )
 
 
+def _id_missing(obj: Mapping[str, Any]) -> bool:
+    """Whether the card says the object is there, but its id or key has no value.
+
+    Then MEHO cannot compare the object, so it is not read as absent.
+    """
+    return (
+        obj.get("present") is True
+        and any(field in obj for field in IDENTITY_FIELDS)
+        and object_identity(obj) is None
+    )
+
+
 def _as_stored(identity: dict[str, Any]) -> dict[str, Any]:
     """*identity* as it reads back from the stored card.
 
@@ -248,7 +262,8 @@ async def object_changed_since_request(
 ) -> str | None:
     """Why the run must be refused, or ``None`` when the object is the approved one.
 
-    Returns :data:`REASON_UNREADABLE` when the card does not build now,
+    Returns :data:`REASON_UNREADABLE` when the card does not build now, or
+    when a card has an object that is there but no id to compare,
     :data:`REASON_APPEARED` when the card said the object was absent and
     the live card names one, and :data:`REASON_CHANGED` when the live
     object has another identity than the card. Returns ``None`` when the
@@ -274,7 +289,7 @@ async def object_changed_since_request(
         "op_id": request.op_id,
         "connector_id": request.connector_id,
     }
-    if live is None:
+    if live is None or _id_missing(live) or _id_missing(approved):
         _log.warning("approval_resume_object_unreadable", **log_fields)
         return REASON_UNREADABLE
     approved_identity = object_identity(approved)

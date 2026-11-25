@@ -2332,8 +2332,8 @@ The read checks no agent grant.
 A strict model gateway refuses a tool schema that holds `null` inside an
 `enum`, and then refuses the whole tool list. 16 fields in 11 tools are
 written as `{"type": ["string", "null"], "enum": [..., null]}`. There is no
-switch. The copy of the schema that `tools/list` sends never has `null` in an
-`enum`.
+switch. The copy of an input schema that `tools/list` sends never has `null`
+in an `enum`. Output schemas are sent as they are.
 
 - `_wire_safe_input_schema` in `mcp/registry.py` walks the whole schema
   (`properties`, `items`, `$defs`, and so on) and drops `None` from each

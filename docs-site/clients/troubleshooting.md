@@ -335,13 +335,14 @@ agent gets no MEHO tools. The error says a schema holds `null` inside an
 Gemini client (`langchain-google-genai` 4.5.2) stops with
 `Input should be a valid string [... input_value=None ...]` for an `enum`.
 
-**Wall.** Some tool inputs list `null` as one allowed value. A strict
-gateway refuses such a schema, and then refuses the whole list.
+**Wall.** On MEHO 0.48.0 and older, the sent input schemas of some tools
+list `null` inside an `enum`. A strict gateway refuses such a schema, and
+then refuses the whole list.
 
-**Fix.** Update MEHO to the version with this fix. MEHO then sends the
-tool schemas without `null` inside an `enum`, and the list loads. A call
-that sends `null` still works, because the server checks every call
-against the full schema.
+**Fix.** Update MEHO to a version newer than 0.48.0. MEHO then sends the
+tool input schemas without `null` inside an `enum`. A call that sends
+`null` still works, because the server checks every call against the full
+schema.
 
 ## A tool call fails with "Tool execution failed" but the server logged 200
 

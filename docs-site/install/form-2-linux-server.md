@@ -52,7 +52,7 @@ The machine also needs:
 You also need a computer on the management network with a browser:
 Chrome 111, Safari 16.4 or Firefox 128, or newer.
 
-**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. In MEHO's own login realm, these changes need a platform admin other than you: a change you asked for with a token, the command line or MCP; a change of the approval sign-in or of most realm settings; and a move of a secret into your own password. A change in that realm that an agent asked for needs a platform admin in the web console. This may be a platform admin who stands behind the agent, for example who set it up, owns it or gave it a grant. A change of the approval sign-in that an agent asked for needs a platform admin who does not stand behind the agent. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 MEHO runs on your management network only, never on the internet. Users
 reach it on ports 80 and 443 from the management network. MEHO holds the

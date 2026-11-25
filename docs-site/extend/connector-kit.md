@@ -158,6 +158,13 @@ operations you register, not `execute`.
   list them in `product_aliases`, for example `("vcenter", "vsphere")`.
   With the switch `CONNECTOR_LIST_PRODUCT_ALIASES` on, a `product` filter
   of `meho_connector_list` also finds your connector by these names.
+- **What a target needs.** A connector can declare four optional
+  attributes: `default_port`, `target_fields` (the extra settings of a
+  target), `credential_ways` (the ways to log in and the fields of the
+  secret) and `test_operation` (one safe read that needs no input). MEHO
+  checks them at start. The console reads them from
+  `GET /api/v1/connectors/target-form?product=<product>`. A connector that
+  declares nothing works as before.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 

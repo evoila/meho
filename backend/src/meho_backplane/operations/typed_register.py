@@ -156,6 +156,9 @@ from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
 )
+from meho_backplane.operations.connector_declaration_check import (
+    assert_connector_declarations_valid,
+)
 from meho_backplane.operations.dead_handler_sweep import retire_dead_handler_rows
 from meho_backplane.operations.embed import (
     build_embedding_text,
@@ -520,6 +523,7 @@ async def operation_catalog_write(
                 await _populate_catalog(session, embedding_service=embedding_service)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
+                await assert_connector_declarations_valid(session)
                 await record_catalog_release(session)
                 await _fail_start_for_test(session)
             yield

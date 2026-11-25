@@ -167,6 +167,14 @@ count.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
+## Target form declarations
+
+`KubernetesConnector` declares one credential way, `kubeconfig`, with the one
+field `kubeconfig` on several lines. The test read is `k8s.namespace.list`.
+The connector also accepts the vSphere Supervisor user name and password
+pair (see the WCP section); that way is not declared yet. See
+[connector-target-form.md](connector-target-form.md).
+
 ## Key types
 
 - **`KubernetesConnector`** (`connector.py`) -- `Connector` subclass.

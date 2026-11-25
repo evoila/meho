@@ -5306,6 +5306,61 @@
         }
       }
     },
+    "/api/v1/connectors/target-form": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "What a target of a product needs",
+        "description": "Return the target form declarations of every connector class of *product*.",
+        "operationId": "get_target_form_api_v1_connectors_target_form_get",
+        "parameters": [
+          {
+            "name": "product",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The product slug, for example `harbor` or `linux`.",
+              "title": "Product"
+            },
+            "description": "The product slug, for example `harbor` or `linux`."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetFormResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/connectors/ingest": {
       "post": {
         "tags": [
@@ -34334,6 +34389,72 @@
         "title": "ConventionsDriftResponse",
         "description": "The drift check's answer. ``in_sync`` is true only when nothing differs.\n\n``added``: ``{slug, value}``, a rule in the file that MEHO does not have.\n``changed``: ``{slug, before, after}``, only the fields an import would\nchange. ``only_in_meho``: ``{slug}``, an operational convention the file\ndoes not have. All three are empty when ``mistakes`` is not."
       },
+      "CredentialFieldModel": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "help": {
+            "type": "string",
+            "title": "Help"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden"
+          },
+          "multiline": {
+            "type": "boolean",
+            "title": "Multiline"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label",
+          "help",
+          "required",
+          "hidden",
+          "multiline"
+        ],
+        "title": "CredentialFieldModel",
+        "description": "One field of the secret."
+      },
+      "CredentialWayModel": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialFieldModel"
+            },
+            "type": "array",
+            "title": "Fields"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "fields"
+        ],
+        "title": "CredentialWayModel",
+        "description": "One way to log in."
+      },
       "CurrentStepResponse": {
         "properties": {
           "kind": {
@@ -46260,6 +46381,141 @@
         ],
         "title": "TargetCreate",
         "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"2.11.0\"`` for a Harbor target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
+      },
+      "TargetFieldModel": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "help": {
+            "type": "string",
+            "title": "Help"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "choices": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Choices"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "nullable": true,
+            "title": "Default"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "help",
+          "required",
+          "kind",
+          "choices",
+          "default"
+        ],
+        "title": "TargetFieldModel",
+        "description": "One extra setting of a target."
+      },
+      "TargetFormClass": {
+        "properties": {
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "supported_version_range": {
+            "type": "string",
+            "nullable": true,
+            "title": "Supported Version Range"
+          },
+          "default_port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Default Port"
+          },
+          "target_fields": {
+            "items": {
+              "$ref": "#/components/schemas/TargetFieldModel"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Target Fields"
+          },
+          "credential_ways": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialWayModel"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Credential Ways"
+          },
+          "test_operation": {
+            "type": "string",
+            "nullable": true,
+            "title": "Test Operation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "impl_id",
+          "version",
+          "supported_version_range",
+          "default_port",
+          "target_fields",
+          "credential_ways",
+          "test_operation"
+        ],
+        "title": "TargetFormClass",
+        "description": "What one connector class declares. ``None`` means \"not declared\"."
+      },
+      "TargetFormResponse": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "classes": {
+            "items": {
+              "$ref": "#/components/schemas/TargetFormClass"
+            },
+            "type": "array",
+            "title": "Classes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product",
+          "classes"
+        ],
+        "title": "TargetFormResponse",
+        "description": "The declarations of every connector class of one product."
       },
       "TargetListResponse": {
         "properties": {

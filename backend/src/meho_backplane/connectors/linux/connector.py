@@ -65,6 +65,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["LinuxSshConnector", "parse_fingerprint_output", "parse_os_release"]
 
@@ -251,6 +252,42 @@ class LinuxSshConnector(SshConnector):
     version_range_reason = (
         "Any Linux host that runs systemd fits. A rule for the distribution applies, not a range."
     )
+    credential_ways = (
+        CredentialWay(
+            key="key",
+            label="SSH key",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user to log in as. MEHO uses root when you leave it out.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="ssh_private_key",
+                    label="Private key",
+                    help="The private key of the user, as text.",
+                    multiline=True,
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="password",
+            label="Password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user to log in as. MEHO uses root when you leave it out.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the user."
+                ),
+            ),
+        ),
+    )
+    test_operation = "linux.identity.show"
 
     async def fingerprint(
         self,

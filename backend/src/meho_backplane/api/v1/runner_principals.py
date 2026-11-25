@@ -59,6 +59,7 @@ as 404 (never 403).
 from __future__ import annotations
 
 from typing import Annotated, Final
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -86,11 +87,14 @@ from meho_backplane.auth.runner_write_allowlist import (
     RunnerWriteAllowlistEntryRead,
     RunnerWriteAllowlistService,
 )
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.gateway.repository import get_set_aside_markers
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SchedulerVaultBrokerError,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -158,6 +162,27 @@ def _handle_admin_error(exc: Exception) -> HTTPException:
     )
 
 
+async def _with_set_aside(
+    tenant_id: UUID, principals: list[RunnerPrincipalRead]
+) -> list[RunnerPrincipalRead]:
+    """*principals* with their set-aside count and time, while runner checks are on.
+
+    A runner without an assignment row has 0 and no time. With
+    ``RUNNER_CHECKS_ENABLED`` off, the principals come back unchanged.
+    """
+    if not get_settings().runner_checks_enabled:
+        return principals
+    async with get_sessionmaker()() as session:
+        markers = await get_set_aside_markers(session, tenant_id=tenant_id)
+    shown: list[RunnerPrincipalRead] = []
+    for principal in principals:
+        count, last_at = markers.get(principal.name, (0, None))
+        shown.append(
+            principal.model_copy(update={"set_aside_count": count, "set_aside_last_at": last_at})
+        )
+    return shown
+
+
 @router.get("", response_model=RunnerPrincipalListResponse)
 async def list_runner_principals(
     operator: Operator = _require_operator,
@@ -177,7 +202,9 @@ async def list_runner_principals(
         limit=limit,
         offset=offset,
     )
-    return RunnerPrincipalListResponse(principals=principals)
+    return RunnerPrincipalListResponse(
+        principals=await _with_set_aside(operator.tenant_id, principals)
+    )
 
 
 @router.get("/{name}", response_model=RunnerPrincipalRead)
@@ -197,7 +224,8 @@ async def show_runner_principal(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="runner_principal_not_found",
         )
-    return entry
+    (shown,) = await _with_set_aside(operator.tenant_id, [entry])
+    return shown
 
 
 @router.post(

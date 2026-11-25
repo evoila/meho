@@ -293,7 +293,7 @@ async def test_a_service_that_is_reachable_from_outside_is_named(
 ) -> None:
     manifest = (
         "apiVersion: v1\nkind: Service\nmetadata: {name: web, namespace: prod}\n"
-        "spec: {type: LoadBalancer, externalIPs: ['192.0.2.1']}\n"
+        "spec: {type: LoadBalancer, externalIPs: [placeholder-address]}\n"
     )
     effect, _ = await _card(monkeypatch, manifest)
 

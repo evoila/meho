@@ -453,6 +453,35 @@ def _reset_jwks_module_state() -> Iterator[None]:
     clear_jwks_cache()
 
 
+_MANAGED_REALM_CHECK: Final = "meho_backplane.connectors.keycloak.managed_realm_check"
+
+
+@pytest.fixture(autouse=True)
+def _keycloak_answers_the_managed_realm(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Keycloak answers with the managed realm of the target when MEHO checks it.
+
+    The connector reads the realm before it uses anything inside it. The
+    Keycloak tests mock only the requests of the operation they test, so this
+    read gets the expected answer here. The check itself runs. A test of the
+    check requests :func:`real_managed_realm_check` to opt out.
+    """
+    module = sys.modules.get(_MANAGED_REALM_CHECK)
+    if module is None or "real_managed_realm_check" in request.fixturenames:
+        return
+
+    async def _answer(_connector: Any, target: Any, _operator: Any, _path: str) -> dict[str, Any]:
+        return {"realm": module.resolve_realm_config(target).managed_realm}
+
+    monkeypatch.setattr(module, "_read_realm", _answer)
+
+
+@pytest.fixture
+def real_managed_realm_check() -> None:
+    """Opt out: the connector really reads the realm before it uses it."""
+
+
 @pytest.fixture(autouse=True)
 def _stub_descriptor_embedding(
     monkeypatch: pytest.MonkeyPatch,

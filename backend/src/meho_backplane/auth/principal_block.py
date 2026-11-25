@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import delete, select
@@ -69,6 +69,7 @@ __all__ = [
     "REASON_MAX_LENGTH",
     "BlockedPerson",
     "CannotBlockSelfError",
+    "OwnBlockStaysError",
     "PrincipalBlockUnavailableError",
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
@@ -119,6 +120,10 @@ class CannotBlockSelfError(Exception):
 
 class PrincipalNotBlockedError(Exception):
     """There is no block to remove."""
+
+
+class OwnBlockStaysError(Exception):
+    """An admin tried to remove a block on their own login that they may not remove."""
 
 
 @dataclass(frozen=True)
@@ -320,34 +325,73 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
 
-async def unblock_principal(operator: Operator, sub: str) -> int:
+async def _read_blocks(session: AsyncSession, sub: str) -> list[tuple[str, str]]:
+    """Every block of *sub* as ``(scope, reason)``, read from the table.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
+    """
+    query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(PrincipalBlock.sub == sub)
+    try:
+        rows = (await session.execute(query)).tuples()
+        return sorted((str(scope), str(reason)) for scope, reason in rows)
+    except Exception as exc:
+        _log.warning("principal_block_read_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+
+
+async def unblock_principal(
+    operator: Operator,
+    sub: str,
+    *,
+    reason: str | None = None,
+    sign_in: dict[str, Any] | None = None,
+) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
     A platform admin removes every block of the login. A tenant admin
-    removes the block of their own tenant only. The audit row names each
-    removed block with its scope and reason. Raises
-    :class:`PrincipalNotBlockedError` when there is none.
+    removes the block of their own tenant only. On their own login an
+    admin removes only the block of the current tenant. The table is read
+    for it, not the cached list: a block in every tenant, or for a tenant
+    admin a block in this tenant, raises :class:`OwnBlockStaysError` and
+    nothing is removed. The audit row names each removed block with its
+    scope and reason. Raises :class:`PrincipalNotBlockedError` when there
+    is none, and :class:`PrincipalBlockUnavailableError` when the table
+    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
+    go into the audit row when they are given.
     """
+    tenant_scope = str(operator.tenant_id)
+    own_login = sub == operator.sub
+    only_this_tenant = own_login or not operator.platform_admin
     condition = PrincipalBlock.sub == sub
-    if not operator.platform_admin:
-        condition = condition & (PrincipalBlock.scope == str(operator.tenant_id))
+    if only_this_tenant:
+        condition = condition & (PrincipalBlock.scope == tenant_scope)
     async with get_sessionmaker()() as session:
-        query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(condition)
-        removed = sorted((await session.execute(query)).tuples())
+        blocks = await _read_blocks(session, sub)
+        scopes = {scope for scope, _reason in blocks}
+        if own_login and (
+            BLOCK_SCOPE_ALL in scopes or (not operator.platform_admin and tenant_scope in scopes)
+        ):
+            raise OwnBlockStaysError
+        removed = [b for b in blocks if b[0] == tenant_scope] if only_this_tenant else blocks
         if not removed:
             raise PrincipalNotBlockedError
         await session.execute(delete(PrincipalBlock).where(condition))
+        payload: dict[str, Any] = {
+            "unblocked_sub": sub,
+            "scopes": [scope for scope, _reason in removed],
+            "removed_blocks": [{"scope": scope, "reason": why} for scope, why in removed],
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        if sign_in is not None:
+            payload["sign_in"] = sign_in
         add_audit_row(
             session,
             operator,
             op_id="principal.unblock",
             method="DELETE",
             path=f"/api/v1/principals/blocked/{sub}",
-            payload={
-                "unblocked_sub": sub,
-                "scopes": [scope for scope, _reason in removed],
-                "removed_blocks": [{"scope": scope, "reason": reason} for scope, reason in removed],
-            },
+            payload=payload,
         )
         await session.commit()
     reset_block_cache()

@@ -87,6 +87,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_credential_write_preview_conformance.py",
     "tests/test_operations_jsonflux_conformance.py",
     "tests/test_broadcast_classifier_coverage.py",
+    # The checked-in table of class, risk level and approval of every typed operation.
+    "tests/test_approval_table_snapshot.py",
     # Every typed operation in the flight recorder.
     "tests/test_flight_recorder_typed_spans.py",
     "tests/test_flight_recorder_secret_field_guard.py",
@@ -116,6 +118,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_operations_own_message_of_secret_op.py",
     # Every function in the package that writes an approval decision.
     "tests/test_people_behind_doors_guard.py",
+    # Every call in the package that asks the gateway for a run command.
+    "tests/test_gateway_mint_callers_name_the_approval.py",
     # Every guide and codebase docs page.
     "tests/test_people_behind_docs.py",
 )

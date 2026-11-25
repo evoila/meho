@@ -344,6 +344,9 @@ names (`proposed_effect.blast_radius.object`) with the live one
   not the sibling values the children list.
 - The live card says the object is gone: the run goes ahead and the
   handler answers "already absent" or "not found" itself.
+- A card says the object is there (`present: true`), but its id or key
+  has no value: the run is refused (`REASON_UNREADABLE`). MEHO cannot
+  compare the object, so it is not read as absent.
 - The card does not build now (the op does not resolve, the builder
   declines, or it fails while reading, for example a user is found but
   the read of their groups fails): the run is refused
@@ -2897,6 +2900,17 @@ of this is the same:
   runner login can change between two calls. So a call whose people
   behind differ gets its own request with its own list. A person's own
   call has no people behind on either side.
+- the acting agent (`principal_act`). In this lookup
+  (`_find_same_call_pending_request`), a call with an acting agent never
+  gets the request of a direct call, and the other way round. A direct
+  call has none on either side.
+
+The check of a step of a multi-step operation (`enforce_subop_policy`)
+passes `allow_same_call_reuse=False` to `create_pending_request`, so a step
+always gets its own request and a normal "waits for approval" answer.
+
+A retry key that was linked to a request while the switch was on keeps
+finding that request after the switch is turned off.
 
 The answer has the same `approval_request_id` and
 `extras.approval_request_reused: true`. No new request row is made, and no
@@ -6045,6 +6059,55 @@ group rules (only a MEHO-Admin approves their own delete).
   [`dispatch-request-preview.md`](dispatch-request-preview.md)).
 
 Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
+
+## The approval table
+
+The table holds, for every operation of the core: its class, its risk
+level, whether it needs approval, and why no grant can cover it (the kind
+from `never_covered_reason`, or `null`). A change of one of these shows in
+the diff of this file. The file is
+`backend/tests/snapshots/approval_table.json`. A row is one typed operation
+of one connector, with its operation id and connector id, sorted by
+operation id and then connector id. It is the built-in default only: no
+install override, no tenant policy row, no connector package outside this
+repository, no operation made from an API file at run time.
+
+- **The test.** `backend/tests/test_approval_table_snapshot.py` registers all
+  typed operations (as `test_credential_calls_always_wait.py` does), builds
+  the table with `backend/tests/approval_table.py` and compares it with the
+  file. On a difference it names the new, removed and changed rows. It runs
+  a fresh registration pass with `POLICY_CLASSIFICATION` on, so the policy
+  operations are in the table, and without a local
+  `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, so local grant rules never reach
+  the file. The short test run of a one-connector pull request runs it too.
+- **Write the file again.** From `backend/`:
+  `MEHO_WRITE_APPROVAL_TABLE=1 uv run pytest -o tmp_path_retention_policy=failed tests/test_approval_table_snapshot.py`.
+  Only the value `1` writes. Commit the file.
+- **The CI job.** The step "Judge the approval table against the base
+  branch" of the job "Secret hiding compared with the base branch" runs
+  `scripts/ci/approval_table_judge.py` on the table of the base branch and
+  the table of the pull request. Both the script and the base table are read
+  from the base branch, so a pull request cannot weaken the rule that
+  judges it. It runs no code of the pull request. When the base has no
+  script or no table yet, it prints so and passes. The job is not a required
+  check.
+- **What fails.** An operation that gets a lower risk level (`destructive` >
+  `dangerous` > `caution` > `safe`); loses "needs approval"; loses "no grant
+  can cover it"; moves from `credential_read`, `credential_write` or
+  `credential_mint` to another class; or is removed. A new row passes, and
+  so does a change to more approval or a higher level.
+- **List a wanted change.** Add one entry for each change, with a one-line
+  reason, to `backend/tests/snapshots/approval_table_approved.yaml`:
+  `op_id`, `connector_id`, `change` (`lowered_level`, `lost_approval`,
+  `lost_never`, `left_credential` or `removed`) and `reason`. Only entries
+  that the pull request adds count. An entry that matches no change is
+  stale and fails the job. An entry already on the base branch approves
+  nothing and never fails. Write each value on one line: plain text, or
+  text in quotes. The judge stops on an empty reason and on any other YAML
+  form (for example a block that starts with `|` or `>`). A `#` after a
+  space or a tab starts a comment, which is not part of the value.
+- **The judge tests.** `backend/tests/test_approval_table_judge.py` runs the
+  judge on hand-made table pairs.
 
 ## References
 

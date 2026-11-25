@@ -1241,6 +1241,8 @@ What an operator can do now:
 
   `deploy/values-examples/values-vks.yaml` does this for Traefik in the
   namespace `traefik`, and turns on the OpenBao rule too (#5833).
+  `deploy/values-examples/values-k3s.yaml` does the same for the Traefik of
+  k3s in `kube-system`.
 
 - Run a service mesh that encrypts traffic between pods (mutual TLS).
 

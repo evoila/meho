@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Helm values for MEHO on k3s with its built-in Traefik (install form 3),
+# with the built-in PostgreSQL, Keycloak and OpenBao (on by default).
+#
+# Where the Traefik facts come from: k3s v1.37.2+k3s1 (manifests/traefik.yaml
+# in the k3s repository) ships the Traefik chart 41.6.101+up41.6.1 into the
+# namespace kube-system. Rendered with `helm template`, its pods carry the
+# label app.kubernetes.io/name=traefik, and its HTTPS entry point `websecure`
+# listens on pod port 8443 (the Service sends port 443 to it). The render test
+# of this file is backend/tests/test_chart_k3s.py. Not yet run on a live k3s
+# cluster: the check of `config.forwardedAllowIps` below is still open.
+#
+# Before the install:
+# - k3s brings Traefik, so you need no ingress controller. Leave k3s's
+#   default `servicelb` on, or give the Traefik Service an address in
+#   another way, and point your DNS name to it.
+# - The disks use the default StorageClass of k3s (local-path).
+#
+# Pass it before your own values file, which sets at least `image.tag`,
+# `ingress.host`, `coreKeycloak.hostname` (the same name),
+# `coreKeycloak.firstTenantId` (a UUID you pick once and keep) and
+# `networkPolicy.extraEgress` (the networks of the systems MEHO manages):
+#
+#   helm install meho oci://ghcr.io/evoila/meho-chart --version <version> \
+#     -n <namespace> --create-namespace -f values-k3s.yaml -f values-site.yaml \
+#     --wait --wait-for-jobs --timeout 20m
+ingress:
+  className: traefik
+  annotations:
+    # HTTPS only. Without it, Traefik also serves MEHO and the Keycloak login
+    # on plain HTTP (port 80), with no redirect. `websecure` is the HTTPS entry
+    # point of the Traefik chart that k3s ships.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+networkPolicy:
+  # Only pods in kube-system may reach the backplane. k3s runs Traefik there.
+  # The rule names the namespace, not the Traefik pods, so every pod in
+  # kube-system can reach MEHO. The Traefik pod label below limits only the
+  # calls that MEHO makes to its own address.
+  ingressControllerNamespace: kube-system
+  # MEHO reaches its own console address through Traefik. The first-start
+  # checks `dns` and `certificate` need it. The rule is checked after the
+  # Service sends port 443 on to the Traefik pod, so it names the pod labels
+  # and the pod port 8443 (the chart's default port).
+  # Why not the svclb pods: servicelb of k3s sets no `ipMode` on the Service
+  # address, which means VIP, so kube-proxy sends a pod's call to the node
+  # address straight to Traefik, before the host-port rule sees it. This holds
+  # when the name of `ingress.host` resolves to an address in the Service
+  # status (`kubectl -n kube-system get svc traefik`). For any other address,
+  # add a rule in `networkPolicy.extraEgress`. Read from the sources, not yet
+  # run on a live cluster. Issue 6922 in evoila/meho checks it.
+  ingressControllerEgress:
+    podLabels:
+      app.kubernetes.io/name: traefik
+# The web console at https://<host>/ui/. Off by default in the chart. The
+# install makes the Secret `<release>-core-ui-auth`: with a release name
+# other than `meho`, change the name below.
+uiConsole:
+  enabled: true
+  secretName: meho-core-ui-auth
+config:
+  # The schema asks for the console's Keycloak client when the console is on.
+  uiKeycloakClientId: meho-web
+  # The networks MEHO may use as targets, if they are on private addresses.
+  # MEHO refuses them by default. This range is only an example. List only
+  # the networks of the systems MEHO manages, and never the pod and service
+  # networks of the cluster (the k3s defaults are 10.42.0.0/16 and
+  # 10.43.0.0/16). Never 0.0.0.0/0.
+  # targetSsrfAllowlist: "192.0.2.0/24"
+corePostgres:
+  persistence:
+    # Empty = the cluster's default StorageClass (local-path on k3s).
+    storageClass: ""
+coreKeycloak:
+  # Off by default. On: only the backplane, OpenBao, the setup Jobs and the
+  # pods in kube-system reach Keycloak. Traefik runs in kube-system and needs
+  # it for browser and CLI logins. The rule names the namespace, so every pod
+  # in kube-system can reach Keycloak. k3s enforces network rules.
+  networkPolicy:
+    enabled: true
+    extraFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+coreVault:
+  persistence:
+    storageClass: ""
+  # Off by default. On: only the backplane and its setup Job reach OpenBao.
+  networkPolicy:
+    enabled: true

@@ -29,6 +29,7 @@ Three properties hold on the same inputs:
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from collections.abc import Callable
@@ -185,8 +186,9 @@ _SHAPES: list[tuple[str, Callable[[int], Any], tuple[str, ...]]] = [
 def _shortest_of_three(path: str, payload: Any) -> float:
     best = float("inf")
     for _ in range(3):
+        fresh = copy.deepcopy(payload)
         started = time.perf_counter()
-        STEPS[path](payload)
+        STEPS[path](fresh)
         best = min(best, time.perf_counter() - started)
     return best
 

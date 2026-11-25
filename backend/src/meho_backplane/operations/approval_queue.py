@@ -1327,11 +1327,30 @@ async def _link_reuse_key(
         )
 
 
+#: Status code of the ``approval.reuse`` row of a retry that got a request a
+#: person already approved. Only a waiting request has 202.
+_REUSE_APPROVED_STATUS_CODE: int = 200
+
+
+def _found_request_state(request: ApprovalRequest) -> str:
+    """The state of *request* as the ``approval.reuse`` row says it.
+
+    ``waiting``, or ``approved_`` plus the run phase
+    (:class:`ApprovalResultState`): ``approved_not_started``,
+    ``approved_started``, ``approved_executed``, ``approved_failed`` or
+    ``approved_uncertain``.
+    """
+    phase = approval_result_state(request)
+    return "waiting" if phase is None else f"approved_{phase.value}"
+
+
 async def _write_reuse_audit_row(
     session: AsyncSession,
     operator: Operator,
     request: ApprovalRequest,
     params: dict[str, Any],
+    *,
+    say_state: bool = False,
 ) -> None:
     """Write the ``approval.reuse`` audit row of a call that got *request*.
 
@@ -1341,8 +1360,19 @@ async def _write_reuse_audit_row(
     masked before the hash). Its id is kept in ``request._reuse_audit_id``,
     so the answer's ``audit_id`` is this row and not the first call's
     ``approval.request`` row.
+
+    With *say_state* (a retry with the same key), the payload also has
+    ``request_state`` (see :func:`_found_request_state`). The status code is
+    202 for a waiting request and 200 for an approved one.
     """
     audit_id = uuid.uuid4()
+    payload: dict[str, Any] = {"params_hash": compute_audit_params_hash(params)}
+    status_code = _APPROVAL_STATUS_CODE
+    if say_state:
+        state = _found_request_state(request)
+        payload["request_state"] = state
+        if state != "waiting":
+            status_code = _REUSE_APPROVED_STATUS_CODE
     await _write_audit_row(
         session,
         audit_id=audit_id,
@@ -1350,9 +1380,9 @@ async def _write_reuse_audit_row(
         operator=operator,
         request=request,
         path=_REUSE_PATH,
-        status_code=_APPROVAL_STATUS_CODE,
+        status_code=status_code,
         duration_ms=0.0,
-        extra_payload={"params_hash": compute_audit_params_hash(params)},
+        extra_payload=payload,
         caller_session=True,
     )
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
@@ -1373,7 +1403,7 @@ async def _reuse_for_key_retry(
     from meho_backplane.settings import get_settings
 
     if get_settings().approval_retry_own_audit_row:
-        await _write_reuse_audit_row(session, operator, reused, params)
+        await _write_reuse_audit_row(session, operator, reused, params, say_state=True)
     return reused
 
 
@@ -1772,9 +1802,10 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
-#: Audit path of a call that got the waiting request of the same call
-#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
-#: ``approval.request`` row.
+#: Audit path of a call that gets an existing request. The call writes this
+#: row, not a second ``approval.request`` row. Two calls write it: a call that
+#: gets the waiting request of the same call (``APPROVAL_SAME_CALL_REUSE``),
+#: and a retry with the same key (``APPROVAL_RETRY_OWN_AUDIT_ROW``).
 _REUSE_PATH = "approval.reuse"
 
 #: Audit paths written on the task of the call that waits.

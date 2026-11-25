@@ -3,8 +3,8 @@
 
 """Add the set-aside count and time to ``runner_assignments``.
 
-Revision ID: 0188
-Revises: 0187
+Revision ID: 0189
+Revises: 0188
 Create Date: 2026-11-25
 
 ``set_aside_count`` is the number of result batches a runner has set aside,
@@ -23,8 +23,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0188"
-down_revision: str | None = "0187"
+revision: str = "0189"
+down_revision: str | None = "0188"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

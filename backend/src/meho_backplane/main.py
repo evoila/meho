@@ -134,6 +134,7 @@ from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage
 from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.runner_enrollment import router as api_v1_runner_enrollment_router
 from meho_backplane.api.v1.runner_principals import (
     router as api_v1_runner_principals_router,
 )
@@ -1431,6 +1432,7 @@ app.include_router(api_v1_agent_principals_router)
 # Reads gated to operator+; writes gated to tenant_admin. Tenant-scoped via
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_runner_enrollment_router)
 app.include_router(api_v1_runner_principals_router)
 # The admin block list: block, unblock and list logins that MEHO refuses on
 # every request. Person-only, tenant_admin; no MCP tool.

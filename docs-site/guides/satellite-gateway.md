@@ -16,7 +16,10 @@ what stays central (which is almost everything).
 
     - A central backplane the satellite can reach **outbound** (the
       satellite dials it; the reverse path is never opened).
-    - Registering and revoking runner principals needs **tenant_admin**.
+    - Registering a runner principal needs **a person with tenant_admin**,
+      signed in with their own login: the answer carries an enrollment code.
+      A service login or an agent login gets `403 human_principal_required`.
+      Revoking needs **tenant_admin**.
     - The satellite gateway is **Beta** — see the
       [feature-maturity index](../reference/maturity.md#satellite_gateway).
 
@@ -147,16 +150,80 @@ satellite's identity (a Keycloak client `runner:<name>`, tagged
 
 ```bash
 meho runner-principal register edge-dc-a
-# → the principal: id, Keycloak client runner:edge-dc-a, owner
+# → the principal: id, Keycloak client runner:edge-dc-a, owner,
+#   and a one-time enrollment code
 ```
 
-Register prints no token. MEHO stores the client's secret in Vault
-(under the same path pattern as agent secrets). Set `MEHO_RUNNER_ID` to
-the runner name (`edge-dc-a`). `MEHO_RUNNER_TOKEN` is a bearer token of
-that Keycloak client.
+Register prints a one-time enrollment code. It is shown once, it works
+once, and it ends after 30 minutes. Copy it now. MEHO stores only a hash
+of it. MEHO also stores the client's secret in Vault (under the same path
+pattern as agent secrets). Set `MEHO_RUNNER_ID` to the runner name
+(`edge-dc-a`).
 
 **2. Deploy the runner** inside the isolated network — the same image,
-started in runner mode, configured entirely through `MEHO_RUNNER_*` env:
+started in runner mode, configured entirely through `MEHO_RUNNER_*` env.
+The runner logs in in one of two ways.
+
+*Its own key pair (recommended).* On its first start the runner makes a
+key pair, keeps the private key in `MEHO_RUNNER_KEY_DIR` (default
+`/var/lib/meho/runner-key`, file mode `0600`) and sends only the public
+key, with the enrollment code, to central. Central puts the public key on
+the runner's Keycloak client (signed JWT client login). From then on the
+runner signs its own login request and gets a short token. It asks for a
+new token before the old one ends, and once more after a `401`. No person
+hands it a token. The private key never leaves the site.
+
+The runner uses the key file only when its group and other users have no
+rights to it (for example mode `0600` or `0400`). With any other mode it stops
+with an error that names the file and its mode and says to set mode `0600`.
+From the Kubernetes docs
+([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
+In a Kubernetes pod with
+`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
+the runner then stops. Mount the key so that it keeps mode `0600`: set no
+`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
+volume driver that does not change file rights.
+
+This login follows RFC 7523, a signed JWT as the proof of a client's login
+([section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3)), and
+Keycloak's "Signed JWT" client authenticator
+([Keycloak: Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials)).
+MEHO's live test of this login runs in CI against the Keycloak image
+`keycloak/keycloak:26.0`. The proof on an operator's own Keycloak comes with
+a later step on a real install.
+
+```bash
+MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
+MEHO_RUNNER_ID=edge-dc-a \
+MEHO_RUNNER_ENROLLMENT_CODE=<code-from-register> \
+python -m meho_backplane.runner
+```
+
+Put `MEHO_RUNNER_KEY_DIR` on a volume that stays when the runner
+restarts. After the first start the runner finds its key there, so the
+code is not needed again. When the answer to the first start is lost, start
+the runner again with the same code and the same key folder: it finishes the
+enrollment, also after the 30 minutes. `MEHO_RUNNER_TOKEN_URL` sets the login
+server's token address when the runner must reach it under another name than
+central tells it. Both addresses must be `https://`. Plain `http://` works only
+for an address on the same machine.
+
+The runner sends its `MEHO_RUNNER_ID` with the code. When the code belongs to
+a runner with another name, central refuses it and changes nothing, so the
+code still works for its own runner. Check which code goes to which site, and
+start again.
+
+A runner whose key is lost stops with an error. Put the old key file back. Or
+revoke the runner, register a new one under a new name, and start with the new
+`MEHO_RUNNER_ID` and `MEHO_RUNNER_ENROLLMENT_CODE`. The same key folder can
+stay: the runner replaces the old login there. Give the new runner a new,
+empty `MEHO_RUNNER_SPOOL_DIR`, and keep the old spool folder as it is. Each
+result waiting in the spool carries the name of the runner that made it, and
+central refuses it under the new name.
+
+*A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
+Keycloak client instead. The runner sends it as it is and does not renew
+it; give it a new one by hand when it ends. This mode works as before.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
@@ -170,8 +237,7 @@ Optional knobs: `MEHO_RUNNER_TICK_INTERVAL_SECONDS` (poll cadence),
 spool bounds).
 
 There is no chart, package or installer for the runner yet; you write your
-own container setup. The runner does not renew its token; when the token
-expires, give it a new one by hand.
+own container setup.
 
 **3. Confirm central sees it:**
 
@@ -212,6 +278,16 @@ switch:
 meho runner-principal revoke edge-dc-a
 ```
 
+Revoke works the same for every runner, with a key or with a fixed token.
+It turns the runner's Keycloak client off, then deletes the client. With the
+client, its public key and its Keycloak secret are gone. The runner row stays
+and is marked revoked, and its enrollment code is cleared:
+`meho runner-principal list --include-revoked` shows it, and `show` shows it
+as revoked. The name stays taken: a new register of the same name gets `409`.
+A revoked runner cannot be brought back, because the deleted client cannot be
+turned on again. A new runner needs a new name and a new enrollment code. A
+token the runner already has works until it ends.
+
 ## Satellite vs. the in-process check runner
 
 Do not confuse the satellite with the **in-process check runner** that
@@ -229,18 +305,22 @@ tenant_admin writes for each runner (step 4 above) also still works.
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID` / `TOKEN`) is missing or malformed. | Set all three; the error names the offender. |
+| The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID`) is missing or malformed, or it has neither `MEHO_RUNNER_TOKEN`, nor `MEHO_RUNNER_ENROLLMENT_CODE`, nor a key in `MEHO_RUNNER_KEY_DIR`. | Set the missing one; the error names it. |
+| The runner exits 1 with `runner_login_error` and "enrollment was refused" | The enrollment code is wrong, was used, has ended, or its runner is revoked. | Start with the key file that enrolled with this code. Or revoke the runner, register a new one under a new name, and use the new name and code. |
+| The runner exits 1 with `runner_login_error` and "is missing", "does not match the saved login" or "is for runner:…" | The login saved in `MEHO_RUNNER_KEY_DIR` does not fit the key there or `MEHO_RUNNER_ID`. | Put the right key file back, or set the right `MEHO_RUNNER_ID`. Or start with a new runner's name and code. |
+| The runner exits 1 with "must start with https://" | The address of central or of the login server is plain `http://`. | Use the `https://` address. |
 | The runner shows `unknown` on `/ui/runners` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. With `RUNNER_CHECKS_ENABLED` on, results of a sensor with a `runner_name` count as check results. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
-| `403` registering a runner principal | `meho runner-principal register` / `revoke` need **tenant_admin**. | Enroll under a tenant_admin session; `show` / `list` are operator-level. |
+| `403` registering a runner principal | `meho runner-principal register` needs a person with **tenant_admin**; `revoke` needs **tenant_admin**. A service login or an agent login gets `403 human_principal_required` on register. | Register with your own sign-in as a person with tenant_admin; `show` / `list` are operator-level. |
+| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | The group or other users have rights to the key file in `MEHO_RUNNER_KEY_DIR`. In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key file at each mount. | Run `chmod 600` on the file and start the runner again. In a pod, mount the key so that it keeps mode `0600`: set no `fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a volume driver that does not change file rights. |
 
 ## What is not built yet
 
 - Changes through a satellite.
 - Reads that need a stored password (the runner has no Vault login of its own).
 - Generic operations (made from an API spec) on a satellite.
-- A chart or installer, and token renewal.
+- A chart or installer.
 - The per-check interval.
 - A CLI command or page that shows runner results.
 

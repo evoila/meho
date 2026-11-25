@@ -17,7 +17,9 @@ non-success status; the loop treats that uniformly as "reuse the cached
 assignment / spool the batch". The central routes land in #2499; this
 module is exercised against :class:`httpx.MockTransport` here.
 
-Every request carries ``Authorization: Bearer <MEHO_RUNNER_TOKEN>``, the
+Every request carries ``Authorization: Bearer <token>`` (the fixed
+``MEHO_RUNNER_TOKEN``, or a short token the runner got with its own key, see
+:mod:`meho_backplane.runner.login`), the
 runner's wire version (:data:`~meho_backplane.runner.wire.SCHEMA_VERSION`
 in the :data:`~meho_backplane.runner.wire.WIRE_VERSION_HEADER` header), the
 digest of its connector packages (in the
@@ -31,12 +33,18 @@ both versions.
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncGenerator
 from typing import Final
 
 import httpx
 import structlog
 
 from meho_backplane.runner import wire
+from meho_backplane.runner.login import (
+    RunnerLoginError,
+    SignedJwtTokenProvider,
+    uses_proxy_settings,
+)
 from meho_backplane.runner.package_set import PACKAGE_SET_HEADER, local_package_set
 from meho_backplane.runner.wire import RefusedResult, RunnerAssignment, RunnerResultBatch
 
@@ -54,6 +62,7 @@ _RESULTS_PATH: Final[str] = "/api/v1/checks/results"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 10.0
 _RETRYABLE_CLIENT_STATUSES: Final[frozenset[int]] = frozenset({401, 403, 408, 429})
 _CODE_PATTERN: Final = re.compile(r"[a-z0-9_.-]{1,64}")
+_HTTP_401: Final[int] = 401
 
 
 class RunnerClientError(RuntimeError):
@@ -114,6 +123,22 @@ def _raise_for_wire_version_mismatch(resp: httpx.Response) -> None:
         raise RunnerWireVersionMismatchError(detail)
 
 
+class _ProviderAuth(httpx.Auth):
+    """Sends the provider's current token; after a ``401`` it gets a new one and tries once more."""
+
+    def __init__(self, provider: SignedJwtTokenProvider) -> None:
+        self._provider = provider
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        request.headers["Authorization"] = f"Bearer {await self._provider.get_token()}"
+        response = yield request
+        if response.status_code == _HTTP_401:
+            request.headers["Authorization"] = f"Bearer {await self._provider.refresh()}"
+            yield request
+
+
 class _AssignmentUnchanged:
     """Singleton sentinel: central answered ``304`` — keep the cache."""
 
@@ -137,21 +162,28 @@ class RunnerClient:
         *,
         central_url: str,
         runner_id: str,
-        token: str,
+        token: str | None = None,
+        token_provider: SignedJwtTokenProvider | None = None,
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if (token is None) == (token_provider is None):
+            raise ValueError("give either a fixed token or a token provider")
         self._runner_id = runner_id
+        headers = {
+            wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
+            PACKAGE_SET_HEADER: local_package_set().digest,
+            wire.FEATURES_HEADER: wire.FEATURE_SCHEDULED_CHECKS,
+        }
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.AsyncClient(
             base_url=central_url.rstrip("/"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
-                PACKAGE_SET_HEADER: local_package_set().digest,
-                wire.FEATURES_HEADER: wire.FEATURE_SCHEDULED_CHECKS,
-            },
+            headers=headers,
+            auth=_ProviderAuth(token_provider) if token_provider is not None else None,
             timeout=httpx.Timeout(timeout),
             transport=transport,
+            trust_env=token_provider is None or uses_proxy_settings(central_url),
         )
 
     async def __aenter__(self) -> RunnerClient:
@@ -172,7 +204,7 @@ class RunnerClient:
             params["known_version"] = known_version
         try:
             resp = await self._client.get(_ASSIGNMENT_PATH, params=params)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RunnerLoginError) as exc:
             raise RunnerClientError(f"assignment fetch failed: {exc!r}") from exc
         if resp.status_code == httpx.codes.NOT_MODIFIED:
             return ASSIGNMENT_UNCHANGED
@@ -192,7 +224,7 @@ class RunnerClient:
         """
         try:
             resp = await self._client.post(_RESULTS_PATH, json=batch.model_dump(mode="json"))
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, RunnerLoginError) as exc:
             raise RunnerClientError(f"results post failed: {exc!r}") from exc
         _raise_for_wire_version_mismatch(resp)
         if not resp.is_success:

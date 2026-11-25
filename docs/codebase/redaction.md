@@ -1033,7 +1033,13 @@ before a reviewer reads the pull request.
   names the inputs that changed, are missing or are new. The same file
   checks three properties on main: a text with no secret comes back
   unchanged, hiding twice gives the answer of hiding once, and the time
-  grows in a straight line with the size.
+  grows in a straight line with the size. Each timed run gets its own copy
+  of the input.
+  The snapshot test file takes about 12 seconds of its own time, and
+  `test_redaction_compare_judge.py` about 3 seconds (measured on 12 cores).
+  Both are under 30 seconds in a unit shard. The first test of any shard
+  also pays a one-time session setup of about 33 seconds (it imports every
+  connector); that time belongs to the shard, not to these files.
 - **Write the snapshot again.** From `backend/`:
   `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
 - **The records.** `redaction_compare.py --records FILE`, run from a

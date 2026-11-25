@@ -523,7 +523,10 @@ async def operation_catalog_write(
                 await _populate_catalog(session, embedding_service=embedding_service)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
-                await assert_connector_declarations_valid(session)
+                await assert_connector_declarations_valid(
+                    session,
+                    allow_missing_rows=get_settings().test_amortize_typed_op_registrars,
+                )
                 await record_catalog_release(session)
                 await _fail_start_for_test(session)
             yield

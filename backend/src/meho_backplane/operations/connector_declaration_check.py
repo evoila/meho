@@ -45,7 +45,9 @@ def _required_inputs(parameter_schema: object) -> list[str]:
     return [str(name) for name in required] if isinstance(required, list) else []
 
 
-async def _check_test_operation(session: AsyncSession, cls: type[Connector]) -> None:
+async def _check_test_operation(
+    session: AsyncSession, cls: type[Connector], *, allow_missing_rows: bool
+) -> None:
     op_id = cls.test_operation
     if op_id is None:
         return
@@ -62,6 +64,8 @@ async def _check_test_operation(session: AsyncSession, cls: type[Connector]) -> 
         )
     ).first()
     if row is None:
+        if allow_missing_rows:
+            return
         raise ConnectorDeclarationError(
             f"{who}: test_operation {op_id!r} is not a registered operation of this connector."
         )
@@ -78,10 +82,20 @@ async def _check_test_operation(session: AsyncSession, cls: type[Connector]) -> 
         )
 
 
-async def assert_connector_declarations_valid(session: AsyncSession) -> None:
-    """Raise :class:`ConnectorDeclarationError` for the first broken declaration."""
+async def assert_connector_declarations_valid(
+    session: AsyncSession, *, allow_missing_rows: bool = False
+) -> None:
+    """Raise :class:`ConnectorDeclarationError` for the first broken declaration.
+
+    ``allow_missing_rows`` is for the test-only registrar snapshot
+    (``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS``): a test that wrote some
+    built-in rows before the start leaves the snapshot replay with nothing to
+    add, so the rows of the shipped connectors can be missing. A missing row
+    is then not an error. A row that exists is still checked. Production never
+    sets it.
+    """
     classes = registered_connector_classes()
     for cls in classes:
         check_connector_declaration(cls)
     for cls in classes:
-        await _check_test_operation(session, cls)
+        await _check_test_operation(session, cls, allow_missing_rows=allow_missing_rows)

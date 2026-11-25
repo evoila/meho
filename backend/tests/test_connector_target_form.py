@@ -201,6 +201,21 @@ async def test_an_unknown_test_operation_stops_the_start(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_a_missing_row_is_allowed_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test-only snapshot can leave rows out; a row that exists is still checked."""
+    cls = _make(test_operation="formfake.missing")
+    monkeypatch.setattr(
+        connector_registry, "_REGISTRY_V2", {("formfake", "1.x", "formfake-rest"): cls}
+    )
+    async with get_sessionmaker()() as session:
+        await assert_connector_declarations_valid(session, allow_missing_rows=True)
+    await _seed_op("formfake.missing", safety="caution")
+    async with get_sessionmaker()() as session:
+        with pytest.raises(ConnectorDeclarationError, match=r"must be 'safe'"):
+            await assert_connector_declarations_valid(session, allow_missing_rows=True)
+
+
+@pytest.mark.asyncio
 async def test_a_test_operation_that_is_not_safe_stops_the_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

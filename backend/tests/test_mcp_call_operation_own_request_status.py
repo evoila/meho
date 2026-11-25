@@ -700,6 +700,7 @@ async def test_a_caller_of_another_tenant_gets_one_not_found_row_in_its_own_tena
     caller = _REQUESTER.model_copy(update={"tenant_id": other_tenant, "sub": "caller-elsewhere"})
     _Caller.operator = caller
     status_before = await _status_row_ids()
+    all_before = await _audit_row_ids()
 
     answer = _answer(_call(client, request_id))
 
@@ -708,8 +709,13 @@ async def test_a_caller_of_another_tenant_gets_one_not_found_row_in_its_own_tena
     assert row.tenant_id == other_tenant
     assert row.operator_sub == "caller-elsewhere"
     assert row.parent_audit_id is None
-    added = [row for row in await _status_rows() if row.id not in status_before]
-    assert [r for r in added if r.tenant_id == _REQUESTER.tenant_id] == []
+    async with get_sessionmaker()() as session:
+        written = (await session.scalars(select(AuditLog))).all()
+    assert [
+        (r.path, r.tenant_id)
+        for r in written
+        if r.id not in all_before and r.tenant_id == _REQUESTER.tenant_id
+    ] == []
 
 
 @pytest.mark.parametrize(

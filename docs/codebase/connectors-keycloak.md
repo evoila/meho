@@ -1749,6 +1749,10 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   `realm_id_missing` code, before approval and again when the approved call
   runs. Keycloak leaves the id out when the target's login may not view the
   realm (`view-realm` or `manage-realm`).
+- **The approved realm id.** In the approved run, the handler's own read
+  right before the DELETE must answer with the realm id on the approval
+  card. Another id is refused with the `realm_id_changed` code, and no
+  DELETE is sent.
 - **Approval** cannot be turned off for this operation.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
@@ -2275,8 +2279,11 @@ before a write of the realm settings, so a wrong answer returns nothing and
 sends nothing. This covers approval cards and the `keycloak:` sides of
 `secret.move` too. `keycloak.user.check_login` runs it before it sends the
 password. An operation that reads the realm settings also checks that
-answer. One passed check counts for 5 seconds, and each run starts with a
-new one. Every admin login can read the name. A
+answer. A passed check counts only inside one run of an operation, and
+there for at most 5 seconds; each run starts with a new one. A request
+outside a run (a `keycloak:` side of `secret.move`, an approval card, the
+check before an approved run) reads the realm first every time, so a call
+never uses a check of an earlier call. Every admin login can read the name. A
 `keycloak.realm.create` that names no realm makes the managed realm, so its
 approval check judges it by that name, like a create that names it
 (`ops_write_login_realm_rule.py`).

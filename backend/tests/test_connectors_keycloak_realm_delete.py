@@ -35,6 +35,7 @@ What is proven:
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -970,4 +971,59 @@ async def test_a_realm_made_again_under_the_same_name_is_not_deleted(
     assert resumed.status == "denied", resumed
     assert resumed.extras is not None
     assert resumed.extras["error_code"] == "object_changed_since_approval"
+    assert not del_route.called
+
+
+def _in_the_handler() -> bool:
+    """True while the realm delete handler itself runs (not a check before it)."""
+    return any(frame.function == "keycloak_realm_delete" for frame in inspect.stack())
+
+
+@pytest.mark.parametrize("same_id", [True, False], ids=["same-id", "other-id"])
+async def test_the_handler_compares_its_realm_id_with_the_approved_id(
+    kc: KeycloakConnector, same_id: bool
+) -> None:
+    """Every check before the run reads the approved id; the handler's own read may not.
+
+    With another id in the handler's read, the call is refused and no DELETE
+    is sent. With the same id, the DELETE is sent.
+    """
+    other_id = "4f6c2a1e-0000-0000-0000-00000000d003"
+    handler_reads: list[str] = []
+
+    def _realm(_request: httpx.Request) -> httpx.Response:
+        if del_route.called:
+            return httpx.Response(404)
+        realm_id = _REALM_ID
+        if _in_the_handler():
+            realm_id = _REALM_ID if same_id else other_id
+            handler_reads.append(realm_id)
+        return httpx.Response(200, json=_realm_rep(realm_id=realm_id))
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(side_effect=_realm)
+        _mount_counts(mock)
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        request_id = await _wait_for_approval(_operator())
+        async with get_sessionmaker()() as session:
+            await approve_request(session, request_id, operator=_approver(), params=None)
+            await session.commit()
+        async with get_sessionmaker()() as session:
+            row = await session.get(ApprovalRequest, request_id)
+            assert row is not None
+            resumed = await resume_dispatch_after_approval(
+                operator=_approver(), request=row, params=None
+            )
+
+    if same_id:
+        assert resumed.status == "ok", resumed
+        assert resumed.result == {"realm": _REALM, "deleted": True, "already_absent": False}
+        assert del_route.call_count == 1
+        return
+    assert handler_reads == [other_id]
+    assert resumed.status == "error", resumed
+    assert resumed.extras is not None
+    assert resumed.extras["exception_class"] == "KeycloakDeleteRefusedError"
+    assert "(realm_id_changed)" in resumed.extras["exception_message"]
     assert not del_route.called

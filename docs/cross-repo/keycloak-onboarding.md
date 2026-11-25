@@ -261,6 +261,8 @@ Other rules:
   and deletes it only when Keycloak answers with exactly the managed realm
   (`realm_name_mismatch` otherwise), and with the realm's id
   (`realm_id_missing` otherwise: the target's login needs `view-realm`).
+  When the approved call runs, the realm id must still be the id on the
+  approval card (`realm_id_changed` otherwise).
   Approval cannot be turned off for this
   operation.
 

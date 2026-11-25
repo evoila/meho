@@ -51,7 +51,10 @@ steps again when the approved call executes. Before an approved call runs,
 MEHO builds the card again and compares the realm id
 (:mod:`~meho_backplane.operations.approval_object_check`): a realm that was
 deleted and made again under the same name has a new id, so the run is
-refused and nothing is deleted.
+refused and nothing is deleted. The handler's own read, right before the
+DELETE, compares the realm id once more with the id on the approval card.
+When they differ, the call is refused with the ``realm_id_changed`` code and
+no DELETE is sent.
 
 References
 ----------
@@ -87,6 +90,7 @@ from meho_backplane.connectors.keycloak.session import (
     DEFAULT_ADMIN_REALM,
     resolve_realm_config,
 )
+from meho_backplane.operations._preview import approved_preview
 from meho_backplane.targets.keycloak_realm_warnings import (
     backplane_login_realms as _backplane_login_realms,
 )
@@ -251,6 +255,23 @@ async def realm_blast_radius(
     }
 
 
+def _check_approved_id(rep: dict[str, Any]) -> None:
+    """In an approved run, refuse a realm whose id is not the id on the approval card."""
+    card = approved_preview(REALM_DELETE_OP)
+    if card is None:
+        return
+    block = card.get("blast_radius")
+    shown = block.get("object") if isinstance(block, dict) else None
+    approved_id = shown.get("id") if isinstance(shown, dict) else None
+    if approved_id != rep["id"]:
+        raise KeycloakDeleteRefusedError(
+            REALM_DELETE_OP,
+            "realm_id_changed",
+            "Keycloak answered with another realm id than the one on the approval card. "
+            "Nothing was deleted. Send a new request.",
+        )
+
+
 async def keycloak_realm_delete(
     self: KeycloakConnector,
     operator: Operator,
@@ -261,8 +282,10 @@ async def keycloak_realm_delete(
     realm = realm_name_param(params, target)
     check_realm_guards(target, realm)
     result: dict[str, Any] = {"realm": realm}
-    if await read_managed_realm(self, operator, target, realm) is None:
+    rep = await read_managed_realm(self, operator, target, realm)
+    if rep is None:
         return {**result, "deleted": False, "already_absent": True}
+    _check_approved_id(rep)
     return await _delete_and_verify(
         self, operator, target, op_id=REALM_DELETE_OP, path=_realm_path(realm), result=result
     )

@@ -765,28 +765,45 @@ as stored, counting every entry. A document that does not fit whole
 keeps only its identity; when not even that fits, one closing entry
 counts the documents left out.
 
-**The `k8s.apply` agent hint and the switch `K8S_APPLY_ONE_APPROVAL_HINT`.**
+**The `k8s.apply` agent texts and the switch `K8S_APPLY_ONE_APPROVAL_HINT`.**
 A call of `k8s.apply` with `dry_run="server"` waits for approval, like the
-real call. The old hint told the agent to dry-run first, so each manifest
-cost two approvals. With the switch on
-(`Settings.k8s_apply_one_approval_hint`, off by default),
-`register_operations()` stores the op with a new hint
-(`with_apply_hint()` in `_apply_hint.py`). It tells the agent to:
+real call. With the switch on (`Settings.k8s_apply_one_approval_hint`, off
+by default), `register_operations()` stores the op with the texts of
+`with_apply_hint()` in `_apply_hint.py`:
 
-- look at the manifests first with `preview_operation`. That needs no
-  approval and does not contact the cluster. It shows the manifests the call
-  would apply (`plan_shown` is false). The approval request of the real call
-  shows the result of a server dry run;
-- put all manifests of one deploy into one `k8s.apply` call. The call applies
-  them in order and needs one approval.
+- The summary line "Server-side apply one or more manifests in order; needs
+  one approval per call." It shows in every `search_operations` answer.
+- A `when_to_use` text, a `dry_run` hint and an `output_shape` text. The
+  agent reads them in the `guidance` block of an exact-op
+  `search_operations` call. That block is there only while
+  `OPERATION_CONTRACT_GUIDANCE` is on too (off by default).
+
+It tells the agent:
+
+- `preview_operation` needs no approval and does not contact the cluster.
+  It shows the manifest text that was sent, after the check of the
+  parameter shape (`plan_shown` is false). It does not show what the apply
+  will change on the cluster.
+- Send all manifests of one deploy in one `k8s.apply` call, as one manifest
+  text with the documents split by `---`, in the order they must exist. The
+  call applies them in that order and needs one approval.
+- A call with `dry_run='server'` waits for approval too. The approval
+  request shows the result of a server dry run.
+
+This operation is at risk level `dangerous`. It waits for a person on every
+call, also when a platform admin has turned approval off for it.
 
 An object in a namespace that the same call creates fails its dry run on the
 approval request, because the namespace does not exist yet. The real apply
 still works, because the namespace is applied first. The hint says this.
-Nothing else changes: the risk level, the approval rule and the parameters
-stay. With the switch off, the op is described as before.
-`tests/test_k8s_write_hint_no_dry_run_first.py` fails when the hint of any
-Kubernetes write operation tells the agent to dry-run it first.
+The risk level, the approval rule and the parameters are the same with the
+switch on and off. With the switch off, the op keeps the texts written in
+`ops_write_meta.py`, which say to run `dry_run='server'` and then
+`dry_run='none'`.
+`tests/test_k8s_write_hint_no_dry_run_first.py` reads the texts that
+`register_operations()` stores with the switch on. It fails when the text of
+any Kubernetes write operation tells the agent to call it with a dry run, or
+to read a dry-run answer, before the real call.
 
 **`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
 each field of an object. `k8s.apply` applies under the owner `meho`. When

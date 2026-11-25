@@ -2825,13 +2825,18 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
-    #: The agent hint of ``k8s.apply`` (#6921), behind a switch that is off by
-    #: default. When on, the hint no longer says to call ``k8s.apply`` with a
-    #: dry run before the real call (both calls wait for approval). It says to
-    #: look at the manifests with ``preview_operation`` (no approval) and to
-    #: send all manifests of one deploy in one call
-    #: (:mod:`meho_backplane.connectors.kubernetes._apply_hint`). Off: the
-    #: hint is as before. Set via ``K8S_APPLY_ONE_APPROVAL_HINT``.
+    #: The agent texts of ``k8s.apply`` (#6921), behind a switch that is off by
+    #: default. When on, the summary line "Server-side apply one or more
+    #: manifests in order; needs one approval per call." shows in every
+    #: ``search_operations`` answer. The ``when_to_use`` text and the
+    #: ``dry_run`` hint reach the agent only in the ``guidance`` block of an
+    #: exact-op ``search_operations`` call, while ``OPERATION_CONTRACT_GUIDANCE``
+    #: is on too (off by default). They say that ``preview_operation`` needs no
+    #: approval and shows the manifest text that was sent, and to send all
+    #: manifests of one deploy in one call
+    #: (:mod:`meho_backplane.connectors.kubernetes._apply_hint`). Off:
+    #: ``k8s.apply`` keeps the texts written in ``ops_write_meta.py``. Set via
+    #: ``K8S_APPLY_ONE_APPROVAL_HINT``.
     k8s_apply_one_approval_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it

@@ -850,9 +850,11 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   (`runner/spool.py::ResultSpool.set_aside`), together with the HTTP status,
   the short code of the answer and the time (never the free text of the
   answer), and goes on with the next batch. Nothing sends a set-aside batch
-  again. The runner then posts a batch without results that carries
+  again. In the same tick, also while other batches wait in the retry folder,
+  the runner posts a batch without results that carries
   `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
-  `set_aside_last_at`. `runner_checks.record_set_aside` shows each such check
+  `set_aside_last_at`. When that post fails, the next tick sends it again.
+  `runner_checks.record_set_aside` shows each such check
   as `unknown` with the reason `result_refused`, the status and the code,
   and stores the count and the time on the runner's assignment row
   (`set_aside_count`, `set_aside_last_at`). The console page `/ui/runners`

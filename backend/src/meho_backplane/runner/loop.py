@@ -14,7 +14,8 @@ eager-init races) does not apply to the runner's tiny startup.
 
 Each tick, in order:
 
-1. drain the on-disk retry spool oldest-first,
+1. drain the on-disk retry spool oldest-first, then tell MEHO about results
+   of set-aside batches, also while other batches still wait in the spool,
 2. fetch the assignment (echoing the cached digest as ``known_version``;
    a ``304`` or a fetch failure keeps the cached assignment so the runner
    keeps executing while the uplink is down),
@@ -154,8 +155,9 @@ async def run_one_tick(
     _log().info("runner_tick_start", cached_version=state.assignment_version)
     try:
         spool_empty = await _drain_spool(client, spool, state)
-        if spool_empty:
-            await _send_notices(client, spool, state, runner_id)
+        # Not tied to an empty spool: when MEHO refuses each new batch (a wrong
+        # clock), batches keep waiting and the checks must still say why.
+        await _send_notices(client, spool, state, runner_id)
         await _fetch_assignment(client, state)
         await _execute_and_report(client, spool, state, runner_id, post_now=spool_empty)
     except RunnerWireVersionMismatchError as exc:
@@ -306,7 +308,10 @@ async def _send_notices(
 
     MEHO then shows the checks of those results as ``unknown`` with the reason
     that the result was refused, and shows the count of set-aside batches. The
-    notice stays queued when the send fails.
+    notice goes out in the tick that set the batch aside, also while other
+    batches wait in the spool. It holds no result, so it never passes a waiting
+    one, and MEHO keeps a newer counted result of the check. The notice stays
+    queued when the send fails, and the next tick sends it again.
     """
     if not state.notices:
         return

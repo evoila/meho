@@ -1659,8 +1659,16 @@ through the same `is_rights_change` check, so an upgrade weakens nothing.
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
-**A tenant with one admin (#6641).** There, nobody can approve that
-admin's change of rights. MEHO says so; it builds no exception.
+**A tenant with one admin, and a change a platform admin must approve.**
+A platform admin must approve a waiting change of rights where the card's
+`login_realm` fact is true: the change is in MEHO's own login realm, in
+`master` or in the target's admin realm, or MEHO could not make sure that
+it is not. The person who asked approves it only as a platform admin who
+asked in the web console. So when the person who asked is the only admin of
+the tenant, nobody else in the tenant can approve it. MEHO says so; it
+builds no exception. In every other realm, the person who asked approves
+the waiting change in the web console, so MEHO shows no one-admin note
+there.
 
 - `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
   Keycloak admin client: the enabled members of every group (at any level)
@@ -1676,33 +1684,64 @@ admin's change of rights. MEHO says so; it builds no exception.
   known" never gives a warning.
 - At request time, `rights_change_note` in `operations/approval_queue.py`
   runs after the request and its approval step event are saved (the
-  dispatcher and the composite step), outside the `try` that answers
-  "denied". A failed read of the note gives no note; the call still waits
-  for approval. When the requester is the only admin, the answer gets
-  `extras.approval_note`: "This change needs a second admin to approve it.
-  This tenant has only one admin." and a link to the approvals guide. The
-  note is added to `error` too. The request is still stored, so an admin
+  dispatcher, the composite step and the MCP read of an own request),
+  outside the `try` that answers "denied". For every waiting change of
+  rights (`is_rights_change(request)` is true) it calls
+  `only_admin_note(tenant_id, requester_sub, login_realm=...)` in
+  `auth/tenant_admins.py`:
+  - the "no admin" note shows for every waiting change of rights with a
+    sure count of zero admins, also `policy.apply`, `policy.classify` and
+    a change in any other realm;
+  - the one-admin note shows only when the person who asked is the only
+    admin of the tenant and the card's `login_realm` fact is true, by the
+    facts the approve uses: `grant_facts(request)` is not `None` and its
+    `login_realm` is true. The connector sets the fact for MEHO's own
+    login realm, for `master` and for the target's admin realm, and also
+    when it could not make sure that the change is not in one of them. A
+    card without the realm fact counts as the login realm, as in the
+    approve.
+
+  `policy.apply`, `policy.classify` (they have no realm) and a change in
+  another realm get no one-admin note. Two or more admins and a count that
+  is not known give no note. When the tenant has at least one admin, a
+  request whose asker is not an admin (an Operator, an agent or a service
+  login) gets no note. A failed read of the note gives
+  no note; the call still waits for approval. The one-admin note is in
+  `extras.approval_note` and at the end of `error`: "A platform admin must
+  approve this change. It is in MEHO's own login realm, in `master` or in
+  the target's admin realm, or MEHO could not make sure that it is not. You can
+  approve it yourself only if you are a platform admin and asked for it
+  in the web console. MEHO found no other admin in this tenant." and a
+  link to the approvals guide. The request is still stored, so an admin
   added later can approve it. `meho operation call` prints the note under
   the parked hint. The web console shows it in the waiting answer of the
   Keycloak pages, the operation run window, and the classify page.
 - `/api/v1/health` and `meho_status` report the count in
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
-  admin": a warning with the same sentence for one admin, ok for two or
-  more, and no line when the count is not known or the backplane is older.
+  admin". For one admin it warns "This tenant has only one admin. Some
+  changes of rights in MEHO's own login realm need a platform admin other
+  than the person who asked." Its fix says "add a second platform admin in
+  Keycloak (in MEHO-Platform-Admins)" with the guide link. Two or more
+  admins give an ok line. When the count is not known or the backplane is
+  older, there is no line.
+- The fix of the `meho doctor` line "approval sign-in" says who runs
+  `keycloak.authflow.ensure_approval_flow`: a platform admin in the web
+  console runs it at once; asked with a token, it waits and a second
+  platform admin approves it.
 - The note for each number of admins (`only_admin_note`):
 
   | Admins | Note |
   |---|---|
-  | none | "This tenant has no admin." and the guide link. No "second admin" sentence, because one more admin would not be enough. |
-  | one, the requester | "This change needs a second admin to approve it. This tenant has only one admin." and the link |
-  | one, another person | no note, because that admin can approve |
+  | none | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
+  | one, the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note |
+  | one, another person | no note. In MEHO's own login realm, in `master` and in the target's admin realm, only a platform admin approves; MEHO counts tenant admins and platform admins together, so there is no note also when that other admin is a tenant admin only. |
   | two or more | no note |
   | not known | no note |
 
   The "no admin" note shows only for a sure count of zero. Today the read of
   the realm gives "not known" instead of zero (see above), so this note comes
   into use when that read changes. On an approved request (a retry with the
-  same key), the "second admin" sentence goes and the rest stays in every row.
+  same key), the part about who must approve goes and the rest stays in every row.
 
 ## The "may I approve this?" answer (#3329)
 
@@ -2848,12 +2887,13 @@ for approval.
   The answer keeps its `status` and `extras`, but its text is
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
-  secret value. When the request has the rights note (a change of rights in
-  a tenant with one admin), the note follows this text. On an approved
-  request, the note leaves out "This change needs a second admin to approve
-  it." and keeps "This tenant has only one admin." and the guide link, also
-  in `extras.approval_note`. A retry of a waiting request keeps the text
-  "requires approval before execution" and the full note.
+  secret value. When the request has the note of `rights_change_note` (see
+  [the note for a tenant with one admin](#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
+  the note follows this text. On an approved request, the note keeps only "MEHO
+  found no other admin in this tenant." and the guide link, also in
+  `extras.approval_note`: the part about who must approve is left out. A
+  retry of a waiting request keeps the text "requires approval before
+  execution" and the full note.
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be

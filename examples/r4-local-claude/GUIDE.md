@@ -207,50 +207,24 @@ as `.mcp.json`:
 }
 ```
 
-Export the token in the operator's shell. The MEHO CLI stores
-tokens in the OS keyring when available; when not (headless
-hosts, CI containers, or with `MEHO_KEYRING_DISABLE=1`), it falls
-back to a 0600-mode credentials file at
-`$XDG_CONFIG_HOME/meho/credentials.json` (defaults to
-`$HOME/.config/meho/credentials.json`). See
-[`cli/internal/auth/store.go`](../../cli/internal/auth/store.go)
-for the resolution logic.
-
-There is **no `meho login --print-token` verb today**; extract
-the token from whichever backend stored it:
+Log in with `--print-token`. The CLI then writes only the access
+token to standard output. The login prompt and all other lines go to
+standard error:
 
 ```bash
-# File backend (headless / MEHO_KEYRING_DISABLE=1):
-export MEHO_MCP_TOKEN="$(jq -r '
-  .entries
-  | to_entries[]
-  | select(.key | endswith("https://meho.example.com"))
-  | .value.access_token
-' "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json")"
-
-# Keyring backend (macOS Keychain / Secret Service / Wincred):
-# The credentials file does not exist; query the OS keyring
-# directly. On macOS:
-#   security find-generic-password -s meho -a https://meho.example.com -w
-# On Linux:
-#   secret-tool lookup service meho user https://meho.example.com
-# Or set MEHO_KEYRING_DISABLE=1 and re-run `meho login` to force
-# the file backend, then use the jq snippet above.
+export MEHO_MCP_TOKEN="$(meho login --print-token https://meho.example.com)"
 ```
 
-> Token rotation is per-deployment. The default Keycloak access
-> token TTL is short (5–15 minutes); export the variable in a
-> rotating helper, or use the Custom Connector / CIMD path which
-> manages refresh internally. The `refresh_token` is stored
-> alongside the access token in the same file/keyring entry
-> (`StoredToken.RefreshToken` in
-> [`cli/internal/auth/store.go`](../../cli/internal/auth/store.go))
-> for the v0.2 `meho refresh` verb once it ships.
+> **The token ends after 5 minutes.** MEHO's built-in login setup
+> gives access tokens a life of 5 minutes. Every call then fails
+> until you make a new token and restart the client. Use this
+> variant only for a short test, or when the client cannot run a
+> local command. For a login that renews itself, use Variant B.
 
 ### Variant B — stdio shim via `mcp-remote` (everything else)
 
 When the local client is Claude Code's stdio-MCP path on a non-CIMD
-realm:
+realm, or any client that can start a local command:
 
 ```json
 {
@@ -259,20 +233,33 @@ realm:
       "command": "npx",
       "args": [
         "-y",
-        "mcp-remote",
+        "mcp-remote@0.1.38",
         "https://meho.example.com/mcp",
-        "--header",
-        "Authorization: Bearer ${MEHO_MCP_TOKEN}"
+        "8456",
+        "--static-oauth-client-info", "{\"client_id\": \"meho-mcp\"}",
+        "--static-oauth-client-metadata", "{\"scope\": \"mcp:read mcp:execute offline_access\"}"
       ]
     }
   }
 }
 ```
 
-`mcp-remote` is the official stdio↔HTTP MCP transport shim. The
-Claude Code session spawns `npx mcp-remote ...` on stdio; the shim
-holds the token and translates JSON-RPC frames to Streamable HTTP.
-Token rotation is the same as Variant A.
+`mcp-remote` is the stdio↔HTTP MCP transport shim. The client
+starts `npx mcp-remote ...` on stdio. The shim signs in as the
+registered client `meho-mcp`, keeps the login in `~/.mcp-auth`, and
+renews the 5-minute access token by itself. You make no token. The
+login ends after 48 hours without use, or after 7 days at most.
+
+The shim needs Node.js with `npx`. For an internal CA, set
+`NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the environment of the
+shim. If your login belongs to several tenants, add
+`"--header", "Meho-Tenant:<tenant name or ID>"` to `args`.
+
+On a machine with no browser (for example a jump host), sign in
+once through an SSH tunnel. Use exactly the same command for the sign-in
+and for the client. The steps are on the
+[Other MCP clients](../../docs-site/clients/mcp-remote-shim.md#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host)
+page. A bearer token you make by hand is the last resort on that page.
 
 ## Step 4 — Agent principal's `tenant_role` (tenant_admin via Keycloak)
 

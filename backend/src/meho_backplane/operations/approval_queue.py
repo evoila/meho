@@ -189,6 +189,7 @@ from meho_backplane.operations.grant_approval import (
     check_rights_change_approval,
     grant_audit_fields,
     grant_changed_since_request,
+    grant_facts,
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
@@ -2444,20 +2445,34 @@ async def create_pending_request(
 
 
 async def rights_change_note(request: ApprovalRequest) -> str | None:
-    """The note for a change of rights that no other admin could approve (#6641).
+    """The note for a waiting change of rights that no other admin could approve.
 
-    The request is stored all the same, so an admin added later can still
-    approve it. ``None`` for any other request, when another admin could
-    approve, and when MEHO cannot count the admins
-    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+    * A sure count of zero admins gives the "no admin" note for every
+      waiting change of rights (:func:`is_rights_change`), also
+      ``policy.apply``, ``policy.classify`` and a change in any other realm.
+    * The note that the person who asked is the only admin shows only where
+      a platform admin must approve: the card's ``login_realm`` fact is true
+      (:func:`~meho_backplane.operations.grant_approval.grant_facts`; a
+      missing realm fact counts as true). There the person who asked
+      approves it only as a platform admin who asked in the web console.
+
+    ``None`` for every other request, when another admin is found, when the
+    person who asked is not an admin, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). The request
+    is stored all the same, so an admin added later can still approve it.
 
     The note is extra help only. When reading it fails, the answer is
     ``None`` and the request still waits for approval as stored.
     """
     if not is_rights_change(request):
         return None
+    facts = grant_facts(request)
     try:
-        return await only_admin_note(request.tenant_id, request.principal_sub)
+        return await only_admin_note(
+            request.tenant_id,
+            request.principal_sub,
+            login_realm=facts is not None and facts.login_realm,
+        )
     except Exception:
         _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
         return None

@@ -1327,23 +1327,30 @@ _GUIDE_LINK = (
     "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
     "#changes-of-rights-need-another-admin"
 )
-#: The whole rights note, word for word: the sentence that is false after an approval,
-#: then the two parts that stay true.
+#: The whole rights note, word for word: who must approve the change and why,
+#: then the two parts that stay true after an approval.
 _FULL_NOTE = (
-    "This change needs a second admin to approve it. "
-    f"This tenant has only one admin. See {_GUIDE_LINK}"
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
+    "You can approve it yourself only if you are a platform admin and asked for it in the "
+    f"web console. MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
 )
 _WAITING_ERROR = f"awaiting_approval: {_OP_ID!r} requires approval before execution. {_FULL_NOTE}"
 
 
 def _only_admin_is_requester(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the test op a change of rights in a tenant whose only admin is the requester."""
+    """Make the test op a change of rights in MEHO's own login realm.
+
+    The tenant's only admin is the requester. The op is registered like a
+    Keycloak write; its card has no realm fact, which counts as the login realm.
+    """
     from meho_backplane.auth import tenant_admins
 
     async def _read(*_args: object) -> frozenset[str] | None:
         return frozenset({"op-requester"})
 
     monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_OP_ID})
+    monkeypatch.setattr(grant_approval, "_GRANT_OPS", {_OP_ID: grant_approval._GrantOp((), ())})
     monkeypatch.setattr(tenant_admins, "_read", _read)
 
 
@@ -1368,7 +1375,7 @@ async def test_retry_of_an_approved_rights_change_keeps_only_the_true_part_of_th
     assert first["error"] == _WAITING_ERROR
 
     approver = _operator(sub="op-approver").model_copy(
-        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True}
+        update={"tenant_role": TenantRole.TENANT_ADMIN, "web_session": True, "platform_admin": True}
     )
     async with get_sessionmaker()() as s:
         await approve_request(s, uuid.UUID(request_id), operator=approver, params=None)
@@ -1378,11 +1385,10 @@ async def test_retry_of_an_approved_rights_change_keeps_only_the_true_part_of_th
     assert retry["status"] == "awaiting_approval", retry
     assert retry["extras"]["approval_request_id"] == request_id
     note = retry["extras"]["approval_note"]
-    assert note == f"This tenant has only one admin. See {_GUIDE_LINK}"
-    assert "This change needs a second admin to approve it." not in note
+    assert note == f"MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
     assert retry["error"] == (
         f"awaiting_approval: the approval request {request_id} is already approved. "
-        f"This tenant has only one admin. See {_GUIDE_LINK}"
+        f"MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
     )
 
 
@@ -1433,7 +1439,7 @@ async def test_retry_of_an_approved_request_whose_run_failed_says_it_is_approved
 
 
 @pytest.mark.asyncio
-async def test_retry_of_a_waiting_rights_change_keeps_the_second_admin_note(
+async def test_retry_of_a_waiting_rights_change_keeps_the_login_realm_note(
     monkeypatch: pytest.MonkeyPatch, embedding: list[float]
 ) -> None:
     _only_admin_is_requester(monkeypatch)

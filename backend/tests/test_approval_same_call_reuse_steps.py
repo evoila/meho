@@ -305,3 +305,31 @@ async def test_a_step_checked_at_the_top_level_gets_its_own_request(
     assert len(await _requests()) == 2
     assert await _reuse_audit_rows() == []
     assert recorded == [("pending", direct_id), ("pending", step_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_gets_a_reused_request_answers_normally(
+    monkeypatch: pytest.MonkeyPatch, recorded: list[tuple[str, uuid.UUID]]
+) -> None:
+    await _register_ops()
+    target = _FakeTarget(product="vault")
+    direct = await _direct(target)
+    assert direct.status == "awaiting_approval", direct.error
+    # The step path asks for its own request; make the queue ignore that and
+    # hand back the waiting request of the same call.
+    real = approval_queue_module._same_call_reuse_applies
+
+    def _ignore_keyword(run_id: Any, resume_parent: Any, requester: Any, *_rest: Any) -> bool:
+        return real(run_id, resume_parent, requester, True)
+
+    monkeypatch.setattr(approval_queue_module, "_same_call_reuse_applies", _ignore_keyword)
+    monkeypatch.setattr(approval_queue_module, "_is_composite_step", lambda: False)
+
+    step = await _step_at_top_level(target)
+
+    assert step.status == "awaiting_approval", step.error
+    assert step.extras["approval_request_id"] == direct.extras["approval_request_id"]
+    assert step.extras["approval_request_reused"] is True
+    assert len(await _requests()) == 1
+    assert len(await _reuse_audit_rows()) == 1
+    assert recorded == [("pending", uuid.UUID(direct.extras["approval_request_id"]))]

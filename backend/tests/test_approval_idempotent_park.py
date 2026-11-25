@@ -1689,3 +1689,24 @@ async def test_a_call_with_the_same_acting_agent_gets_the_waiting_request() -> N
     assert getattr(again, "_reused", False) is True
     assert await _approval_row_count() == 1
     assert await _request_audit_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_person_behind_a_call_with_another_acting_agent_cannot_approve_its_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+    with actor_delegation("agent:bot-a"):
+        second = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert second.principal_act == "agent:bot-a"
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s, second.id, operator=_operator(sub="person-b"))
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, second.id, operator=_operator(sub="person-c"))
+    assert approved.status == ApprovalRequestStatus.APPROVED

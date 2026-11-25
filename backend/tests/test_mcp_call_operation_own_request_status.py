@@ -1016,6 +1016,6 @@ async def test_a_failed_audit_write_ends_the_call_with_an_internal_error_and_sen
     assert body["error"]["code"] == -32603, body
     assert "result" not in body
     assert "demo.vm.delete" not in response.text
-    for leaked in ("awaiting_approval", "pending", "approved", "stored-marker", "executed"):
-        assert leaked not in response.text
+    for text in ("awaiting_approval", "pending", "approved", "stored-marker", "executed"):
+        assert text not in response.text
     assert await _request_columns(request_id) == columns_before

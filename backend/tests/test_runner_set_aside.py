@@ -23,6 +23,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -403,3 +404,26 @@ async def test_central_shows_the_checks_of_refused_results_as_unknown_and_keeps_
         stored = (await session.execute(select(RunnerAssignmentRow))).scalars().one()
     assert markers["runner-a"][0] == 2
     assert stored.set_aside_last_at is not None
+
+
+def test_the_set_aside_folder_keeps_at_most_max_files_batches(tmp_path: Path) -> None:
+    spool = ResultSpool(tmp_path, max_files=2)
+    names: list[str] = []
+    with capture_logs() as logs:
+        for uid in ("first", "second", "third"):
+            path = spool.write_batch(_batch(uid))
+            names.append(path.name)
+            spool.set_aside(path, _batch(uid), status=400, code="results_refused")
+
+    kept = sorted(p.name for p in (tmp_path / "set-aside").glob("*.json"))
+    assert kept == names[1:]  # the newest two
+    count, _newest = spool.set_aside_summary()
+    assert count == 2
+    drops = [e for e in logs if e["event"] == "runner_set_aside_overflow_drop"]
+    assert len(drops) == 1
+    assert drops[0]["log_level"] == "warning"
+    assert (drops[0]["path"], drops[0]["status"], drops[0]["code"]) == (
+        names[0],
+        400,
+        "results_refused",
+    )

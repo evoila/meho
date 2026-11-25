@@ -22,7 +22,9 @@ Design:
 * **Set-aside folder** — a batch that MEHO refuses every time is moved to the
   ``set-aside`` folder inside the spool folder, together with the status and
   the code MEHO answered with (no free text). Nothing reads that folder
-  again by itself, and the cap does not drop from it.
+  again by itself. It keeps at most ``max_files`` batches: before one more
+  is set aside past the limit, the oldest set-aside batch is removed and a
+  warning names its file, its status and its code.
 * **Bounded** — before each write, oldest files are dropped until adding
   one more stays within ``max_files``; each drop logs a warning. A runner
   partitioned for a long time sheds the oldest results rather than filling
@@ -62,6 +64,11 @@ _TMP_SUFFIX = ".tmp"
 _SET_ASIDE_DIR = "set-aside"
 
 
+def _batch_files(folder: Path) -> list[Path]:
+    """Return the batch files of *folder*, oldest-first. Excludes ``.tmp``."""
+    return sorted(p for p in folder.glob("*.json") if not p.name.endswith(_TMP_SUFFIX))
+
+
 class ResultSpool:
     """A directory of un-posted result batches, drained oldest-first."""
 
@@ -74,7 +81,7 @@ class ResultSpool:
         """Return spooled batch files, oldest-first. Excludes ``.tmp``."""
         if not self._dir.exists():
             return []
-        return sorted(p for p in self._dir.glob("*.json") if not p.name.endswith(_TMP_SUFFIX))
+        return _batch_files(self._dir)
 
     def write_batch(self, batch: RunnerResultBatch) -> Path:
         """Persist *batch* atomically and return its file path."""
@@ -120,6 +127,7 @@ class ResultSpool:
         """
         target_dir = self._dir / _SET_ASIDE_DIR
         target_dir.mkdir(parents=True, exist_ok=True)
+        self._enforce_set_aside_cap(target_dir)
         final = target_dir / path.name
         tmp = target_dir / (path.name + _TMP_SUFFIX)
         record = {
@@ -139,12 +147,32 @@ class ResultSpool:
             code=code,
         )
 
+    def _enforce_set_aside_cap(self, target_dir: Path) -> None:
+        """Remove the oldest set-aside batches until one more stays within ``max_files``."""
+        files = _batch_files(target_dir)
+        while files and len(files) >= self._max_files:
+            oldest = files.pop(0)
+            status: object = None
+            code: object = None
+            with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
+                record = json.loads(oldest.read_text(encoding="utf-8"))
+                status, code = record.get("status"), record.get("code")
+            with contextlib.suppress(FileNotFoundError):
+                oldest.unlink()
+            _log().warning(
+                "runner_set_aside_overflow_drop",
+                path=oldest.name,
+                status=status,
+                code=code,
+                max_files=self._max_files,
+            )
+
     def set_aside_summary(self) -> tuple[int, datetime | None]:
         """Return how many batches are set aside and when the newest was set aside."""
         target_dir = self._dir / _SET_ASIDE_DIR
         if not target_dir.exists():
             return 0, None
-        files = sorted(p for p in target_dir.glob("*.json") if not p.name.endswith(_TMP_SUFFIX))
+        files = _batch_files(target_dir)
         newest: datetime | None = None
         for path in files:
             try:

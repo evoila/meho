@@ -1198,9 +1198,9 @@ token, which starts the 48 hours again. If your realm turns on **Offline
 Session Max Limited**, that maximum also applies.
 
 Without `offline_access`, the refresh token ends at the realm's **SSO
-Session Idle** limit. MEHO's built-in login server sets 1 hour. On a realm
-you made by hand, Keycloak's default is 30 minutes. After that, the next
-MEHO call needs a new login.
+Session Idle** limit. MEHO's built-in login server sets 1 hour.
+On a realm you made by hand, Keycloak's default is 30 minutes.
+After that, the next MEHO call needs a new login.
 
 Two more things must be true:
 
@@ -1233,8 +1233,10 @@ too. So set the realm's SSO session to the same values:
 | SSO Session Idle (`ssoSessionIdleTimeout`) | **`3600`** seconds (1 hour) | **Realm settings → Sessions** |
 | SSO Session Max (`ssoSessionMaxLifespan`) | **`36000`** seconds (10 hours) | **Realm settings → Sessions** |
 
-Keycloak's defaults are 30 minutes and 10 hours. With them, the console
-session ends after 30 minutes without use.
+MEHO's built-in login server already sets these values: 1 hour and 10
+hours. Only a realm you made by hand needs this change.
+A realm made by hand starts with Keycloak's defaults: 30 minutes and 10 hours.
+With them, a console session on a realm made by hand ends after 30 minutes without use.
 
 When the session ends, the console shows "Your session ended. Please
 sign in again." and a **Sign in** button. After the login, the person is

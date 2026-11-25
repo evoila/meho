@@ -222,9 +222,9 @@ MEHO's built-in login server it ends after 48 hours without use, or
 after 7 days at most. Then run `meho login` again.
 
 - `meho login --offline=false` asks for a short login instead. It ends
-  after 1 hour without use on MEHO's built-in login server. On a realm
-  you made by hand, it ends at that realm's SSO Session Idle limit
-  (Keycloak's default is 30 minutes).
+  after 1 hour without use on MEHO's built-in login server.
+  On a realm you made by hand, it ends at that realm's SSO Session Idle
+  limit (Keycloak's default for a realm made by hand is 30 minutes).
 - If the login server does not offer the long login (an older realm),
   `meho login` logs in without it and prints one line that says so. Ask
   your admin to fix the realm: see

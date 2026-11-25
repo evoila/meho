@@ -2221,6 +2221,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Vault (default backend)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#store-the-credential-through-meho" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Store the credential through MEHO
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -3449,6 +3466,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Vault (default backend)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#store-the-credential-through-meho" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Store the credential through MEHO
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
           <li class="md-nav__item">
@@ -3653,8 +3687,13 @@ scope also has <code>meho_targets_register</code> and <code>meho_targets_update<
 (tenant_admin only). Through <code>call_operation</code>, the connector
 <code>targets-registry-1.x</code> offers <code>targets.register</code>, <code>targets.update</code>,
 <code>targets.remove</code> and <code>targets.probe</code>; every register and every update
-waits for a person's approval, and <code>targets.remove</code> always waits for one. MEHO has no MCP tool to stage a secret. This is also why
-the CLI is worth installing before your first agent session.</p>
+waits for a person's approval, and <code>targets.remove</code> always waits for one.</p>
+<p>MEHO has no MCP tool to stage a secret, on purpose: a password must
+never pass through an agent or a model. A person stores it with the
+CLI or the web console (see
+<a href="#store-the-credential-through-meho">Store the credential through MEHO</a>).
+This is also why the CLI is worth installing before your first agent
+session.</p>
 <h2 id="write-a-targetsyaml">Write a <code>targets.yaml</code><a class="headerlink" href="#write-a-targetsyaml" title="Permanent link">&para;</a></h2>
 <p>The file is a <code>targets:</code> list. A minimal, realistic pair — a
 Kubernetes cluster and a VMware appliance that is reached by IP:</p>
@@ -3926,17 +3965,89 @@ canonical, enforced layout is per-<a href="../../reference/words/#tenant">tenant
 </code></pre></div>
 <p>If you omit <code>secret_ref</code> at registration, <strong>the server derives exactly
 that path for you</strong>. The reliable recipe is therefore: register first,
-read the derived reference back, then stage the secret at it.</p>
-<div class="highlight"><pre><span></span><code><span class="c1"># 1. After import, read the derived reference:</span>
-meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>lab-vcenter
+read the derived reference back, then store the secret at it through MEHO.</p>
+<h4 id="store-the-credential-through-meho">Store the credential through MEHO<a class="headerlink" href="#store-the-credential-through-meho" title="Permanent link">&para;</a></h4>
+<p>MEHO stores the credential for you. The write uses the operation
+<code>vault.kv.put</code>. It has the risk level <code>caution</code>, and <strong>it always waits for
+a person's approval.</strong> No grant and no run approval covers it. While it
+waits, MEHO keeps the value encrypted. The audit row keeps only a hash of
+it, never the value. This recipe is for installs that use Vault or the
+built-in OpenBao. It is not for Google Secret Manager (see below).</p>
+<ol>
+<li>
+<p>Read the derived reference:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>describe<span class="w"> </span>lab-vcenter
 <span class="c1">#   ...</span>
 <span class="c1">#   secret_ref:        tenants/4f6f6f6f-.../lab-vcenter</span>
-
-<span class="c1"># 2. Stage the credential there with your own Vault tooling.</span>
-<span class="c1">#    The Vault CLI addresses the *wire* path, which prepends the mount:</span>
-vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>secret/tenants/4f6f6f6f-.../lab-vcenter<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="nv">username</span><span class="o">=</span>svc-meho<span class="w"> </span><span class="nv">password</span><span class="o">=</span><span class="s1">'...'</span>
 </code></pre></div>
+</li>
+<li>
+<p>Make a new, empty file that only you can read:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">CREDS</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>mktemp<span class="k">)</span><span class="s2">"</span>
+</code></pre></div>
+<p><code>mktemp</code> always makes a new file with a new name, readable only by
+you. It never reuses an old file. Then open the file <code>$CREDS</code> in an
+editor and write the credential. The password stays out of your shell
+history:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"username"</span><span class="p">:</span><span class="w"> </span><span class="s2">"svc-meho"</span><span class="p">,</span><span class="w"> </span><span class="nt">"password"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&lt;password&gt;"</span><span class="p">}</span>
+</code></pre></div>
+<p>Save the file.</p>
+</li>
+<li>
+<p>Send it. Use the mount <code>secret</code> and the <code>secret_ref</code> from step 1:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>secret<span class="w"> </span>tenants/4f6f6f6f-.../lab-vcenter<span class="w"> </span>--data<span class="w"> </span>@<span class="s2">"</span><span class="nv">$CREDS</span><span class="s2">"</span>
+<span class="c1"># → status: awaiting_approval</span>
+<span class="c1">#   approval id: 4b1c… — inspect with: meho approvals show 4b1c…</span>
+</code></pre></div>
+<p>You need no <code>--target</code> for this. MEHO logs in to Vault with your own
+token. The <code>--data</code> flag reads a file with <code>@&lt;file&gt;</code>. It does not read
+standard input, and you should never put the password in the command
+itself. If MEHO refuses the path, check that the mount is <code>secret</code> and
+that the path is the <code>secret_ref</code> from step 1.</p>
+</li>
+<li>
+<p>A person approves the request. When they approve, MEHO runs the
+   write with <strong>the approver's</strong> Vault rights, not yours. MEHO also
+   checks your own write rights before the request waits. So both of
+   you need the right to write the exact path from step 1.</p>
+<ul>
+<li><strong>On the built-in OpenBao (the default install):</strong> a tenant
+  operator (<code>MEHO-Operators</code>) may write only under
+  <code>tenants/&lt;tenant-id&gt;/rotation/</code>. They cannot write the target's
+  path. So use a tenant admin (<code>MEHO-Admins</code>) for both steps: an
+  admin sends the request, and an admin approves it. If you are the
+  only admin, you may approve your own request with a click in the
+  web console, or on the command line after a fresh sign-in. See
+  <a href="../approvals-and-break-glass/#approve-on-the-command-line">Approve on the command line</a>.</li>
+<li><strong>On your own Vault:</strong> the Vault policies of both people must allow
+  a write on the exact path. MEHO's own rules on who may approve
+  still hold: see
+  <a href="../approvals-and-break-glass/#who-may-approve">Who may approve</a>.</li>
+</ul>
+<p>On the command line, use the approval id from step 3:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>4b1c…
+</code></pre></div>
+<p>Approving runs the write at once. No second step follows.</p>
+</li>
+<li>
+<p>Delete the file after the write is done:</p>
+<div class="highlight"><pre><span></span><code>rm<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$CREDS</span><span class="s2">"</span>
+</code></pre></div>
+<p>If the request was rejected, nothing was stored. Delete the file
+anyway. Fix the cause the person gave, make the file again (step 2)
+and send it again (step 3).</p>
+</li>
+</ol>
+<p><strong>The same in the web console.</strong> Open the page <strong>Vault</strong> (<code>/ui/vault</code>),
+press <strong>Write secret</strong>, and fill in the mount <code>secret</code>, the path from
+step 1, and the JSON body. The form shows that the write waits for
+approval. Approve it on the page <strong>Approvals</strong>.</p>
+<div class="admonition warning">
+<p class="admonition-title">An agent must not send a password</p>
+<p>Never send a password through <code>call_operation</code> or any other agent
+tool. The value would pass through the model. Store the credential
+yourself, as above.</p>
+</div>
 <p>The two path notations trip everyone once, so:</p>
 <table>
 <thead>
@@ -3977,9 +4088,17 @@ vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </spa
   connector's onboarding notes
   (<a href="https://github.com/evoila/meho/tree/main/docs/cross-repo"><code>docs/cross-repo/</code></a>).</li>
 </ul>
+<p>The <code>--data</code> file is a JSON object, so the kubeconfig text goes into
+one JSON string. This one-liner builds the file from a kubeconfig
+without printing it:</p>
 <div class="highlight"><pre><span></span><code><span class="c1"># Kubernetes example — one field, whole kubeconfig as the value:</span>
-vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>secret/tenants/&lt;tenant-id&gt;/lab-rke2<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="nv">kubeconfig</span><span class="o">=</span>@rke2-kubeconfig.yaml
+<span class="c1"># mktemp makes a new file that only you can read.</span>
+<span class="nv">CREDS</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>mktemp<span class="k">)</span><span class="s2">"</span>
+python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>rke2-kubeconfig.yaml<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$CREDS</span><span class="s2">"</span>
+meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-id&gt;/lab-rke2<span class="w"> </span>--data<span class="w"> </span>@<span class="s2">"</span><span class="nv">$CREDS</span><span class="s2">"</span>
+<span class="c1"># After the request is approved and the write is done:</span>
+rm<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$CREDS</span><span class="s2">"</span>
 </code></pre></div>
 <h3 id="google-secret-manager-credentialbackend-gsm">Google Secret Manager (<code>credentialBackend: gsm</code>)<a class="headerlink" href="#google-secret-manager-credentialbackend-gsm" title="Permanent link">&para;</a></h3>
 <p>The ref grammar is:</p>
@@ -4305,7 +4424,7 @@ MEHO passes that error on and changes nothing.</p>
 <tr>
 <td>Dispatch fails, <code>connector_vault_forbidden</code> — Vault answered <em>permission denied</em></td>
 <td>Nine times out of ten the secret is staged at the wrong path, <strong>not</strong> a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path.</td>
-<td><code>vault kv put</code> the credential at the expected path. If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run <code>meho targets update &lt;name&gt; --secret-ref &lt;path&gt;</code>. If the error says it is not the target's own <code>secret_ref</code>, check the path the operation names. Do <strong>not</strong> widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422.</td>
+<td>Store the credential at the expected path with <code>meho vault kv put secret &lt;path&gt; --data @creds.json</code> (<a href="#store-the-credential-through-meho">recipe</a>). If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run <code>meho targets update &lt;name&gt; --secret-ref &lt;path&gt;</code>. If the error says it is not the target's own <code>secret_ref</code>, check the path the operation names. Do <strong>not</strong> widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422.</td>
 </tr>
 <tr>
 <td>Dispatch fails, <code>connector_auth_failed</code> (HTTP 401 at session establish)</td>

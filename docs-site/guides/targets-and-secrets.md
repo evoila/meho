@@ -446,6 +446,55 @@ when you leave it out.
   admin sees the targets of every tenant. You can fix one with
   `meho targets update`, or in the console edit form ("Managed realm").
 
+## Find targets whose secret is outside the tenant's folder
+
+MEHO keeps each tenant's secrets under the tenant's own folder in the
+secret store (Vault or OpenBao). When a target's `secret_ref` points
+outside that folder, MEHO writes a warning to the server log, at most once
+an hour for each target. The call still works. Move the secret into the
+tenant's folder.
+
+To list these targets, run this as an admin:
+
+```bash
+meho targets outside-folder
+```
+
+A tenant admin sees their own tenant. A platform admin sees every tenant,
+or one tenant with `--tenant <tenant-id>`. To list one tenant you are a
+member of, choose it first, so your own role there applies, and then name
+its ID:
+
+```bash
+meho tenants use <name>
+meho targets outside-folder --tenant <tenant-id>
+```
+
+Without `--tenant`, a platform admin still sees every tenant. The list of
+every tenant leaves out each other tenant where you are a member without
+the admin role. Each row has the target name, the
+tenant, the `secret_ref` and why it is outside. The same list is at
+`GET /api/v1/targets/checks/outside-tenant-folder`.
+
+The folder is set by `VAULT_KV_TENANT_SCOPE_PREFIX`, with the tenant id in
+place of `{tenant_id}`. By default it is `secret/tenants/<tenant-id>/`.
+Ask the person who runs your MEHO install if your install uses another
+folder.
+
+To move a target into the folder:
+
+1. Copy the secret into the tenant's folder with your own store tooling.
+   With the default folder, that is `tenants/<tenant-id>/<target-name>`
+   in the `secret` mount.
+2. Run `meho targets update <name> --secret-ref <new path>`. With the
+   default folder, the new path is `tenants/<tenant-id>/<target-name>`.
+3. The update waits until a person approves it. The command prints the
+   approval request. Wait for the approval.
+4. Run `meho targets outside-folder` again. The target is gone from the list.
+
+When the folder check is off on your install, the command says
+"The folder check is off on this install" and lists nothing.
+
 ## Change a secret
 
 MEHO keeps a login for each target for a while, so it does not have to

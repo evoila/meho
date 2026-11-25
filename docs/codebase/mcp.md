@@ -2338,13 +2338,17 @@ the copy of the schema that `tools/list` sends.
 - **On:** `_wire_safe_input_schema` in `mcp/registry.py` walks the whole
   schema (`properties`, `items`, `$defs`, and so on) and drops `None` from
   each `enum`. Nothing else changes: a `type` list such as
-  `["string", "null"]` stays.
+  `["string", "null"]` stays. Values under `default`, `const` and
+  `examples` are data and stay as they are. An `enum` that would be left
+  empty is removed, so the `type` still limits the value.
 - The server checks each call against `inputSchema`, not the wire copy. A
   call that sends `null` for such a field still passes, and the handler
   treats it like a missing field.
 - MEHO's own hosted agent reuses `to_wire()`, so it gets the same copy.
 - No tool is added, removed or renamed.
-- Tests: `tests/test_mcp_strict_tool_schemas.py`.
+- Tests: `tests/test_mcp_strict_tool_schemas.py`. It runs the real handler of
+  each of the 11 tools with `null` and with the field left out. Only the call
+  below the handler (service or database) is a stand-in.
 
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 

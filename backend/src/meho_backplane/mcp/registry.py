@@ -338,26 +338,55 @@ def _strict_tool_schemas_on() -> bool:
 
     Read from the environment, not from :func:`get_settings`: the hosted
     agent builds its tool list when its module is imported, and the full
-    settings need more environment than that import has.
+    settings need more environment than that import has. It uses the same
+    :func:`parse_bool_env` as ``Settings.mcp_strict_tool_schemas``, so both
+    give one answer; ``test_mcp_strict_tool_schemas.py`` checks that.
     """
     return parse_bool_env(os.environ.get("MCP_STRICT_TOOL_SCHEMAS"))
 
 
-def _without_null_enum_members(node: Any) -> Any:
-    """Return *node* with ``None`` removed from every ``enum`` list, at any depth.
+#: Keywords whose value is plain data, not a schema. An ``enum`` inside such a
+#: value is not a rule of the schema, so it stays as it is.
+_LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "examples", "example"})
 
-    Used for ``MCP_STRICT_TOOL_SCHEMAS``. Nothing else changes: a ``type``
-    list such as ``["string", "null"]`` stays. *node* is not mutated. A node
-    with nothing to change is returned as the same object.
+#: Keywords whose value maps a name to a schema. The names are free text (a
+#: property may be called ``default``), so they are never read as keywords.
+_SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+
+
+def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
+    """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
+
+    Used for ``MCP_STRICT_TOOL_SCHEMAS``. It goes to any depth. Nothing else
+    changes: a ``type`` list such as ``["string", "null"]`` stays, and so do
+    the values under ``default``, ``const`` and ``examples``. An ``enum``
+    that would be left empty is removed: an empty ``enum`` matches nothing,
+    and a strict gateway refuses it too. The ``type`` keyword still limits
+    the value. *node* is not mutated. A node with nothing to change is
+    returned as the same object.
+
+    *names_are_keys* is true for the value of ``properties`` and the like,
+    where the keys are names, not keywords.
     """
     if isinstance(node, dict):
         changed = False
         out: dict[str, Any] = {}
         for key, value in node.items():
-            if key == "enum" and isinstance(value, list) and None in value:
-                new_value: Any = [member for member in value if member is not None]
+            if names_are_keys:
+                new_value: Any = _without_null_enum_members(value)
+            elif key in _LITERAL_KEYWORDS:
+                new_value = value
+            elif key == "enum" and isinstance(value, list) and None in value:
+                new_value = [member for member in value if member is not None]
             else:
-                new_value = _without_null_enum_members(value)
+                new_value = _without_null_enum_members(
+                    value, names_are_keys=key in _SCHEMA_MAP_KEYWORDS
+                )
+            if key == "enum" and not names_are_keys and new_value == []:
+                changed = True
+                continue
             changed = changed or new_value is not value
             out[key] = new_value
         return out if changed else node

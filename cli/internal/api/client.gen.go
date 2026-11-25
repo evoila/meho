@@ -2209,7 +2209,8 @@ type ApprovalSignInStatusState string
 // “rights_change_admins“ is how many admins of the caller's tenant could
 // approve a change of rights (#6641,
 // :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
-// count them. With one admin, a change of rights cannot be approved.
+// count them. With one admin, some changes of rights in MEHO's own login
+// realm cannot be approved.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
@@ -7256,7 +7257,8 @@ type HealthResponse struct {
 	// ``rights_change_admins`` is how many admins of the caller's tenant could
 	// approve a change of rights (#6641,
 	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-	// count them. With one admin, a change of rights cannot be approved.
+	// count them. With one admin, some changes of rights in MEHO's own login
+	// realm cannot be approved.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

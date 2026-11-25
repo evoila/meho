@@ -990,6 +990,37 @@ PYTHONPATH-leak imports.
 | `tests/integration/test_auth_keycloak_client_credentials.py` + `KeycloakBootstrap` / `keycloak_bootstrap` fixture | `backend/tests/integration/test_auth_keycloak_client_credentials.py` + `backend/tests/integration/conftest.py` + `backend/tests/integration/_fixtures/meho-integration-realm.json` | G11.2-T7 (#1098) live-Keycloak integration test that closes the deferred AC of G11.2-T2 (#816). The `keycloak_bootstrap` module-scoped fixture boots a Keycloak 26.x container (image pinned via `MEHO_TEST_KEYCLOAK_IMAGE` — **no docker.io default**, the fixture skips when unset because Keycloak images are ~600 MB and would exhaust the shared NAT egress pull bucket; CI sets the env var to a Harbor-proxied tag), bind-mounts the `meho-integration-realm.json` realm import at `/opt/keycloak/data/import/` (filename follows Keycloak's `<realm-name>-realm.json` convention), launches `start-dev --import-realm`, waits for the Quarkus "Listening on:" log line, and yields a frozen `KeycloakBootstrap` dataclass with the live `base_url` / `issuer_url` / `client_id` / `client_secret` / `audience` plus the expected `tenant_id` / `tenant_role` / `principal_kind` claim values the realm's hardcoded-claim mappers stamp onto every issued access token. The realm holds one confidential `serviceAccountsEnabled` client (`agent:test-bot`) with four protocol mappers: `oidc-audience-mapper` (stamps `meho-backplane-test` audience) plus three `oidc-hardcoded-claim-mapper` rows (`tenant_id` / `tenant_role=tenant_admin` / `principal_kind=agent`). The integration test exercises the **real** `client_credentials` grant end to end: `get_client_credentials_token(...)` against the container's token endpoint, then `verify_jwt_for_audience(f"Bearer {token}", expected_audience=...)` through the production JWT chain (not respx), asserting the resulting `Operator` carries `sub` (non-empty service-account UUID), `principal_kind=AGENT`, `tenant_role=OPERATOR`, `tenant_id` matching the realm's hardcoded value. The test temporarily overrides `KEYCLOAK_ISSUER_URL` to the container's realm issuer (the autouse `_integration_default_env` fixture pins a synthetic value at module load; `monkeypatch.setenv` + `get_settings.cache_clear()` + `clear_jwks_cache()` switch the chain to the live container). Bootstrap admin credentials use the Keycloak 26.x `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD` env vars (replacing the legacy `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD`). Skip path mirrors the other testcontainer suites: `MEHO_TEST_KEYCLOAK_IMAGE` unset → explicit-remediation skip; Docker socket missing → conftest's uniform skip; container boot failure (the container may not get extra rights, image pull rate-limit) → skip with the exception class name. Closes the integration AC of #816 deferred when no Keycloak testcontainer existed in the suite. |
 | `tests/integration/test_tenant_isolation.py` | `backend/tests/integration/test_tenant_isolation.py` | G0.1-T6 (Task #236) broad-spectrum end-to-end test for the tenancy chain. Boots `pgvector/pgvector:pg16` via `testcontainers` (module-scoped fixture in `tests/integration/conftest.py`; image name env-overridable via `MEHO_TEST_PGVECTOR_IMAGE`), applies `alembic upgrade head` against the asyncpg URL, builds a fresh `FastAPI` with the production middleware stack plus the `/api/v1/rbac-test` stub routes mounted unconditionally, and exercises five integration cases: (1) two operators in two tenants generate correctly tenant-scoped audit rows (5+3 split, no cross-pollination); (2) a JWT signed with an unknown tenant_id still authenticates and lands its row under the bogus UUID — documents v0.2's "trust the issuer's claim" model; (3) the per-tenant query helper returns only the requesting tenant's rows (forward-compat for G8); (4) a `read_only` JWT on `/api/v1/rbac-test/operator` returns 403 — sanity for T4's RBAC primitive; (5) the highest-value test — eight interleaved requests under `asyncio.gather` from four operators across two tenants must produce audit rows attributed to the right tenant_id, catching structlog contextvar leaks across concurrent asyncio tasks. The `_skip_no_docker` class-level mark mirrors `tests/migrations/test_migration_rollback.py`'s pattern: agent sandboxes without Docker skip the PG-driven tests; CI runners with Docker provisioned run them. The cheap import-smoke test `test_module_imports_cleanly` runs unconditionally so a renamed fixture surfaces at collection time. |
 
+### Log levels and HTTP calls
+
+For each call through httpx, MEHO's per-call line holds only the method, the scheme and host, and the status, at every log level.
+
+`configure_logging()` holds the logger of each HTTP client library, and every child logger, at the level in the table, whatever the root level is.
+
+| Logger | Held at |
+|---|---|
+| `httpcore`, `h2`, `hpack` (below httpx) | WARNING |
+| `httpx2`, `httpcore2` (sign-in and the AI SDKs) | WARNING |
+| `anthropic`, `openai` (AI SDKs) | WARNING |
+| `urllib3` (below `requests` and the Vault client `hvac`) | ERROR |
+| `botocore` | ERROR |
+| `aiohttp.client` | ERROR |
+| `kubernetes_asyncio.client.rest` | WARNING |
+| `google.auth.transport` | WARNING |
+
+The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. MEHO sets these levels, and a filter on MEHO's own log handler drops every record below the held level. So a library's own log setting does not bring these records back: for example `ANTHROPIC_LOG=debug`, which sets the `anthropic` and `httpx2` loggers to DEBUG when the SDK is first imported, or a library that calls `setLevel` on its logger later.
+
+At the default level (INFO), an operator does not see these lines of the libraries:
+
+- the per-call line of the HTTP client (`httpx2` "HTTP Request: ...");
+- the retry lines of the AI SDKs ("Retrying request ...");
+- the credential-source line of the cloud libraries (`botocore` "Found credentials in ...");
+- the token refresh line of the cloud libraries (`google.auth.transport` "Refreshing credentials ...", `botocore` SSO token refresh);
+- the `urllib3` warnings: the connection pool warning, the certificate name warning and the retry warning;
+- the `botocore` warnings: the credential refresh warnings, the token refresh warnings and the deprecated endpoint warning;
+- the two `aiohttp` client warnings: the `.netrc` file warning and the proxy kind warning.
+
+`tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept. At the end of the module it checks that each logger the tests change has its level from before.
+
 ## Control flow
 
 1. The container's `CMD` invokes

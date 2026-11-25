@@ -25,6 +25,14 @@ a credential (a vCenter download URL, a pre-signed URL, a token in the
 query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
 its scheme and host before the bridge writes it.
 
+MEHO holds the logger of each HTTP client library, and every child
+logger, at the level in :data:`_HTTP_STACK_LOGGERS`.
+:func:`_bridge_stdlib_logging` sets these levels and puts
+:class:`_HttpStackLevelFilter` on MEHO's handler. The filter drops every
+record below the held level, also when a library changes the level of its
+own logger after :func:`configure_logging` ran (the Anthropic SDK does this
+at its first import when ``ANTHROPIC_LOG`` is set).
+
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
 replaced, not stacked). Tests that need a clean slate call it again
@@ -47,6 +55,49 @@ from structlog.tracebacks import ExceptionDictTransformer
 #: line). Named rather than clearing all root handlers, so pytest's own
 #: ``caplog`` handler survives a mid-test :func:`configure_logging` call.
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
+
+
+#: Loggers of the HTTP client libraries and the level MEHO holds each of them,
+#: and their child loggers, at. The filter on MEHO's handler drops every
+#: record below that level.
+_HTTP_STACK_LOGGERS: dict[str, int] = {
+    "httpcore": logging.WARNING,
+    "httpx2": logging.WARNING,
+    "httpcore2": logging.WARNING,
+    "anthropic": logging.WARNING,
+    "openai": logging.WARNING,
+    "h2": logging.WARNING,
+    "hpack": logging.WARNING,
+    "urllib3": logging.ERROR,
+    "botocore": logging.ERROR,
+    "aiohttp.client": logging.ERROR,
+    "kubernetes_asyncio.client.rest": logging.WARNING,
+    "google.auth.transport": logging.WARNING,
+}
+
+
+def _held_level(name: str) -> int | None:
+    """Return the held level of a listed logger or of a child of one."""
+    while True:
+        held = _HTTP_STACK_LOGGERS.get(name)
+        if held is not None:
+            return held
+        parent, dot, _ = name.rpartition(".")
+        if not dot:
+            return None
+        name = parent
+
+
+class _HttpStackLevelFilter(logging.Filter):
+    """Drop a record of an HTTP library logger below its held level.
+
+    Sits on MEHO's handler, so the hold does not depend on the level of the
+    library's own logger, which the library can change at any time.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        held = _held_level(record.name)
+        return held is None or record.levelno >= held
 
 
 class _HttpxUrlFilter(logging.Filter):
@@ -166,6 +217,7 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     handler = _LazyStdoutHandler()
     handler.name = _STDLIB_BRIDGE_HANDLER_NAME
     handler.setFormatter(formatter)
+    handler.addFilter(_HttpStackLevelFilter())
 
     root = logging.getLogger()
     for existing in [h for h in root.handlers if h.name == _STDLIB_BRIDGE_HANDLER_NAME]:
@@ -173,6 +225,8 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     root.addHandler(handler)
     root.setLevel(level)
     logging.getLogger("httpx").addFilter(_HTTPX_URL_FILTER)
+    for name, held in _HTTP_STACK_LOGGERS.items():
+        logging.getLogger(name).setLevel(held)
 
     for name in ("uvicorn", "uvicorn.error"):
         bridged = logging.getLogger(name)

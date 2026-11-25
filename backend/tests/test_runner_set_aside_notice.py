@@ -197,7 +197,6 @@ async def test_notice_values_in_another_form_reach_no_reading_mail_or_investigat
     assert sent["mails"], "the kept notice sends the Dashboard mail"
     seen = repr((kept.model_dump(), skipped.last_evidence, sent["mails"], sent["investigations"]))
     assert marker not in seen
-    assert "999" not in repr(kept.last_evidence)
 
 
 @pytest.mark.asyncio

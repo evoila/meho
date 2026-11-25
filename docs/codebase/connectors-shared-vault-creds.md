@@ -117,6 +117,10 @@ dispatcher's `connector_error` branch.
 1. **Reject unset `secret_ref`.** A target with `secret_ref=None` is
    unconfigured → `VaultCredentialsReadError` (`_require_secret_ref`);
    the value is stripped for the scheme split and read.
+   For a Vault ref, the loader then checks the path against the tenant's
+   folder and logs a warning when it is outside, for every caller that is
+   not already refused by the check in `load_secret_data`. The read goes
+   on; see `connectors-vault-tenant-scope.md`, "Warning for every caller".
 2. **Split the scheme and dispatch.** `split_credential_ref` resolves the
    ref to `(kind, store_ref)`: a schemeless ref uses the deployment
    default (`config.credentialBackend`, default `vault`), an explicit

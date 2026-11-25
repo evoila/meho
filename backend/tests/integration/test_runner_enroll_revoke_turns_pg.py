@@ -255,6 +255,7 @@ async def _assert_one_revoked_refusal_row(code: str, jwk: dict[str, str]) -> Non
         "runner": _NAME,
         "reason": "runner_revoked",
         "key_id": ec_key_id(jwk),
+        "left_out_total": 0,
     }
     secret = code.partition(".")[2]
     for column in AuditLog.__table__.columns:
@@ -416,3 +417,55 @@ async def test_the_code_of_another_runner_changes_nothing(
     assert (await _row()).enrolled_key_id is None
     enrolled = await enroll_runner_key(code, _jwk(), _NAME)
     assert (await _row()).enrolled_key_id == enrolled.key_id
+
+
+@_skip_no_docker
+async def test_two_refusal_rows_at_once_count_each_left_out_refusal_once(
+    pg_engine: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second row write waits for the first commit, then counts only what is new."""
+    from .._runner_enroll_fakes import FakeValkey
+
+    valkey = FakeValkey()
+    monkeypatch.setattr(
+        "meho_backplane.auth.runner_enrollment_limits.get_broadcast_client", lambda: valkey
+    )
+    await _seed_runner()
+    row = await _row()
+    left_out_key = f"meho:ratelimit:runner-enroll-refusal:{row.id.hex}:code_invalid:left-out"
+    valkey.store[left_out_key] = 2
+    real_read = runner_enrollment.read_left_out_total
+    first_read = asyncio.Event()
+    go = asyncio.Event()
+
+    async def held_read(runner_id: uuid.UUID, reason: str) -> int | None:
+        total = await real_read(runner_id, reason)
+        if not first_read.is_set():
+            first_read.set()
+            await go.wait()
+        return total
+
+    monkeypatch.setattr(runner_enrollment, "read_left_out_total", held_read)
+    first = asyncio.create_task(runner_enrollment._write_refusal(row, 403, "code_invalid", None))
+    await asyncio.wait_for(first_read.wait(), timeout=10)
+    valkey.store[left_out_key] = 3  # one more refusal is left out meanwhile
+    second = asyncio.create_task(runner_enrollment._write_refusal(row, 403, "code_invalid", None))
+    await asyncio.sleep(_OVERLAP_SECONDS)
+    assert not second.done()  # it waits for the first commit
+    go.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=20)
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog)
+                    .where(AuditLog.path == "runner.principal.key_enrollment_refused")
+                    .order_by(AuditLog.occurred_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [r.payload.get("left_out_before", 0) for r in rows] == [2, 1]
+    assert [r.payload["left_out_total"] for r in rows] == [2, 3]

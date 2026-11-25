@@ -86,10 +86,6 @@ class FakeValkey:
         self.calls += 1
         return self.add(name, 1)
 
-    async def incrby(self, name: str, amount: int) -> int:
-        self.calls += 1
-        return self.add(name, amount)
-
     async def expire(self, name: str, time: int) -> bool:
         self.calls += 1
         return self.set_expiry(name, time)
@@ -103,11 +99,10 @@ class FakeValkey:
             self.expires_at.pop(name, None)
         return gone
 
-    async def getdel(self, name: str) -> str | None:
+    async def get(self, name: str) -> str | None:
         self.calls += 1
         self._drop_ended()
-        value = self.store.pop(name, None)
-        self.expires_at.pop(name, None)
+        value = self.store.get(name)
         return None if value is None else str(value)
 
 
@@ -123,11 +118,8 @@ class BrokenValkey:
     async def incr(self, *args: Any) -> Any:
         raise ConnectionError("valkey is down")
 
-    async def incrby(self, *args: Any) -> Any:
-        raise ConnectionError("valkey is down")
-
     async def delete(self, *args: Any) -> Any:
         raise ConnectionError("valkey is down")
 
-    async def getdel(self, *args: Any) -> Any:
+    async def get(self, *args: Any) -> Any:
         raise ConnectionError("valkey is down")

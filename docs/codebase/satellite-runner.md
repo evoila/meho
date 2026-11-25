@@ -1021,12 +1021,16 @@ database read. A code that is not valid UTF-8 (a lone surrogate sent as a
 JSON escape) matches no stored code and is refused like any wrong code. A
 runner gets at most one refusal row per reason and minute
 (`auth/runner_enrollment_limits.py`). The row's slot is one key per minute, set
-with `SET NX`. Each refusal that is left out is added to one counter of that
-runner and reason. The counter has no end time, and the next row that is
-written takes the count as `left_out_before`, however late it comes. A row that
-cannot be written deletes the exact slot key it took (also after the minute
-changed) and gives its count back. When Valkey cannot be reached there, the row
-is written anyway. A body that fails the body check gets 422 without `input`,
+with `SET NX`. Each refusal that is left out adds one to a counter of that
+runner and reason. The counter only goes up and has no end time. Each row
+stores the counter value it read as `left_out_total`. Its `left_out_before`
+says how many refusals were left out since the newest row of that runner and
+reason, however late the row comes. The row reads the stored value of the newest row, reads the counter
+and is inserted in one transaction, under an advisory lock per runner and
+reason: a second row write waits for this commit. So a row that is not
+committed takes no count away, and its count goes into the next row once. A row
+that cannot be written deletes the exact slot key it took (also after the
+minute changed). When Valkey cannot be reached there, the row is written anyway. A body that fails the body check gets 422 without `input`,
 without the names of fields the sender added (an extra field is always
 `extra_field` in `loc`, also when it is named `body`), and with only numbers in
 `ctx`. When its code matches a runner that is not revoked, one refusal row

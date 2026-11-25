@@ -3101,8 +3101,7 @@ async def find_remote_write_approval(
 
     The approval is the request named by *approval_request_id*. Only the
     login that asked (*asker_sub*) can use it, and it must match the
-    connector. Its time limit must not have passed: the lookup checks the
-    deadline itself and does not wait for the clean-up job.
+    connector. An approval past its time limit is refused.
 
     Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
     the ``remote-write`` (caution) tier mints a capability **only** against a

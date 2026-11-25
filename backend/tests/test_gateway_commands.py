@@ -706,7 +706,7 @@ async def test_mint_remote_write_matches_the_connector(
 async def test_mint_remote_write_checks_the_approval_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An approval past its time limit is not used, even before the clean-up job."""
+    """An approval past its time limit is refused."""
     approval_id = await _seed_committed_approval()
     await _seed_write_allowlist()
     async with get_sessionmaker()() as session:
@@ -743,6 +743,28 @@ async def test_mint_remote_write_refuses_a_blocked_asker(
     assert result.refusal_code is MintRefusalCode.ASKER_BLOCKED
     assert await _approval_resumed_at(approval_id) is None
     reset_block_cache()
+
+
+async def test_mint_remote_write_refuses_when_the_block_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint refuses when the block list cannot be read, and keeps the approval."""
+    from meho_backplane.auth.principal_block import PrincipalBlockUnavailableError
+
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+
+    async def _unreadable(sub: str, tenant_id: uuid.UUID) -> bool:
+        raise PrincipalBlockUnavailableError(sub)
+
+    monkeypatch.setattr(gc, "is_principal_blocked", _unreadable)
+
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.ASKER_BLOCKED
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
 
 
 async def test_mint_remote_write_audit_row_names_asker_caller_and_approval(

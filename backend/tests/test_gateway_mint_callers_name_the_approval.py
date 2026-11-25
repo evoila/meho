@@ -4,8 +4,9 @@
 """Every source call of ``mint_gateway_command`` names the approval request.
 
 The mint uses an approval only for the request it names and only for the login
-that asked. A source file outside ``tests/`` that calls the mint without
-``approval_request_id=`` would skip that check. This guard finds such calls.
+that asked. A call without ``approval_request_id=`` cannot use an approval, so
+the mint refuses a write from it. This guard finds such calls in the source
+files outside ``tests/``.
 """
 
 from __future__ import annotations

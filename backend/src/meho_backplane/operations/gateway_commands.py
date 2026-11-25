@@ -648,24 +648,16 @@ async def _screen_remote_write(
     connector_id: str,
     approval_request_id: uuid.UUID | None,
 ) -> tuple[Any, Any, MintResult | None]:
-    """Run the three read-only remote-write pre-checks, in fail-closed order.
+    """Run the four read-only remote-write checks; the first that fails refuses.
 
-    Returns ``(approval, signing_key, refusal)``. On any fail-closed check
-    ``refusal`` is a :class:`MintResult` (the mint aborts **before** the
-    single-use latch); when it is ``None`` both ``approval`` and ``signing_key``
-    are bound. None of these three checks writes a row or consumes the approval:
+    Returns ``(approval, signing_key, refusal)``. No check uses up the approval:
 
-    1. **Approval binding** (mechanism 1, #3189) — a committed, un-consumed,
-       param-bound ``ApprovalRequest`` for ``(op, target, params)``; none →
-       :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
-    2. **Signing key** (#3189) — the central Ed25519 key must be provisioned to
-       sign the capability; unavailable →
-       :attr:`MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE`.
-    3. **Per-runner allowlist** (mechanism 2, #3190) — the op-class + target must
-       be on the runner's ``runner_write_allowlist``, screened through the shared
-       :func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`
-       matcher the DB-free edge re-runs (defence in depth); off-allowlist (or no
-       allowlist at all) → :attr:`MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`.
+    1. The named approval of this asker matches op, target and params:
+       ``REMOTE_WRITE_GATE_UNSATISFIED``.
+    2. The asker is not blocked, and the block list can be read: ``ASKER_BLOCKED``.
+    3. The signing key is set up: ``REMOTE_WRITE_SIGNING_UNAVAILABLE``.
+    4. The runner allowlist has the op class and target, by the matcher the
+       runner runs too: ``REMOTE_WRITE_NOT_ALLOWLISTED``.
     """
     from meho_backplane.settings import get_settings
 

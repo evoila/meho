@@ -6031,15 +6031,15 @@ Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mod
 
 ## The approval table
 
-`backend/tests/snapshots/approval_table.json` lists every built-in typed
-operation of this repository, one row each, sorted by operation id and then
-connector id. A row has the operation id, the connector id, the op class,
-the risk level, whether the call needs approval, and why no grant can cover
-it (the kind from `never_covered_reason`, or `null`). It is the built-in
-default only: no install override, no tenant policy row, no connector
-package outside this repository, no operation made from an API file at run
-time. Any change of a class, a level or an approval then shows in the diff
-of this file.
+The table holds, for every operation of the core: its class, its risk
+level, whether it needs approval, and why no grant can cover it (the kind
+from `never_covered_reason`, or `null`). A change of one of these shows in
+the diff of this file. The file is
+`backend/tests/snapshots/approval_table.json`. A row is one typed operation
+of one connector, with its operation id and connector id, sorted by
+operation id and then connector id. It is the built-in default only: no
+install override, no tenant policy row, no connector package outside this
+repository, no operation made from an API file at run time.
 
 - **The test.** `backend/tests/test_approval_table_snapshot.py` registers all
   typed operations (as `test_credential_calls_always_wait.py` does), builds

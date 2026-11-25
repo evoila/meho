@@ -18,7 +18,7 @@ This chapter does not need it.
 
 | You bring | Requirements |
 |---|---|
-| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx; k3s and RKE2 bring Traefik, see [k3s](#k3s)) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
+| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx; k3s and RKE2 bring Traefik: then change the ingress class, the controller namespace and two network rules, see [k3s](#k3s)) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
 | **Helm** | [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. Helm 4 is recommended. |
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
 | **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
@@ -324,8 +324,14 @@ meho status
 k3s brings Traefik, in the namespace `kube-system`, and enforces
 network rules. Use the example file
 [`values-k3s.yaml`](https://github.com/evoila/meho/blob/main/deploy/values-examples/values-k3s.yaml).
-It was made from the Traefik chart of k3s v1.37.2+k3s1. Take it as it
-is. It sets:
+It was made from the Traefik chart of k3s v1.37.2+k3s1. Download the
+file of your release, next to your `values.yaml`, and take it as it is:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/evoila/meho/<release tag>/deploy/values-examples/values-k3s.yaml
+```
+
+It sets:
 
 - `ingress.className: traefik`, and the annotation
   `traefik.ingress.kubernetes.io/router.entrypoints: websecure`. MEHO
@@ -353,6 +359,13 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
   --namespace meho --create-namespace \
   -f values-k3s.yaml -f values.yaml
 ```
+
+MEHO's call to its own address works when the name `ingress.host`
+resolves to an address that `kubectl -n kube-system get svc traefik`
+shows under `EXTERNAL-IP`. k3s then sends the call straight to Traefik.
+If the name resolves to another address (for example a public address
+that a router translates, or a proxy in front), the file's rule does not
+match. Add a rule for that address in `networkPolicy.extraEgress`.
 
 Also list the networks of your systems in `networkPolicy.extraEgress`
 and `config.targetSsrfAllowlist`, as in Step 3. Never put the pod and

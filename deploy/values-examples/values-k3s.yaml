@@ -40,6 +40,13 @@ networkPolicy:
   # checks `dns` and `certificate` need it. The rule is checked after the
   # Service sends port 443 on to the Traefik pod, so it names the pod labels
   # and the pod port 8443 (the chart's default port).
+  # Why not the svclb pods: servicelb of k3s sets no `ipMode` on the Service
+  # address, which means VIP, so kube-proxy sends a pod's call to the node
+  # address straight to Traefik, before the host-port rule sees it. This holds
+  # when the name of `ingress.host` resolves to an address in the Service
+  # status (`kubectl -n kube-system get svc traefik`). For any other address,
+  # add a rule in `networkPolicy.extraEgress`. Read from the sources, not yet
+  # run on a live cluster.
   ingressControllerEgress:
     podLabels:
       app.kubernetes.io/name: traefik

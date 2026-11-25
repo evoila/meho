@@ -133,3 +133,16 @@ def test_values_k3s_keeps_the_target_guard_on() -> None:
         for e in _render()["Deployment/meho"]["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert env.get("MEHO_TARGET_SSRF_ALLOWLIST", {}).get("value", "") == ""
+
+
+def test_values_k3s_names_the_console_secret_and_uses_the_default_storage_class() -> None:
+    values = yaml.safe_load(_VALUES_K3S.read_text())
+    assert values["uiConsole"]["secretName"] == "meho-core-ui-auth"
+    assert values["corePostgres"]["persistence"]["storageClass"] == ""
+    assert values["coreVault"]["persistence"]["storageClass"] == ""
+    # An empty class renders no `storageClassName`, so the cluster default
+    # (local-path on k3s) is used for both disks.
+    docs = _render()
+    for name in ("StatefulSet/meho-postgres", "StatefulSet/meho-vault"):
+        for claim in docs[name]["spec"]["volumeClaimTemplates"]:
+            assert "storageClassName" not in claim["spec"]

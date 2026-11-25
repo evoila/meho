@@ -673,6 +673,37 @@ async def test_mint_remote_write_uses_approval_only_for_the_asker(
     assert own.minted
 
 
+async def test_refused_remote_write_mint_writes_one_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal for a login that did not ask leaves one audit row, with no params."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+    stranger = _caller("other-login", PrincipalKind.USER)
+
+    result = await _mint_caution(monkeypatch, approval_id=approval_id, operator=stranger)
+
+    assert not result.minted
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "gateway.command.mint")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    audit = rows[0]
+    assert audit.id == result.refusal_audit_id
+    assert audit.tenant_id == _TENANT
+    assert audit.operator_sub == "other-login"
+    assert audit.payload["caller_sub"] == "other-login"
+    assert audit.payload["approval_request_id"] == str(approval_id)
+    assert audit.payload["runner_id"] == _RUNNER
+    assert audit.payload["op_id"] == _OP_ID
+    assert audit.payload["result_status"] == MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED.value
+    assert "params" not in audit.payload
+    assert "params_hash" not in audit.payload
+
+
 async def test_mint_remote_write_needs_the_named_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -762,7 +793,7 @@ async def test_mint_remote_write_refuses_when_the_block_list_cannot_be_read(
     result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert not result.minted
-    assert result.refusal_code is MintRefusalCode.ASKER_BLOCKED
+    assert result.refusal_code is MintRefusalCode.ASKER_BLOCK_UNREADABLE
     assert await _count(GatewayCommand) == 0
     assert await _approval_resumed_at(approval_id) is None
 

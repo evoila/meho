@@ -248,11 +248,18 @@ work item, plus approval-bound minting.
   defence) and **single-use** (the approval's one-way `resumed_at` latch,
   claimed in the mint session so it is consumed iff the mint commits). No
   approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
-  An approval covers one request of one asker, and the mint uses it only for
-  that asker: the caller must be the login that asked, the approval must
-  match the connector and must not be past its time limit, and the mint
-  refuses while the asker is blocked. The mint audit row names the asker,
-  the caller and the approval.
+  The mint uses an approval only when the caller is the login that asked, the
+  approval matches the connector, and it is not past its own `expires_at`
+  (never later than the clean-up job's limit); it also refuses while the asker
+  is blocked (`asker_blocked`) or the block list cannot be read
+  (`asker_block_unreadable`). The mint audit row names the asker, the caller
+  and the approval. A refused remote-write mint writes one audit row in the
+  same tenant (path `gateway.command.mint`, status 403) with the caller, the
+  approval request id the caller sent, the runner, the operation and the
+  refusal code, and no params; no command row is written and the approval
+  stays unused. The other refusals (unknown operation, invalid params,
+  operation not allowed for a runner, revoked runner, policy) write a log
+  line only.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
@@ -309,7 +316,7 @@ allowlist — and fail-closed when either is absent.
   (`load_runner_allowlist`) and ANDs the gate with the approval binding; an
   op-class/target off the allowlist (or no allowlist at all) →
   `MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`, before the single-use latch
-  (a refusal writes no rows / consumes no approval).
+  (a refusal writes one audit row, no command row, and uses up no approval).
 - **At the edge** — `_screen_item` re-runs the same matcher against the
   runner's **own** provisioning-config mirror (`satellite_write_allowlist`,
   parsed by `parse_runner_allowlist`), never the mint's and never a field on

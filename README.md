@@ -462,7 +462,7 @@ with the built-in parts.
 **Is the agent runtime included?**
 No — bring your own. MEHO governs what an agent is allowed to do; it does
 not run the model. Point any MCP client (Claude Code, Cursor, Cline,
-Continue, custom) at the backplane and operate under your own identity.
+Continue, opencode, custom) at the backplane and operate under your own identity.
 
 **Does MEHO replace Teleport / StrongDM?**
 No. Those broker *human* sessions (SSH/DB/k8s). MEHO governs *agent*

@@ -1,6 +1,6 @@
 # Other MCP clients (the `mcp-remote` shim)
 
-Some MCP clients — Cursor as of this writing, and others — follow the
+Some MCP clients — Cursor and opencode as of this writing, and others — follow the
 RFC 9728 metadata trail correctly but **expose no `client_id` field**
 in their config. They then fall back to Dynamic Client Registration,
 which Keycloak's Trusted Hosts policy blocks, and the wire-up never
@@ -134,6 +134,35 @@ every shim run on it, by hand (step 2) and from the client (step 6).
     With several tenants, the tenant header must be in both places.
 
 7. **Check it** with `meho_status` (see [Verify](#verify)).
+
+### Example: opencode
+
+opencode takes the same command in its config file, `opencode.json` in
+the project folder. Each server is an entry under `mcp`, and the command
+is a list of words. This was run with opencode 1.19.6:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "meho": {
+      "type": "local",
+      "command": [
+        "npx", "-y", "mcp-remote@0.1.38", "https://meho.example.com/mcp", "8456",
+        "--static-oauth-client-info", "{\"client_id\": \"meho-mcp\"}",
+        "--static-oauth-client-metadata", "{\"scope\": \"mcp:read mcp:execute offline_access\"}"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+Start opencode as the same user who did the sign-in in step 2, so the shim
+finds `~/.mcp-auth`. `opencode mcp list` shows `meho` as `connected` when
+the stored login works. For the `NODE_EXTRA_CA_CERTS` setting, add an
+`"environment": {"NODE_EXTRA_CA_CERTS": "/path/to/internal-ca.pem"}`
+entry to the server.
 
 How long the login lasts:
 

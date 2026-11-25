@@ -19,8 +19,9 @@
                              count. Without --summary-only it prints each
                              difference that is not approved (input id, step,
                              kind) and the counts.
-  --changed FILE             the paths under backend/tests/redaction_compare/
-                             that the pull request changes, each ended by a
+  --changed FILE             the paths under backend/tests/redaction_compare/,
+                             and backend/tests/__init__.py, that the pull
+                             request changes, each ended by a
                              NUL byte, as `git diff --name-only --no-renames
                              -z` writes them (a moved file gives its old and
                              its new path). Each path is a difference of

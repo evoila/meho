@@ -1573,8 +1573,9 @@ jobs:
     # Builds, for the base branch and for this pull request, the list of
     # hidden and shown parts of each fixed input on each secret-hiding step,
     # each side from its own code and input set, and judges the two lists.
-    # A change to a file under backend/tests/redaction_compare/ is judged as a
-    # difference too and needs its own approved entry.
+    # A change to a file under backend/tests/redaction_compare/, or to
+    # backend/tests/__init__.py, is a difference too and needs its own
+    # approved entry.
     # It fails when the base hides a part that the pull request shows, when a
     # plain part that the base shows is now hidden, when an answer changed in
     # another way, or when an input of the base is gone, unless
@@ -1679,16 +1680,16 @@ jobs:
             && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
           # The pull request: its own code and input set, with the base's
           # rule script, in a container with no mounts and no runner files.
-          # The files of the compare package that the pull request changes
-          # are listed from git here and judged as differences, so the input
-          # set and the way the answers are read change only with an approved
-          # entry. --no-renames lists both the old and the new path of a
-          # moved file; -z ends each path with a NUL byte and keeps it exactly
-          # as it is (no quotes, no escapes). A base script without --changed
+          # The files of the compare package, and backend/tests/__init__.py
+          # (it runs when the package is imported), that the pull request
+          # changes are listed from git here. Each listed file is a difference
+          # and needs its own reviewed entry. --no-renames lists both the old
+          # and the new path of a moved file; -z ends each path with a NUL
+          # byte and keeps it exactly as it is (no quotes, no escapes). A base script without --changed
           # has no such check yet.
           changed_args=()
           if grep -q -e '--changed' "${dir}/redaction_compare.py"; then
-            git diff --name-only --no-renames -z "${base}" "${head}" -- backend/tests/redaction_compare > "${dir}/changed.txt"
+            git diff --name-only --no-renames -z "${base}" "${head}" -- backend/tests/__init__.py backend/tests/redaction_compare > "${dir}/changed.txt"
             changed_args=(--changed "${dir}/changed.txt")
           fi
           stage="${dir}/head-input"

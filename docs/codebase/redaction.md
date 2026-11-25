@@ -1079,18 +1079,18 @@ before a reviewer reads the pull request.
   `python3 -I`, so a pull request cannot weaken the check that judges it.
   The job also lists, with `git diff --name-only --no-renames -z`, each
   file that the pull request changes under `backend/tests/redaction_compare/`
-  (the input set and the code that reads the answers) and passes the list
-  with `--changed`. A moved file gives its old and its new path. The judge
-  reads the list as bytes and spells each path so that two different paths
-  never get the same spelling: a printable letter other than a space, a
+  (the input set and the code that reads the answers) and the file
+  `backend/tests/__init__.py` (it runs when the package is imported), and
+  passes the list with `--changed`. A moved file gives its old and its new
+  path. The judge reads the list as bytes and spells each path so that two
+  different paths never get the same spelling: a printable letter other than a space, a
   quote or a backslash stays as it is (also a letter outside ASCII), a
   backslash becomes `\\`, a byte that is not UTF-8 becomes `\xNN`, and any
   other letter becomes `\uNNNN` (for example a line break is `\u000a`). The
-  job runs for any change in that folder, a `.md` file too. Each such file
-  is a difference of its own and needs an approved entry with
-  `id: compare-package`, the path as the judge spells it as `path`, and
-  `part: changed`. So the records of the pull request cannot be changed to
-  look like the base's without a reviewed entry.
+  job runs for any change in that folder, a `.md` file too. Each listed
+  file is a difference and needs its own reviewed entry: an approved entry
+  with `id: compare-package`, the path as the judge spells it as `path`,
+  and `part: changed`.
   The approved file is the one that the pull request commits: it is the
   open list that a reviewer reads. The job reads it, the base's approved
   file and the rule script from git before any code of the pull request
@@ -1142,7 +1142,7 @@ before a reviewer reads the pull request.
       > "$tmp/base-approved.yaml"
     changed_args=()
     if grep -q -e '--changed' "$rules"; then
-      git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/redaction_compare > "$tmp/changed.txt"
+      git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/__init__.py backend/tests/redaction_compare > "$tmp/changed.txt"
       changed_args=(--changed "$tmp/changed.txt")
     fi
     python3 -I "$rules" \

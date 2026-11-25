@@ -527,7 +527,7 @@ def _compare_step_text() -> str:
 def test_the_job_lists_the_changed_package_files_from_git() -> None:
     step = _compare_step_text()
     assert "git diff --name-only --no-renames -z" in step
-    assert "backend/tests/redaction_compare" in step
+    assert "-- backend/tests/__init__.py backend/tests/redaction_compare >" in step
     assert '--changed "${dir}/changed.txt"' in step
     assert '"${changed_args[@]}"' in step
 
@@ -653,6 +653,51 @@ def test_entries_with_the_exact_names_approve_a_move_and_an_accented_file(
     assert _judge_command(tmp_path, changed, _entries(_OLD, _NEW, _ACCENTED)) == 0
 
 
+_TESTS_INIT = "backend/tests/__init__.py"
+
+
+def _changed_list_for_tests_init(tmp_path: Path) -> Path:
+    """Run the job's own ``git diff`` line on a commit that changes only the tests package init."""
+    repo = tmp_path / "repo"
+    package = repo / "backend" / "tests" / "redaction_compare"
+    package.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / _TESTS_INIT).write_text("", encoding="utf-8")
+    (package / "answers.py").write_text("ANSWERS = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / _TESTS_INIT).write_text("import os\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "edit the tests package")
+    head = _git(repo, "rev-parse", "HEAD")
+    match = _DIFF_LINE.search(_compare_step_text())
+    assert match is not None
+    out = tmp_path / "out"
+    out.mkdir()
+    subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", match.group(1)],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "base": base, "head": head, "dir": str(out)},
+        check=True,
+    )
+    return out / "changed.txt"
+
+
+def test_the_job_lists_a_change_of_the_tests_package_init(tmp_path: Path) -> None:
+    changed = _changed_list_for_tests_init(tmp_path)
+    assert changed.read_bytes() == _TESTS_INIT.encode() + b"\0"
+
+
+def test_a_change_of_the_tests_package_init_fails_without_an_entry(tmp_path: Path) -> None:
+    changed = _changed_list_for_tests_init(tmp_path)
+    assert _judge_command(tmp_path, changed, "approved: []\n") == 1
+
+
+def test_a_change_of_the_tests_package_init_passes_with_its_own_entry(tmp_path: Path) -> None:
+    changed = _changed_list_for_tests_init(tmp_path)
+    assert _judge_command(tmp_path, changed, _entries(_TESTS_INIT)) == 0
+
+
 def _local_block() -> str:
     text = _DOCS.read_text(encoding="utf-8")
     block = text[text.index("- **See the differences locally.**") :]
@@ -665,7 +710,10 @@ def test_the_local_command_passes_the_changed_package_files_like_the_job() -> No
     match = _DIFF_LINE.search(block)
     assert match is not None
     assert "--name-only --no-renames -z origin/main HEAD" in match.group(1)
-    assert '-- backend/tests/redaction_compare > "$tmp/changed.txt"' in match.group(1)
+    assert (
+        '-- backend/tests/__init__.py backend/tests/redaction_compare > "$tmp/changed.txt"'
+        in match.group(1)
+    )
     assert 'changed_args=(--changed "$tmp/changed.txt")' in block
     assert "grep -q -e '--changed' \"$rules\"" in block
 
@@ -692,12 +740,15 @@ def _old_judge() -> str:
     return text.replace("--changed", "--not-known").replace("args.changed", "args.not_known")
 
 
-def _local_repo(tmp_path: Path, judge: str) -> tuple[Path, Path]:
-    """A main branch with the judge, a clone, and a branch that edits a package file."""
+def _local_repo(
+    tmp_path: Path, judge: str, edit: str = "backend/tests/redaction_compare/answers.py"
+) -> tuple[Path, Path]:
+    """A main branch with the judge, a clone, and a branch that edits the file ``edit``."""
     main = tmp_path / "main"
     package = main / "backend" / "tests" / "redaction_compare"
     package.mkdir(parents=True)
     (package / "answers.py").write_text(_RECORDS, encoding="utf-8")
+    (main / _TESTS_INIT).write_text("", encoding="utf-8")
     snapshots = main / "backend" / "tests" / "snapshots"
     snapshots.mkdir()
     (snapshots / "redaction_compare_approved.yaml").write_text("approved: []\n", "utf-8")
@@ -709,8 +760,8 @@ def _local_repo(tmp_path: Path, judge: str) -> tuple[Path, Path]:
     clone = tmp_path / "clone"
     _git(tmp_path, "clone", "-q", str(main), str(clone))
     _git(clone, "checkout", "-q", "-b", "change")
-    edited = (package / "answers.py").relative_to(main)
-    (clone / edited).write_text(_RECORDS + "# read the answers\n", encoding="utf-8")
+    edited = clone / edit
+    edited.write_text(edited.read_text(encoding="utf-8") + "# read the answers\n", "utf-8")
     _git(clone, "commit", "-q", "-am", "edit")
     return main, clone
 
@@ -740,6 +791,17 @@ def test_the_local_command_with_a_judge_that_knows_changed_lists_the_package_fil
     done = _run_local_block(tmp_path, clone)
     assert done.returncode == 1, done.stderr
     assert "compare-package backend/tests/redaction_compare/answers.py: changed" in done.stdout
+
+
+def test_the_local_command_lists_a_change_of_the_tests_package_init(tmp_path: Path) -> None:
+    _, clone = _local_repo(tmp_path, _SCRIPT.read_text(encoding="utf-8"), edit=_TESTS_INIT)
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 1, done.stderr
+    assert f"compare-package {_TESTS_INIT}: changed" in done.stdout
+    approved = clone / "backend" / "tests" / "snapshots" / "redaction_compare_approved.yaml"
+    approved.write_text(_entries(_TESTS_INIT), encoding="utf-8")
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def test_the_local_command_with_an_older_judge_runs_without_changed(tmp_path: Path) -> None:

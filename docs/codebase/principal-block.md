@@ -15,8 +15,49 @@ Who may block:
 - A tenant admin blocks a person in their own tenant. The block never
   reaches another tenant.
 - Nobody blocks their own login (422 `cannot_block_self`).
-- Only a person with `tenant_admin` can block, unblock or list. An agent,
-  service or runner login gets 403. There is no MCP tool.
+- Only a person can block, unblock or list. An agent, service or runner
+  login gets 403. There is no MCP tool.
+- Block and list need `tenant_admin`. Unblock needs `tenant_admin`, or a
+  platform admin who removes their own block.
+
+Who removes a block:
+
+- A tenant admin removes the blocks of their own tenant.
+- A platform admin with `tenant_admin` in the current tenant removes every
+  block of another person's login.
+- Only a platform admin removes a block that a platform admin made (scope
+  `*`). The person under it gets 403 on unblock.
+- A tenant admin who is blocked in their tenant gets 403 on unblock.
+
+A platform admin's way back:
+
+- A platform admin whom a tenant admin blocked removes that block on their
+  own login, in the tenant of the block:
+  `meho principal unblock <sub> --reason "<why>"`.
+- This call needs a reason of 1 to 500 characters and a fresh approval
+  sign-in: the same check as an approve (`check_fresh_approval_sign_in` in
+  `auth/approval_sign_in.py`). Without a reason MEHO answers 422
+  `unblock_reason_required`; without a fresh sign-in, 401
+  `fresh_sign_in_required`. The block stays in both cases.
+- The audit row `principal.unblock` holds the reason and the sign-in
+  (`sign_in`).
+- The way back uses the approval sign-in client of the login server
+  (`meho-cli-approve` in MEHO's own setup). An install without that client
+  has no way back; another platform admin or a tenant admin of that tenant
+  removes the block then.
+- On their own login, MEHO removes only the block of the current tenant.
+  It reads the table for this, not the list it keeps for 5 seconds.
+- A platform admin who is blocked in the current tenant removes only their
+  own block there. Every other route of that tenant refuses them until the
+  block is gone.
+- The platform admin flag comes from the person's own token (the claim or
+  the realm role).
+- When the block list or the table cannot be read, the unblock answers 503
+  `principal_block_check_unavailable`, like every other route.
+
+To stop a platform admin: another platform admin blocks the person in
+every tenant. In the login server, take the platform admin role away and
+end the person's sessions and long logins.
 
 A blocked person reads: "This person is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
@@ -54,17 +95,26 @@ Where the list is checked:
 | `UISessionMiddleware` (`ui/auth/middleware.py`) | Every console request, not only the 300-second token check. 403 with the plain text above. |
 | `dispatch()` (`operations/dispatcher.py`) | Every top-level operation call, also the calls of hosted agent runs and scheduled runs. Each step of a multi-step operation that runs through `dispatch()` checks again before it is sent. A `denied` result, and the vendor gets no call. |
 | `enforce_subop_policy`, `run_governed_subop` (`operations/composite.py`) | Each governed direct step of a multi-step operation, also a step that is sent again on a resume. The step is refused before it is sent, and the operation returns the refusal. |
-| `HttpConnector._request_json`, `HttpConnector._post_json` (`connectors/adapters/http.py`) | Each request that a multi-step operation sends straight to the target through the connector's own session (for example the GitHub commit steps). The request is not sent; `dispatch()` returns the same refusal. Outside a multi-step operation and outside an approved run, this check does nothing: the top-level call checked the list already. |
+| `raise_if_send_refused` (`auth/principal_block.py`) | A check that MEHO runs at fixed points while a call runs. A call that reaches it while its login is blocked ends with the block refusal; `dispatch()` returns it. |
 | `PrincipalBlockGate` (`agent/principal_block_gate.py`) | Every tool call and every model request of a hosted agent run and of its child runs (`invoke_agent`). The tool does not run, the model gets no further request, and the run ends failed with the refusal text. The audit row of the refused tool call has status 403 (503 when the list cannot be read). |
 | `invoke_agent` (`agent/invoke.py`) | A child run that is refused because its person is blocked ends failed with the refusal text, and its heartbeat stops. The refusal goes on to the parent run: the parent stops with no retry and ends failed with the same text. |
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
-A block made while a multi-step operation runs stops its next step, and
-the whole operation with it. The operation answers with the refusal, also
-when its handler catches the error of the step. An inventory read
-(`linux.migration.inventory` and the others) stores no inventory then. No
-further step starts. A list that cannot be read stops the operation the
-same way.
+MEHO checks the block again at fixed points while a call runs
+(`raise_if_send_refused`). A call that reaches such a point ends with the
+block refusal, and the answer says whether a part of it may have run. A
+request that is already on its way to a system runs to its end. The check
+reads the login that the dispatcher noted for the running call
+(`tracking_run` in `auth/principal_block_run.py`) and every login bound with
+`checking_logins_for_steps`. It reads a copy of the list that is at most 5
+seconds old, so it reads the database at most once in 5 seconds per process.
+
+Once a check of a run refused, every later check of the same run refuses
+too, also when the list can be read again. The operation answers with the
+refusal, also when its handler catches the error of the step. An inventory
+read (`linux.migration.inventory` and the others) stores no inventory then.
+A list that cannot be read stops the call the same way. The answer says
+that the list could not be read.
 
 The answer says what was sent (`execution_outcome`):
 
@@ -93,13 +143,13 @@ holds for a step through `dispatch()`, a governed direct step, and a
 request sent straight to the target.
 
 A new request of a blocked person is refused within 5 seconds. An open
-live stream is not cut at once:
-
-- The console's live stream (`/ui/broadcast/stream`) ends at its next
-  session check, at most `ui_session_read_revalidation_seconds` later
-  (300 seconds by default).
-- `GET /api/v1/feed` ends when the person's token ends (or after
-  `feed_stream_max_seconds`, when that comes first).
+live stream of the person ends within a few seconds too. The console's
+live stream (`/ui/broadcast/stream`) and `GET /api/v1/feed` each read the
+block list in their liveness check (`StreamLiveness.still_valid`), at every
+check and not only at the session check. A list that cannot be read ends the
+stream as well. A stream that waits for an announcement checks again after
+2 seconds at the latest, and its check accepts a copy of the list that is
+at most 2 seconds old. So a block ends the stream within 4 seconds.
 
 A hosted agent run acts as the person who started it, so it stops when
 that person is blocked. A scheduled run acts as the agent's own login, so
@@ -126,12 +176,26 @@ REST routes (`/api/v1/principals/blocked`):
   the blocks of their tenant.
 - `POST` with `{"sub", "reason"}`: block. A second block in the same
   scope updates the reason.
-- `DELETE /{sub}`: unblock. A platform admin removes every block of the
-  login. A tenant admin removes the block of their tenant. 404 when there
-  is none.
+- `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
+  every block of the login, but on their own login only the block of the
+  current tenant. A tenant admin removes the block of their tenant. 404
+  when there is none. On the caller's own login the call needs the body
+  `{"reason": "..."}` (1 to 500 characters, else 422
+  `unblock_reason_required`) and a token of a fresh approval sign-in (else
+  401 `fresh_sign_in_required` with the `WWW-Authenticate` challenge).
+  Both are checked before any block is read. On another person's login
+  the reason is optional and goes into the audit row. This route uses its own sign-in check
+  (`verify_jwt_platform_admin_way_back` in `auth/jwt.py`,
+  `verify_jwt_and_bind_platform_admin_way_back` in `middleware.py`): a
+  platform admin passes a block of the current tenant and reaches the
+  route, which lets a caller who is blocked there remove only their own
+  block. A block in every tenant always refuses.
 
 CLI: `meho principal block <sub> --reason <text>`,
-`meho principal unblock <sub>`, `meho principal blocked`.
+`meho principal unblock <sub> [--reason <text>]`, `meho principal blocked`.
+On a 401 with the challenge, `unblock` opens the browser approval sign-in
+(the same way as `meho approvals approve`) and sends the call again with
+that token; the token stays in memory for this one run.
 
 ## Dependencies
 

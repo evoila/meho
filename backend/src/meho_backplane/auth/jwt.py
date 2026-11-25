@@ -129,6 +129,7 @@ __all__ = [
     "refuse_blocked_principal",
     "verify_jwt",
     "verify_jwt_for_audience",
+    "verify_jwt_platform_admin_way_back",
 ]
 
 #: HTTP timeout for both the OIDC discovery hit and the JWKS hit. Keep
@@ -1923,6 +1924,7 @@ async def verify_jwt_for_audience(
     allow_unchosen: bool = False,
     allow_mcp_profile: bool = False,
     check_tenant_block: bool = True,
+    platform_admin_own_way_back: bool = False,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1987,6 +1989,11 @@ async def verify_jwt_for_audience(
     same for a chosen tenant: only the console's tenant picker and switch
     set it, because they do not work in the session's tenant.
 
+    Way back: *platform_admin_own_way_back* is for the unblock route only.
+    A login whose own token says platform admin is then not refused for a
+    block in the current tenant, so that person can remove it. A block in
+    every tenant always counts.
+
     Profile tokens (#6099): a token with the ``mcp_profile`` claim gets 403
     ``mcp_profile_scope_violation`` unless *allow_mcp_profile* is set. Only
     the MCP route sets it. So a new entrance refuses such a token unless it
@@ -2007,7 +2014,8 @@ async def verify_jwt_for_audience(
     operator = await select_current_tenant(
         operator, requested_tenant, allow_unchosen=allow_unchosen
     )
-    await refuse_blocked_principal(operator, check_tenant=check_tenant_block)
+    way_back = platform_admin_own_way_back and operator.platform_admin
+    await refuse_blocked_principal(operator, check_tenant=check_tenant_block and not way_back)
     # Imported here: the policy package imports ``meho_backplane.auth``.
     from meho_backplane.policy.bindings import BoundKindConflictError, bind_current_tenant
 
@@ -2078,6 +2086,26 @@ async def verify_jwt(
         authorization,
         expected_audience=settings.keycloak_audience,
         requested_tenant=header_value(meho_tenant),
+    )
+
+
+async def verify_jwt_platform_admin_way_back(
+    authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
+) -> Operator:
+    """Like :func:`verify_jwt`, but a platform admin may pass a tenant block.
+
+    Only for the unblock route. A platform admin who an admin blocked in
+    the current tenant gets through the token check, so the route can
+    let that person remove their own block. A block in every tenant still
+    refuses the request.
+    """
+    settings = get_settings()
+    return await verify_jwt_for_audience(
+        authorization,
+        expected_audience=settings.keycloak_audience,
+        requested_tenant=header_value(meho_tenant),
+        platform_admin_own_way_back=True,
     )
 
 

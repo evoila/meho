@@ -116,6 +116,17 @@ It checks the named Vault target (it must have its own role) and the
 caller's policy on it. When it says no, the dispatcher refuses the call and
 makes no approval card.
 
+A ``keycloak:`` side on another realm
+====================================
+
+A Keycloak target works on one realm only, its managed realm.
+:func:`check_secret_move_realms` runs in the op's check before the wait for
+approval (:func:`check_secret_move_before_approval`, registered with
+:func:`~meho_backplane.operations._park_check.register_park_check`):
+it refuses a ``keycloak:`` ref whose realm is not the managed realm of its
+target, so no approval card is made. The endpoint refuses it again when the
+move runs.
+
 A ``linux:`` sink the path check refuses
 ========================================
 
@@ -176,7 +187,18 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.secret.endpoints import SecretRef
 
-__all__ = ["build_secret_move_preview", "check_secret_move_sink", "has_keycloak_side"]
+__all__ = [
+    "build_secret_move_preview",
+    "check_secret_move_realms",
+    "check_secret_move_sink",
+    "has_keycloak_side",
+]
+
+#: The reason when the target name of a ``keycloak:`` ref fits more than one target.
+_AMBIGUOUS_TARGET = (
+    "keycloak secret ref: the target name fits more than one target. "
+    "Use a name that fits one target only."
+)
 
 _LINUX_KIND = "linux"
 _KEYCLOAK_KIND = "keycloak"
@@ -364,6 +386,42 @@ def check_secret_move_sink(params: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+async def check_secret_move_realms(ctx: PreviewContext) -> str | None:
+    """Check before the wait for approval: each ``keycloak:`` ref names its target's managed realm.
+
+    The check of ``secret.handoff.export`` too, which has only a source. A
+    malformed ref or a target that does not exist is left to the run, which
+    reports it. A target name that fits more than one target is refused. The
+    reason names the target's managed realm, never a param value.
+    """
+    # Imported here: the keycloak module imports this package, so a top
+    # import is circular when the keycloak module is imported first.
+    from meho_backplane.connectors.keycloak.secret_endpoint import (
+        KeycloakSecretRefError,
+        keycloak_ref_realm_problem,
+    )
+
+    for key in ("from", "to"):
+        raw = ctx.params.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            spec = parse_secret_ref(raw)
+        except ValueError:
+            continue
+        if spec.kind != "keycloak":
+            continue
+        try:
+            problem = await keycloak_ref_realm_problem(ctx.operator, spec.ref)
+        except (KeycloakSecretRefError, TargetNotFoundError):
+            continue
+        except AmbiguousTargetError:
+            return _AMBIGUOUS_TARGET
+        if problem is not None:
+            return problem
+    return None
+
+
 async def refuse_sink_before_approval(ctx: PreviewContext) -> str | None:
     """The check before approval of ``secret.move``: ask the sink, if it has a check.
 
@@ -384,6 +442,19 @@ async def refuse_sink_before_approval(ctx: PreviewContext) -> str | None:
         return None
     reason: str | None = await check(ctx.operator)
     return reason
+
+
+async def check_secret_move_before_approval(ctx: PreviewContext) -> str | None:
+    """The one check of ``secret.move`` before it waits for approval.
+
+    An op has one such check, so this runs both: first the realm of each
+    ``keycloak:`` ref (:func:`check_secret_move_realms`), then the sink's
+    own check (:func:`refuse_sink_before_approval`). The first reason wins.
+    """
+    problem = await check_secret_move_realms(ctx)
+    if problem is not None:
+        return problem
+    return await refuse_sink_before_approval(ctx)
 
 
 async def build_secret_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -438,7 +509,7 @@ def _register_secret_move_preview_builder() -> None:
     register_preview_builder("secret.move", build_secret_move_preview)
     register_permission_preflight("secret.move", vault_target_move_preflight)
     register_params_check("secret.move", check_secret_move_sink)
-    register_park_check("secret.move", refuse_sink_before_approval)
+    register_park_check("secret.move", check_secret_move_before_approval)
     register_agent_preview_filter("secret.move", _hide_target_cards)
     register_rights_change_check("secret.move", has_keycloak_side)
     register_grant_op("secret.move", applies=has_keycloak_side)

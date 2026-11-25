@@ -95,6 +95,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak_levels import (
     APPROVAL_LEVEL,
@@ -198,6 +199,7 @@ async def get_admin_list_strict(
     params: dict[str, Any] | None = None,
 ) -> list[Any]:
     """GET a JSON array. Any other body raises; it is never read as an empty list."""
+    await connector._realm_checks.ensure(connector, target, operator, "GET", path)
     client = await connector._http_client(target)
     headers = await connector.auth_headers(target, operator)
     resp = await client.request("GET", path, params=params, headers=headers)
@@ -400,6 +402,7 @@ async def _read_levels(
     has level 2.
     """
     rep = await connector._get_admin_json(target, path, operator=operator)
+    check_answered_realm(ENSURE_APPROVAL_FLOW_OP_ID, rep, target)
     attributes = dict(rep.get("attributes") or {})
     levels = parse_level_map(attributes.get(LEVEL_MAP))
     if levels is None:

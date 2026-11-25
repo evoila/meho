@@ -95,6 +95,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
@@ -166,13 +167,15 @@ async def keycloak_realm_get(
     Op-id: ``keycloak.realm.get``. The realm is the target's
     ``managed_realm``; no params. The :class:`RealmRepresentation` carries
     realm-wide policy (login settings, token lifespans, SMTP, themes). Any
-    nested secret is scrubbed before return.
+    nested secret is scrubbed before return. An answer that names another
+    realm than the managed realm is refused (:func:`.check_answered_realm`).
     """
     del params  # declared empty; intentionally ignored
     realms = resolve_realm_config(target)
     realm = await self._get_admin_json(
         target, fill_path(_ADMIN_REALM_PATH, {"realm": realms.managed_realm}), operator=operator
     )
+    check_answered_realm("keycloak.realm.get", realm, target)
     return {"realm": redact_secret_fields(realm)}
 
 

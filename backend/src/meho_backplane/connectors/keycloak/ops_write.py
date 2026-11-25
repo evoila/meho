@@ -141,7 +141,12 @@ from meho_backplane.connectors.keycloak.ops_write_realm_smtp import (
     with_smtp_password,
 )
 from meho_backplane.connectors.keycloak.ops_write_user_identity import read_user_for_write
-from meho_backplane.connectors.keycloak.realm_params import realm_param
+from meho_backplane.connectors.keycloak.realm_params import (
+    REALM_PARAM_OPS,
+    check_answered_realm,
+    new_realm_problem,
+    realm_param,
+)
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -309,18 +314,21 @@ async def keycloak_realm_create(
     """Create a realm (``POST /admin/realms``).
 
     Op-id: ``keycloak.realm.create``. ``representation`` is the
-    RealmRepresentation body; its ``realm`` field is the realm name. A
+    RealmRepresentation body. The new realm is the target's managed realm:
+    the body sent to Keycloak always names it. ``realm`` and
+    ``representation.realm`` are each checked on their own, and one that
+    names another realm is refused before anything is sent. A
     409 (realm already exists) is treated as an idempotent success.
     Returns a value-free confirmation: the realm name + created/conflict
     flags.
     """
-    representation = dict(params["representation"])
-    realm_name = (
-        realm_param(params, "representation.realm", "keycloak.realm.create")
-        or realm_param(params, "realm", "keycloak.realm.create")
-        or ""
-    )
-    representation.setdefault("realm", realm_name)
+    for path in REALM_PARAM_OPS["keycloak.realm.create"]:
+        realm_param(params, path, "keycloak.realm.create", target)
+    problem = new_realm_problem(target)
+    if problem is not None:
+        raise ValueError(problem)
+    realm_name = resolve_realm_config(target).managed_realm
+    representation = {**params["representation"], "realm": realm_name}
     result = await self._write_admin(
         target, "POST", _ADMIN_REALMS_PATH, operator=operator, json=representation
     )
@@ -346,7 +354,8 @@ async def keycloak_realm_update(
     stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
     value-free confirmation plus the read-back check. Both realm names must
     be plain names (:mod:`.realm_params`) and are percent-encoded as one
-    path segment.
+    path segment. A read that answers with another realm than the managed
+    realm is refused before anything is sent (:func:`.check_answered_realm`).
 
     The realm's SMTP password comes only from ``smtp_password_secret_ref``
     (see :mod:`.ops_write_realm_smtp`): it is read here and set as
@@ -356,12 +365,17 @@ async def keycloak_realm_update(
     if has_inline_smtp_password(params):
         raise ValueError(f"keycloak.realm.update: {inline_smtp_password_reason()}")
     realms = resolve_realm_config(target)
-    realm_name = realm_param(params, "realm", "keycloak.realm.update") or realms.managed_realm
-    new_name = realm_param(params, "representation.realm", "keycloak.realm.update") or realm_name
+    realm_name = (
+        realm_param(params, "realm", "keycloak.realm.update", target) or realms.managed_realm
+    )
+    new_name = (
+        realm_param(params, "representation.realm", "keycloak.realm.update", target) or realm_name
+    )
     representation = dict(params["representation"])
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
     current = await self._get_admin_json(target, path, operator=operator)
     refuse_login_realm_write(realm_name, current, representation)
+    check_answered_realm("keycloak.realm.update", current, target)
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX

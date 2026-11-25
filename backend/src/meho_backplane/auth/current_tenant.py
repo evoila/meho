@@ -33,7 +33,9 @@ several tenants     400           that tenant            403 tenant_not_member
 A platform admin (a person, never a machine) may also name any tenant that
 exists in the ``tenant`` table. There they act as ``tenant_admin``, never
 with ``approver`` or ``self_approver``, and :attr:`Operator.role_from_platform_admin` is set so
-the audit row can say so. A tenant that does not exist gives
+the audit row can say so. When the token has no tenant list, the token's own
+tenant and role stay in :attr:`Operator.token_tenant_id` and
+:attr:`Operator.token_tenant_role`. A tenant that does not exist gives
 ``403 tenant_not_found``; the lookup never creates a tenant row. The
 lookup never raises the role of a tenant the person is already in: when
 the header names one of their own tenants by a name the token does not
@@ -302,6 +304,8 @@ async def _as_platform_admin(operator: Operator, wanted: str) -> Operator:
             "old_group": None,
             "tenant_chosen": True,
             "role_from_platform_admin": True,
+            "token_tenant_id": None if operator.tenants else operator.tenant_id,
+            "token_tenant_role": None if operator.tenants else operator.tenant_role,
         }
     )
 

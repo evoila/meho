@@ -5,6 +5,7 @@
 **Initiatives:** [#6033](https://github.com/evoila/meho/issues/6033) (part 1: categories, approver routing by category, the policy file) and [#6049](https://github.com/evoila/meho/issues/6049) (part 2: roles that the customer defines)
 **Replaces in part:** the "No exceptions" rule in [approval-groups-and-self-approval.md](approval-groups-and-self-approval.md), and rule 1 "One group per person" in [login-role-groups.md](login-role-groups.md). See "What this record replaces" below.
 **Changed by:** [the four default roles](2026-11-18-four-default-roles.md) (not built yet). An Admin changes rights alone: in the web console, the change runs at once. A change of rights asked with a token or by an AI waits for an Admin's click in the console. Decision 8 and floor 6 are withdrawn. The console comes first, and the file is its export and import. No more shipped example files.
+**Replaced in part by:** [the custom policy model](2026-11-25-custom-policy-model.md) (proposed, not built yet). With its one switch on, an admin may lower a risk level, a tenant may loosen up to an outer limit, and floor 3 gives way to agent policies.
 
 ## The decision in short
 

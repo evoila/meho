@@ -190,8 +190,7 @@ This login follows RFC 7523, a signed JWT as the proof of a client's login
 Keycloak's "Signed JWT" client authenticator
 ([Keycloak: Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials)).
 MEHO's live test of this login runs in CI against the Keycloak image
-`keycloak/keycloak:26.0`. It was proven on the Keycloak image
-`keycloak/keycloak:26.0` of the CI live test.
+`keycloak/keycloak:26.0`.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \
@@ -227,7 +226,11 @@ central refuses it under the new name.
 
 *A fixed token.* Set `MEHO_RUNNER_TOKEN` to a bearer token of the runner's
 Keycloak client instead. The runner sends it as it is and does not renew
-it; give it a new one by hand when it ends.
+it; give it a new one by hand when it ends. The runner uses the fixed token
+only when its `MEHO_RUNNER_KEY_DIR` holds no login record and no
+`MEHO_RUNNER_ENROLLMENT_CODE` is set. A saved login record wins over
+`MEHO_RUNNER_TOKEN`. To use a fixed token for a runner that used the key
+login, give it an empty key folder.
 
 ```bash
 MEHO_RUNNER_CENTRAL_URL=https://meho.example.com \

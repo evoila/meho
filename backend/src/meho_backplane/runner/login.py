@@ -13,7 +13,9 @@ Both requests go over https, or over plain http to this same machine only.
 The private key never leaves the site: only the public key and the signed
 login request travel, and nothing in this module logs a key or a token.
 
-The fixed ``MEHO_RUNNER_TOKEN`` mode is unchanged and does not use this module.
+The fixed ``MEHO_RUNNER_TOKEN`` mode does not use this module: the runner sends
+that value as it is and does not renew it. It runs only when the key folder
+holds no login record and no enrollment code is set.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import stat
 import tempfile
 import time
@@ -88,7 +91,22 @@ _OTHER_RUNNER: Final[str] = (
     "for its own runner"
 )
 
+#: A signing type that is safe to show in an error text: a short name.
+_SHORT_NAME: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9]{1,16}")
+#: A client id that is safe to show: ``runner:`` and a registered name (128 at most).
+_SHORT_CLIENT_ID: Final[re.Pattern[str]] = re.compile(r"runner:[A-Za-z0-9._-]{1,128}")
+
 _log = structlog.get_logger(__name__)
+
+
+def _shown_signing_type(value: str) -> str:
+    """The signing type for an error text; any value that is not a short name is hidden."""
+    return value if _SHORT_NAME.fullmatch(value) else "an unknown signing type"
+
+
+def _shown_client_id(value: str) -> str:
+    """The client id for an error text; any value that is not a plain name is hidden."""
+    return value if _SHORT_CLIENT_ID.fullmatch(value) else "an unknown client id"
 
 
 class RunnerLoginError(RuntimeError):
@@ -255,7 +273,8 @@ class _LoginRecord:
             # A plain RunnerLoginError: startup stops here, and the enrollment
             # code is not sent again.
             raise RunnerLoginError(
-                f"the login record {path} has signing type {record.signing_alg}; "
+                f"the login record {path} has signing type "
+                f"{_shown_signing_type(record.signing_alg)}; "
                 f"the runner reads only {_SIGNING_ALG}. {_RECOVERY}"
             )
         return record
@@ -311,11 +330,13 @@ async def enroll_with_code(
         raise RunnerLoginError("enrollment answer is not valid") from exc
     if record.signing_alg != _SIGNING_ALG:
         raise RunnerLoginError(
-            f"enrollment answer has signing type {record.signing_alg}; "
+            f"enrollment answer has signing type {_shown_signing_type(record.signing_alg)}; "
             f"the runner reads only {_SIGNING_ALG}"
         )
     if record.client_id != _client_id(runner_id):
-        raise RunnerLoginError(f"{_OTHER_RUNNER} (the code is for {record.client_id})")
+        raise RunnerLoginError(
+            f"{_OTHER_RUNNER} (the code is for {_shown_client_id(record.client_id)})"
+        )
     if record.key_id != ec_key_id(public_jwk(key)):
         raise RunnerLoginError("enrollment answer is for another key")
     try:
@@ -415,7 +436,7 @@ def _load_saved_login(
     record = _LoginRecord.from_file(folder / LOGIN_FILE_NAME)
     if record.client_id != _client_id(settings.runner_id):
         raise _SavedLoginError(
-            f"the saved login in {settings.key_dir} is for {record.client_id}, "
+            f"the saved login in {settings.key_dir} is for {_shown_client_id(record.client_id)}, "
             f"and MEHO_RUNNER_ID is {settings.runner_id}"
         )
     key = _read_private_key(folder / KEY_FILE_NAME)

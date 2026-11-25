@@ -66,11 +66,12 @@ class RunnerSettings(BaseModel):
     is ``repr``-excluded (mould: chassis secret fields) so it never lands
     in a structured log line via an accidental ``logger.bind(settings=...)``.
 
-    The runner logs in one of two ways. With ``MEHO_RUNNER_TOKEN`` it sends that
-    fixed token. Without it, it signs its own login with a key pair made at the
-    site: the first start needs ``MEHO_RUNNER_ENROLLMENT_CODE`` (the one-time
-    code from ``meho runner-principal register``); later starts use the key
-    kept in ``key_dir``.
+    The runner logs in one of two ways. It signs its own login with a key pair
+    made at the site when ``key_dir`` holds a login record or
+    ``MEHO_RUNNER_ENROLLMENT_CODE`` is set (the one-time code from
+    ``meho runner-principal register``, needed on the first start). Only when
+    ``key_dir`` holds no login record and no code is set does it send the fixed
+    ``MEHO_RUNNER_TOKEN``. A saved record wins over the token.
     """
 
     model_config = ConfigDict(frozen=True)

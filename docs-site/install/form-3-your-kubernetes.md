@@ -18,7 +18,7 @@ This chapter does not need it.
 
 | You bring | Requirements |
 |---|---|
-| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
+| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx; k3s and RKE2 bring Traefik, see [k3s](#k3s)) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
 | **Helm** | [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. Helm 4 is recommended. |
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
 | **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
@@ -50,10 +50,12 @@ Create `values.yaml`:
 image:
   # Pin an immutable tag: v<x.y.z> for a release (see
   # https://github.com/evoila/meho/releases).
-  tag: "v0.45.0"
+  tag: "<REPLACE: a release tag>"
 
 ingress:
   enabled: true
+  # The class of your ingress controller. k3s and RKE2 use traefik: see
+  # the notes for your platform.
   className: nginx
   host: meho.example.com
   tls:
@@ -67,12 +69,33 @@ coreKeycloak:
   # A UUID you pick once for your first tenant, and keep.
   # For example, make one with: uuidgen | tr 'A-Z' 'a-z'
   firstTenantId: "<REPLACE: a new UUID>"
+
+# The web console at https://meho.example.com/ui/. It is off by default.
+# The install makes the Secret that holds its login secret.
+uiConsole:
+  enabled: true
+config:
+  uiKeycloakClientId: meho-web
 ```
 
 That is all. Leave `postgres.credentialsSecret`, `vault.address`,
 `config.vaultAddr`, `config.keycloakIssuerUrl` and `keycloak.issuer`
 empty. The chart sets them, and Helm stops with an error that names the
 key if you set one. You never type a database password.
+
+### Tell the chart where your ingress controller runs
+
+The network rules let only one namespace reach MEHO. The default is
+`ingress-nginx`. If your controller runs in another namespace, set
+`networkPolicy.ingressControllerNamespace` to it. Without it, the
+controller is blocked.
+
+MEHO also needs to reach its own address, `ingress.host`. The first-start
+checks `dns` and `certificate` use it. Name the pods of your ingress
+controller in `networkPolicy.ingressControllerEgress.podLabels`, and the
+port of their HTTPS entry point in `networkPolicy.ingressControllerEgress.port`
+(the default is 8443). With no labels, MEHO has no rule for its own
+address. [k3s](#k3s) shows both keys for Traefik.
 
 ### Give hosted agents a model (optional)
 
@@ -132,6 +155,26 @@ and a rule for the port you expect never matches. Write the rule for
 the real Pod and its port, not for the load balancer address. For
 ingress-nginx the port is usually 443. Check the `targetPort` of your
 ingress Service.
+
+### Let MEHO accept targets on private addresses
+
+MEHO refuses a target on a private address (for example `192.168.x.x`
+or `10.x.x.x`) by default. Most systems MEHO manages are on such
+addresses. To allow them, list their networks in
+`config.targetSsrfAllowlist`, separated by commas:
+
+```yaml
+config:
+  # List only the networks of the systems MEHO manages. Never 0.0.0.0/0.
+  # Never the pod and service networks of your cluster.
+  targetSsrfAllowlist: "192.0.2.0/24"
+```
+
+This is a second rule, next to `networkPolicy.extraEgress` above. The
+network rule decides what the pod may reach. This list decides which
+addresses MEHO accepts as a target. A target needs both. The default
+stays on until you set it. For the details, see
+[Targets and secrets](../guides/targets-and-secrets.md).
 
 ### If a certificate comes from an internal authority
 
@@ -223,7 +266,7 @@ Download the `meho` CLI for your platform from the
 [releases page](https://github.com/evoila/meho/releases):
 
 ```bash
-TAG=<the release tag of your backplane, for example v0.45.0>
+TAG=<the release tag of your backplane, for example vX.Y.Z>
 TARBALL=meho_${TAG#v}_linux_amd64.tar.gz   # or darwin_arm64, etc.
 curl -LO https://github.com/evoila/meho/releases/download/${TAG}/${TARBALL}
 curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS
@@ -275,6 +318,46 @@ meho status
 [the setup page and the settings file](setup-page.md).
 
 ## Notes for your platform
+
+### k3s
+
+k3s brings Traefik, in the namespace `kube-system`, and enforces
+network rules. Use the example file
+[`values-k3s.yaml`](https://github.com/evoila/meho/blob/main/deploy/values-examples/values-k3s.yaml).
+It was made from the Traefik chart of k3s v1.37.2+k3s1. Take it as it
+is. It sets:
+
+- `ingress.className: traefik`, and the annotation
+  `traefik.ingress.kubernetes.io/router.entrypoints: websecure`. MEHO
+  then answers on HTTPS only.
+- `networkPolicy.ingressControllerNamespace: kube-system`. Only Traefik
+  may reach MEHO.
+- `networkPolicy.ingressControllerEgress.podLabels` with the label
+  `app.kubernetes.io/name: traefik`. MEHO can then reach its own address
+  through Traefik, on the pod port 8443.
+- `uiConsole.enabled: true` and `config.uiKeycloakClientId: meho-web`:
+  the web console.
+- `coreKeycloak.networkPolicy` and `coreVault.networkPolicy`, on. Only
+  MEHO, the setup Jobs and Traefik (Keycloak only) reach them.
+- `corePostgres.persistence.storageClass` and
+  `coreVault.persistence.storageClass`, empty. The disks use the default
+  class of k3s, `local-path`.
+
+In your own `values.yaml` from Step 3, leave out the `ingress.className`
+line and the `uiConsole` and `config.uiKeycloakClientId` lines. The
+example file sets them. Then pass both files in Step 4, the example file
+first:
+
+```bash
+helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+  --namespace meho --create-namespace \
+  -f values-k3s.yaml -f values.yaml
+```
+
+Also list the networks of your systems in `networkPolicy.extraEgress`
+and `config.targetSsrfAllowlist`, as in Step 3. Never put the pod and
+service networks of k3s (`10.42.0.0/16` and `10.43.0.0/16` by default)
+in `config.targetSsrfAllowlist`, so `10.0.0.0/8` is a bad value on k3s.
 
 ### VKS (vSphere Kubernetes Service)
 

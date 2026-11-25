@@ -375,6 +375,19 @@ MEHO may reach only its own parts and DNS. List here every system MEHO
 must reach, for example the vCenter and NSX. Without a rule, MEHO cannot
 reach the vCenter it runs on.
 
+MEHO also refuses a target on a private address by default. The vCenter
+and NSX are usually on one. List their networks in
+`config.targetSsrfAllowlist`, separated by commas:
+
+```yaml
+config:
+  # List only the networks of the systems MEHO manages. Never 0.0.0.0/0.
+  targetSsrfAllowlist: "192.0.2.0/24"
+```
+
+The network rule above decides what the pod may reach. This list decides
+which addresses MEHO accepts as a target. A target needs both.
+
 ## Step 4: Install
 
 ```bash

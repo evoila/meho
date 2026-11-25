@@ -339,10 +339,36 @@ class RefusedResult(BaseModel):
     reason: str
 
 
+class SetAsideNotice(BaseModel):
+    """A result of a batch that MEHO refused every time, so the runner set it aside.
+
+    The runner keeps the batch in its set-aside folder and sends only this
+    notice: which check, which result, the status and the code MEHO answered
+    with (never the free text of the answer), and the runner time of the result.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    check_ref: str
+    result_uid: str
+    status: int
+    code: str | None = None
+    produced_at: datetime | None = None
+
+
 class RunnerResultBatch(BaseModel):
-    """A batch of results the runner reports (or spools) in one POST."""
+    """A batch of results the runner reports (or spools) in one POST.
+
+    ``set_aside`` names the results of batches the runner set aside since its
+    last notice. ``set_aside_total`` and ``set_aside_last_at`` say how many
+    batches are in the runner's set-aside folder and when the newest one was
+    set aside. All three stay empty on a batch without a notice.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     runner_id: str
     results: list[RunnerResult] = Field(default_factory=list)
+    set_aside: list[SetAsideNotice] = Field(default_factory=list)
+    set_aside_total: int | None = None
+    set_aside_last_at: datetime | None = None

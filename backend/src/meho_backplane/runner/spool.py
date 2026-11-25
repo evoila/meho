@@ -19,6 +19,10 @@ Design:
 * **Atomic writes** — content is written to a ``.tmp`` sibling then
   :func:`os.replace`\\d into place, so a crash mid-write never leaves a
   half-written batch a later drain would choke on.
+* **Set-aside folder** — a batch that MEHO refuses every time is moved to the
+  ``set-aside`` folder inside the spool folder, together with the status and
+  the code MEHO answered with (no free text). Nothing reads that folder
+  again by itself, and the cap does not drop from it.
 * **Bounded** — before each write, oldest files are dropped until adding
   one more stays within ``max_files``; each drop logs a warning. A runner
   partitioned for a long time sheds the oldest results rather than filling
@@ -29,9 +33,11 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -53,6 +59,7 @@ def _log() -> structlog.typing.FilteringBoundLogger:
 
 
 _TMP_SUFFIX = ".tmp"
+_SET_ASIDE_DIR = "set-aside"
 
 
 class ResultSpool:
@@ -102,6 +109,51 @@ class ResultSpool:
         """Delete a spooled file after it has been re-posted."""
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
+
+    def set_aside(
+        self, path: Path, batch: RunnerResultBatch, *, status: int, code: str | None
+    ) -> None:
+        """Move the spooled batch at *path* to the set-aside folder, with its reason.
+
+        The new file holds the status, the code, the time and the batch. The
+        spool file is removed after the new file is in place.
+        """
+        target_dir = self._dir / _SET_ASIDE_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+        final = target_dir / path.name
+        tmp = target_dir / (path.name + _TMP_SUFFIX)
+        record = {
+            "status": status,
+            "code": code,
+            "set_aside_at": datetime.now(UTC).isoformat(),
+            "batch": json.loads(batch.model_dump_json()),
+        }
+        tmp.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(tmp, final)
+        self.remove(path)
+        _log().warning(
+            "runner_batch_set_aside",
+            path=str(final),
+            results=len(batch.results),
+            status=status,
+            code=code,
+        )
+
+    def set_aside_summary(self) -> tuple[int, datetime | None]:
+        """Return how many batches are set aside and when the newest was set aside."""
+        target_dir = self._dir / _SET_ASIDE_DIR
+        if not target_dir.exists():
+            return 0, None
+        files = sorted(p for p in target_dir.glob("*.json") if not p.name.endswith(_TMP_SUFFIX))
+        newest: datetime | None = None
+        for path in files:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))["set_aside_at"]
+                at = datetime.fromisoformat(raw)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            newest = at if newest is None or at > newest else newest
+        return len(files), newest
 
     def _enforce_cap(self) -> None:
         """Drop oldest files until one more write stays within the cap."""

@@ -30,6 +30,7 @@ both versions.
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 import httpx
@@ -51,6 +52,8 @@ _log = structlog.get_logger(__name__)
 _ASSIGNMENT_PATH: Final[str] = "/api/v1/checks/assignment"
 _RESULTS_PATH: Final[str] = "/api/v1/checks/results"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 10.0
+_RETRYABLE_CLIENT_STATUSES: Final[frozenset[int]] = frozenset({401, 403, 408, 429})
+_CODE_PATTERN: Final = re.compile(r"[a-z0-9_.-]{1,64}")
 
 
 class RunnerClientError(RuntimeError):
@@ -59,7 +62,33 @@ class RunnerClientError(RuntimeError):
     The tick loop catches this and reuses the cached assignment (fetch)
     or spools the batch (post) — a down uplink is an expected condition,
     not a crash.
+
+    ``status_code`` is the HTTP status MEHO answered with, and ``code`` is the
+    short machine code of the answer (never its free text). Both are ``None``
+    for a failure without an answer, such as a lost connection.
     """
+
+    def __init__(
+        self, message: str, *, status_code: int | None = None, code: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+    @property
+    def is_permanent(self) -> bool:
+        """True when MEHO answered with a client error that a retry does not change.
+
+        A login problem (401, 403), a time-out (408) and a rate limit (429)
+        can pass, so they are not permanent. Neither is a wire version refusal.
+        """
+        status = self.status_code
+        return (
+            status is not None
+            and 400 <= status < 500
+            and status not in _RETRYABLE_CLIENT_STATUSES
+            and not isinstance(self, RunnerWireVersionMismatchError)
+        )
 
 
 class RunnerWireVersionMismatchError(RunnerClientError):
@@ -167,7 +196,11 @@ class RunnerClient:
             raise RunnerClientError(f"results post failed: {exc!r}") from exc
         _raise_for_wire_version_mismatch(resp)
         if not resp.is_success:
-            raise RunnerClientError(f"results post returned status {resp.status_code}")
+            raise RunnerClientError(
+                f"results post returned status {resp.status_code}",
+                status_code=resp.status_code,
+                code=_code_of(resp),
+            )
         return _refused_of(resp)
 
 
@@ -179,3 +212,24 @@ def _refused_of(resp: httpx.Response) -> list[RefusedResult]:
         return [RefusedResult.model_validate(entry) for entry in refused or []]
     except ValueError:
         return []
+
+
+def _code_of(resp: httpx.Response) -> str | None:
+    """The short machine code of an error answer, or ``None``.
+
+    Reads ``detail.code`` or the ``type`` of the first ``detail`` entry. Free
+    text is never returned: a value that is not a short code is dropped.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    code: object = None
+    if isinstance(detail, dict):
+        code = detail.get("code")
+    elif isinstance(detail, list) and detail and isinstance(detail[0], dict):
+        code = detail[0].get("type")
+    if isinstance(code, str) and _CODE_PATTERN.fullmatch(code):
+        return code
+    return None

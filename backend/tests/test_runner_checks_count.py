@@ -372,10 +372,9 @@ async def test_runner_time_in_the_future_is_refused(client: TestClient, switch_o
         _result(sensor_id, uid="future-1", payload={"count": 50}, produced_at=future),
     )
 
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "accepted": 0,
-        "duplicates": 0,
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == {
+        "code": "results_refused",
         "refused": [{"result_uid": "future-1", "reason": "future_time"}],
     }
     assert await _stored_count() == 0

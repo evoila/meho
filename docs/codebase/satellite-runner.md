@@ -716,8 +716,10 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   whose *effective* policy (`lookup_descriptor`, operator overrides applied)
   needs no approval, that is not a safe write and not a call that waits for
   a person. Else the item is dropped with a warning; hand-written items use
-  the same check. Create, edit and the Dashboard file import refuse such an
-  op for a bound Sensor (`checks/runner_binding.py::require_runner_can_run`).
+  the same check. An op that needs approval by a rule set after the Sensor was
+  created leaves the runner's list too. Create, edit and the Dashboard file
+  import refuse such an op for a bound Sensor
+  (`checks/runner_binding.py::require_runner_can_run`).
   The Dashboard file import lists every such Sensor in one answer, together
   with the other problems of the file.
 - **Only to a runner that can schedule.** The runner names what it can do in
@@ -726,6 +728,25 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   Sensor items only for a runner that names it. An older runner gets none and
   MEHO logs `assignment_sensor_items_withheld`; its checks turn `unknown`
   until it is updated. The word needs no wire version bump.
+- **A bound check that is not on the list reads `unknown`.** The central
+  check loop skips a Sensor with a `runner_name`, so MEHO records the state
+  itself when the runner does not get the Sensor. On each
+  `GET /api/v1/checks/assignment`, `materialize_assignment(left_off=...)`
+  names every active bound Sensor it left off the list, with the reason:
+  `runner_cannot_schedule` (the runner does not name `scheduled-checks`),
+  `op_requires_approval`, `op_unresolved_or_unsafe`, `op_is_write`,
+  `op_waits_for_person`, `target_unresolved`, `sensor_target_unreadable`,
+  `connector_package_set_mismatch`.
+  `runner_checks.mark_left_off_sensors` then locks the runner's row and
+  records `unknown` (`reason` `not_on_runner_list`, `why` the reason above)
+  through `_record` and `_claim`, once for each change of reason: a Sensor
+  whose last reading already names the same reason is not written again. The
+  Dashboard edge is claimed for each written Sensor, so the Dashboard mail
+  and the investigator also start when every check of the Dashboard runs on
+  that runner. A Sensor that is resumed while its runner is marked stale
+  (`checks/sensor_pause.py`) reads `unknown` with the reason `runner_stale`.
+  A reader sees the state in `meho sensor get`, REST, MCP and the Dashboard;
+  the evidence holds the reason. With the switch off none of this runs.
 - **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
   `timezone`, and `next_due_at`: the Sensor's `next_fire_at` (or its
   `created_at` when it has none), always in UTC. The runner
@@ -783,10 +804,16 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   `last_evaluated_at`. So a batch that waited for the lock never counts a
   reading at a time before one another batch already counted. `RunnerResult.produced_at`
   (the runner clock) is compared only with `sensor.runner_produced_at`, the
-  runner time of the last counted result. A `produced_at` later than
-  `received_at` is refused: not stored, outcome `future_time`, and named in
-  the answer's `refused` list (`[{result_uid, reason}]`, left out when
-  empty); the runner logs `runner_result_refused_by_central`. A result
+  runner time of the last counted result. A `produced_at` more than
+  `CLOCK_ALLOWANCE` (30 seconds) later than `received_at` is refused: not
+  stored, outcome `future_time`, and named in the answer's `refused` list
+  (`[{result_uid, reason}]`, left out when empty); the runner logs
+  `runner_result_refused_by_central`. The allowance covers the small
+  difference of two clocks that are set by network time. When every result of
+  a batch is refused, the answer is a 422 with `detail.code`
+  `results_refused` and the same list. The counter rises for a refused result
+  after the rest of the batch is stored, so a batch that is sent again counts
+  it once. A result
   without `produced_at` is stored and not counted (`no_time`): without it
   MEHO cannot tell a new result from a replay. A result at or before
   `runner_produced_at` is dropped (`old`), also after the clean-up job
@@ -813,6 +840,23 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   Sensor bind creates an empty assignment row (`ensure_assignment_row`) so
   the sweeper watches a runner that has only Sensors. The next accepted
   result batch clears the marker and normal results follow.
+- **A batch that MEHO refuses every time is set aside.** The runner keeps a
+  failed batch in its retry folder and sends later results behind it. A
+  failure that can pass (no connection, a time-out, a 5xx answer, a rate
+  limit 429, a login to renew 401 or 403) leaves the batch in its place. A
+  client error that is none of these counts as a refusal. After
+  `SET_ASIDE_AFTER_TRIES` (3) refusals of the same batch, the runner moves
+  it to the `set-aside` folder inside its spool folder
+  (`runner/spool.py::ResultSpool.set_aside`), together with the HTTP status,
+  the short code of the answer and the time (never the free text of the
+  answer), and goes on with the next batch. Nothing sends a set-aside batch
+  again. The runner then posts a batch without results that carries
+  `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
+  `set_aside_last_at`. `runner_checks.record_set_aside` shows each such check
+  as `unknown` with the reason `result_refused`, the status and the code,
+  and stores the count and the time on the runner's assignment row
+  (`set_aside_count`, `set_aside_last_at`). The console page `/ui/runners`
+  has a "Set aside" column with both.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
   `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
   result is added after its transaction commits, so a result that rolls

@@ -92,7 +92,13 @@ async def _render(request: Request, *, session_ctx: UISessionContext) -> HTMLRes
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         stale_map = await repository.get_stale_markers(session, tenant_id=tenant_id)
-    rows = [project_runner_to_row(p, stale_at=stale_map.get(p.name)) for p in principals]
+        set_aside_map = await repository.get_set_aside_markers(session, tenant_id=tenant_id)
+    rows = [
+        project_runner_to_row(
+            p, stale_at=stale_map.get(p.name), set_aside=set_aside_map.get(p.name, (0, None))
+        )
+        for p in principals
+    ]
     context: dict[str, object] = {
         "page_title": "Runners",
         "active_surface": "runners",

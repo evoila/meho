@@ -43123,6 +43123,24 @@
             },
             "type": "array",
             "title": "Results"
+          },
+          "set_aside": {
+            "items": {
+              "$ref": "#/components/schemas/SetAsideNotice"
+            },
+            "type": "array",
+            "title": "Set Aside"
+          },
+          "set_aside_total": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Set Aside Total"
+          },
+          "set_aside_last_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Set Aside Last At"
           }
         },
         "type": "object",
@@ -43130,7 +43148,7 @@
           "runner_id"
         ],
         "title": "RunnerResultBatch",
-        "description": "A batch of results the runner reports (or spools) in one POST."
+        "description": "A batch of results the runner reports (or spools) in one POST.\n\n``set_aside`` names the results of batches the runner set aside since its\nlast notice. ``set_aside_total`` and ``set_aside_last_at`` say how many\nbatches are in the runner's set-aside folder and when the newest one was\nset aside. All three stay empty on a batch without a notice."
       },
       "RunnerWorkItem": {
         "properties": {
@@ -45136,6 +45154,41 @@
         ],
         "title": "SessionUploadResult",
         "description": "What one upload did."
+      },
+      "SetAsideNotice": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Code"
+          },
+          "produced_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Produced At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "result_uid",
+          "status"
+        ],
+        "title": "SetAsideNotice",
+        "description": "A result of a batch that MEHO refused every time, so the runner set it aside.\n\nThe runner keeps the batch in its set-aside folder and sends only this\nnotice: which check, which result, the status and the code MEHO answered\nwith (never the free text of the answer), and the runner time of the result."
       },
       "SettingsImportResponse": {
         "properties": {

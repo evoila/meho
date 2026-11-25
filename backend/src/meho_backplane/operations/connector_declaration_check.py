@@ -9,7 +9,9 @@ its operation rows. For each registered connector class:
 * the shape of the declaration is checked (names, duplicates, kinds), see
   :func:`~meho_backplane.connectors.target_form.check_connector_declaration`;
 * a declared ``test_operation`` must be a built-in operation row of the same
-  connector, with risk level ``safe`` and no required input.
+  connector, with risk level ``safe``, and a call with no input must pass the
+  same parameter check a real call runs (the schema with its ``oneOf`` /
+  ``anyOf`` rules, and the op's own params check).
 
 A broken declaration stops the start with a message that names the connector
 class. The core only reads the declarations; it never changes how a connector
@@ -17,6 +19,8 @@ logs in.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +32,13 @@ from meho_backplane.connectors.target_form import (
     check_connector_declaration,
 )
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations._validate import (
+    InvalidOpSchemaError,
+    ingested_schema_for_validation,
+    params_errors,
+    validate_params,
+)
+from meho_backplane.operations.switch_params import checked_parameter_schema
 
 __all__ = ["assert_connector_declarations_valid", "registered_connector_classes"]
 
@@ -38,11 +49,23 @@ def registered_connector_classes() -> list[type[Connector]]:
     return sorted(unique, key=lambda cls: (cls.product, cls.version, cls.impl_id, cls.__name__))
 
 
-def _required_inputs(parameter_schema: object) -> list[str]:
-    if not isinstance(parameter_schema, dict):
-        return []
-    required = parameter_schema.get("required")
-    return [str(name) for name in required] if isinstance(required, list) else []
+def _empty_call_problems(op_id: str, parameter_schema: Any, source_kind: str) -> list[str]:
+    """What a call of *op_id* with no input would be refused for; ``[]`` when it passes.
+
+    Runs the same steps as the parameter check of a real call: the schema as
+    calls see it, the stricter form for an ingested op, the JSON Schema
+    check, and the op's own params check.
+    """
+    schema = checked_parameter_schema(parameter_schema)
+    if not isinstance(schema, dict):
+        schema = {}
+    if source_kind == "ingested":
+        schema = ingested_schema_for_validation(schema)
+    try:
+        errors = params_errors(op_id, {}, validate_params(schema, {}))
+    except InvalidOpSchemaError as exc:
+        return [f"its parameter schema has a broken reference {exc.missing_ref}"]
+    return sorted({f"{err['path']}: {err['expected']}" for err in errors})
 
 
 async def _check_test_operation(
@@ -54,7 +77,11 @@ async def _check_test_operation(
     who = f"Connector {cls.__name__}"
     row = (
         await session.execute(
-            select(EndpointDescriptor.safety_level, EndpointDescriptor.parameter_schema).where(
+            select(
+                EndpointDescriptor.safety_level,
+                EndpointDescriptor.parameter_schema,
+                EndpointDescriptor.source_kind,
+            ).where(
                 EndpointDescriptor.tenant_id.is_(None),
                 EndpointDescriptor.product == cls.product,
                 EndpointDescriptor.version == cls.version,
@@ -69,15 +96,15 @@ async def _check_test_operation(
         raise ConnectorDeclarationError(
             f"{who}: test_operation {op_id!r} is not a registered operation of this connector."
         )
-    safety_level, parameter_schema = row
+    safety_level, parameter_schema, source_kind = row
     if safety_level != "safe":
         raise ConnectorDeclarationError(
             f"{who}: test_operation {op_id!r} has risk level {safety_level!r}; it must be 'safe'."
         )
-    required = _required_inputs(parameter_schema)
-    if required:
+    problems = _empty_call_problems(op_id, parameter_schema, source_kind)
+    if problems:
         raise ConnectorDeclarationError(
-            f"{who}: test_operation {op_id!r} needs input ({', '.join(sorted(required))}); "
+            f"{who}: test_operation {op_id!r} needs input ({'; '.join(problems)}); "
             "it must need nothing beyond the target."
         )
 

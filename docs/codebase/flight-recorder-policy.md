@@ -82,6 +82,15 @@ the standing-grant rule or the vendor error text (it is not in
 `SECRET_FAMILY_TAGS`). Use a secret tag when the vendor error text must be
 hidden too, and `destructive` only for a real delete.
 
+## Keeping a connector's own check read out of the trace
+
+A connector that makes a request only for its own check (not for the
+operation) runs it inside `with capture.paused():`
+(`flight_recorder/capture.py`). The trace gets no span for any call in that
+block, so the stored trace and the agent copy hold only the calls of the
+operation itself. Capture goes on after the block. The Keycloak realm check
+uses it (`docs/codebase/connectors-keycloak.md`).
+
 ## Audit
 
 Every applied change is folded into the request's `audit_log` row via `audit_*`

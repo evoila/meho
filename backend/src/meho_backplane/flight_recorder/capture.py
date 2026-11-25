@@ -57,6 +57,8 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -87,6 +89,7 @@ __all__ = [
     "SpanStart",
     "begin_dispatch_capture",
     "end_dispatch_capture",
+    "paused",
     "record_jsonflux_reduction",
     "record_vendor_call",
     "record_vendor_call_error",
@@ -327,6 +330,21 @@ async def _persist(scope: _CaptureScope) -> None:
 # ---------------------------------------------------------------------------
 # Vendor-call span (the shared httpx seam)
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def paused() -> Iterator[None]:
+    """Record no span for the calls made inside this block.
+
+    A connector uses it for a request it makes only for its own check, so
+    the stored trace and the agent copy hold only the calls of the operation
+    itself. Capture goes on as before after the block.
+    """
+    token = _active_capture_var.set(None)
+    try:
+        yield
+    finally:
+        _active_capture_var.reset(token)
 
 
 def span_start() -> SpanStart | None:

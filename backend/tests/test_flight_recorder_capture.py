@@ -449,6 +449,24 @@ def test_trace_byte_cap_collapses_overflow() -> None:
     assert collapsed[0].attributes["collapsed_count"] == 2
 
 
+def test_paused_block_records_no_span_and_capture_goes_on_after_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.paused():
+            assert capture.span_start() is None
+            capture.record_vendor_call(
+                capture.SpanStart(started_at=datetime.now(UTC), monotonic=0.0),
+                method="GET",
+                request_headers={},
+                response=SimpleNamespace(status_code=200),
+            )
+        assert scope.spans == []
+        assert capture.span_start() is not None
+    finally:
+        capture._active_capture_var.reset(token)
+
+
 # ---------------------------------------------------------------------------
 # F7 -- a forced recorder failure never breaks the connector call
 # ---------------------------------------------------------------------------

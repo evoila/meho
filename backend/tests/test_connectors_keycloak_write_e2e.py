@@ -42,10 +42,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
-from meho_backplane.connectors.keycloak.realm_answer import (
-    REALM_CHECK_TRACE_BODY,
-    KeycloakRealmAnswerError,
-)
+from meho_backplane.connectors.keycloak.realm_answer import KeycloakRealmAnswerError
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -649,26 +646,27 @@ async def test_recorded_refusal_holds_no_value_of_the_other_realm(
     with pytest.raises(KeycloakRealmAnswerError) as refused:
         await _client_get_with_realm_answer(keycloak_write_e2e, answer)
     assert _OTHER_REALM_MARKER not in str(refused.value)
-    realm_reads = [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
-    assert len(realm_reads) == 1
-    assert realm_reads[0].attributes["response_body"] == REALM_CHECK_TRACE_BODY
+    assert not [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
     trace = json.dumps([[s.name, s.attributes] for s in recording.spans], default=str)
     assert _OTHER_REALM_MARKER not in trace
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_keycloak_realm_check")
-async def test_recorded_check_read_holds_a_fixed_text_when_the_realm_matches(
+async def test_recorded_trace_holds_only_the_client_read_when_the_realm_matches(
     keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
 ) -> None:
-    """The check read records a fixed text; the operation's own read is recorded as before."""
+    """A successful client.get records only its own client read, not the check read."""
     client_read = await _client_get_with_realm_answer(
         keycloak_write_e2e, {"realm": "example", "displayName": _OTHER_REALM_MARKER}
     )
     assert client_read.call_count == 1
-    bodies = {s.name.rsplit("/", 1)[-1]: s.attributes["response_body"] for s in recording.spans}
-    assert bodies["example"] == REALM_CHECK_TRACE_BODY
-    assert "meho-web" in json.dumps(bodies[_CLIENT_UUID])
+    admin_spans = [s for s in recording.spans if "/admin/realms/" in s.name]
+    assert [s.name.rsplit("/", 1)[-1] for s in admin_spans] == [_CLIENT_UUID]
+    assert "meho-web" in json.dumps(admin_spans[0].attributes["response_body"])
+    assert _OTHER_REALM_MARKER not in json.dumps(
+        [[s.name, s.attributes] for s in recording.spans], default=str
+    )
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,46 @@ keep that inside each sensor's tenant:
   `docs/cross-repo/vault-provisioning.md`, "Bounding the check-runner
   principal".
 
+## Warning for every caller
+
+The check-runner and a tenant with its own Vault role are refused when a
+target's own path is outside the tenant's folder. Every other caller is
+checked too, and gets a warning instead of a refusal. The read goes on.
+Move the secret into the tenant's folder.
+
+- **Where.** The shared loader (`_resolve_and_load` in
+  `connectors/_shared/vault_creds.py`) calls
+  `outside_tenant_folder_reason` for every store read of a target's own
+  Vault secret. The helper never raises. It uses the same rules as
+  `enforce_tenant_scope`: the same path joining, the same segment border
+  and `PLATFORM_EXEMPT_PATHS` for reads. A test pins the two together.
+- **The warning.** The server log gets `target_secret_ref_outside_tenant_folder`
+  with the target id and name, the tenant id and `secret_ref_prefix`, the
+  first part of the path. A slash, a backslash, a percent sign, a question
+  mark and a number sign each end the first part. A path with one part
+  shows only `…`. There is at most one warning per target per
+  process per hour. Nothing goes into the answer, the trace or the audit
+  row.
+- **Check off.** When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty and the tenant
+  has no own Vault role, the helper answers "not outside" and nothing is
+  logged. Only Vault and OpenBao paths are checked, not `gsm:` or
+  `wrapped:` refs.
+- **The list.** `GET /api/v1/targets/checks/outside-tenant-folder` and
+  `meho targets outside-folder` list the targets whose path is outside the
+  folder, read from the targets table when asked. Two path segments, so the
+  route never meets `GET /api/v1/targets/{name}`. A tenant admin sees their
+  own tenant. A platform admin sees every tenant, or one with `tenant_id`.
+  `tenant_id` goes through `authorize_tenant_scope`: a tenant the admin is a
+  member of is chosen with the `Meho-Tenant` header, so their role there
+  applies, and `tenant_id` of that same tenant then lists only it. The list
+  of every tenant leaves out each other tenant where the admin is a member
+  without the `tenant_admin` role. That includes the token's own tenant of
+  a token without a tenant list (`Operator.token_tenant_id` and
+  `token_tenant_role`).
+  The list uses the same `outside_tenant_folder_reason` as the warning, so
+  a target is listed exactly when a read of its secret warns. With the
+  check off, the answer has `check_off: true` and no rows.
+
 ## The namespace convention
 
 The rule is configured by one setting,

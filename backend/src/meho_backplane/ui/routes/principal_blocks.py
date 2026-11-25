@@ -13,7 +13,9 @@ the signed-in session only.
 
 Every form is a plain ``POST`` form with the CSRF token and the page's
 tenant (``meho_tenant``) in hidden fields, so it works without
-JavaScript, and a form from a page of another tenant gets ``409``. A
+JavaScript, and a form from a page of another tenant gets ``409``. When
+MEHO cannot read the block list, the page and both steps of an unblock
+answer ``503`` with ``principal_block_check_unavailable``. A
 change answers ``303`` back to the page. The unblock button of a row
 opens a confirm page first; only the form of that page (``confirm=yes``)
 removes blocks. The page never unblocks the admin's own login: that
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
@@ -51,6 +54,7 @@ from meho_backplane.ui.templating import get_templates
 __all__ = ["build_principal_blocks_router"]
 
 _PAGE = "/ui/blocked-people"
+_log = structlog.get_logger(__name__)
 _session = Depends(require_ui_session)
 
 
@@ -104,7 +108,7 @@ async def _page(
     context = {
         "page_title": "Blocked people",
         "active_surface": "blocked-people",
-        "blocked": await list_blocked(operator),
+        "blocked": await _readable_blocks(operator),
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
         "own_sub": operator.sub,
@@ -120,6 +124,15 @@ async def _page(
     )
     _set_csrf_cookie(response, token)
     return response
+
+
+async def _readable_blocks(operator: Operator) -> list[BlockedPerson]:
+    """The blocks the admin may see; ``503`` when MEHO cannot read the list."""
+    try:
+        return await list_blocked(operator)
+    except Exception as exc:
+        _log.warning("principal_block_list_read_failed", exc_info=True)
+        raise _unavailable() from exc
 
 
 def _back_to_page() -> RedirectResponse:
@@ -202,7 +215,7 @@ async def _unblock(
     if sub == operator.sub:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_LOGIN_UNBLOCK)
     if confirm != _CONFIRMED:
-        blocks = [b for b in await list_blocked(operator) if b.sub == sub]
+        blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
         if not blocks:
             raise _not_blocked()
         return await _confirm_page(request, session, operator, sub, blocks)

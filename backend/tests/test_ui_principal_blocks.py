@@ -15,6 +15,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth import principal_block
@@ -27,6 +28,7 @@ from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes import principal_blocks as ui_principal_blocks
 from tests._oidc_jwt_helpers import mint_token, mock_discovery_and_jwks
 from tests.test_ui_agent_grants import (
     _OP_A,
@@ -375,6 +377,30 @@ def test_unblock_answers_503_when_the_block_list_cannot_be_read(
     assert response.status_code == 503
     assert response.json()["detail"] == "principal_block_check_unavailable"
     assert _block_rows() == [("in-a", str(_TENANT_A), "reason a")]
+
+
+def test_first_unblock_click_and_page_answer_503_when_the_block_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _tenants()
+    _seed_blocks(("in-a", str(_TENANT_A), "reason a"))
+
+    async def _unreadable(*_args: Any, **_kwargs: Any) -> Any:
+        raise OperationalError("SELECT", {}, Exception("database is down"))
+
+    client, mock, csrf = _client()
+    monkeypatch.setattr(ui_principal_blocks, "list_blocked", _unreadable)
+    try:
+        first = client.post(_UNBLOCK, data={"sub": "in-a"}, headers=_csrf_headers(csrf))
+        page = client.get(_PAGE)
+    finally:
+        mock.stop()
+    assert first.status_code == 503, first.text
+    assert first.json()["detail"] == "principal_block_check_unavailable"
+    assert page.status_code == 503, page.text
+    assert page.json()["detail"] == "principal_block_check_unavailable"
+    assert _block_rows() == [("in-a", str(_TENANT_A), "reason a")]
+    assert _audit_payloads("principal.unblock") == []
 
 
 def test_old_forms_after_a_tenant_switch_are_refused_and_change_no_blocks() -> None:

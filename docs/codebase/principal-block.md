@@ -214,8 +214,8 @@ and the page says that every block of the login goes, also the blocks of
 tenant admins. The page never unblocks the admin's own login (403
 `own_login`), and it shows no button on that row: the admin uses
 `meho principal unblock <sub> --reason <text>`, which asks for a reason
-and a fresh sign-in. When MEHO cannot read the blocks, the unblock
-answers 503 `principal_block_check_unavailable`. Every form is a plain
+and a fresh sign-in. When MEHO cannot read the blocks, the page and
+both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)
 in hidden fields, so it works without JavaScript, and a form from a page
 of another tenant answers 409. A done form answers 303 back to the page. A refused block

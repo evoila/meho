@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""The one switch ``CUSTOM_POLICY`` (#6957).
+
+* With every switch off, the three parts of the policy are off.
+* With only ``CUSTOM_POLICY`` on, all three are on.
+* With only one old switch on, only that part is on (as before).
+* ``GET /ready`` shows ``features.policy.custom_policy``.
+* ``policy.apply``, ``policy.classify`` and ``policy.classify_preview``
+  register with only ``CUSTOM_POLICY`` on, and not with every switch off.
+* No code outside :mod:`meho_backplane.policy.switches` and the settings
+  reads the three switches directly.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterator
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy import select
+
+from meho_backplane.connectors.policy.apply import (
+    POLICY_APPLY_OP_ID,
+    register_policy_apply_operation,
+)
+from meho_backplane.connectors.policy.classify import (
+    POLICY_CLASSIFY_OP_ID,
+    register_policy_classify_operation,
+)
+from meho_backplane.connectors.policy.preview import (
+    POLICY_CLASSIFY_PREVIEW_OP_ID,
+    register_policy_classify_preview_operation,
+)
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.features import CATEGORY_WITHOUT_CLASSIFICATION, build_features_block
+from meho_backplane.mcp.registry import ToolDefinition
+from meho_backplane.mcp.tools._preview_policy_fields import (
+    PREVIEW_POLICY_OUTPUT_SCHEMA,
+    policy_schema_for_settings,
+)
+from meho_backplane.policy import bindings, routing, shadow, store
+from meho_backplane.policy.routing import category_routing_warnings
+from meho_backplane.settings import get_settings
+
+_SWITCHES = (
+    "CUSTOM_POLICY",
+    "POLICY_CLASSIFICATION",
+    "POLICY_ENGINE_SHADOW",
+    "POLICY_APPROVER_ROUTING",
+)
+
+_CATEGORY_ROUTE = [{"match": {"category": "network"}, "approvers": ["Admins"]}]
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    for name in _SWITCHES:
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _turn_on(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    for name in names:
+        monkeypatch.setenv(name, "true")
+    get_settings.cache_clear()
+
+
+def _parts() -> dict[str, bool]:
+    """What each helper says, keyed by the old switch it stands for."""
+    assert routing.routing_enabled() is bindings.routing_enabled()
+    return {
+        "POLICY_CLASSIFICATION": store.classification_enabled(),
+        "POLICY_ENGINE_SHADOW": shadow.shadow_enabled(),
+        "POLICY_APPROVER_ROUTING": routing.routing_enabled(),
+    }
+
+
+def test_every_switch_off_turns_every_part_off() -> None:
+    assert get_settings().custom_policy is False
+    assert _parts() == dict.fromkeys(_SWITCHES[1:], False)
+
+
+@pytest.mark.parametrize("value", ["false", "", "no", "on-ish"])
+def test_custom_policy_not_true_turns_nothing_on(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CUSTOM_POLICY", value)
+    get_settings.cache_clear()
+    assert get_settings().custom_policy is False
+    assert _parts() == dict.fromkeys(_SWITCHES[1:], False)
+
+
+def test_custom_policy_alone_turns_every_part_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    settings = get_settings()
+    assert settings.custom_policy is True
+    assert (
+        settings.policy_classification,
+        settings.policy_engine_shadow,
+        settings.policy_approver_routing,
+    ) == (False, False, False)
+    assert _parts() == dict.fromkeys(_SWITCHES[1:], True)
+
+
+@pytest.mark.parametrize("old_switch", _SWITCHES[1:])
+def test_one_old_switch_turns_on_only_its_part(
+    monkeypatch: pytest.MonkeyPatch, old_switch: str
+) -> None:
+    _turn_on(monkeypatch, old_switch)
+    assert _parts() == {name: name == old_switch for name in _SWITCHES[1:]}
+
+
+def test_ready_shows_custom_policy_off_by_default() -> None:
+    block = build_features_block(get_settings())["policy"]
+    assert block["custom_policy"] is False
+    assert (block["classification"], block["engine_shadow"], block["approver_routing"]) == (
+        False,
+        False,
+        False,
+    )
+    assert block["notes"] == []
+
+
+def test_ready_shows_the_parts_on_with_custom_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    block = build_features_block(get_settings())["policy"]
+    assert block["custom_policy"] is True
+    assert (block["classification"], block["engine_shadow"], block["approver_routing"]) == (
+        True,
+        True,
+        True,
+    )
+    assert block["notes"] == []
+
+
+def test_category_note_stays_for_routing_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing on and classification off: the note and the warning, as before."""
+    _turn_on(monkeypatch, "POLICY_APPROVER_ROUTING")
+    assert build_features_block(get_settings())["policy"]["notes"] == [
+        CATEGORY_WITHOUT_CLASSIFICATION
+    ]
+    assert len(category_routing_warnings(_CATEGORY_ROUTE)) == 1
+
+
+def test_custom_policy_has_no_category_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    assert category_routing_warnings(_CATEGORY_ROUTE) == []
+
+
+def _preview_tool() -> ToolDefinition:
+    return ToolDefinition.model_construct(
+        name="preview_operation",
+        outputSchema={"type": "object", "properties": {"x": {}, **PREVIEW_POLICY_OUTPUT_SCHEMA}},
+    )
+
+
+def test_preview_fields_follow_custom_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    def keys() -> set[str]:
+        schema = policy_schema_for_settings(_preview_tool()).outputSchema
+        assert schema is not None
+        return set(schema["properties"])
+
+    assert keys() == {"x"}
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    assert keys() == {"x", *PREVIEW_POLICY_OUTPUT_SCHEMA}
+
+
+@pytest.fixture
+def embedding() -> AsyncMock:
+    service = AsyncMock()
+    service.encode_one.return_value = [0.25] * 384
+    service.encode.return_value = [[0.25] * 384]
+    service.dimension = 384
+    return service
+
+
+async def _register_policy_ops(embedding: AsyncMock) -> set[str]:
+    await register_policy_apply_operation(embedding_service=embedding)
+    await register_policy_classify_operation(embedding_service=embedding)
+    await register_policy_classify_preview_operation(embedding_service=embedding)
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(EndpointDescriptor.op_id).where(
+                EndpointDescriptor.op_id.in_(
+                    [POLICY_APPLY_OP_ID, POLICY_CLASSIFY_OP_ID, POLICY_CLASSIFY_PREVIEW_OP_ID]
+                )
+            )
+        )
+    return set(rows.scalars())
+
+
+@pytest.mark.asyncio
+async def test_policy_ops_register_with_only_custom_policy(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    assert await _register_policy_ops(embedding) == {
+        POLICY_APPLY_OP_ID,
+        POLICY_CLASSIFY_OP_ID,
+        POLICY_CLASSIFY_PREVIEW_OP_ID,
+    }
+
+
+@pytest.mark.asyncio
+async def test_policy_ops_not_registered_with_every_switch_off(embedding: AsyncMock) -> None:
+    assert await _register_policy_ops(embedding) == set()
+
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "meho_backplane"
+
+#: The only files that may read the three switches directly.
+_ALLOWED = {_SRC / "settings.py", _SRC / "policy" / "switches.py"}
+
+_DIRECT_READ = re.compile(
+    r"settings\w*(?:\(\))?\.(policy_classification|policy_engine_shadow|policy_approver_routing)\b"
+    r"|environ(?:\.get\(|\[)\s*[\"'](POLICY_CLASSIFICATION|POLICY_ENGINE_SHADOW|"
+    r"POLICY_APPROVER_ROUTING|CUSTOM_POLICY)[\"']"
+)
+
+
+def test_no_code_reads_the_switches_directly() -> None:
+    found = [
+        f"{path.relative_to(_SRC)}:{number}"
+        for path in sorted(_SRC.rglob("*.py"))
+        if path not in _ALLOWED
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if _DIRECT_READ.search(line)
+    ]
+    assert found == [], "ask meho_backplane.policy.switches instead"

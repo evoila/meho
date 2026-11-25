@@ -57,6 +57,7 @@ from meho_backplane.policy.classification import (
     label_text_ok,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.switches import classification_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -88,8 +89,8 @@ SWITCH_OFF_REFUSAL: Final[str] = (
 
 
 def classification_enabled() -> bool:
-    """True when the ``POLICY_CLASSIFICATION`` switch is on."""
-    return get_settings().policy_classification
+    """True when ``POLICY_CLASSIFICATION`` or ``CUSTOM_POLICY`` is on."""
+    return classification_on(get_settings())
 
 
 def connector_id_of(row: EndpointDescriptor) -> str:

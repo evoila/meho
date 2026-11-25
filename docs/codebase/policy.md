@@ -14,6 +14,32 @@ Everything here is behind the switch `POLICY_CLASSIFICATION` (off by
 default). With the switch off, the import is refused with one sentence.
 Validate, diff, export and history still work: they only read.
 
+## The switches
+
+Three parts of the policy each have their own switch, off by default:
+
+- `POLICY_CLASSIFICATION`: categories, labels and "always wait" on
+  operations ([policy-classification.md](policy-classification.md));
+- `POLICY_ENGINE_SHADOW`: the policy evaluator runs next to today's
+  checks and decides nothing ([policy-evaluator.md](policy-evaluator.md));
+- `POLICY_APPROVER_ROUTING`: approvals go to the teams the file names
+  ([policy-bindings.md](policy-bindings.md)).
+
+`CUSTOM_POLICY` (Helm `config.policy.customPolicy`, off by default) is the
+one switch of the custom policy model
+([decision record](../decisions/2026-11-25-custom-policy-model.md),
+decision 12). With it on, all three parts count as on. Each old switch
+still works alone. Nothing else reads `CUSTOM_POLICY` yet.
+
+One module decides whether a part is on:
+`backend/src/meho_backplane/policy/switches.py`. Code asks it (or the
+helpers that call it: `classification_enabled`, `shadow_enabled`,
+`routing_enabled`), never the settings or the environment. `GET /ready`
+shows `features.policy.custom_policy`, and for each part whether it is
+on, by its own switch or by `CUSTOM_POLICY`. `GET /version` lists
+`CUSTOM_POLICY` with the other switches that change what an agent sees.
+`backend/tests/test_custom_policy_switch.py` checks all of this.
+
 ## The file
 
 ```yaml

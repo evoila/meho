@@ -39,7 +39,6 @@ on, like ``policy.classify``.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -56,7 +55,7 @@ from meho_backplane.operations.typed_register import (
 from meho_backplane.policy.document import MAX_POLICY_BYTES
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.store import classification_enabled
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.policy.switches import classification_on_in_environment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -311,7 +310,7 @@ async def register_policy_apply_operation(
     embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Upsert the ``policy.apply`` typed op; delete it while the switch is off."""
-    if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
+    if not classification_on_in_environment():
         await remove_built_in_connector_rows(
             product="policy", version="1.x", impl_id="policy-registry"
         )

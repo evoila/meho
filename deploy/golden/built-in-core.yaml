@@ -2568,7 +2568,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: a8bb29b55b43a1d3a99b42a9d3b31de7236acfb8790deb7a5874e3e6b57038c4
+        checksum/config: 7a249b324f3b1ef8b171649c11c07f42b8dc2f9188238539225286eef96a608b
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -3864,6 +3864,9 @@ data:
   # routing section, and the policy file's bindings give login groups a
   # group kind and categories. Off by default.
   POLICY_APPROVER_ROUTING: "false"
+  # The one switch of the custom policy model. With it on, the three
+  # switches above count as on. Off by default.
+  CUSTOM_POLICY: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep off, once a week when on).

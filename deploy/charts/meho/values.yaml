@@ -794,10 +794,15 @@ config:
   # categories. When `"false"` (the default), MEHO reads no binding and
   # today's rule decides who may approve. See `docs/codebase/approvals.md`
   # and `docs/codebase/policy-bindings.md`.
+  # `policy.customPolicy` is rendered into `CUSTOM_POLICY`, the one switch
+  # of the custom policy model. When `"true"`, the three switches above
+  # count as on; each of them still works alone. When `"false"` (the
+  # default), MEHO behaves as before. See `docs/codebase/policy.md`.
   policy:
     classification: "false"
     engineShadow: "false"
     approverRouting: "false"
+    customPolicy: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and

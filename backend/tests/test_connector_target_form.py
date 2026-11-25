@@ -5,17 +5,17 @@
 
 Covers:
 
-* a class that declares nothing behaves as before;
+* a class that declares nothing passes the check and answers with nulls;
 * the shape check of a declaration (blank name, duplicate name, duplicate way
   key, and the other broken cases);
-* the check of ``test_operation`` against the operation rows, with the same
-  parameter check a call runs (a ``oneOf`` rule counts);
-* the real Harbor, Linux and Kubernetes declarations pass the start check;
 * a declaration built only from ``meho_connector_kit`` passes;
 * ``GET /api/v1/connectors/target-form``: the answers for Harbor and Linux,
   404 for an unknown product, 403 for the read-only role, two classes of one
   product, 404 for a connector another tenant imported, and no secret store
   call.
+
+The check of ``test_operation`` at start is in
+``test_connector_declaration_start.py``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors import registry as connector_registry
-from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+from meho_backplane.connectors.harbor.connector import HarborConnector
+from meho_backplane.connectors.linux.connector import LinuxSshConnector
 from meho_backplane.connectors.target_form import (
     ConnectorDeclarationError,
     CredentialField,
@@ -46,10 +47,6 @@ from meho_backplane.connectors.target_form import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.middleware import RequestContextMiddleware
-from meho_backplane.operations.connector_declaration_check import (
-    assert_connector_declarations_valid,
-)
-from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -200,161 +197,6 @@ def test_a_declaration_from_the_kit_alone_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
-
-
-async def _seed_op(op_id: str, *, safety: str = "safe", required: list[str] | None = None) -> None:
-    schema: dict[str, Any] = {"type": "object", "properties": {}}
-    if required:
-        schema["required"] = required
-    async with get_sessionmaker()() as session, session.begin():
-        session.add(
-            EndpointDescriptor(
-                tenant_id=None,
-                product="formfake",
-                version="1.x",
-                impl_id="formfake-rest",
-                op_id=op_id,
-                source_kind="typed",
-                parameter_schema=schema,
-                safety_level=safety,
-                is_enabled=True,
-            )
-        )
-
-
-async def _check_with(monkeypatch: pytest.MonkeyPatch, cls: type[Connector]) -> None:
-    monkeypatch.setattr(
-        connector_registry, "_REGISTRY_V2", {("formfake", "1.x", "formfake-rest"): cls}
-    )
-    async with get_sessionmaker()() as session:
-        await assert_connector_declarations_valid(session)
-
-
-@pytest.mark.asyncio
-async def test_a_good_test_operation_passes(monkeypatch: pytest.MonkeyPatch) -> None:
-    await _seed_op("formfake.ping")
-    await _check_with(monkeypatch, _make(test_operation="formfake.ping"))
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_test_operation_stops_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(ConnectorDeclarationError, match=r"FakeConnector.*not a registered"):
-        await _check_with(monkeypatch, _make(test_operation="formfake.missing"))
-
-
-@pytest.mark.asyncio
-async def test_a_missing_row_is_allowed_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The test-only snapshot can leave rows out; a row that exists is still checked."""
-    cls = _make(test_operation="formfake.missing")
-    monkeypatch.setattr(
-        connector_registry, "_REGISTRY_V2", {("formfake", "1.x", "formfake-rest"): cls}
-    )
-    async with get_sessionmaker()() as session:
-        await assert_connector_declarations_valid(session, allow_missing_rows=True)
-    await _seed_op("formfake.missing", safety="caution")
-    async with get_sessionmaker()() as session:
-        with pytest.raises(ConnectorDeclarationError, match=r"must be 'safe'"):
-            await assert_connector_declarations_valid(session, allow_missing_rows=True)
-
-
-@pytest.mark.asyncio
-async def test_a_test_operation_that_is_not_safe_stops_the_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await _seed_op("formfake.change", safety="caution")
-    with pytest.raises(ConnectorDeclarationError, match=r"FakeConnector.*must be 'safe'"):
-        await _check_with(monkeypatch, _make(test_operation="formfake.change"))
-
-
-@pytest.mark.asyncio
-async def test_a_test_operation_that_needs_input_stops_the_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await _seed_op("formfake.get", required=["id"])
-    with pytest.raises(ConnectorDeclarationError, match=r"FakeConnector.*needs input"):
-        await _check_with(monkeypatch, _make(test_operation="formfake.get"))
-
-
-@pytest.mark.asyncio
-async def test_a_test_operation_that_needs_one_of_two_inputs_stops_the_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No top-level ``required``, but a call with no input fails the ``oneOf``."""
-    async with get_sessionmaker()() as session, session.begin():
-        session.add(
-            EndpointDescriptor(
-                tenant_id=None,
-                product="formfake",
-                version="1.x",
-                impl_id="formfake-rest",
-                op_id="formfake.item.list",
-                source_kind="typed",
-                parameter_schema={
-                    "type": "object",
-                    "properties": {"scope": {"type": "string"}, "all": {"const": True}},
-                    "oneOf": [{"required": ["scope"]}, {"required": ["all"]}],
-                },
-                safety_level="safe",
-                is_enabled=True,
-            )
-        )
-    with pytest.raises(ConnectorDeclarationError, match=r"FakeConnector.*needs input"):
-        await _check_with(monkeypatch, _make(test_operation="formfake.item.list"))
-
-
-@pytest.mark.asyncio
-async def test_a_test_operation_of_another_connector_does_not_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with get_sessionmaker()() as session, session.begin():
-        session.add(
-            EndpointDescriptor(
-                tenant_id=None,
-                product="other",
-                version="1.x",
-                impl_id="other-rest",
-                op_id="other.ping",
-                source_kind="typed",
-                parameter_schema={"type": "object"},
-                safety_level="safe",
-                is_enabled=True,
-            )
-        )
-    with pytest.raises(ConnectorDeclarationError, match="not a registered"):
-        await _check_with(monkeypatch, _make(test_operation="other.ping"))
-
-
-@pytest.mark.asyncio
-async def test_the_shipped_connectors_pass_the_start_check() -> None:
-    """The real registrars run, then the check runs on Harbor, Linux and Kubernetes."""
-    service = AsyncMock()
-    service.encode_one.return_value = [0.1] * 384
-    service.encode.return_value = [[0.1] * 384]
-    service.dimension = 384
-    await run_typed_op_registrars(embedding_service=service)
-    async with get_sessionmaker()() as session:
-        await assert_connector_declarations_valid(session)
-
-
-@pytest.mark.asyncio
-async def test_a_pod_list_test_read_stops_the_start_and_names_the_connector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``k8s.pod.list`` needs a namespace or a request for all namespaces."""
-    service = AsyncMock()
-    service.encode_one.return_value = [0.1] * 384
-    service.encode.return_value = [[0.1] * 384]
-    service.dimension = 384
-    await run_typed_op_registrars(embedding_service=service)
-    monkeypatch.setattr(KubernetesConnector, "test_operation", "k8s.pod.list")
-    async with get_sessionmaker()() as session:
-        with pytest.raises(
-            ConnectorDeclarationError, match=r"KubernetesConnector.*'k8s.pod.list' needs input"
-        ):
-            await assert_connector_declarations_valid(session)
-
-
-# ---------------------------------------------------------------------------
 # The route
 # ---------------------------------------------------------------------------
 
@@ -398,7 +240,27 @@ def _get(
         )
 
 
-def test_harbor_answer(client: TestClient) -> None:
+async def _seed_ready_test_read(cls: type[Connector]) -> None:
+    """The stored row of the class's test read: ``safe`` and turned on."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            EndpointDescriptor(
+                tenant_id=None,
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=cls.test_operation,
+                source_kind="typed",
+                parameter_schema={"type": "object"},
+                safety_level="safe",
+                is_enabled=True,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_harbor_answer(client: TestClient) -> None:
+    await _seed_ready_test_read(HarborConnector)
     resp = _get(client, "harbor")
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -413,7 +275,9 @@ def test_harbor_answer(client: TestClient) -> None:
     ]
 
 
-def test_linux_answer_has_two_ways_and_a_multiline_key(client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_linux_answer_has_two_ways_and_a_multiline_key(client: TestClient) -> None:
+    await _seed_ready_test_read(LinuxSshConnector)
     resp = _get(client, "linux")
     assert resp.status_code == 200, resp.text
     (cls,) = resp.json()["classes"]

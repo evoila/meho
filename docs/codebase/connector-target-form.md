@@ -15,11 +15,12 @@ the target form and the credential form.
 | `credential_ways` | The ways to log in and the fields of the secret for each. `None` means not declared. An empty tuple means "declared: no credential needed". |
 | `test_operation` | The op id of one `safe` read that needs no input beyond the target. `None` means not declared. |
 
-A class that sets none of them behaves as before.
+A class that sets none of them passes the start check, and the route
+answers `null` for all four.
 
 Declared today: the Linux SSH connector (`LinuxSshConnector`, two ways: key
 and password; both also take the known hosts text), Harbor (one way: user name and password) and Kubernetes (one
-way: kubeconfig). Other SSH connectors do not declare yet, and nothing is
+way: kubeconfig). Other SSH connectors declare nothing, and nothing is
 declared on the shared `SshConnector` class.
 
 ## Key types
@@ -51,14 +52,24 @@ map.
    checks the shape: a blank name, a name twice in one way, a way key twice, a
    target field key twice, a `choice` with no choices, a port outside 1 to
    65535.
-3. For a class with a `test_operation` it reads the built-in operation row of
-   the same product, version and implementation. The row must exist and have
-   risk level `safe`. A call with no input (`{}`) must pass the same parameter
-   check a real call runs: the schema as calls see it (with its `oneOf` and
-   `anyOf` rules), checked by `validate_params`, then the op's own params
-   check. So a read that needs one of two inputs fails the start too.
-4. A failure raises `ConnectorDeclarationError`. The start fails and the
-   transaction rolls back, like any other start-up registration failure.
+3. For a class with a `test_operation` it checks the facts of the code. A
+   registrar of the same product, version and implementation must write the
+   operation in this start, and the registrar's own definition must give it
+   risk level `safe`. While the registrars run, `operation_catalog_write`
+   collects the risk level each one gives (`collect_code_safety_levels`). A
+   call with no input (`{}`) must pass the same parameter check a real call
+   runs: the schema as calls see it (with its `oneOf` and `anyOf` rules),
+   checked by `validate_params`, then the op's own params check. So a read
+   that needs one of two inputs fails the start too.
+4. A failure of step 2 or 3 raises `ConnectorDeclarationError`. The start
+   fails and the transaction rolls back, like any other start-up
+   registration failure.
+5. A value that lives only in the database never stops the start: a stored
+   risk level other than `safe` on the row, the row's turned-off mark
+   (`is_enabled` false), or an override (install or tenant) that raises the
+   risk level or makes the operation wait for approval. For each such value
+   MEHO logs one warning line, `connector_test_operation_not_ready`, with the
+   connector class, the op id and the stored value. Then it starts.
 
 The route `GET /api/v1/connectors/target-form?product=<product>`
 (`backend/src/meho_backplane/api/v1/connectors_target_form.py`) returns the
@@ -68,7 +79,14 @@ unknown product. The caller sees every hand-written class, because it is
 installed with MEHO. A class made by an import counts only when the caller may
 see that connector (`connector_triples_visible_to` in
 `operations/_lookup.py`): the import is built in, or it belongs to the
-caller's tenant. A connector that another tenant imported answers 404. It holds names and labels only. It never reads the secret
+caller's tenant. A connector that another tenant imported answers 404.
+
+`test_operation` is `null` for a class while its test read is not `safe`
+and enabled in the database for the caller: the stored row has another risk
+level or is turned off, or an override of the install or of the caller's
+tenant raises its risk level or makes it wait for approval
+(`ready_test_operations`). Then the console offers no test read for that
+class. The answer holds names and labels only. It never reads the secret
 store. The router is included before the `/{connector_id}` routes of the
 ingest router, so `target-form` is not read as a connector id.
 

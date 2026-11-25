@@ -172,7 +172,7 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 `KubernetesConnector` declares one credential way, `kubeconfig`, with the one
 field `kubeconfig` on several lines. The test read is `k8s.namespace.list`.
 The connector also accepts the vSphere Supervisor user name and password
-pair (see the WCP section); that way is not declared yet. See
+pair (see the WCP section); that way is not declared. See
 [connector-target-form.md](connector-target-form.md).
 
 ## Key types

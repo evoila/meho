@@ -172,7 +172,8 @@ operations you register, not `execute`.
   secret) and `test_operation` (one safe read that needs no input). MEHO
   checks them at start. The console reads them from
   `GET /api/v1/connectors/target-form?product=<product>`. A connector that
-  declares nothing works as before. Build the entries with
+  declares nothing passes the start check, and the route shows the four as
+  `null`. Build the entries with
   `kit.TargetField`, `kit.CredentialWay` and `kit.CredentialField`
   (kit 1.6 or higher).
 - **Caches.** Key a cache you keep across calls, for example a login

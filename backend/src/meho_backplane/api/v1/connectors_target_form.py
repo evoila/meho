@@ -12,6 +12,12 @@ reads the secret store and never returns a value of any secret.
 
 Errors: 404 with a plain message when no connector serves the product.
 
+``test_operation`` is ``null`` for a class while its declared test read is not
+``safe`` and enabled in the database for the caller: the stored row has
+another risk level or is turned off, or an override of the install or the
+caller's tenant raises its risk level or makes it wait for approval. Then the
+console offers no test read for that class.
+
 The caller sees the connector classes installed with MEHO, and a class made
 by an import only when the caller may see that connector: the import is
 built in, or it belongs to the caller's tenant. A connector that another
@@ -34,6 +40,7 @@ from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.connectors.registry import connectors_for_tenant
 from meho_backplane.connectors.target_form import CredentialWay, TargetField
 from meho_backplane.operations._lookup import connector_triples_visible_to
+from meho_backplane.operations.connector_declaration_check import ready_test_operations
 
 __all__ = ["TargetFormClass", "TargetFormResponse", "router"]
 
@@ -75,7 +82,11 @@ class CredentialWayModel(BaseModel):
 
 
 class TargetFormClass(BaseModel):
-    """What one connector class declares. ``None`` means "not declared"."""
+    """What one connector class declares. ``None`` means "not declared".
+
+    ``test_operation`` is also ``None`` while the declared test read is not
+    ``safe`` and enabled in the database for the caller.
+    """
 
     impl_id: str
     version: str
@@ -123,7 +134,7 @@ def _way(way: CredentialWay) -> CredentialWayModel:
     )
 
 
-def _describe(cls: type[Connector]) -> TargetFormClass:
+def _describe(cls: type[Connector], *, test_ready: bool) -> TargetFormClass:
     return TargetFormClass(
         impl_id=cls.impl_id,
         version=cls.version,
@@ -135,7 +146,7 @@ def _describe(cls: type[Connector]) -> TargetFormClass:
         credential_ways=(
             None if cls.credential_ways is None else [_way(w) for w in cls.credential_ways]
         ),
-        test_operation=cls.test_operation,
+        test_operation=cls.test_operation if test_ready else None,
     )
 
 
@@ -181,4 +192,8 @@ async def get_target_form(
             http_status.HTTP_404_NOT_FOUND,
             f"No connector serves the product {product!r}.",
         )
-    return TargetFormResponse(product=classes[0].product, classes=[_describe(c) for c in classes])
+    ready = await ready_test_operations(operator.tenant_id, classes)
+    return TargetFormResponse(
+        product=classes[0].product,
+        classes=[_describe(c, test_ready=c in ready) for c in classes],
+    )

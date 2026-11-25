@@ -12,11 +12,15 @@ realm first and compares the answered name:
   realm's settings;
 * the login check sends no password;
 * a request of the secret broker sends nothing;
-* each run checks anew, and one run does not check before each request.
+* each run checks anew, and one run does not check before each request;
+* a passed check never counts for a later call: two calls of the secret
+  broker, of an approval card or of the check before an approved run each
+  read the realm first, also within :data:`CHECK_SECONDS`.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -27,9 +31,14 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.managed_realm_check import ManagedRealmChecks
 from meho_backplane.connectors.keycloak.ops_authflow import ENSURE_APPROVAL_FLOW_OP_ID
+from meho_backplane.connectors.keycloak.secret_endpoint import build_keycloak_secret_endpoint
+from meho_backplane.connectors.secret.endpoints import SecretMaterial
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
+from meho_backplane.operations.approval_object_check import live_card
 from tests.test_keycloak_realm_fence import (
     _CHECK_LOGIN,
+    _CONNECTOR_ID,
     _ID,
     _KC_BASE_URL,
     _OTHER_ANSWERS,
@@ -38,6 +47,7 @@ from tests.test_keycloak_realm_fence import (
     _READS,
     _REALM,
     _REALM_PATH,
+    _TARGET_NAME,
     _dispatch,
     _mount_token,
     _required_settings_env,  # noqa: F401 -- autouse fixture
@@ -204,12 +214,104 @@ async def test_a_passed_check_counts_for_the_requests_that_follow(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         realm = mock.get(_REALM_PATH).respond(200, json={"realm": _REALM})
-        for _ in range(3):
+        with checks.run():
+            for _ in range(3):
+                await checks.check(connector, target, operator)
+            assert realm.call_count == 1
+            now["t"] += 5.1
             await checks.check(connector, target, operator)
-        assert realm.call_count == 1
-        now["t"] += 5.1
-        await checks.check(connector, target, operator)
-        assert realm.call_count == 2
-        checks.forget(target)
-        await checks.check(connector, target, operator)
-        assert realm.call_count == 3
+            assert realm.call_count == 2
+            checks.forget(target)
+            await checks.check(connector, target, operator)
+            assert realm.call_count == 3
+        # Outside a run, no passed check counts: every request reads the realm.
+        for count in (4, 5):
+            await checks.check(connector, target, operator)
+            assert realm.call_count == count
+
+
+_SOMEONE = [{"id": _ID, "username": "someone"}]
+
+
+async def _password_move(operator: Operator) -> None:  # noqa: F811
+    sink = build_keycloak_secret_endpoint(f"{_TARGET_NAME}/{_REALM}/someone#password")
+    await sink.write_secret(operator, SecretMaterial(b"example-password"))
+
+
+async def _client_secret_read(operator: Operator) -> None:  # noqa: F811
+    source = build_keycloak_secret_endpoint(f"{_TARGET_NAME}/{_REALM}/clients/example-app#secret")
+    await source.read_secret(operator)
+
+
+async def _delete_card(operator: Operator) -> None:  # noqa: F811
+    await build_proposed_effect(
+        PreviewContext(
+            descriptor=SimpleNamespace(op_id="keycloak.user.delete"),  # type: ignore[arg-type]
+            connector_instance=_CONNECTOR_INSTANCE_CACHE[KeycloakConnector],
+            operator=operator,
+            target=await _target(operator),
+            params={"username": "someone"},
+            connector_id=_CONNECTOR_ID,
+        )
+    )
+
+
+async def _check_before_the_run(operator: Operator) -> None:  # noqa: F811
+    await live_card(
+        operator,
+        connector_id=_CONNECTOR_ID,
+        op_id="keycloak.user.delete",
+        target=await _target(operator),
+        params={"username": "someone"},
+    )
+
+
+_SECOND_CALLS = {
+    "secret-broker-password": _password_move,
+    "secret-broker-client-secret": _client_secret_read,
+    "approval-card": _delete_card,
+    "check-before-the-run": _check_before_the_run,
+}
+
+
+@pytest.mark.parametrize("call", list(_SECOND_CALLS))
+async def test_a_passed_check_does_not_count_for_the_next_call(
+    operator: Operator,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    call: str,
+) -> None:
+    """Two calls within :data:`CHECK_SECONDS`; Keycloak answers another realm for the second.
+
+    The second call reads the realm and sends nothing else: no password set,
+    no client secret read, no user read for a card.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.managed_realm_check.time.monotonic", lambda: 100.0
+    )
+    run = _SECOND_CALLS[call]
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        answer: dict[str, Any] = {"now": {"realm": _REALM, "id": "realm-id"}}
+        realm = mock.get(_REALM_PATH).mock(
+            side_effect=lambda _request: httpx.Response(200, json=answer["now"])
+        )
+        secret = mock.get(path__regex=r".*/client-secret$").respond(
+            200, json={"type": "secret", "value": "example-secret"}
+        )
+        clients = mock.get(path__regex=r".*/clients$").respond(
+            200, json=[{"id": _ID, "clientId": "example-app"}]
+        )
+        rest = mock.route(url__regex=r".*").mock(return_value=httpx.Response(200, json=_SOMEONE))
+        await run(operator)
+        reads = realm.call_count
+        sent = rest.call_count + secret.call_count + clients.call_count
+        assert reads > 0
+        assert sent > 0
+
+        answer["now"] = _OTHER_ANSWERS[0]
+        try:
+            await run(operator)
+        except ValueError as exc:
+            assert "did not answer with the realm" in str(exc)
+        assert realm.call_count == reads + 1
+        assert rest.call_count + secret.call_count + clients.call_count == sent

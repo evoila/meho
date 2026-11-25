@@ -15,9 +15,13 @@ else nothing more is sent.
 Every admin login can read the name: without the right to view the realm,
 Keycloak answers with a short form that has it.
 
-A check counts for :data:`CHECK_SECONDS`, so one operation does not read the
-realm before each of its requests. Every operation starts with a new check
-(:func:`~meho_backplane.connectors.keycloak.answer_realm.name_the_realm`).
+A passed check counts only inside one run of an operation
+(:meth:`ManagedRealmChecks.run`, opened by
+:func:`~meho_backplane.connectors.keycloak.answer_realm.name_the_realm`), and
+there for at most :data:`CHECK_SECONDS`. So one operation does not read the
+realm before each of its requests, and no call uses a check of an earlier
+call. A request outside a run (the secret broker, an approval card, the check
+before an approved run) reads the realm first, every time.
 
 A read or a delete of the realm itself is not checked here: the caller checks
 the answer it reads.
@@ -26,6 +30,9 @@ the answer it reads.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -40,8 +47,13 @@ if TYPE_CHECKING:
 
 __all__ = ["CHECK_SECONDS", "ManagedRealmChecks"]
 
-#: How long one passed check counts.
+#: How long one passed check counts inside one run.
 CHECK_SECONDS: Final = 5.0
+
+_Passed = dict[tuple[tuple[str, str], str], float]
+
+#: The passed checks of the current run; ``None`` outside a run.
+_RUN_CHECKS: ContextVar[_Passed | None] = ContextVar("keycloak_realm_checks", default=None)
 
 
 def _realm_path(target: KeycloakTargetLike) -> str:
@@ -56,20 +68,31 @@ async def _read_realm(
 
 
 class ManagedRealmChecks:
-    """The passed checks of one connector, per target and managed realm."""
+    """The passed checks of the current run, per target and managed realm."""
 
-    def __init__(self) -> None:
-        self._passed_until: dict[tuple[tuple[str, str], str], float] = {}
+    @contextmanager
+    def run(self) -> Iterator[None]:
+        """One run of an operation: checks passed in it count only until it ends."""
+        token = _RUN_CHECKS.set({})
+        try:
+            yield
+        finally:
+            _RUN_CHECKS.reset(token)
 
     def forget(self, target: KeycloakTargetLike) -> None:
         """Drop every passed check of *target*; the next request checks again."""
+        passed = _RUN_CHECKS.get()
+        if passed is None:
+            return
         key = target_cache_key(target)
-        for entry in [entry for entry in self._passed_until if entry[0] == key]:
-            del self._passed_until[entry]
+        for entry in [entry for entry in passed if entry[0] == key]:
+            del passed[entry]
 
     def clear(self) -> None:
         """Drop every passed check."""
-        self._passed_until.clear()
+        passed = _RUN_CHECKS.get()
+        if passed is not None:
+            passed.clear()
 
     async def ensure(
         self,
@@ -87,15 +110,17 @@ class ManagedRealmChecks:
     async def check(
         self, connector: KeycloakConnector, target: KeycloakTargetLike, operator: Operator
     ) -> None:
-        """Check the realm, unless a check passed in the last :data:`CHECK_SECONDS`.
+        """Check the realm, unless a check passed in this run in the last :data:`CHECK_SECONDS`.
 
         Raises :class:`ValueError` when Keycloak answers with another realm
         name, with no name, or with something that is not an object.
         """
         managed = resolve_realm_config(target).managed_realm
         key = (target_cache_key(target), managed)
-        if self._passed_until.get(key, 0.0) > time.monotonic():
+        passed = _RUN_CHECKS.get()
+        if passed is not None and passed.get(key, 0.0) > time.monotonic():
             return
         answer = await _read_realm(connector, target, operator, _realm_path(target))
         check_answered_realm("keycloak", answer, target)
-        self._passed_until[key] = time.monotonic() + CHECK_SECONDS
+        if passed is not None:
+            passed[key] = time.monotonic() + CHECK_SECONDS

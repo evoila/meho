@@ -25,9 +25,10 @@ The summary keeps the field whole, also when the name is long
 (:mod:`~meho_backplane.operations.required_fields`). With the switch off the
 summary is as before.
 
-The wrapper also makes every run check the realm's name anew
+The wrapper also opens one run of the realm check
 (:mod:`~meho_backplane.connectors.keycloak.managed_realm_check`), in both
-states of the switch.
+states of the switch: every run checks the realm's name anew, and a check
+passed in it does not count after it.
 """
 
 from __future__ import annotations
@@ -61,8 +62,8 @@ def answer_realm_on() -> bool:
 def _wrap(handler: Any) -> Any:
     @functools.wraps(handler)
     async def wrapper(self: Any, operator: Any, target: Any, params: Any) -> Any:
-        self._realm_checks.forget(target)
-        answer = await handler(self, operator, target, params)
+        with self._realm_checks.run():
+            answer = await handler(self, operator, target, params)
         if not isinstance(answer, dict) or not answer_realm_on():
             return answer
         return {REALM_FIELD: resolve_realm_config(target).managed_realm, **answer}

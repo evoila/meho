@@ -45,10 +45,13 @@ executable only through the Stage-3 composed write gate, #2901); destructive =
 `dangerous` + `requires_approval` (satellite-EXCLUDED by the tier ladder,
 central-dial / on-site only).
 
-A call made with a token (MCP, the command line, REST) runs only `safe` ops at
-once. A `caution` op without its own approval flag then waits for an approval
-click; in the web interface it runs at once (`_person_park_reason` in
-`operations/_validate.py`). An agent's call of any op that is not `safe` waits
+With the default settings, a call to a `caution` op without its own approval
+flag runs at once only when a person with the Operator role or higher sends it
+in the web console, or when a service login sends it and a standing grant or a
+run approval covers it (`_person_park_reason` in `operations/_validate.py`).
+Every other call that policy allows waits for approval. The paragraph "When
+`wsfc.groups.move` waits for approval" below gives the rule for the move. An
+agent's call of any op that is not `safe` waits
 for a person (`auth/permissions.py`). An op with a caller-address field
 (`wsfc.witness.set`) waits for a person on every call, and no standing grant
 covers it (`operations/caller_address.py`).
@@ -111,10 +114,10 @@ Examples: a call with a person's token from the CLI, MCP or REST, and an agent
 call. When the matching agent grant says `deny`, MEHO refuses the agent call and
 asks no person to approve it. So an agent grant can deny the move, but it cannot
 make the move run at once. When `AGENT_GRANT_REQUIRED` is `on`, an agent with no
-matching grant is refused. An operator can make the op stricter: raise its risk
-level or require approval. Then the web console call waits too. No setting
-lowers the risk level. So no setting lets a person's token call or an agent call
-run at once.
+matching grant is refused. A person with the Admin role can make the op
+stricter: raise its risk level or require approval. Then the web console call
+waits too. No setting lowers the risk level. So no setting lets a person's token
+call or an agent call run at once.
 
 ## Key types
 

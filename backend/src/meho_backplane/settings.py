@@ -1677,8 +1677,11 @@ class Settings(BaseModel):
         ``dispatch_child``, or one saved to restart after approval) and a
         re-run for an earlier requester always get their own request, and
         a direct call never gets the request of such a step.
-        When off, every such call makes a new request. Env
-        ``APPROVAL_SAME_CALL_REUSE``.
+        The acting agent must be the same too (none for a direct call).
+        The check of a step of a multi-step operation never uses the reuse.
+        When off, every such call makes a new request. A retry key that was
+        linked to a request while the switch was on keeps finding that
+        request after it is turned off. Env ``APPROVAL_SAME_CALL_REUSE``.
     approval_retry_own_audit_row:
         Off by default. When on, a retry that gets the waiting (or approved)
         request through the same ``idempotency_key`` writes its own

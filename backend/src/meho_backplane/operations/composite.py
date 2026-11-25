@@ -1457,6 +1457,8 @@ async def _gate_subop(
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
                     install_category=descriptor.policy_install_category,
+                    # A step always gets its own request.
+                    allow_same_call_reuse=False,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed

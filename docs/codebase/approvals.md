@@ -2883,6 +2883,16 @@ of this is the same:
   runner login can change between two calls. So a call whose people
   behind differ gets its own request with its own list. A person's own
   call has no people behind on either side.
+- the acting agent (`principal_act`). A call with an acting agent never
+  gets the request of a direct call, and the other way round. A direct
+  call has none on either side.
+
+The check of a step of a multi-step operation (`enforce_subop_policy`)
+passes `allow_same_call_reuse=False` to `create_pending_request`, so a step
+always gets its own request and a normal "waits for approval" answer.
+
+A retry key that was linked to a request while the switch was on keeps
+finding that request after the switch is turned off.
 
 The answer has the same `approval_request_id` and
 `extras.approval_request_reused: true`. No new request row is made, and no

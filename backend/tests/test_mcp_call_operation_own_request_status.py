@@ -890,8 +890,10 @@ async def test_a_waiting_change_of_rights_with_one_admin_has_the_note(
         proposed_effect={"op_id": member_add, "preview": {"grant": {"login_realm": True}}},
     )
 
-    async def _only_one(tenant_id: uuid.UUID, requester_sub: str) -> str:
-        return "You are the only admin."
+    async def _only_one(
+        tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool
+    ) -> str | None:
+        return "You are the only admin." if login_realm else None
 
     monkeypatch.setattr("meho_backplane.operations.approval_queue.only_admin_note", _only_one)
 

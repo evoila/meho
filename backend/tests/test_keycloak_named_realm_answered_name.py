@@ -20,7 +20,9 @@ A new realm (``keycloak.realm.create``) that Keycloak does not know is
 judged by its name as typed, and that name must be plain ASCII. A side of a
 ``secret.move`` is judged without a Keycloak call: a name that is not plain
 ASCII counts as a protected realm, and so does every side when the name of
-a protected realm is not plain ASCII.
+a protected realm is not plain ASCII. There, when the person who asked is
+the only admin of the tenant, the waiting move shows the full one-admin
+note.
 
 Fixture values are made up.
 """
@@ -32,21 +34,25 @@ from typing import Any
 
 import pytest
 
+from meho_backplane.auth import tenant_admins
 from meho_backplane.connectors.keycloak.realm_params import (
     check_realm_params,
     is_plain_realm_name,
 )
 from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.operations.approval_queue import rights_change_note
 from meho_backplane.operations.grant_approval import GRANT_REASON_STRICTER
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
 from tests.test_approval_grant_to_self import (
     _REALM,
+    _REQUESTER,
     _approve,
     _FakeTarget,
     _park,
     _person,
+    _row,
     _status,
 )
 from tests.test_keycloak_login_realm_every_write import (
@@ -292,6 +298,39 @@ async def test_a_plain_side_needs_a_platform_admin_when_a_protected_name_has_an_
     request_id = await _park(params, effect, op_id=write.op_id)
 
     assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+
+
+#: The one-admin note on a waiting request, word for word.
+_ONE_ADMIN_NOTE = (
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
+    "You can approve it yourself only if you are a platform admin and asked for it in the "
+    "web console. MEHO found no other admin in this tenant. See "
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+    "#changes-of-rights-need-another-admin"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _SIDES, ids=["sink", "source"])
+async def test_a_plain_side_with_an_accented_admin_realm_waits_with_the_one_admin_note(
+    write: _Write,
+    fake: _FakeKeycloak,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _protect_accented(monkeypatch, "admin-realm")
+    monkeypatch.setattr(tenant_admins, "_kept", {})
+
+    async def _only_the_asker(*_args: object) -> frozenset[str]:
+        return frozenset({_REQUESTER})
+
+    monkeypatch.setattr(tenant_admins, "_read", _only_the_asker)
+    fake.realm_reads_fail.add(_OTHER_REALM)
+    effect, params = await _effect(fake, write, _OTHER_REALM)
+    request_id = await _park(params, effect, op_id=write.op_id)
+
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert await rights_change_note(await _row(request_id)) == _ONE_ADMIN_NOTE
 
 
 @pytest.mark.asyncio

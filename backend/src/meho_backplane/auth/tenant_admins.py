@@ -5,7 +5,8 @@
 
 A change of rights waits for a platform admin when it is in MEHO's own
 login realm, in ``master`` or in the target's admin realm, or when MEHO could
-not read its realm (the approval card's ``login_realm`` fact is true).
+not make sure that it is not (the approval card's ``login_realm`` fact is
+true).
 The person who asked approves it only when they are a platform admin and
 asked for it in the web console
 (:func:`~meho_backplane.operations.grant_approval.check_rights_change_approval`).
@@ -37,9 +38,11 @@ The answer is ``None`` ("not known") when MEHO cannot count:
 
 * :func:`only_admin_note` at request time. The caller
   (:func:`~meho_backplane.operations.approval_queue.rights_change_note`)
-  asks for it only for a change of rights in MEHO's own login realm, in
-  ``master`` or in the target's admin realm, or in a realm MEHO could not
-  read;
+  asks for it for every waiting change of rights. A sure count of zero
+  gives the "no admin" note for each of them. The note that the person who
+  asked is the only admin shows only for a change in MEHO's own login
+  realm, in ``master`` or in the target's admin realm, or where MEHO could
+  not make sure that it is not;
 * the doctor line of ``meho doctor`` (``approvals.rights_change_admins`` in
   ``/api/v1/health``), which warns that some changes of rights in that realm
   need a platform admin other than the person who asked.
@@ -78,13 +81,13 @@ __all__ = [
 ]
 
 #: Who approves a waiting change of rights in MEHO's own login realm, in
-#: ``master`` or in the target's admin realm, or in a realm MEHO could not
-#: read: the first part of the note. An answer about an approved request
+#: ``master`` or in the target's admin realm, or where MEHO could not make
+#: sure that it is not: the first part of the note. An answer about an approved request
 #: leaves it out.
 LOGIN_REALM_APPROVER: Final[str] = (
     "A platform admin must approve this change. "
     "It is in MEHO's own login realm, in `master` or in the target's admin realm, "
-    "or MEHO could not read its realm. "
+    "or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it "
     "in the web console."
 )
@@ -269,26 +272,31 @@ async def admin_count(tenant_id: uuid.UUID) -> int | None:
     return None if ids is None else len(ids)
 
 
-async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
-    """The note for a waiting change of rights a platform admin must approve, else ``None``.
+async def only_admin_note(
+    tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool = True
+) -> str | None:
+    """The note for a waiting change of rights no other admin could approve, else ``None``.
 
-    The caller asks only for a change of rights in MEHO's own login realm, in
-    ``master`` or in the target's admin realm, or in a realm MEHO could not
-    read.
+    The caller asks for every waiting change of rights. *login_realm* is
+    true when a platform admin must approve it: it is in MEHO's own login
+    realm, in ``master`` or in the target's admin realm, or MEHO could not
+    make sure that it is not.
 
-    * No admin at all: :data:`NO_ADMIN`. It has no sentence about who must
-      approve, because one more admin alone would not be enough.
-    * The requester is the only admin: :data:`LOGIN_REALM_APPROVER` and
-      :data:`ONLY_ONE_ADMIN`.
+    * No admin at all: :data:`NO_ADMIN`, for every change of rights. It has
+      no sentence about who must approve, because one more admin alone
+      would not be enough.
+    * The requester is the only admin and *login_realm* is true:
+      :data:`LOGIN_REALM_APPROVER` and :data:`ONLY_ONE_ADMIN`.
     * ``None`` when another admin is found, when the person who asked is
-      not an admin, and when the count is not known: then MEHO says nothing
-      new.
+      not an admin, when the person who asked is the only admin and
+      *login_realm* is false, and when the count is not known: then MEHO
+      says nothing new.
     """
     ids = await tenant_admin_ids(tenant_id)
     if ids is None:
         return None
     if not ids:
         return f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-    if ids - {requester_sub.casefold()}:
+    if not login_realm or ids - {requester_sub.casefold()}:
         return None
     return f"{LOGIN_REALM_APPROVER} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

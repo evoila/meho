@@ -55,7 +55,7 @@ _RIGHTS_OP = "demo.rights.change"
 #: The whole note, word for word.
 _FULL_NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
-    "`master` or in the target's admin realm, or MEHO could not read its realm. "
+    "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
     "web console. MEHO found no other admin in this tenant. See "
     "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
@@ -392,8 +392,14 @@ def _descriptor() -> EndpointDescriptor:
     )
 
 
-async def _ask(monkeypatch: pytest.MonkeyPatch, op_id: str = _RIGHTS_OP) -> Any:
-    _grant_op(monkeypatch)
+async def _ask(
+    monkeypatch: pytest.MonkeyPatch, op_id: str = _RIGHTS_OP, *, grant: bool = True
+) -> Any:
+    """Ask for *op_id*; with *grant*, it is a change of rights of one login with a realm fact."""
+    if grant:
+        _grant_op(monkeypatch)
+    else:
+        monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_RIGHTS_OP})
     operator = Operator(
         sub=_ADMIN_A,
         raw_jwt="<jwt>",
@@ -428,11 +434,12 @@ async def test_the_only_admin_asks_for_a_change_of_rights_and_reads_the_sentence
     assert result.extras["approval_request_id"]
 
 
+@pytest.mark.parametrize("grant", [False, True], ids=["no-realm-fact", "login-realm"])
 async def test_a_waiting_change_of_rights_with_no_admin_reads_no_admin(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, grant: bool
 ) -> None:
     _known(monkeypatch, set())
-    result = await _ask(monkeypatch)
+    result = await _ask(monkeypatch, grant=grant)
     note = f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
     assert result.status == "awaiting_approval"
     assert result.extras["approval_note"] == note
@@ -540,6 +547,26 @@ async def test_the_note_shows_only_for_a_change_of_rights_in_the_login_realm(
     _known(monkeypatch, {_ADMIN_A})
     note = await rights_change_note(_request(op_id, grant))
     assert note == (_FULL_NOTE if has_note else None)
+
+
+@pytest.mark.parametrize(
+    ("op_id", "grant"),
+    [
+        (_RIGHTS_OP, {"login_realm": True}),
+        (_RIGHTS_OP, None),
+        (_RIGHTS_OP, {"login_realm": False}),
+        ("policy.apply", None),
+        ("policy.classify", None),
+    ],
+    ids=["login-realm", "realm-fact-missing", "another-realm", "policy-apply", "policy-classify"],
+)
+async def test_the_no_admin_note_shows_for_every_change_of_rights(
+    monkeypatch: pytest.MonkeyPatch, op_id: str, grant: dict[str, Any] | None
+) -> None:
+    _grant_op(monkeypatch)
+    _known(monkeypatch, set())
+    note = await rights_change_note(_request(op_id, grant))
+    assert note == f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
 
 
 async def test_a_failed_note_read_still_waits_for_approval(

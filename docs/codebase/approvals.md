@@ -1659,12 +1659,13 @@ and the request window in the web interface shows the same sign
 **A tenant with one admin, and a change a platform admin must approve.**
 A platform admin must approve a waiting change of rights where the card's
 `login_realm` fact is true: the change is in MEHO's own login realm, in
-`master` or in the target's admin realm, or MEHO could not read its realm.
-The person who asked approves it only as a platform admin who asked in the
-web console. So when the person who asked is the only admin of the tenant,
-nobody else in the tenant can approve it. MEHO says so; it builds no
-exception. In every other realm, the person who asked approves the waiting
-change in the web console, so MEHO shows no note there.
+`master` or in the target's admin realm, or MEHO could not make sure that
+it is not. The person who asked approves it only as a platform admin who
+asked in the web console. So when the person who asked is the only admin of
+the tenant, nobody else in the tenant can approve it. MEHO says so; it
+builds no exception. In every other realm, the person who asked approves
+the waiting change in the web console, so MEHO shows no one-admin note
+there.
 
 - `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
   Keycloak admin client: the enabled members of every group (at any level)
@@ -1681,25 +1682,30 @@ change in the web console, so MEHO shows no note there.
 - At request time, `rights_change_note` in `operations/approval_queue.py`
   runs after the request and its approval step event are saved (the
   dispatcher, the composite step and the MCP read of an own request),
-  outside the `try` that answers "denied". It gives a note only when both
-  are true:
-  - the request is a change of rights where the card's `login_realm`
-    fact is true, by the facts the approve uses: `grant_facts(request)` is
-    not `None` and its `login_realm` is true. The connector sets the fact
-    for MEHO's own login realm, for `master` and for the target's admin
-    realm, and also when it could not read the realm. A card without the
-    realm fact counts as the login realm, as in the approve;
-  - `only_admin_note(tenant_id, requester_sub)` in `auth/tenant_admins.py`
-    finds that the person who asked is the only admin of the tenant.
+  outside the `try` that answers "denied". For every waiting change of
+  rights (`is_rights_change(request)` is true) it calls
+  `only_admin_note(tenant_id, requester_sub, login_realm=...)` in
+  `auth/tenant_admins.py`:
+  - the "no admin" note shows for every waiting change of rights with a
+    sure count of zero admins, also `policy.apply`, `policy.classify` and
+    a change in any other realm;
+  - the one-admin note shows only when the person who asked is the only
+    admin of the tenant and the card's `login_realm` fact is true, by the
+    facts the approve uses: `grant_facts(request)` is not `None` and its
+    `login_realm` is true. The connector sets the fact for MEHO's own
+    login realm, for `master` and for the target's admin realm, and also
+    when it could not make sure that the change is not in one of them. A
+    card without the realm fact counts as the login realm, as in the
+    approve.
 
-  Every other request gives no note: a change in another realm,
-  `policy.apply` and `policy.classify` (they have no realm), two or more
-  admins, a count that is not known, and a request whose asker is not an
-  admin (an Operator, an agent or a service login). A failed read of the
-  note gives no note; the call still waits for approval. The note is in
+  `policy.apply`, `policy.classify` (they have no realm) and a change in
+  another realm get no one-admin note. Two or more admins, a count that is
+  not known, and a request whose asker is not an admin (an Operator, an
+  agent or a service login) give no note. A failed read of the note gives
+  no note; the call still waits for approval. The one-admin note is in
   `extras.approval_note` and at the end of `error`: "A platform admin must
   approve this change. It is in MEHO's own login realm, in `master` or in
-  the target's admin realm, or MEHO could not read its realm. You can
+  the target's admin realm, or MEHO could not make sure that it is not. You can
   approve it yourself only if you are a platform admin and asked for it
   in the web console. MEHO found no other admin in this tenant." and a
   link to the approvals guide. The request is still stored, so an admin
@@ -1722,8 +1728,8 @@ change in the web console, so MEHO shows no note there.
 
   | Admins | Note |
   |---|---|
-  | none | "This tenant has no admin." and the guide link. No sentence about who must approve, because one more admin would not be enough. |
-  | one, the requester | the full note above and the link |
+  | none | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
+  | one, the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note |
   | one, another person | no note, because that admin can approve |
   | two or more | no note |
   | not known | no note |

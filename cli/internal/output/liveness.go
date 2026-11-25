@@ -27,6 +27,9 @@ func PrintLiveness(stdoutW io.Writer, resp *api.LivenessResponse) error {
 	fmt.Fprint(stdoutW, formatTenants(resp.Operator))
 	fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
 	fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
+	if resp.Operator.TenantId != nil && resp.Operator.TenantRole == api.TenantRoleReadOnly {
+		fmt.Fprintf(stdoutW, "  Approvals: %s\n", approvalsReader)
+	}
 	fmt.Fprintln(stdoutW, OperatorRoleNote)
 	return nil
 }

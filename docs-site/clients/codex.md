@@ -136,6 +136,8 @@ target. It should wait. After a person approves it, it should run.
 
 Use the [`mcp-remote` shim](claude-desktop.md) as a local stdio server in
 Codex. The shim runs the login for the client. The setup is the same as
-for Claude Desktop. The static-token variant on the
-[other clients page](mcp-remote-shim.md) is a last resort, because its
-token expires quickly.
+for Claude Desktop. If Codex runs on a machine with no browser, use
+[the steps for a machine without a browser](mcp-remote-shim.md#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host).
+The static-token variant on the
+[other clients page](mcp-remote-shim.md#the-static-token-last-resort) is a
+last resort, because its token ends after 5 minutes.

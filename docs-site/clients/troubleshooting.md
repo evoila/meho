@@ -76,8 +76,11 @@ correct, secure response.
 **Fix.** Give the client a pre-registered `client_id`. [Claude Code](claude-code.md)
 takes it in `.mcp.json` (`oauth.clientId`); the
 [Claude Desktop shim](claude-desktop.md) takes it via
-`--static-oauth-client-info`. For a client that exposes neither, carry a
-token through the [static-token shim](mcp-remote-shim.md). Do **not**
+`--static-oauth-client-info`. For a client that exposes neither, run the
+[`mcp-remote` shim in login mode](mcp-remote-shim.md#connect-with-a-login-that-renews-itself).
+Only if that is not possible, carry a token through the
+[static-token shim](mcp-remote-shim.md#the-static-token-last-resort); its
+token ends after 5 minutes. Do **not**
 open DCR on a production realm to work around a per-client config gap.
 
 ## Login start fails with `unauthorized_client` (W1)

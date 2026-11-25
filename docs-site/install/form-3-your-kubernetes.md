@@ -23,7 +23,7 @@ This chapter does not need it.
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
 | **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
 | **A browser** | The web console is built with Tailwind CSS 4, which is made for Chrome 111, Safari 16.4 and Firefox 128 or newer. Use a browser at least that new. |
-| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
+| **A second platform admin** | Plan for a second platform admin. An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.
@@ -269,6 +269,64 @@ Prove the whole chain:
 
 ```bash
 meho status
+```
+
+### If you are the only admin
+
+The first login is an Admin, and an Admin may approve their own changes,
+at every risk level. This is on purpose, so one person can use MEHO. Read
+the rule in
+[Who may approve](../guides/approvals-and-break-glass.md#who-may-approve).
+Do not turn on the emergency switch for this.
+
+- A change of rights (who may do what in MEHO) runs only with a click in
+  the web console.
+- `meho status` shows the rule for your own role on its `Approvals` line.
+
+To add a second admin:
+
+1. Route the Keycloak admin console. This is one upgrade, with the same
+   chart version you installed. If you did not pin a version, run
+   `helm list -n meho` and read it from the `CHART` column (for example
+   `meho-chart-1.2.3` is version `1.2.3`):
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=true
+    ```
+
+2. Log in to the console as the console admin. Its steps are in
+   [The console admin](keycloak-realm.md#the-console-admin).
+3. Create the person and join them to the group **MEHO-Admins**. The
+   steps are in [Local users](login/local-users.md). An admin alone
+   cannot approve a change of rights that someone sent with a token in MEHO's own login realm. Only a second
+   person who is a platform admin approves it. If this person should do
+   that, also join them to the group **MEHO-Platform-Admins**. The rule
+   is in
+   [More rules for a change of one login or one group](../guides/approvals-and-break-glass.md#more-rules-for-a-change-of-one-login-or-one-group).
+4. Set the route back when you are done:
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=false
+    ```
+
+If your values file already sets `coreKeycloak.ingress.exposeAdmin`,
+change it there instead: `true` to open the admin console, `false` to
+close it. Each time, run the install command of Step 4 with these
+options, so the chart stays at the version you run:
+
+- `--version <chart-version>`: the version you installed (item 1 above
+  says how to find it);
+- the same `-f` values files you used for the installation, in the same
+  order.
+
+```bash
+helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+  --namespace meho --version <chart-version> \
+  -f values.yaml
 ```
 
 **You now have a running MEHO and a logged-in operator.** Go on with

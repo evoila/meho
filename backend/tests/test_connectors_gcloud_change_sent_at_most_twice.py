@@ -21,6 +21,7 @@ import respx
 from meho_backplane.connectors.gcloud import GcloudConnector
 from meho_backplane.connectors.gcloud.workload_identity import _send_json_abs
 from tests.test_connectors_gcloud_workload_identity import _OPERATOR, _TARGET, connector
+from tests.test_connectors_http_change_redirect import _real_capture
 
 __all__ = ["connector"]
 
@@ -120,3 +121,23 @@ async def test_delete_307_then_401_sends_two_deletes(connector: GcloudConnector)
     assert status == 401
     assert first.call_count == 1
     assert slash.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trace_of_a_bucket_create_holds_both_sends_after_a_401(
+    connector: GcloudConnector,
+) -> None:
+    with (
+        _real_capture("gcloud.storage.bucket.create") as spans,
+        respx.mock(assert_all_called=False) as mock,
+    ):
+        route = mock.post(_URL).mock(
+            side_effect=_answers(httpx.Response(401), httpx.Response(200, json={"name": "b1"}))
+        )
+        await _create(connector)
+
+    assert route.call_count == 2
+    assert [(span.attributes["method"], span.status) for span in spans] == [
+        ("POST", "401"),
+        ("POST", "200"),
+    ]

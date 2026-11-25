@@ -798,18 +798,21 @@ class GcloudConnector(
         the first send, a followed redirect and the send after the token
         refresh. So after a 401 MEHO sends the change again only when the
         first send was one request, and that second send follows no
-        redirect. The answer is returned as it is; the caller checks it.
+        redirect. Each send goes through :meth:`_send_traced`, so the trace
+        holds every request. The answer is returned as it is; the caller
+        checks it.
         """
         token = await self._ensure_token(target, operator)
         client = await self._http_client(target)
-        resp = await client.request(
-            method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
+        resp = await self._send_traced(
+            client, method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
         )
         if resp.status_code == 401 and not resp.history:
             _log.info("gcloud_401_token_refresh_post", target=target.name, url=abs_url)
             new_token = await self.refresh_token(target)
             with last_send_of_a_change():
-                resp = await client.request(
+                resp = await self._send_traced(
+                    client,
                     method,
                     abs_url,
                     json=json_body,

@@ -20,24 +20,42 @@ _DEFINING_MODULE = _SRC / "operations" / "gateway_commands.py"
 
 
 def _calls_without_approval(source: str) -> list[int]:
-    """Line numbers of mint calls that pass no ``approval_request_id``."""
+    """Line numbers of mint calls that pass no ``approval_request_id``.
+
+    A keyword set to ``None`` counts as none, and a call through an import
+    alias (``import ... as mint``) is found too.
+    """
+    tree = ast.parse(source)
+    names = {_MINT}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(a.asname for a in node.names if a.name == _MINT and a.asname)
     lines: list[int] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != _MINT:
+        if name not in names:
             continue
-        if not any(kw.arg == "approval_request_id" for kw in node.keywords):
+        if not any(
+            kw.arg == "approval_request_id" and not _is_none(kw.value) for kw in node.keywords
+        ):
             lines.append(node.lineno)
     return lines
+
+
+def _is_none(value: ast.expr) -> bool:
+    return isinstance(value, ast.Constant) and value.value is None
 
 
 def test_guard_flags_a_call_without_the_approval_request() -> None:
     """The guard finds a call that leaves out the approval request id."""
     assert _calls_without_approval("await mint_gateway_command(s, operator=o)") == [1]
     assert _calls_without_approval("await mint_gateway_command(s, approval_request_id=a)") == []
+    assert _calls_without_approval("await mint_gateway_command(s, approval_request_id=None)") == [1]
+    aliased = "from x import mint_gateway_command as mint\nawait mint(s, operator=o)"
+    assert _calls_without_approval(aliased) == [2]
 
 
 def test_source_calls_of_the_mint_name_the_approval_request() -> None:

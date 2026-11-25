@@ -11,6 +11,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -664,8 +665,10 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// discovery fetch entirely.
 	//
 	// `meho doctor` is left out: it must make exactly the network calls
-	// it reports, and none at all with --no-network.
-	if !invokesDoctor(root, args) {
+	// it reports, and none at all with --no-network. `meho --version` is
+	// left out too: it prints only the CLI line, so an unreachable
+	// backplane must not delay it.
+	if !invokesDoctor(root, args) && !invokesRootVersionFlag(root, args) {
 		registerDynamicSubcommands(root)
 	}
 
@@ -758,6 +761,25 @@ func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
 func invokesDoctor(root *cobra.Command, args []string) bool {
 	c, _, err := root.Find(args)
 	return err == nil && c != nil && c.Parent() == root && c.Name() == "doctor"
+}
+
+// invokesRootVersionFlag reports whether args run `meho --version`: the
+// root command with its --version flag set. `meho version` is a
+// subcommand and is not matched.
+func invokesRootVersionFlag(root *cobra.Command, args []string) bool {
+	c, _, err := root.Find(args)
+	if err != nil || c != root {
+		return false
+	}
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "--version" || (strings.HasPrefix(a, "--version=") && a != "--version=false") {
+			return true
+		}
+	}
+	return false
 }
 
 // registerDynamicSubcommands runs the discovery fetch and grafts

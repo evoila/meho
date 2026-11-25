@@ -6,10 +6,15 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/version"
 )
 
@@ -223,5 +228,48 @@ func TestRootVersionFlagHasNoShortForm(t *testing.T) {
 	verbose := root.PersistentFlags().Lookup("verbose")
 	if verbose == nil || verbose.Shorthand != "v" {
 		t.Fatalf("--verbose must keep -v, got %+v", verbose)
+	}
+}
+
+// TestRootVersionFlagSkipsCommandDiscovery runs the real root command
+// with a saved backplane: `meho --version` must send the backplane no
+// request, so an unreachable server cannot delay it. `meho version`
+// still fetches the command list and the backplane version.
+func TestRootVersionFlagSkipsCommandDiscovery(t *testing.T) {
+	xdg := withTempXDG(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+	t.Cleanup(setDynamicRegistrar(nil))
+
+	run := func(args ...string) string {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		return stdout.String()
+	}
+
+	for _, args := range [][]string{{"--version"}, {"--verbose", "--version"}, {"--version=true"}} {
+		out := run(args...)
+		if out != cliVersionLine()+"\n" {
+			t.Fatalf("%v output: %q", args, out)
+		}
+		if n := requests.Load(); n != 0 {
+			t.Fatalf("%v sent the backplane %d request(s), want 0", args, n)
+		}
+	}
+
+	run("version")
+	if requests.Load() == 0 {
+		t.Fatal("`meho version` sent the backplane no request; it must still fetch the command list and the backplane version")
 	}
 }

@@ -18,8 +18,11 @@ Every command accepts the global flags below.
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
 - `--profile` — named login to use (default: `$MEHO_PROFILE`, else `default`). Each profile keeps its own login, so one person can hold several identities side by side. `meho login <url> --profile <name>` stores the login under that name. The flag wins over `$MEHO_PROFILE`.
 - `--verbose`, `-v` — enable verbose output.
-- `--version` — print the CLI version line, the same line as `meho version`, and exit. It does not contact a backplane and has no short form.
 - `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`. The backplane cleans every ticket id with one rule: it removes white space at both ends, refuses an empty value, control characters (also a tab inside the id) and invisible characters, allows at most 256 characters, and stores the text in Unicode form NFC.
+
+## Version flag
+
+`meho --version` prints the CLI version line, the same line as `meho version`, and exits. It does not contact a backplane and has no short form. The flag works only on `meho` itself, not on a subcommand: some subcommands, such as `meho targets add`, have their own `--version` flag for a product version.
 
 ## Login session
 

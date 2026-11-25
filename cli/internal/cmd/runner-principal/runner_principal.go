@@ -56,8 +56,8 @@ func NewRootCmd() *cobra.Command {
 			"Write verbs (register / revoke) require tenant_admin, and register " +
 			"also requires a person, not a service or agent login; read verbs " +
 			"(list / show) are operator-level. register creates the Keycloak " +
-			"client and a DB row; revoke disables the Keycloak client (kill " +
-			"switch) and marks the row revoked.",
+			"client and a DB row; revoke turns the runner's Keycloak client off " +
+			"and deletes it (kill switch), and marks the row revoked.",
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())

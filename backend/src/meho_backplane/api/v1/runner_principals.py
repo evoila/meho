@@ -21,11 +21,12 @@ Route inventory
 * ``POST /api/v1/runner-principals`` — register a new runner principal
   (creates the Keycloak client + inserts DB row). Returns the row with
   HTTP 201. 409 when the Keycloak client id is already taken. Role:
-  ``tenant_admin``, and the caller must be a person: a service, agent or
-  runner login gets 403 ``human_principal_required``.
+  ``tenant_admin``, and the caller must be a person: a service login or an
+  agent login gets 403 ``human_principal_required``, and a runner login gets
+  403 ``runner_scope_violation``.
 * ``DELETE /api/v1/runner-principals/{name}/revoke`` — revoke a runner
-  (kill switch: disables Keycloak client + marks row revoked). Returns the
-  updated row. Role: ``tenant_admin``.
+  (kill switch: turns the runner's Keycloak client off and deletes it, and
+  marks the row revoked). Returns the updated row. Role: ``tenant_admin``.
 * ``GET /api/v1/runner-principals/{name}/write-allowlist`` — list the
   runner's granted ``remote-write`` capabilities (#3190). Role: ``operator``.
 * ``POST /api/v1/runner-principals/{name}/write-allowlist`` — grant one
@@ -214,9 +215,10 @@ async def register_runner_principal(
     The answer carries a one-time enrollment code, shown only here. The runner
     sends it with its own public key to ``POST /api/v1/runner-principals/enroll``.
 
-    Only a person with ``tenant_admin`` may call it. A service, agent or
-    runner login gets 403 ``human_principal_required`` before anything is
-    made. The minted Keycloak client's token carries a
+    Only a person with ``tenant_admin`` may call it. A service login or an
+    agent login gets 403 ``human_principal_required``, and a runner login gets
+    403 ``runner_scope_violation``, before anything is made. The minted
+    Keycloak client's token carries a
     hardcoded ``principal_kind=runner`` mapper and a read-only
     ``tenant_role``, so the resulting principal is caged to the gateway
     path prefixes and rejected everywhere else (see the module docstring).
@@ -273,9 +275,9 @@ async def revoke_runner_principal(
 ) -> RunnerPrincipalRead:
     """Revoke a runner principal (kill switch).
 
-    Disables the Keycloak client (blocks new token grants) and marks the DB
-    row ``revoked=true``. Returns the updated row. ``tenant_admin`` only.
-    Returns 404 when absent or already revoked.
+    Turns the runner's Keycloak client off (blocks new token grants) and
+    deletes it, and marks the DB row ``revoked=true``. Returns the updated row.
+    ``tenant_admin`` only. Returns 404 when absent or already revoked.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["revoke"],

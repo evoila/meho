@@ -994,6 +994,33 @@ async def test_machine_tenant_admin_cannot_register_a_runner(
 
 
 @pytest.mark.asyncio
+async def test_runner_login_cannot_register_a_runner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runner login gets 403 ``runner_scope_violation`` and nothing is made."""
+    await _seed_tenants()
+    writes = _recording_vault_write(monkeypatch)
+    key = make_rsa_keypair("kid-runner-register")
+    factory = _mock_kc_ok()
+    with (
+        patch("meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings", factory),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": "runner-made"},
+            headers={"Authorization": f"Bearer {_runner_token(key)}"},
+        )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "runner_scope_violation"
+    factory.return_value.create_client.assert_not_awaited()
+    assert writes == []
+    principals = await _fetch_principals(_TENANT_A)
+    assert principals == []
+
+
+@pytest.mark.asyncio
 async def test_person_tenant_admin_with_platform_admin_still_gets_the_code(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

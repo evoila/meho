@@ -2116,14 +2116,21 @@ the mixin to its own.
   a finished import, because it is what keeps a retry from uploading the file
   twice. Azure allows at most 50 tags on one resource
   ([limits page](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits)),
-  so one import site holds at most 50 records, one per file and one per
-  `repeat_key`. MEHO counts the site's tags before it asks for an upload link.
-  When a file has no record yet and the site has 50 tags, the call stops with a
-  conflict that says how many tags the site has, and MEHO asks Azure for no
-  upload link and uploads nothing. The caller then sends the call with another
-  `site` name, or a person removes tags of the import site that are not needed
-  (MEHO's own tags start with `meho-csv-`). A retry of a file that has a record
-  still works on a full site. If the tag
+  and MEHO uses one tag per file and per `repeat_key`. MEHO counts the
+  site's tags before it asks for an upload link. When a file has no record
+  yet and the site has 50 tags, MEHO makes room: it reads the site's job list
+  and removes its own records (`meho-csv-` tags) of jobs that ended at least
+  a day ago, oldest first, as many as it needs. Other tags stay, and so do
+  records of jobs that still run, that ended less than a day ago, that have no
+  end time, or that Azure does not list. So a record stays at least a day
+  after its job ended, and a retry in that time uploads nothing. A retry
+  after its record was removed finds no record and imports the file again,
+  as a new import job. When MEHO finds no record to remove, the call stops
+  with a conflict that says how many tags the site has, and MEHO asks Azure
+  for no upload link and uploads nothing. The caller then sends the call again
+  a day after the earlier jobs ended, sends it with another `site` name, or a
+  person removes tags of the import site that are not needed. A retry of a
+  file that has a record still works on a full site. If the tag
   cannot be written (for example when someone added a tag in between), nothing is uploaded, and the import job that Azure made
   for the upload link stays without a file; the agent then tells the person
   and reads the jobs with `azure.migrate.job.list` first. An existing site is
@@ -2214,6 +2221,10 @@ SHA-256, size and row count.
   each with or without its `*` mark, in any case. A UTF-8 byte order mark at
   the start is allowed; MEHO hashes and uploads the bytes as they came. Azure checks every row; its reasons for
   bad rows come back in `bad_rows` (at most 100, secrets filtered).
+- One import site holds at most 50 tags (Azure's limit). MEHO uses one per
+  file and per `repeat_key`, and removes its own records of jobs that ended at
+  least a day ago when it needs room. When it finds none, the call stops and
+  uploads nothing.
 - `machines`, `add` and `remove` take the machine `name` from
   `azure.migrate.machine.list` (the API description says "machine names").
   At most 1000 per call.

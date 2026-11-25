@@ -55,9 +55,11 @@ If a step did not finish, the answer says so. Read the state first
 the call again.
 
 Each file of `azure.migrate.import.start` keeps one tag on the import site.
-Azure allows at most 50 tags on a resource, so one import site holds the
-records of at most 50 files. At the limit the call stops and uploads nothing.
-Use another `site` name, or remove tags that are not needed (MEHO's own tags
+Azure allows at most 50 tags on a resource. When the site is full, MEHO
+removes its own tags of import jobs that ended at least a day ago, oldest
+first, to make room. When there is still no room, the call stops and uploads
+nothing. Then send the call again a day after the earlier jobs ended, use
+another `site` name, or remove tags that are not needed (MEHO's own tags
 start with `meho-csv-`).
 
 One target is one subscription. For two subscriptions, make two targets.

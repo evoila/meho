@@ -23,10 +23,13 @@ never uploads the same file twice:
    imported: MEHO uploads nothing and tells the caller to read the job list and
    the machine list first.
    A tag stays after a finished import: it is the record that keeps a retry
-   from uploading the file twice. Azure allows at most 50 tags on a resource,
-   so one site holds at most 50 records. When a file has no record yet and the
-   site has 50 tags, MEHO stops with an error that says so, asks Azure for no
-   upload link and uploads nothing.
+   from uploading the file twice. Azure allows at most 50 tags on a resource.
+   When a file has no record yet and the site has 50 tags, MEHO makes room:
+   it removes its own records (``meho-csv-`` tags) of import jobs that ended
+   at least a day ago, oldest first, as many as needed. A record is so kept
+   for at least a day after its job ended; a retry in that time uploads
+   nothing. When there is still no room, MEHO stops with an error that says
+   so, asks Azure for no upload link and uploads nothing.
 3. Ask the site for an upload link (``importUri``) and write the job name to
    the tag *before* the upload. If the tag cannot be written, nothing is
    uploaded. MEHO adds and removes only its own tag (the Tags API's
@@ -60,6 +63,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -72,11 +76,13 @@ from meho_backplane.connectors.azure._errors import (
     AzureUrlRefusedError,
 )
 from meho_backplane.connectors.azure._http import send
+from meho_backplane.connectors.azure._paging import list_all_pages
 from meho_backplane.connectors.azure._paths import (
     MIGRATE_API_VERSION,
     MIGRATE_IMPORT_COLLECTOR_PATH,
     MIGRATE_PROJECT_PATH,
     OFFAZURE_API_VERSION,
+    OFFAZURE_IMPORT_JOBS_PATH,
     OFFAZURE_IMPORT_SITE_PATH,
     OFFAZURE_IMPORT_URI_PATH,
     RESOURCES_API_VERSION,
@@ -90,6 +96,7 @@ from meho_backplane.connectors.azure.migrate_csv import (
 from meho_backplane.connectors.azure.migrate_jobs import (
     WAITING_STATE,
     job_name_of,
+    job_row,
     read_job,
     site_param,
     site_path,
@@ -121,6 +128,29 @@ _LOCK_WAIT_SECONDS: Final[float] = 120.0
 
 #: Azure's limit of tags on one resource. Each imported file keeps one tag on the site.
 MAX_SITE_TAGS: Final[int] = 50
+
+#: The start of the name of every record tag MEHO writes.
+RECORD_TAG_PREFIX: Final[str] = "meho-csv-"
+
+#: How long a record stays after its import job ended before MEHO may remove
+#: it to make room for a new file. A retry in that time uploads nothing.
+RECORD_KEEP: Final[timedelta] = timedelta(days=1)
+
+
+def _utc_now() -> datetime:
+    """The time now. Tests replace it."""
+    return datetime.now(UTC)
+
+
+def _ended_at(value: object) -> datetime | None:
+    """The end time of an import job in UTC, or ``None`` when Azure gave none."""
+    if not isinstance(value, str):
+        return None
+    try:
+        ended = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return ended if ended.tzinfo else ended.replace(tzinfo=UTC)
 
 
 def _record_key(prepared: PreparedCsv, repeat_key: object) -> str:
@@ -219,6 +249,7 @@ class _Import:
         """
         if outcome.done:
             return
+        read_error = f" {outcome.poll_error}" if outcome.poll_error else ""
         reference = (
             f" The operation to read with azure.operation.status: {json.dumps(outcome.operation)}."
             if outcome.operation is not None
@@ -226,7 +257,7 @@ class _Import:
         )
         raise AzureConflictError(
             f"Azure target {self.target.name!r}: Azure had not confirmed {what} after "
-            f"MEHO's wait. MEHO uploaded nothing. {outcome.poll_error or ''}{reference}".rstrip(),
+            f"MEHO's wait. MEHO uploaded nothing.{read_error}{reference}",
             http_status=409,
             azure_error_code=None,
             azure_message=None,
@@ -295,7 +326,8 @@ class _Import:
         A job that still waits for its file is followed too: its upload may
         still be under way, or its answer was lost. A recorded job that Azure
         no longer has is not a sign that the file never arrived, so MEHO
-        keeps the record, uploads nothing and asks for a new ``repeat_key``.
+        keeps the record, uploads nothing and says to read the job list and
+        the machine list first.
         """
         job = job_name_of(tags.get(self.record_key))
         if job is None:
@@ -318,31 +350,73 @@ class _Import:
                 remediation=remediation,
             ) from None
 
-    def require_tag_room(self, tags: Mapping[str, str]) -> None:
-        """Refuse a file that has no record yet when the site has no room for one.
+    async def make_tag_room(self, tags: Mapping[str, str]) -> None:
+        """Make room for this file's record, or refuse the file.
 
         Called before MEHO asks for an upload link, so no import job is made
-        that would wait for a file for ever.
+        that would wait for a file for ever. On a full site, MEHO removes its
+        own records of import jobs that ended at least :data:`RECORD_KEEP`
+        ago, oldest first. Other tags, and records of jobs that run, ended
+        later or that Azure does not list, stay.
         """
         if self.record_key in tags or len(tags) < MAX_SITE_TAGS:
             return
-        raise AzureConflictError(
+        needed = len(tags) - MAX_SITE_TAGS + 1
+        ended = await self._ended_records(tags)
+        if len(ended) < needed:
+            raise self._no_tag_room(len(tags))
+        for key in ended[:needed]:
+            await self._patch_tag("Delete", key, tags[key])
+
+    async def _ended_records(self, tags: Mapping[str, str]) -> list[str]:
+        """MEHO's record tags whose import job ended at least a day ago, oldest first."""
+        own = {
+            job.casefold(): key
+            for key, value in tags.items()
+            if key.startswith(RECORD_TAG_PREFIX)
+            and key != self.record_key
+            and (job := job_name_of(value)) is not None
+        }
+        if not own:
+            return []
+        paged = await list_all_pages(
+            self.connector,
+            self.target,
+            self._path(OFFAZURE_IMPORT_JOBS_PATH, **self.names),
+            operator=self.operator,
+            api_version=OFFAZURE_API_VERSION,
+        )
+        latest = _utc_now() - RECORD_KEEP
+        found: list[tuple[datetime, str]] = []
+        for item in paged.rows:
+            row = job_row(item) if isinstance(item, Mapping) else None
+            key = own.get(row["name"].casefold()) if row and row["name"] else None
+            ended = _ended_at(row["end_time"]) if row else None
+            if key and row and row["done"] and ended is not None and ended <= latest:
+                found.append((ended, key))
+        return [key for _, key in sorted(found)]
+
+    def _no_tag_room(self, count: int) -> AzureConflictError:
+        """The error for a full site where MEHO could remove none of its records."""
+        return AzureConflictError(
             f"Azure target {self.target.name!r}: import site {self.names['site']!r} has "
-            f"{len(tags)} tags, and Azure allows at most {MAX_SITE_TAGS} tags on a resource. "
-            "MEHO needs one more tag to record this file, so it asked Azure for no upload "
-            "link and uploaded nothing.",
+            f"{count} tags, and Azure allows at most {MAX_SITE_TAGS} tags on a resource. "
+            "MEHO removes its own record of an import job that ended at least a day ago "
+            "when it needs room, and found none. So it asked Azure for no upload link and "
+            "uploaded nothing.",
             http_status=409,
             azure_error_code=None,
             azure_message=None,
             remediation=(
-                "Send the call with another site name (the site parameter), or ask a person "
-                "to remove tags of this import site that are not needed. MEHO's own tags "
-                "start with meho-csv-."
+                "Send the same call again a day after the earlier import jobs of this site "
+                "ended (azure.migrate.job.list shows them), send it with another site name "
+                "(the site parameter), or ask a person to remove tags of this import site "
+                "that are not needed. MEHO's own tags start with meho-csv-."
             ),
         )
 
-    async def _patch_record(self, operation: str, job: str) -> None:
-        """Add (``Merge``) or remove (``Delete``) only this file's record tag.
+    async def _patch_tag(self, operation: str, key: str, value: str) -> None:
+        """Add (``Merge``) or remove (``Delete``) one record tag, and no other tag.
 
         The Tags API changes the named tag alone, so a tag that someone
         changes at the same time, in MEHO or in Azure, stays as it is.
@@ -354,9 +428,13 @@ class _Import:
             TAGS_AT_SCOPE_PATH.format(scope=self.site_id[1:]),
             operator=self.operator,
             params={"api-version": RESOURCES_API_VERSION},
-            json={"operation": operation, "properties": {"tags": {self.record_key: job}}},
+            json={"operation": operation, "properties": {"tags": {key: value}}},
             repeatable=True,
         )
+
+    async def _patch_record(self, operation: str, job: str) -> None:
+        """Add or remove this file's record tag."""
+        await self._patch_tag(operation, self.record_key, job)
 
     async def send_file(self) -> tuple[str, bool]:
         """Get an upload link, record the job, upload. Returns the job and if Azure confirmed."""
@@ -475,7 +553,7 @@ async def import_start_impl(
         await run.ensure_collector()
         known = await run.known_job(tags)
         if known is None:
-            run.require_tag_room(tags)
+            await run.make_tag_room(tags)
             job, confirmed = await run.send_file()
             outcome = "uploaded" if confirmed else "upload_unconfirmed"
         else:

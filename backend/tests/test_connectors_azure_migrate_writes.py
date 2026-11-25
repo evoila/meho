@@ -15,6 +15,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -177,6 +178,7 @@ class _Import:
             200, json={"uri": LINK, "jobArmId": f"{JOBS_PATH}/{JOB}"}
         )
         self.upload = mock.put(host=BLOB_HOST, path="/import-container/servers.csv").respond(201)
+        self.job_list = _arm(mock, "GET", JOBS_PATH).respond(200, json={"value": []})
         self.job = _arm(mock, "GET", f"{JOBS_PATH}/{JOB}").mock(
             side_effect=[
                 httpx.Response(200, json=_job("InProgress")),
@@ -1879,6 +1881,171 @@ async def test_a_file_split_over_many_calls_fills_the_site_and_the_next_call_is_
     assert routes.upload.call_count == uploads == 50
 
 
+#: The time "now" of the tests that make room on a full site.
+_NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+
+def _ended_job(name: str, ended: datetime | None, state: str = "Completed") -> dict[str, Any]:
+    """An import job as Azure lists it, with the time it ended (or none)."""
+    return {
+        "name": name,
+        "id": f"{JOBS_PATH}/{name}",
+        "startTime": "2026-11-01T08:00:00Z",
+        "endTime": ended.isoformat().replace("+00:00", "Z") if ended else None,
+        "properties": {"jobResult": state, "numberOfMachinesImported": 1},
+    }
+
+
+class _SiteOverTime:
+    """A shared site where each upload link makes a new job that ended *age* before now."""
+
+    def __init__(self, mock: respx.MockRouter, site_tags: dict[str, str], age: timedelta) -> None:
+        self.routes = _shared_site(mock, site_tags)
+        self.jobs: list[dict[str, Any]] = []
+        self.age = age
+        self.routes.import_uri.mock(side_effect=self._new_job)
+        self.routes.job_list.mock(
+            side_effect=lambda _: httpx.Response(200, json={"value": self.jobs})
+        )
+        mock.route(method="GET", host=ARM_HOST, path__regex=rf"^{JOBS_PATH}/job-\d+$").mock(
+            side_effect=self._read_job
+        )
+
+    def _new_job(self, _: httpx.Request) -> httpx.Response:
+        name = f"job-{len(self.jobs):03d}"
+        # Each later job ended one minute later, so the first job is the oldest.
+        ended = _NOW - self.age + timedelta(minutes=len(self.jobs))
+        self.jobs.append(_ended_job(name, ended))
+        return httpx.Response(200, json={"uri": LINK, "jobArmId": f"{JOBS_PATH}/{name}"})
+
+    def _read_job(self, request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rpartition("/")[2]
+        return httpx.Response(200, json=next(job for job in self.jobs if job["name"] == name))
+
+
+@pytest.mark.asyncio
+async def test_a_site_takes_more_than_50_files_over_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {"owner": "example-team"}
+    sizes: list[int] = []
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(days=2))
+        for number in range(60):
+            result = await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+            assert result["outcome"] == "uploaded"
+            sizes.append(len(site_tags))
+        deletes = [
+            body for body in _patch_bodies(site.routes.site_patch) if body["operation"] == "Delete"
+        ]
+
+    assert max(sizes) == 50
+    assert site.routes.upload.call_count == 60
+    # One owner tag and 60 files need 61 tags: MEHO removed the records of the
+    # eleven oldest jobs, oldest first, and no other tag.
+    assert [next(iter(body["properties"]["tags"].values())) for body in deletes] == [
+        f"job-{number:03d}" for number in range(11)
+    ]
+    assert site_tags["owner"] == "example-team"
+    assert _tag(_other_file(0)) not in site_tags
+    assert site_tags[_tag(_other_file(59))] == "job-059"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_its_record_was_removed_imports_the_file_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {}
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(days=2))
+        for number in range(51):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+        # The record of file 0 was removed to make room for file 50.
+        assert _tag(_other_file(0)) not in site_tags
+        again = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(0)}
+        )
+
+    assert again["outcome"] == "uploaded"
+    assert again["job_name"] == "job-051"
+    assert site.routes.upload.call_count == 52
+
+
+@pytest.mark.asyncio
+async def test_records_of_jobs_that_ended_less_than_a_day_ago_are_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    site_tags: dict[str, str] = {}
+    with respx.mock(assert_all_called=False) as mock:
+        site = _SiteOverTime(mock, site_tags, timedelta(hours=23))
+        for number in range(50):
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(number)}
+            )
+        links_asked = site.routes.import_uri.call_count
+        patches = site.routes.site_patch.call_count
+        with pytest.raises(AzureConflictError) as caught:
+            await _connector().migrate_import_start(
+                operator(), AzureTargetStub(), {**IMPORT_PARAMS, "csv": _other_file(50)}
+            )
+
+    text = f"{caught.value} {caught.value.remediation}"
+    assert "has 50 tags" in text
+    assert "ended at least a day ago" in text
+    assert "azure.migrate.job.list" in text
+    assert len(site_tags) == 50
+    assert site.routes.import_uri.call_count == links_asked
+    assert site.routes.site_patch.call_count == patches  # no tag removed
+    assert site.routes.upload.call_count == 50
+
+
+@pytest.mark.asyncio
+async def test_only_ended_records_are_removed_and_other_tags_stay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(migrate_import, "_utc_now", lambda: _NOW)
+    old = _NOW - timedelta(days=3)
+    site_tags = _full_tags(46)
+    site_tags.update(
+        {
+            "meho-csv-00000000000000a1": "job-running",
+            "meho-csv-00000000000000a2": "job-not-listed",
+            "meho-csv-00000000000000a3": "job-no-end-time",
+            "meho-csv-00000000000000a4": "job-ended-old",
+        }
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        routes = _shared_site(mock, site_tags)
+        routes.job_list.respond(
+            200,
+            json={
+                "value": [
+                    _ended_job("job-running", None, "InProgress"),
+                    _ended_job("job-no-end-time", None),
+                    _ended_job("job-ended-old", old),
+                    # A job that ended long ago but has no MEHO record.
+                    _ended_job("job-of-someone-else", old - timedelta(days=9)),
+                ]
+            },
+        )
+        result = await _connector().migrate_import_start(
+            operator(), AzureTargetStub(), IMPORT_PARAMS
+        )
+
+    assert result["outcome"] == "uploaded"
+    assert _patch_bodies(routes.site_patch) == [
+        _tag_patch("Delete", "meho-csv-00000000000000a4", "job-ended-old"),
+        _tag_patch("Merge", _tag()),
+    ]
+    assert len(site_tags) == 50
+    assert {"meho-csv-00000000000000a1", "meho-csv-00000000000000a2"} <= site_tags.keys()
+
+
 def _state_of(state: str) -> dict[str, Any]:
     return {"name": SITE, "properties": {"provisioningState": state}}
 
@@ -1994,9 +2161,7 @@ async def test_a_pending_add_with_no_link_is_read_until_it_succeeds_before_the_r
 async def test_an_add_still_pending_when_the_wait_is_over_sends_no_remove() -> None:
     with respx.mock(assert_all_called=False) as mock:
         routes = _Group(mock)
-        routes.update.respond(
-            200, headers={"Retry-After": "3600"}, json=_group_state("Updating")
-        )
+        routes.update.respond(200, headers={"Retry-After": "3600"}, json=_group_state("Updating"))
         result = await _connector().migrate_group_update(
             operator(), AzureTargetStub(), {**GROUP_PARAMS, "add": ["m-1"], "remove": ["m-2"]}
         )

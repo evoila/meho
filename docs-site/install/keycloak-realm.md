@@ -1181,6 +1181,12 @@ stream ends at its next session check (at most
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.
 
+A block by a tenant admin holds in that tenant only. A platform admin
+can remove a tenant admin's block on their own login, with a token that
+still works. To stop a platform admin, another platform admin blocks the
+person: that block holds in every tenant, and only another platform
+admin can remove it.
+
 If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login
 ends after a short time without use, and how to fix the realm. MEHO's

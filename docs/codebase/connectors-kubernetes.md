@@ -67,6 +67,11 @@ is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
+The card of a `k8s.apply` also has, for a person only, a short summary
+of each object (`object_summary`, built by `ops_write_apply_summary.py`):
+whether it is new or exists already, which other writers own fields of it,
+and its risky fields after the apply. It is information only; the apply
+waits for approval exactly as before. See `approvals.md`.
 The stored request of a `k8s.apply` of a Secret, or of a manifest with a
 secret-looking value, keeps its manifest only in the encrypted one-time
 handoff of the run, as a credential write does. Such a call needs

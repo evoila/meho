@@ -2805,6 +2805,74 @@ def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
     assert 'data-testid="approval-run-commands"' not in plain
 
 
+def test_modal_summarises_each_object_of_an_apply() -> None:
+    """The card says for each object: new or exists, other writers, risky fields."""
+    summary = [
+        {
+            "api_group": "apps",
+            "kind": "Deployment",
+            "namespace": "prod",
+            "name": "web",
+            "state": "exists",
+            "built_in": True,
+            "cluster_wide": False,
+            "other_writers": [{"manager": "helm", "operation": "Update"}],
+            "risky_fields": ["uses Secret web-creds", "runs as service account web-runner"],
+        },
+        {
+            "api_group": "example.test",
+            "kind": "Widget",
+            "namespace": None,
+            "name": "w1",
+            "state": "new",
+            "built_in": False,
+            "cluster_wide": True,
+            "other_writers": [],
+            "risky_fields": [],
+        },
+    ]
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview": {"dry_run": True, "object_summary": summary},
+            "preview_populated": True,
+        }
+    )
+    block = body.split('data-testid="approval-object-summary"')[1].split("</ul>\n        </div>")[0]
+    assert "apps / Deployment prod/web" in block
+    assert "exists already" in block
+    assert "helm (Update)" in block
+    assert "uses Secret web-creds" in block
+    assert "runs as service account web-runner" in block
+    assert "not a built-in kind" in block
+    assert "cluster-wide" in block
+    assert "It does not change who must approve." in block
+    # The list is shown by its own block, not again as raw JSON in the field table.
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert "object_summary" not in table
+
+
+def test_modal_says_the_summary_could_not_be_made_after_a_failed_dry_run() -> None:
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview_unavailable": True,
+            "preview_error": "dry run refused",
+            "object_summary": [
+                {"summary_unavailable": "The summary of the objects could not be made."}
+            ],
+        }
+    )
+    block = body.split('data-testid="approval-object-summary"')[1]
+    assert "The summary of the objects could not be made." in block
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(

@@ -580,8 +580,11 @@ def register_agent_preview_filter(
 #: Top-level keys of a stored ``proposed_effect`` that only a person reads:
 #: the line of the approval card that says why a credential call waits, and
 #: what each container of a ``k8s.apply`` runs when its dry run failed
-#: (:func:`register_preview_failure_keys`).
-PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
+#: (:func:`register_preview_failure_keys`), and the line that says its
+#: object summary could not be made.
+PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
+    {"credential_wait", "run_commands", "object_summary"}
+)
 
 #: Top-level keys of a stored ``proposed_effect`` that a caller reads only
 #: while a switch is on, each with its env name. A person always reads them:
@@ -1090,6 +1093,7 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         return None
 
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import apply_summaries_var
     from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_apply
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
@@ -1099,16 +1103,27 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     # the preview must never persist, even if the parked call itself was
     # a real apply (dry_run="none").
     preview_params = {**ctx.params, "dry_run": "server"}
-    result = await k8s_apply(
-        ctx.connector_instance,
-        ctx.target,
-        ctx.operator,
-        preview_params,
-    )
-    return {**result, **_k8s_apply_manifest_echo(ctx, result)}
+    # Only the card of a person gets the object summary (one extra read of
+    # each live object). The preview an agent reads has none.
+    summaries: list[dict[str, Any]] | None = None if ctx.agent_preview else []
+    token = apply_summaries_var.set(summaries)
+    try:
+        result = await k8s_apply(
+            ctx.connector_instance,
+            ctx.target,
+            ctx.operator,
+            preview_params,
+        )
+    finally:
+        apply_summaries_var.reset(token)
+    return {**result, **_k8s_apply_manifest_echo(ctx, result, summaries)}
 
 
-def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dict[str, Any]:
+def _k8s_apply_manifest_echo(
+    ctx: PreviewContext,
+    result: dict[str, Any],
+    summaries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """The ``subject`` and ``manifest`` keys the k8s.apply preview adds (#3877).
 
     The dry-run summary names each object but not what the apply sets on
@@ -1118,10 +1133,18 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
     connector applies its size limit after that redaction, so the stored
     echo is what is measured. ``subject`` names the objects for the
     reviewer context. ``run_commands`` names what each container runs, with
-    secret values hidden (``ops_write_preview.apply_run_commands``). Only a
-    person reads it: an agent's own preview has no such key, and the
-    stored request an agent reads leaves it out.
+    secret values hidden (``ops_write_preview.apply_run_commands``).
+    ``object_summary`` has one entry for each object: new or existing, who
+    else owns its fields, and its risky fields
+    (``ops_write_apply_summary``); it is the *summaries* the dry run
+    collected, redacted like the manifest. Only a person reads these two
+    keys: an agent's own preview has none, and the stored request an agent
+    reads leaves them out.
     """
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+        OBJECT_SUMMARY_KEY,
+        SUMMARY_FAILED_TEXT,
+    )
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
         apply_manifest_echo,
@@ -1135,6 +1158,10 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
         run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
         if run_commands:
             echo[RUN_COMMANDS_KEY] = run_commands
+    if summaries is not None:
+        echo[OBJECT_SUMMARY_KEY] = _redact(summaries) or [
+            {"summary_unavailable": SUMMARY_FAILED_TEXT}
+        ]
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject
@@ -1160,22 +1187,29 @@ def _k8s_apply_redactor(
 
 
 def _k8s_apply_failure_keys(ctx: PreviewContext) -> dict[str, Any]:
-    """``run_commands`` for the card of a ``k8s.apply`` whose dry run failed.
+    """``run_commands`` and ``object_summary`` for the card of a ``k8s.apply`` whose dry run failed.
 
     MEHO builds it from the manifest text, the same as on a preview that
     worked (``ops_write_preview.apply_run_commands``). The card still says
     that the preview is not available.
     """
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+        OBJECT_SUMMARY_KEY,
+        SUMMARY_FAILED_TEXT,
+    )
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
         apply_run_commands,
     )
 
+    keys: dict[str, Any] = {OBJECT_SUMMARY_KEY: [{"summary_unavailable": SUMMARY_FAILED_TEXT}]}
     manifest = ctx.params.get("manifest")
     if not isinstance(manifest, str):
-        return {}
+        return keys
     run_commands = apply_run_commands(manifest, redact=_k8s_apply_redactor(ctx))
-    return {RUN_COMMANDS_KEY: run_commands} if run_commands else {}
+    if run_commands:
+        keys[RUN_COMMANDS_KEY] = run_commands
+    return keys
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

@@ -3685,6 +3685,37 @@ each container runs" block under the warning that the preview failed
 preview has no such key, and the stored request it reads (MCP tools and
 the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 
+For a person the `k8s.apply` preview also has `object_summary`: one short
+entry per object of the manifest, built by
+`connectors/kubernetes/ops_write_apply_summary.py`. It is information
+only. It changes no rule: every apply waits as before. Each entry has the
+API group (`core` for the old `v1` kinds), the kind, the namespace and the
+name, and:
+
+- `state`: `new` or `exists`, from one read of the live object. A read that
+  fails gives `unknown` and a `state_note`, never `new`.
+- `other_writers`: the managers in the live object's `managedFields`,
+  without `meho`. `null` when the live object was not read.
+- `risky_fields`: found in the object as the dry run returns it, so they
+  include what the workload already has and the manifest does not send: a
+  Secret object or a reference to one, a service account, a role or role
+  binding, host access (`hostPath`, `hostNetwork`, `hostPID`, `hostIPC`,
+  `hostPort`, a privileged container), and a Service of type `NodePort` or
+  `LoadBalancer` or with external IPs. `null` when the dry run returned no
+  object.
+- `built_in`: `false` when the API group is not one of the Kubernetes
+  groups. The group is always read together with the kind. `cluster_wide`:
+  `true` for a kind that is not in a namespace.
+
+The entries hold names only, never a Secret value, an `env` value or a
+command line, and a name that does not look like a Kubernetes name is not
+shown. The live object is read only for its `managedFields`. When the dry
+run fails, the stored request has a top-level `object_summary` with one
+entry that says the summary could not be made. The console card shows the
+list in a "What each object is" block (`approvals/_modal.html`). An agent
+never reads `object_summary`: its own preview has no such key and makes no
+extra read, and the stored request it reads leaves it out.
+
 ## Credential writes: what the approver sees (#4850)
 
 A credential write is an op that `classify_op` (`broadcast/events.py`)

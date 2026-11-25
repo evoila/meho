@@ -105,6 +105,7 @@ from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
 from meho_backplane.operations._preview import (
     PreviewContext,
@@ -692,7 +693,7 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
 
 
 def _run_commands_shown_to_agents() -> bool:
-    """The ``run_commands`` key of the ``k8s.apply`` preview is for a person only."""
+    """The ``run_commands`` and ``object_summary`` keys of the preview are for a person only."""
     return False
 
 
@@ -702,7 +703,9 @@ def _register_kubernetes_write_preview_builders() -> None:
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
     register_person_only_preview_keys(
-        "k8s.apply", _run_commands_shown_to_agents, frozenset({RUN_COMMANDS_KEY})
+        "k8s.apply",
+        _run_commands_shown_to_agents,
+        frozenset({RUN_COMMANDS_KEY, OBJECT_SUMMARY_KEY}),
     )
 
 

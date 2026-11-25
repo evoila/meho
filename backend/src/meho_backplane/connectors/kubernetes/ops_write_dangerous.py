@@ -81,6 +81,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+    apply_summaries_var,
+    summarize_applied_object,
+)
 from meho_backplane.redaction import get_default_policy, redact
 
 if TYPE_CHECKING:
@@ -435,6 +439,12 @@ async def _apply_one(
             f"returned no resourceVersion -- the object was not persisted (the "
             f"response is indistinguishable from a dry-run preview). Refusing to "
             f"report success for an apply that created nothing."
+        )
+    summaries = apply_summaries_var.get()
+    if dry_run and summaries is not None:
+        # Only the card of a person turns this on (ops_write_apply_summary).
+        summaries.append(
+            await summarize_applied_object(dyn, resource, doc, applied, field_manager=FIELD_MANAGER)
         )
     return {
         "api_version": api_version,

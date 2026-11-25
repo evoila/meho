@@ -61,7 +61,7 @@ _ASSIGNMENT_PATH: Final[str] = "/api/v1/checks/assignment"
 _RESULTS_PATH: Final[str] = "/api/v1/checks/results"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 10.0
 _RETRYABLE_CLIENT_STATUSES: Final[frozenset[int]] = frozenset({401, 403, 408, 429})
-_CODE_PATTERN: Final = re.compile(r"[a-z0-9_.-]{1,64}")
+_CODE_PATTERN: Final = re.compile(r"[a-z0-9_]{1,64}")
 _HTTP_401: Final[int] = 401
 
 

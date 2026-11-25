@@ -812,8 +812,8 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   difference of two clocks that are set by network time. When every result of
   a batch is refused, the answer is a 422 with `detail.code`
   `results_refused` and the same list. The counter rises for a refused result
-  after the rest of the batch is stored, so a batch that is sent again counts
-  it once. A result
+  after the rest of the batch is stored. A refused result is counted once in
+  each MEHO process, however often its batch is sent. A result
   without `produced_at` is stored and not counted (`no_time`): without it
   MEHO cannot tell a new result from a replay. A result at or before
   `runner_produced_at` is dropped (`old`), also after the clean-up job
@@ -850,15 +850,24 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   (`runner/spool.py::ResultSpool.set_aside`), together with the HTTP status,
   the short code of the answer and the time (never the free text of the
   answer), and goes on with the next batch. Nothing sends a set-aside batch
-  again. In the same tick, also while other batches wait in the retry folder,
+  again. The `set-aside` folder keeps at most `spool_max_files` batches:
+  before one more is set aside past the limit, the runner removes the oldest
+  set-aside batch and logs `runner_set_aside_overflow_drop` with its file
+  name, status and code. In the same tick, also while other batches wait in the retry folder,
   the runner posts a batch without results that carries
   `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
   `set_aside_last_at`. When that post fails, the next tick sends it again.
   `runner_checks.record_set_aside` shows each such check
   as `unknown` with the reason `result_refused`, the status and the code,
   and stores the count and the time on the runner's assignment row
-  (`set_aside_count`, `set_aside_last_at`). The console page `/ui/runners`
-  has a "Set aside" column with both.
+  (`set_aside_count`, `set_aside_last_at`). It keeps only short, fixed
+  forms: a `result_uid` or `code` must be 1 to 64 lowercase letters, digits
+  and underscores (the runner keeps a code in the same form), and a status
+  must be 400 to 499. A notice with another `result_uid` is skipped, another
+  code is stored as no code, another status as 0, and the post still answers
+  200. A notice without `produced_at` never replaces a counted result. With
+  `RUNNER_CHECKS_ENABLED` on, the console page `/ui/runners` has a "Set
+  aside" column with both; with the switch off it has no such column.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
   `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
   result is added after its transaction commits, so a result that rolls

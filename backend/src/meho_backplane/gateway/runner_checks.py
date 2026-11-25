@@ -16,8 +16,8 @@ Steps for one result batch (see :func:`screen_batch` and
    and names it in the answer. When every result of a batch is refused, the
    answer is a 422, so the runner knows the batch was refused. The counter
    ``runner_check_results_total`` rises for a refused result once the rest
-   of the batch has been stored, so a batch that is sent again counts it
-   once.
+   of the batch has been stored. A refused result is counted once in each
+   MEHO process, however often its batch is sent.
 2. Cap the size of each answer and of the whole batch. An answer over the cap
    is stored without its payload and the Sensor reads ``unknown`` with the
    reason ``answer too large``.
@@ -59,6 +59,7 @@ then sets the state of its Sensors to ``unknown``.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
@@ -127,7 +128,7 @@ _ANSWER_TOO_LARGE = "answer too large"
 _FUTURE_TIME = "future_time"
 
 #: How many refused results this process remembers, so that one refused
-#: result is counted once however often its batch is sent.
+#: result is counted once in this MEHO process however often its batch is sent.
 _REFUSED_SEEN_MAX = 10_000
 _refused_seen: OrderedDict[tuple[uuid.UUID, str, str], None] = OrderedDict()
 
@@ -696,6 +697,23 @@ async def mark_left_off_sensors(
 
 _RESULT_REFUSED = "result_refused"
 
+#: The form of a result id and a code in a set-aside notice: 1 to 64 lowercase
+#: letters, digits and underscores. The runner keeps a code in the same form.
+_NOTICE_ID = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def _kept_notice(notice: SetAsideNotice) -> SetAsideNotice | None:
+    """*notice* with only the values MEHO keeps, or ``None`` to skip it.
+
+    A notice whose ``result_uid`` is not in the short form is skipped. A code
+    in another form is kept as no code, and a status outside 400 to 499 as 0.
+    """
+    if not _NOTICE_ID.fullmatch(notice.result_uid):
+        return None
+    code = notice.code if notice.code and _NOTICE_ID.fullmatch(notice.code) else None
+    status = notice.status if 400 <= notice.status <= 499 else 0
+    return notice.model_copy(update={"code": code, "status": status})
+
 
 async def record_set_aside(
     *,
@@ -709,10 +727,13 @@ async def record_set_aside(
 
     Each notice names a result of a batch that MEHO refused on every try. The
     check of that result reads ``unknown`` with the reason ``result_refused``,
-    the HTTP status and the code (no free text). A check that already has a
-    newer counted result of the runner, or already shows this refusal, is not
-    written again. The count and the time of the newest set-aside batch are
-    stored on the runner's assignment row. A failure is logged and answers the
+    the HTTP status and the code (no free text). Only short, fixed forms of
+    these values are kept (:func:`_kept_notice`); another value never makes
+    MEHO refuse the post. A check that already has a newer counted result of
+    the runner, or already shows this refusal, is not written again. A notice
+    without a runner time never replaces a counted result. The count and the
+    time of the newest set-aside batch are stored on the runner's assignment
+    row. A failure is logged and answers the
     runner like a batch without a notice.
     """
     try:
@@ -731,7 +752,8 @@ async def record_set_aside(
             if row is not None and total is not None:
                 row.set_aside_count = max(total, 0)
                 row.set_aside_last_at = last_at
-            for notice in sorted(notices, key=lambda n: n.check_ref):
+            kept = [n for n in map(_kept_notice, notices) if n is not None]
+            for notice in sorted(kept, key=lambda n: n.check_ref):
                 sensor = await _runner_sensor_by_ref(session, tenant_id, runner_name, notice)
                 if sensor is None or _refusal_shown(sensor, notice):
                     continue
@@ -774,18 +796,22 @@ async def _runner_sensor_by_ref(
 
 
 def _refusal_shown(sensor: Sensor, notice: SetAsideNotice) -> bool:
-    """True when *sensor* already shows this refusal, or has a newer result of the runner."""
+    """True when *sensor* already shows this refusal, or has a newer result of the runner.
+
+    A notice without a runner time cannot be newer, so it never replaces a
+    counted result.
+    """
     evidence = sensor.last_evidence or {}
     if (
         evidence.get("reason") == _RESULT_REFUSED
         and evidence.get("result_uid") == notice.result_uid
     ):
         return True
-    return (
-        notice.produced_at is not None
-        and sensor.runner_produced_at is not None
-        and _as_utc(sensor.runner_produced_at) >= _as_utc(notice.produced_at)
-    )
+    if sensor.runner_produced_at is None:
+        return False
+    if notice.produced_at is None:
+        return True
+    return _as_utc(sensor.runner_produced_at) >= _as_utc(notice.produced_at)
 
 
 async def after_commit(tenant_id: uuid.UUID, counted: list[CountedSensor]) -> None:

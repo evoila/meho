@@ -350,6 +350,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
 		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
 		fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
+		fmt.Fprintf(stdoutW, "  Approvals: %s\n", approvalsOther)
 		return nil
 	}
 
@@ -622,7 +623,9 @@ func formatReadiness(r api.ReadinessStatus) string {
 // approve" in docs-site/guides/approvals-and-break-glass.md.
 const (
 	approvalsAdmin = "you may approve your own changes " +
-		"(a change of rights only with a click in the web console)"
+		"(a change of rights only with a click in the web console; " +
+		"in MEHO's own login realm a change of rights needs a platform admin, " +
+		"and one you sent with a token needs a second person who is a platform admin)"
 	approvalsOperator = "a second person approves your changes; you may approve " +
 		"your own `caution` change that waited because you sent it with a token, " +
 		"with a click in the web console; a change of rights is not covered"

@@ -317,7 +317,7 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		want    string
 	}{
 		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced",
-			"you may approve your own changes (a change of rights only with a click in the web console)"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, and one you sent with a token needs a second person who is a platform admin)"},
 		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
 			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
 		{"reader", withRole(api.TenantRoleReadOnly), "four_eyes_enforced",
@@ -326,7 +326,7 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		{"empty role", withRole(api.TenantRole("")), "four_eyes_enforced", neutral},
 		{"no current tenant", api.OperatorIdentity{Sub: "s", TenantRole: api.TenantRoleTenantAdmin}, "four_eyes_enforced", neutral},
 		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass",
-			"you may approve your own changes (a change of rights only with a click in the web console); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, and one you sent with a token needs a second person who is a platform admin); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
 		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
 			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
 		{"reader, break-glass", withRole(api.TenantRoleReadOnly), "single_operator_break_glass",
@@ -507,7 +507,8 @@ func TestExitCodes(t *testing.T) {
 
 // TestRenderHumanHealth_Tenants: the person's tenants are listed with
 // the role in each, and a login with several tenants that chose none
-// gets the list, a hint and the DB line only (#5239).
+// gets the list, a hint, the DB line and the neutral approvals line only
+// (#5239). The answer carries no approval settings in that case.
 func TestRenderHumanHealth_Tenants(t *testing.T) {
 	tenantA := api.TenantEntry{Name: "lab-a", TenantRole: api.TenantRoleReadOnly}
 	tenantB := api.TenantEntry{Name: "lab-b", TenantRole: api.TenantRoleOperator}
@@ -528,6 +529,7 @@ func TestRenderHumanHealth_Tenants(t *testing.T) {
 		"  Tenants:\n    lab-a  read_only\n    lab-b  operator\n",
 		"No tenant chosen. Choose one with `meho tenants use <name>`.",
 		"DB:    migrated",
+		"  Approvals: who may approve depends on your group in the current tenant (see Who may approve in the approvals guide)\n",
 	} {
 		if !strings.Contains(unchosen, want) {
 			t.Errorf("missing %q in output:\n%s", want, unchosen)

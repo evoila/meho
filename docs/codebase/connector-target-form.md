@@ -25,7 +25,9 @@ declared on the shared `SshConnector` class.
 ## Key types
 
 All in `backend/src/meho_backplane/connectors/target_form.py`. They are
-frozen dataclasses.
+frozen dataclasses. A connector package imports `TargetField`,
+`CredentialField` and `CredentialWay` from `meho_connector_kit` (kit 1.6 or
+higher).
 
 - `TargetField`: `key`, `label`, `help`, `required`, `kind` (`text`,
   `number`, `boolean` or `choice`), `choices`, `default`.
@@ -50,8 +52,11 @@ map.
    target field key twice, a `choice` with no choices, a port outside 1 to
    65535.
 3. For a class with a `test_operation` it reads the built-in operation row of
-   the same product, version and implementation. The row must exist, have risk
-   level `safe` and have no required input.
+   the same product, version and implementation. The row must exist and have
+   risk level `safe`. A call with no input (`{}`) must pass the same parameter
+   check a real call runs: the schema as calls see it (with its `oneOf` and
+   `anyOf` rules), checked by `validate_params`, then the op's own params
+   check. So a read that needs one of two inputs fails the start too.
 4. A failure raises `ConnectorDeclarationError`. The start fails and the
    transaction rolls back, like any other start-up registration failure.
 
@@ -59,19 +64,29 @@ The route `GET /api/v1/connectors/target-form?product=<product>`
 (`backend/src/meho_backplane/api/v1/connectors_target_form.py`) returns the
 declarations of every class of one product, each with its `impl_id`, version
 and version range. Role: operator. It answers 404 with a plain message for an
-unknown product. It holds names and labels only. It never reads the secret
+unknown product. The caller sees every hand-written class, because it is
+installed with MEHO. A class made by an import counts only when the caller may
+see that connector (`connector_triples_visible_to` in
+`operations/_lookup.py`): the import is built in, or it belongs to the
+caller's tenant. A connector that another tenant imported answers 404. It holds names and labels only. It never reads the secret
 store. The router is included before the `/{connector_id}` routes of the
 ingest router, so `target-form` is not read as a connector id.
 
 ## Dependencies
 
-- `connectors/registry.py` for the registered classes.
+- `connectors/registry.py` for the registered classes
+  (`connectors_for_tenant` for the route).
+- `operations/_validate.py` and `operations/switch_params.py` for the
+  parameter check of the test read.
 - The `endpoint_descriptor` rows written by the typed-operation registrars.
 - `cli/api/openapi.json` and the generated CLI client change with the route.
 
 ## Writing a declaration
 
 ```python
+from meho_connector_kit import Connector, CredentialField, CredentialWay
+
+
 class MyConnector(Connector):
     product = "my-product"
     credential_ways = (

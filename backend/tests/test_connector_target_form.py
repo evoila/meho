@@ -8,11 +8,14 @@ Covers:
 * a class that declares nothing behaves as before;
 * the shape check of a declaration (blank name, duplicate name, duplicate way
   key, and the other broken cases);
-* the check of ``test_operation`` against the operation rows;
+* the check of ``test_operation`` against the operation rows, with the same
+  parameter check a call runs (a ``oneOf`` rule counts);
 * the real Harbor, Linux and Kubernetes declarations pass the start check;
+* a declaration built only from ``meho_connector_kit`` passes;
 * ``GET /api/v1/connectors/target-form``: the answers for Harbor and Linux,
   404 for an unknown product, 403 for the read-only role, two classes of one
-  product, and no secret store call.
+  product, 404 for a connector another tenant imported, and no secret store
+  call.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors import registry as connector_registry
+from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
 from meho_backplane.connectors.target_form import (
     ConnectorDeclarationError,
     CredentialField,
@@ -160,6 +164,44 @@ def test_a_broken_declaration_names_the_connector(attrs: dict[str, Any], needle:
 # ---------------------------------------------------------------------------
 
 
+def test_a_declaration_from_the_kit_alone_passes() -> None:
+    """A connector package builds its declaration with kit names only."""
+    import meho_connector_kit as kit
+
+    class KitConnector(kit.Connector):
+        product = "kitfake"
+        version = "1.x"
+        impl_id = "kitfake-rest"
+        default_port = 8443
+        target_fields = (
+            kit.TargetField(key="region", label="Region", kind="choice", choices=("eu", "us")),
+        )
+        credential_ways = (
+            kit.CredentialWay(
+                key="basic",
+                label="User name and password",
+                fields=(
+                    kit.CredentialField(name="username", label="User name", hidden=False),
+                    kit.CredentialField(name="password", label="Password"),
+                ),
+            ),
+        )
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> Any:
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> Any:
+            raise NotImplementedError
+
+    check_connector_declaration(KitConnector)
+    assert kit.TargetField is TargetField
+    assert kit.CredentialWay is CredentialWay
+    assert kit.CredentialField is CredentialField
+
+
+# ---------------------------------------------------------------------------
+
+
 async def _seed_op(op_id: str, *, safety: str = "safe", required: list[str] | None = None) -> None:
     schema: dict[str, Any] = {"type": "object", "properties": {}}
     if required:
@@ -234,6 +276,33 @@ async def test_a_test_operation_that_needs_input_stops_the_start(
 
 
 @pytest.mark.asyncio
+async def test_a_test_operation_that_needs_one_of_two_inputs_stops_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No top-level ``required``, but a call with no input fails the ``oneOf``."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            EndpointDescriptor(
+                tenant_id=None,
+                product="formfake",
+                version="1.x",
+                impl_id="formfake-rest",
+                op_id="formfake.item.list",
+                source_kind="typed",
+                parameter_schema={
+                    "type": "object",
+                    "properties": {"scope": {"type": "string"}, "all": {"const": True}},
+                    "oneOf": [{"required": ["scope"]}, {"required": ["all"]}],
+                },
+                safety_level="safe",
+                is_enabled=True,
+            )
+        )
+    with pytest.raises(ConnectorDeclarationError, match=r"FakeConnector.*needs input"):
+        await _check_with(monkeypatch, _make(test_operation="formfake.item.list"))
+
+
+@pytest.mark.asyncio
 async def test_a_test_operation_of_another_connector_does_not_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,6 +336,24 @@ async def test_the_shipped_connectors_pass_the_start_check() -> None:
         await assert_connector_declarations_valid(session)
 
 
+@pytest.mark.asyncio
+async def test_a_pod_list_test_read_stops_the_start_and_names_the_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``k8s.pod.list`` needs a namespace or a request for all namespaces."""
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    await run_typed_op_registrars(embedding_service=service)
+    monkeypatch.setattr(KubernetesConnector, "test_operation", "k8s.pod.list")
+    async with get_sessionmaker()() as session:
+        with pytest.raises(
+            ConnectorDeclarationError, match=r"KubernetesConnector.*'k8s.pod.list' needs input"
+        ):
+            await assert_connector_declarations_valid(session)
+
+
 # ---------------------------------------------------------------------------
 # The route
 # ---------------------------------------------------------------------------
@@ -295,8 +382,15 @@ def client() -> Iterator[TestClient]:
     yield TestClient(app)
 
 
-def _get(client: TestClient, product: str, *, role: str = "operator") -> Any:
-    token = mint_token(_KEY, sub=f"op-{role}", tenant_id=str(uuid.uuid4()), tenant_role=role)
+def _get(
+    client: TestClient,
+    product: str,
+    *,
+    role: str = "operator",
+    tenant_id: uuid.UUID | None = None,
+) -> Any:
+    tenant = str(tenant_id or uuid.uuid4())
+    token = mint_token(_KEY, sub=f"op-{role}", tenant_id=tenant, tenant_role=role)
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(_KEY))
         return client.get(
@@ -388,6 +482,41 @@ def test_two_classes_of_one_product_are_both_listed(
         ("formfake-b", "2.x"),
     ]
     assert classes[1]["supported_version_range"] == ">=2,<3"
+
+
+@pytest.mark.asyncio
+async def test_a_connector_another_tenant_imported_is_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import registers a class for every tenant; only its own tenant sees it."""
+    owner, other = uuid.uuid4(), uuid.uuid4()
+    shim = type(
+        "AutoShim_privfake",
+        (_Base,),
+        {"product": "privfake", "impl_id": "privfake-rest", "_shim_kind": "bare"},
+    )
+    monkeypatch.setitem(connector_registry._REGISTRY_V2, ("privfake", "1.x", "privfake-rest"), shim)
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            EndpointDescriptor(
+                tenant_id=owner,
+                product="privfake",
+                version="1.x",
+                impl_id="privfake-rest",
+                op_id="privfake.item.list",
+                source_kind="ingested",
+                parameter_schema={"type": "object"},
+                safety_level="safe",
+                is_enabled=True,
+            )
+        )
+    mine = _get(client, "privfake", tenant_id=owner)
+    assert mine.status_code == 200, mine.text
+    assert [c["impl_id"] for c in mine.json()["classes"]] == ["privfake-rest"]
+    theirs = _get(client, "privfake", tenant_id=other)
+    assert theirs.status_code == 404
+    assert theirs.json()["detail"] == "No connector serves the product 'privfake'."
+    assert _get(client, "harbor", tenant_id=other).status_code == 200
 
 
 def test_the_route_never_calls_the_secret_store(

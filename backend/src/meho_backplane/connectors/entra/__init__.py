@@ -31,6 +31,7 @@ from meho_backplane.connectors.entra.connector import EntraConnector
 from meho_backplane.connectors.entra.session import (
     EntraCredentials,
     EntraCredentialsLoader,
+    EntraLogin,
     EntraTargetLike,
     load_credentials_from_vault,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "EntraConnector",
     "EntraCredentials",
     "EntraCredentialsLoader",
+    "EntraLogin",
     "EntraTargetLike",
     "EntraTypedOp",
     "load_credentials_from_vault",

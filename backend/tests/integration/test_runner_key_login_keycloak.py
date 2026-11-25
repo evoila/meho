@@ -9,8 +9,8 @@ sends its public key with the code to ``POST /api/v1/runner-principals/enroll``
 (the real route, which puts the key on the client). Then the runner signs its
 own login request (signed JWT client login), gets a token that the production
 JWT chain accepts, and gets the second token from its renew timer: a test
-clock moves to 5 seconds before the first token ends. After the client is disabled and deleted, no new
-token comes, and a key write finds no client.
+clock moves to 5 seconds before the first token ends. After the client is
+disabled and deleted, no new token comes, and a key write finds no client.
 
 Skips without ``MEHO_TEST_KEYCLOAK_IMAGE`` or Docker, like the other live
 Keycloak tests.

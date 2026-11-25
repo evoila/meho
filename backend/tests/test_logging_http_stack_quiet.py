@@ -13,10 +13,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
+import requests
 
-from meho_backplane.logging import configure_logging
+from meho_backplane.logging import _HTTP_STACK_LOGGERS, configure_logging
 
-_STACK_LOGGERS = ("httpcore", "httpcore.http11", "httpcore.connection", "h2", "hpack")
+_STACK_LOGGERS = (
+    *_HTTP_STACK_LOGGERS,
+    "httpcore.http11",
+    "httpcore.connection",
+    "urllib3.connectionpool",
+    "botocore.endpoint",
+    "google.auth.transport.requests",
+)
 
 
 class _ListHandler(logging.Handler):
@@ -68,15 +76,21 @@ def captured() -> Iterator[_ListHandler]:
     handler = _ListHandler()
     root = logging.getLogger()
     saved_root = root.level
-    saved = {n: logging.getLogger(n).level for n in ("httpx", *_STACK_LOGGERS)}
+    names = ("httpx", *_STACK_LOGGERS)
+    saved = {n: (logging.getLogger(n).level, logging.getLogger(n).disabled) for n in names}
+    # An earlier logging.config call in the same test process can disable these
+    # loggers; turn them on so the test sees what the level alone does.
+    for n in names:
+        logging.getLogger(n).disabled = False
     root.addHandler(handler)
     try:
         yield handler
     finally:
         root.removeHandler(handler)
         root.setLevel(saved_root)
-        for n, lvl in saved.items():
+        for n, (lvl, disabled) in saved.items():
             logging.getLogger(n).setLevel(lvl)
+            logging.getLogger(n).disabled = disabled
 
 
 @pytest.mark.parametrize("level", [logging.DEBUG, logging.INFO])
@@ -94,10 +108,27 @@ def test_real_call_logs_no_response_value(
         assert value not in text
 
 
+@pytest.mark.parametrize("level", [logging.DEBUG, logging.INFO])
+def test_real_requests_call_logs_no_path_or_query(
+    level: int, server: str, values: dict[str, str], captured: _ListHandler
+) -> None:
+    configure_logging(level)
+    response = requests.get(
+        f"{server}/{values['path']}?z={values['query']}", allow_redirects=False, timeout=5
+    )
+    assert response.status_code == 302
+    text = "\n".join(captured.lines)
+    for value in values.values():
+        assert value not in text
+
+
 @pytest.mark.parametrize("name", _STACK_LOGGERS)
-def test_stack_logger_holds_warning_when_root_is_debug(name: str, captured: _ListHandler) -> None:
+def test_stack_logger_drops_debug_line_when_root_is_debug(
+    name: str, values: dict[str, str], captured: _ListHandler
+) -> None:
     configure_logging(logging.DEBUG)
     logger = logging.getLogger(name)
     assert logger.getEffectiveLevel() == logging.WARNING
-    assert not logger.isEnabledFor(logging.DEBUG)
     assert not logger.isEnabledFor(logging.INFO)
+    logger.debug("GET /%s?k=%s", values["path"], values["query"])
+    assert not any(values["path"] in line for line in captured.lines)

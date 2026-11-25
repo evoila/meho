@@ -992,7 +992,7 @@ PYTHONPATH-leak imports.
 
 ### Log levels and HTTP calls
 
-At INFO, MEHO writes one line per connector HTTP call with the method, the scheme and host, and the status. At DEBUG the lines are the same: `configure_logging()` holds the `httpcore`, `h2` and `hpack` loggers at WARNING, whatever the root level is (the loop over `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`). MEHO never writes a response header value, a redirect address, a query or a path beyond the host name into a log line, at any level. `tests/test_logging_http_stack_quiet.py` proves it with a real HTTP call to a local server at DEBUG and INFO.
+At INFO, MEHO writes one line per httpx call with the method, the scheme and host, and the status. At DEBUG this line stays the same. The HTTP client libraries also write their own trace lines at DEBUG, with header values, paths, queries or bodies. `configure_logging()` holds their loggers at WARNING, whatever the root level is: `httpcore`, `h2` and `hpack` (below httpx), `urllib3` (below `requests` and the Vault client `hvac`), `botocore`, `aiohttp.client`, `kubernetes_asyncio.client.rest` and `google.auth.transport`. The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. `tests/test_logging_http_stack_quiet.py` makes real calls with httpx and with `requests` to a local server at DEBUG and INFO, and checks that no header value, path or query of these calls reaches a log line. It also checks that a DEBUG line of each listed logger is dropped.
 
 ## Control flow
 

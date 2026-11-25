@@ -25,10 +25,13 @@ a credential (a vCenter download URL, a pre-signed URL, a token in the
 query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
 its scheme and host before the bridge writes it.
 
-The HTTP stack below httpx (``httpcore``, ``h2``, ``hpack``) writes the
-response header lines of every call at DEBUG. :func:`_bridge_stdlib_logging`
-holds these three loggers at WARNING, whatever the root level is, so no
-response header value, redirect address or query reaches a log line.
+The HTTP client libraries that MEHO uses write trace lines for each call
+at DEBUG: header lines (``httpcore``, ``h2``, ``hpack``), the path and the
+query (``urllib3``, used by ``requests`` and ``hvac``), the full request
+(``botocore``) and the response body (``kubernetes_asyncio.client.rest``).
+:func:`_bridge_stdlib_logging` holds the loggers in
+:data:`_HTTP_STACK_LOGGERS` at WARNING, whatever the root level is, so
+these trace lines never reach a log line.
 
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
@@ -54,9 +57,18 @@ from structlog.tracebacks import ExceptionDictTransformer
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
 
 
-#: Loggers of the HTTP stack below httpx. Their DEBUG lines hold response
-#: header names and values, so they stay at WARNING at every root level.
-_HTTP_STACK_LOGGERS = ("httpcore", "h2", "hpack")
+#: Loggers of the HTTP client libraries. Their DEBUG lines hold header
+#: values, paths, queries or bodies, so they stay at WARNING at every root level.
+_HTTP_STACK_LOGGERS = (
+    "httpcore",
+    "h2",
+    "hpack",
+    "urllib3",
+    "botocore",
+    "aiohttp.client",
+    "kubernetes_asyncio.client.rest",
+    "google.auth.transport",
+)
 
 
 class _HttpxUrlFilter(logging.Filter):

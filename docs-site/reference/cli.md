@@ -4603,7 +4603,7 @@ meho runner-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
-- `--json` — emit raw RunnerPrincipalRead JSON instead of the human summary
+- `--json` — emit raw JSON instead of the human summary; it holds the runner and its one-time enrollment code
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
 
 ### `meho runner-principal revoke`

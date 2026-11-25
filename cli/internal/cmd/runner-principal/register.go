@@ -56,7 +56,7 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ownerSub, "owner-sub", "",
 		"OIDC sub of the kill-switch owner (defaults to the caller's sub)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw RunnerPrincipalRead JSON instead of the human summary")
+		"emit raw JSON instead of the human summary; it holds the runner and its one-time enrollment code")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd

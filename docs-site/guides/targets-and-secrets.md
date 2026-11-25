@@ -307,14 +307,16 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
     #   secret_ref:        tenants/4f6f6f6f-.../lab-vcenter
     ```
 
-2. Make an empty file that only you can read:
+2. Make a new, empty file that only you can read:
 
     ```bash
-    install -m 600 /dev/null creds.json
+    CREDS="$(mktemp)"
     ```
 
-    Then open `creds.json` in an editor and write the credential. The
-    password stays out of your shell history:
+    `mktemp` always makes a new file with a new name, readable only by
+    you. It never reuses an old file. Then open the file `$CREDS` in an
+    editor and write the credential. The password stays out of your shell
+    history:
 
     ```json
     {"username": "svc-meho", "password": "<password>"}
@@ -325,9 +327,9 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
 3. Send it. Use the mount `secret` and the `secret_ref` from step 1:
 
     ```bash
-    meho vault kv put secret tenants/4f6f6f6f-.../lab-vcenter --data @creds.json
+    meho vault kv put secret tenants/4f6f6f6f-.../lab-vcenter --data @"$CREDS"
     # → status: awaiting_approval
-    #   approval_request_id: 4b1c…
+    #   approval id: 4b1c… — inspect with: meho approvals show 4b1c…
     ```
 
     You need no `--target` for this. MEHO logs in to Vault with your own
@@ -336,14 +338,25 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
     itself. If MEHO refuses the path, check that the mount is `secret` and
     that the path is the `secret_ref` from step 1.
 
-4. A person approves the request. Who may do it is on the page
-   [Who may approve](approvals-and-break-glass.md#who-may-approve).
-   In short: a member of `MEHO-Admins` or `MEHO-Operators` may approve
-   your request. If you are the only admin, you may approve your own with
-   a click in the web console, or on the command line after a fresh
-   sign-in. See
-   [Approve on the command line](approvals-and-break-glass.md#approve-on-the-command-line).
-   On the command line, use the `approval_request_id` from step 3:
+4. A person approves the request. When they approve, MEHO runs the
+   write with **the approver's** Vault rights, not yours. MEHO also
+   checks your own write rights before the request waits. So both of
+   you need the right to write the exact path from step 1.
+
+    - **On the built-in OpenBao (the default install):** a tenant
+      operator (`MEHO-Operators`) may write only under
+      `tenants/<tenant-id>/rotation/`. They cannot write the target's
+      path. So use a tenant admin (`MEHO-Admins`) for both steps: an
+      admin sends the request, and an admin approves it. If you are the
+      only admin, you may approve your own request with a click in the
+      web console, or on the command line after a fresh sign-in. See
+      [Approve on the command line](approvals-and-break-glass.md#approve-on-the-command-line).
+    - **On your own Vault:** the Vault policies of both people must allow
+      a write on the exact path. MEHO's own rules on who may approve
+      still hold: see
+      [Who may approve](approvals-and-break-glass.md#who-may-approve).
+
+    On the command line, use the approval id from step 3:
 
     ```bash
     meho approvals approve 4b1c…
@@ -354,7 +367,7 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
 5. Delete the file after the write is done:
 
     ```bash
-    rm creds.json
+    rm -f "$CREDS"
     ```
 
     If the request was rejected, nothing was stored. Delete the file
@@ -402,12 +415,13 @@ without printing it:
 
 ```bash
 # Kubernetes example — one field, whole kubeconfig as the value:
-# The subshell makes creds.json readable only by you.
-(umask 077; python3 -c 'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))' \
-  rke2-kubeconfig.yaml > creds.json)
-meho vault kv put secret tenants/<tenant-id>/lab-rke2 --data @creds.json
+# mktemp makes a new file that only you can read.
+CREDS="$(mktemp)"
+python3 -c 'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))' \
+  rke2-kubeconfig.yaml > "$CREDS"
+meho vault kv put secret tenants/<tenant-id>/lab-rke2 --data @"$CREDS"
 # After the request is approved and the write is done:
-rm creds.json
+rm -f "$CREDS"
 ```
 
 ### Google Secret Manager (`credentialBackend: gsm`)

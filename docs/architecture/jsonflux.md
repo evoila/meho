@@ -706,6 +706,14 @@ dict / list) is skipped with a warning — copying an unbounded vendor
 object inline would defeat the reduction the hint rides on. `None`
 values are preserved (shape stability across poll states).
 
+A connector can also name fields that every summary of its product keeps
+whole, for a list, a document and an answer over the admission limit
+(`operations/required_fields.py`). The dispatcher passes the names to the
+reducer under `required_fields`. They are not in `llm_instructions`, so the
+operation detail does not show them and an admin's edit does not remove
+them. Keycloak uses it for `managed_realm` while `KEYCLOAK_ANSWER_REALM` is
+on.
+
 Since #3633 the hint is no longer the only way. Without a hint, a
 non-credential op keeps its scalar siblings by default (bounded to 32
 keys and 1 KB of JSON text in total, and no single value over 512 bytes;

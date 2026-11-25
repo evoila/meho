@@ -52,7 +52,7 @@ The machine also needs:
 You also need a computer on the management network with a browser:
 Chrome 111, Safari 16.4 or Firefox 128, or newer.
 
-**Plan for two admins.** A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
+**Plan for a second platform admin.** An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin).
 
 MEHO runs on your management network only, never on the internet. Users
 reach it on ports 80 and 443 from the management network. MEHO holds the

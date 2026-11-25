@@ -16,13 +16,15 @@ Exit codes:
 * ``0`` — clean shutdown (SIGTERM/SIGINT cancelled the loop and it
   unwound), or an ordinary keyboard interrupt.
 * ``1`` — configuration error (a required ``MEHO_RUNNER_*`` var is
-  missing or malformed); the offending variable is named on stderr.
+  missing or malformed), or the runner could not enroll its key; the
+  reason is on stderr.
 """
 
 from __future__ import annotations
 
 import sys
 
+from meho_backplane.runner.login import RunnerLoginError
 from meho_backplane.runner.loop import run_runner
 from meho_backplane.runner.settings import RunnerConfigError
 
@@ -35,6 +37,9 @@ def main() -> int:
         run_runner()
     except RunnerConfigError as exc:
         print(f"runner_config_error: {exc}", file=sys.stderr)
+        return 1
+    except RunnerLoginError as exc:
+        print(f"runner_login_error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 0

@@ -217,6 +217,7 @@ func printClientList(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  %-30s %-8s %-7s %s\n", "CLIENT_ID", "ENABLED", "PUBLIC", "INTERNAL_ID")
 	for _, row := range rows {
 		clientID := truncate(stringField(row, "clientId"), 30)
@@ -305,6 +306,7 @@ func printClientGet(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  clientId:      %s\n", stringField(client, "clientId"))
 	fmt.Fprintf(w, "  id:            %s\n", stringField(client, "id"))
 	fmt.Fprintf(w, "  enabled:       %t\n", boolField(client, "enabled"))

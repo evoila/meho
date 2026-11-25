@@ -241,7 +241,13 @@ target 5.1 explicitly — the cmdlet surface is stable across Windows Server
     when that preview builds one; otherwise `plan_shown` is `false`.
     Without its own safe preview, a destructive one shows the redacted
     params and a `preview_hash`; any other stays `unavailable`.
-    `guest.program.run` has none of its own, so it stays `unavailable`.
+    `guest.program.run` has its own safe preview in the VMware connector
+    package. With the switch off (the default) it stays `unavailable`.
+    With the switch on, `preview_operation` answers `ok` with a
+    `preview_hash` and a plan. The plan names the VM, the program path,
+    the size of the arguments and the names of the environment variables.
+    It never shows an argument value or the value of an environment
+    variable.
 
 ## Safety tiers of the write operations
 

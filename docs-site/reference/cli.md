@@ -959,6 +959,8 @@ meho audit replay <session-id> [flags]
 
 Fetch a single audit row by id
 
+The summary prints `secret_read_as` when the row has it. It is the id of the login that the secret store accepted when the secret this call used was read. That read can be in this call, or in an earlier call when the call used a login MEHO kept in memory. So a value does not prove that this call read the store again. It can also be one of three fixed texts: `meho` (the store saw MEHO's own identity), `check-runner` (the check runner read it, and its login has no id), or `kept-login:reader-unknown` (the call used a login MEHO kept in memory, and it is not known whose login read it). The line is missing when no login read a secret for this call. The backplane sends the field only while the switch `AUDIT_SECRET_READ_AS` is on (off by default).
+
 ```
 meho audit show <audit-id> [flags]
 ```
@@ -3463,7 +3465,7 @@ meho keycloak realm create [flags]
 
 #### `meho keycloak realm delete`
 
-Delete a whole Keycloak realm (destructive, a second person must approve)
+Delete a whole Keycloak realm (destructive, approval cannot be turned off)
 
 ```
 meho keycloak realm delete [flags]
@@ -3472,7 +3474,7 @@ meho keycloak realm delete [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
-- `--realm` — the name of the realm to delete (required)
+- `--realm` — the name of the realm to delete: the target's managed realm (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -3497,7 +3499,7 @@ meho keycloak realm update [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
-- `--realm` — realm to update (defaults to the target's managed realm)
+- `--realm` — realm to update: must be the target's managed realm (the default); another realm is refused
 - `--representation-file`, `-f` — path to a JSON file with the partial RealmRepresentation body (required)
 - `--target` — target slug to dispatch against (required)
 
@@ -4333,7 +4335,7 @@ meho principal blocked [flags]
 
 ### `meho principal unblock`
 
-Unblock a person in MEHO (tenant_admin)
+Unblock a person in MEHO (tenant_admin; a platform admin for their own block)
 
 ```
 meho principal unblock <sub> [flags]
@@ -4341,6 +4343,7 @@ meho principal unblock <sub> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the block is removed (required on your own login; kept in the audit log)
 
 ## `meho promote`
 
@@ -4594,14 +4597,14 @@ meho runner-principal list [flags]
 
 ### `meho runner-principal register`
 
-Register a new runner principal (tenant_admin)
+Register a new runner principal (a person with tenant_admin)
 
 ```
 meho runner-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
-- `--json` — emit raw RunnerPrincipalRead JSON instead of the human summary
+- `--json` — emit raw JSON instead of the human summary; it holds the runner and its one-time enrollment code
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
 
 ### `meho runner-principal revoke`
@@ -5409,6 +5412,18 @@ meho targets list [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max targets per page (1..500, server default 100 when omitted)
 - `--product`, `-p` — filter by product slug (exact match)
+
+### `meho targets outside-folder`
+
+List targets whose secret path is outside the tenant's folder
+
+```
+meho targets outside-folder [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--tenant` — tenant id to list (platform admin: a tenant you are not a member of, or the tenant chosen with `meho tenants use`; default: your own tenant, or every tenant for a platform admin)
 
 ### `meho targets probe`
 

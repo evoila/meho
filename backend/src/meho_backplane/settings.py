@@ -1677,8 +1677,20 @@ class Settings(BaseModel):
         ``dispatch_child``, or one saved to restart after approval) and a
         re-run for an earlier requester always get their own request, and
         a direct call never gets the request of such a step.
-        When off, every such call makes a new request. Env
-        ``APPROVAL_SAME_CALL_REUSE``.
+        The acting agent must be the same too (none for a direct call).
+        The check of a step of a multi-step operation never uses the reuse.
+        When off, every such call makes a new request. A retry key that was
+        linked to a request while the switch was on keeps finding that
+        request after it is turned off. Env ``APPROVAL_SAME_CALL_REUSE``.
+    approval_retry_own_audit_row:
+        Off by default. When on, a retry that gets the waiting (or approved)
+        request through the same ``idempotency_key`` writes its own
+        ``approval.reuse`` audit row, in the same transaction. The row names
+        the reused request and the retry's own session. The answer's
+        ``audit_id`` is that row, not the row of the first call. There is
+        still no second ``approval.pending`` event. When off, the retry
+        writes no audit row and the answer's ``audit_id`` is the first
+        call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
     runner_checks_enabled:
         Off by default. When on, a check bound to a runner counts like a
         central check: the result a runner posts for its own check sets the
@@ -2696,6 +2708,7 @@ class Settings(BaseModel):
     mcp_own_request_status: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    approval_retry_own_audit_row: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -2815,6 +2828,12 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The realm in every Keycloak answer, behind a switch that is off by
+    #: default. When on, each dict answer of a Keycloak operation starts with
+    #: ``managed_realm``: the realm the call acted on
+    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
+    #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
+    keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -3949,6 +3968,9 @@ def get_settings() -> Settings:
         approval_same_call_reuse=parse_bool_env(
             os.environ.get("APPROVAL_SAME_CALL_REUSE"),
         ),
+        approval_retry_own_audit_row=parse_bool_env(
+            os.environ.get("APPROVAL_RETRY_OWN_AUDIT_ROW"),
+        ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),
         ),
@@ -3997,6 +4019,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        keycloak_answer_realm=parse_bool_env(
+            os.environ.get("KEYCLOAK_ANSWER_REALM"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

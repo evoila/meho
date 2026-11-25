@@ -409,8 +409,8 @@ func TestStatus_StaleTenantSaysHowToPickAnother(t *testing.T) {
 // TestStatus_ReaderTenantShowsCurrentTenant: after a switch to a
 // tenant where the person only reads, the deep check is refused with
 // 403 insufficient_role. status then shows the liveness answer: who
-// the person is, the current tenant, the database state, and that the
-// other checks need the operator role.
+// the person is, the current tenant, the database state, that a Reader
+// cannot run changes, and that the other checks need the operator role.
 func TestStatus_ReaderTenantShowsCurrentTenant(t *testing.T) {
 	bp, _, _ := newTenantBackplane(t, false)
 	if _, _, err := runMeho(t, "tenants", "use", "lab-a"); err != nil {
@@ -427,6 +427,7 @@ func TestStatus_ReaderTenantShowsCurrentTenant(t *testing.T) {
 		"    lab-b  operator\n",
 		"  DB:    migrated\n",
 		"  Server time: " + liveServerTime + "\n",
+		"  Approvals: you cannot run changes\n",
 		"need the operator role in this tenant",
 	} {
 		if !strings.Contains(out, want) {

@@ -1152,6 +1152,61 @@
         }
       }
     },
+    "/api/v1/targets/checks/outside-tenant-folder": {
+      "get": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Outside Tenant Folder",
+        "description": "List the live targets whose own secret path is outside the tenant's folder.",
+        "operationId": "outside_tenant_folder_api_v1_targets_checks_outside_tenant_folder_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutsideTenantFolderList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -10447,6 +10502,48 @@
         }
       }
     },
+    "/api/v1/runner-principals/enroll": {
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Enroll Runner",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``, whatever the name and\nthe key are. A used code with another key gets the same 403. A good code of\na runner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good, unused code with a\nbad key gets 422. A repeat of a used code with the key it enrolled gives\nthe same answer again.",
+        "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerEnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerEnrollResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runner-principals": {
       "get": {
         "tags": [
@@ -10528,7 +10625,7 @@
           "runner-principals"
         ],
         "summary": "Register Runner Principal",
-        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\nThe answer carries a one-time enrollment code, shown only here. The runner\nsends it with its own public key to ``POST /api/v1/runner-principals/enroll``.\n\nOnly a person with ``tenant_admin`` may call it. A service login or an\nagent login gets 403 ``human_principal_required``, and a runner login gets\n403 ``runner_scope_violation``, before anything is made. The minted\nKeycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 when a runner with the same Keycloak client id exists, also a\nrevoked one or one of another tenant; 503 when Keycloak admin is not\nconfigured.",
         "operationId": "register_runner_principal_api_v1_runner_principals_post",
         "parameters": [
           {
@@ -10558,7 +10655,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                  "$ref": "#/components/schemas/RunnerPrincipalRegistered"
                 }
               }
             }
@@ -10636,7 +10733,7 @@
           "runner-principals"
         ],
         "summary": "Revoke Runner Principal",
-        "description": "Revoke a runner principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks the DB\nrow ``revoked=true``. Returns the updated row. ``tenant_admin`` only.\nReturns 404 when absent or already revoked.",
+        "description": "Revoke a runner principal (kill switch).\n\nTurns the runner's Keycloak client off (blocks new token grants) and\ndeletes it, and marks the DB row ``revoked=true``. Returns the updated row.\n``tenant_admin`` only. Returns 404 when absent or already revoked.",
         "operationId": "revoke_runner_principal_api_v1_runner_principals__name__revoke_delete",
         "parameters": [
           {
@@ -10902,7 +10999,7 @@
           "principals"
         ],
         "summary": "Unblock Principal Route",
-        "description": "Unblock a login. A platform admin removes every block of it.",
+        "description": "Unblock a login. On their own login an admin removes this tenant's block only.",
         "operationId": "unblock_principal_route_api_v1_principals_blocked__sub__delete",
         "parameters": [
           {
@@ -10927,6 +11024,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnblockBody",
+                "nullable": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -28717,7 +28825,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the\nconsole's approval client (#6282): ``auto`` reads each client's\nbinding, so the two can differ. ``sign_in_level_warning`` is a short\nsentence whenever the level is not required in practice for either\nclient or a read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the\nconsole's approval client (#6282): ``auto`` reads each client's\nbinding, so the two can differ. ``sign_in_level_warning`` is a short\nsentence whenever the level is not required in practice for either\nclient or a read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, some changes of rights in MEHO's own login\nrealm cannot be approved."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -40257,6 +40365,68 @@
         "title": "OutcomeUnknownView",
         "description": "Why an approved request is on the \"outcome unknown\" list (#5026)."
       },
+      "OutsideTenantFolderItem": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "secret_ref": {
+            "type": "string",
+            "title": "Secret Ref"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "secret_ref",
+          "reason"
+        ],
+        "title": "OutsideTenantFolderItem",
+        "description": "One target whose secret path is outside the tenant's folder, and why."
+      },
+      "OutsideTenantFolderList": {
+        "properties": {
+          "all_tenants": {
+            "type": "boolean",
+            "title": "All Tenants"
+          },
+          "check_off": {
+            "type": "boolean",
+            "title": "Check Off"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OutsideTenantFolderItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_tenants",
+          "check_off",
+          "items"
+        ],
+        "title": "OutsideTenantFolderList",
+        "description": "The targets outside the folder; ``all_tenants`` says how far the list goes."
+      },
       "PairAddonRequest": {
         "properties": {
           "name": {
@@ -42789,6 +42959,69 @@
         "title": "RunnerAssignment",
         "description": "The runner's current work assignment, fetched each tick.\n\n``assignment_version`` is an opaque digest the runner echoes back as\n``known_version`` so central can answer an unchanged assignment with a\n``304`` (see :meth:`RunnerClient.fetch_assignment`)."
       },
+      "RunnerEnrollRequest": {
+        "properties": {
+          "enrollment_code": {
+            "type": "string",
+            "title": "Enrollment Code"
+          },
+          "public_key": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Public Key"
+          },
+          "runner_name": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Runner Name",
+            "description": "The name the runner was registered under (its MEHO_RUNNER_ID). A code of a runner with another name is refused before anything changes."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enrollment_code",
+          "public_key",
+          "runner_name"
+        ],
+        "title": "RunnerEnrollRequest",
+        "description": "A runner's one-time code, its public key (a JWK, EC P-256) and its name."
+      },
+      "RunnerEnrollResponse": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "issuer": {
+            "type": "string",
+            "title": "Issuer"
+          },
+          "token_endpoint": {
+            "type": "string",
+            "title": "Token Endpoint"
+          },
+          "signing_alg": {
+            "type": "string",
+            "title": "Signing Alg"
+          },
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_id",
+          "issuer",
+          "token_endpoint",
+          "signing_alg",
+          "key_id"
+        ],
+        "title": "RunnerEnrollResponse",
+        "description": "What the runner needs to sign its login request."
+      },
       "RunnerPrincipal": {
         "properties": {
           "sub": {
@@ -42934,6 +43167,97 @@
         ],
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."
+      },
+      "RunnerPrincipalRegistered": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
+          },
+          "package_set_digest": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set Digest"
+          },
+          "enrollment_code": {
+            "type": "string",
+            "title": "Enrollment Code"
+          },
+          "enrollment_code_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Enrollment Code Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "last_seen_at",
+          "enrollment_code",
+          "enrollment_code_expires_at"
+        ],
+        "title": "RunnerPrincipalRegistered",
+        "description": "The answer of ``register``: the principal and its one-time enrollment code.\n\nThe code is shown once and never stored. The runner sends it with its\npublic key to enroll; it works once and until ``enrollment_code_expires_at``."
       },
       "RunnerResult": {
         "properties": {
@@ -47413,6 +47737,19 @@
         ],
         "title": "UISessionContext",
         "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID).\n\n``tenant_id`` is the session's current tenant (#5240).\n``tenant_chosen`` is ``False`` while a person with several tenants\nhas not picked one; the middleware then lets the request reach only\nthe tenant picker. ``can_switch_tenant`` makes the sidebar tenant box\na switch."
+      },
+      "UnblockBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UnblockBody",
+        "description": "Body of ``DELETE /api/v1/principals/blocked/{sub}``.\n\nThe reason is needed when the login is the caller's own. On another\nperson's login it is optional and goes into the audit row."
       },
       "UnblockResponse": {
         "properties": {

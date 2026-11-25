@@ -128,7 +128,12 @@ grant of a service login and no run approval of an automation run covers them.
 MEHO refuses to create such a grant or run approval, and at call time a stored
 one does not clear the wait.
 
-A platform admin can turn approval off for such an operation, for the whole install or for one tenant's own copy. Both the console and the REST API or CLI need a written reason; the REST API and the CLI also need a fresh sign-in. The edit is written to the audit log. After it, a person in the web console runs these two at once, because they are `caution`. A standing grant or a run approval still does not cover them.
+A platform admin can turn approval off for such an operation, for the whole
+install or for one tenant's own copy. Both the console and the REST API or CLI
+need a written reason; the REST API and the CLI also need a fresh sign-in. The
+edit is written to the audit log. After it, a person in the web console runs
+these two at once, because they are `caution`. A standing grant or a run
+approval still does not cover them.
 
 The three `dangerous` ops (`user.delete`, `group.delete`, `computer.delete`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human

@@ -29,11 +29,14 @@ Where it is checked (all through :func:`is_principal_blocked`):
   when that login is blocked;
 * an approved call, which does not run while the person who asked is
   blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`);
-* each step of a multi-step operation, and each request a step sends
-  straight to the target (:func:`raise_if_step_login_blocked`). The logins
-  a step checks are its operator and every login bound with
-  :func:`checking_logins_for_steps`: the operator of the multi-step
-  operation, and on an approved run also the person who asked.
+* each step of a multi-step operation;
+* a running call, at fixed points while it runs (:func:`raise_if_send_refused`).
+  A call that reaches such a point while its login is blocked ends with
+  the block refusal, and the answer says whether a part of it may have
+  run. A request that is already on its way to a system runs to its end.
+  The logins it checks are the login of the running call and every login
+  bound with :func:`checking_logins_for_steps`: the operator of a
+  multi-step operation, and on an approved run also the person who asked.
 
 The reader keeps the whole list in memory for a few seconds per process.
 When the list cannot be read, the check raises
@@ -50,14 +53,18 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.principal_block_run import mark_step_refused, step_refused_in_run
+from meho_backplane.auth.principal_block_run import (
+    mark_step_refused,
+    run_login,
+    step_refused_in_run,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -69,6 +76,7 @@ __all__ = [
     "REASON_MAX_LENGTH",
     "BlockedPerson",
     "CannotBlockSelfError",
+    "OwnBlockStaysError",
     "PrincipalBlockUnavailableError",
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
@@ -77,7 +85,7 @@ __all__ = [
     "first_blocked_step_login",
     "is_principal_blocked",
     "list_blocked",
-    "raise_if_step_login_blocked",
+    "raise_if_send_refused",
     "refusal_of_step",
     "reset_block_cache",
     "unblock_principal",
@@ -121,6 +129,10 @@ class PrincipalNotBlockedError(Exception):
     """There is no block to remove."""
 
 
+class OwnBlockStaysError(Exception):
+    """An admin tried to remove a block on their own login that they may not remove."""
+
+
 @dataclass(frozen=True)
 class BlockedPerson:
     """One row of the block list."""
@@ -157,8 +169,8 @@ async def _load_entries(
     return frozenset((str(sub), str(scope)) for sub, scope in rows)
 
 
-async def _entries() -> frozenset[tuple[str, str]]:
-    """Return the cached list, or read the table when it is older than the limit."""
+async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> frozenset[tuple[str, str]]:
+    """Return the cached list, or read the table when it is older than *max_age*."""
     global _cache
     sessionmaker = get_sessionmaker()
     cached = _cache
@@ -166,7 +178,7 @@ async def _entries() -> frozenset[tuple[str, str]]:
     if (
         cached is not None
         and cached.owner is sessionmaker
-        and 0 <= now - cached.loaded_at < BLOCK_CACHE_SECONDS
+        and 0 <= now - cached.loaded_at < max_age
     ):
         return cached.entries
     try:
@@ -179,12 +191,17 @@ async def _entries() -> frozenset[tuple[str, str]]:
     return entries
 
 
-async def is_principal_blocked(sub: str, tenant_id: uuid.UUID | None) -> bool:
+async def is_principal_blocked(
+    sub: str, tenant_id: uuid.UUID | None, *, max_age: float = BLOCK_CACHE_SECONDS
+) -> bool:
     """True when *sub* is blocked everywhere or in *tenant_id*.
+
+    The list copy may be *max_age* seconds old at most (default
+    :data:`BLOCK_CACHE_SECONDS`).
 
     Raises :class:`PrincipalBlockUnavailableError` when the list cannot be read.
     """
-    entries = await _entries()
+    entries = await _entries(max_age)
     if (sub, BLOCK_SCOPE_ALL) in entries:
         return True
     return tenant_id is not None and (sub, str(tenant_id)) in entries
@@ -245,12 +262,16 @@ async def refusal_of_step(
     been refused in that time. The refusal is noted for the running
     operation, so the whole operation stops with it.
     """
+    return await _refusal_for_login(operator.sub, operator.tenant_id, only_in_steps=only_in_steps)
+
+
+async def _refusal_for_login(
+    sub: str, tenant_id: uuid.UUID | None, *, only_in_steps: bool
+) -> PrincipalBlockedStepError | None:
     refusal = _earlier_refusal()
     if refusal is None:
         try:
-            blocked = await first_blocked_step_login(
-                operator.sub, operator.tenant_id, only_in_steps=only_in_steps
-            )
+            blocked = await first_blocked_step_login(sub, tenant_id, only_in_steps=only_in_steps)
         except PrincipalBlockUnavailableError:
             refusal = PrincipalBlockedStepError(unavailable=True)
         else:
@@ -268,18 +289,27 @@ def _earlier_refusal() -> PrincipalBlockedStepError | None:
     return cast("PrincipalBlockedStepError | None", step_refused_in_run())
 
 
-async def raise_if_step_login_blocked(operator: Operator) -> None:
-    """Stop a request a multi-step operation sends straight to the target.
+async def raise_if_send_refused() -> None:
+    """The check MEHO runs at fixed points while a call runs.
 
-    Called by the HTTP connector base before each request. Does nothing
-    outside a multi-step operation or an approved run. Raises
-    :class:`PrincipalBlockedStepError` when an earlier step of the run was
-    refused, when a login of the step is blocked, or when the list cannot be
-    read (:func:`refusal_of_step`).
+    A call that reaches it while its login is blocked ends with the block
+    refusal. A request that is already on its way to a system runs to its
+    end. The login is the one the dispatcher noted for the running call
+    (:func:`~meho_backplane.auth.principal_block_run.tracking_run`), plus
+    every login bound with :func:`checking_logins_for_steps`.
+
+    Raises :class:`PrincipalBlockedStepError` when an earlier step of the
+    run was refused, when a login is blocked, or when the list cannot be
+    read (:func:`refusal_of_step`). It reads the list copy kept for
+    :data:`BLOCK_CACHE_SECONDS`, so a send reads the database at most once
+    in that time.
     """
-    refusal = await refusal_of_step(operator, only_in_steps=True)
+    login = run_login()
+    if login is None:
+        return
+    refusal = await _refusal_for_login(login[0], login[1], only_in_steps=False)
     if refusal is not None:
-        _log.info("principal_block_step_request_refused", operator_sub=operator.sub)
+        _log.info("principal_block_send_refused", operator_sub=login[0])
         raise refusal
 
 
@@ -320,34 +350,73 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
 
-async def unblock_principal(operator: Operator, sub: str) -> int:
+async def _read_blocks(session: AsyncSession, sub: str) -> list[tuple[str, str]]:
+    """Every block of *sub* as ``(scope, reason)``, read from the table.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
+    """
+    query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(PrincipalBlock.sub == sub)
+    try:
+        rows = (await session.execute(query)).tuples()
+        return sorted((str(scope), str(reason)) for scope, reason in rows)
+    except Exception as exc:
+        _log.warning("principal_block_read_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+
+
+async def unblock_principal(
+    operator: Operator,
+    sub: str,
+    *,
+    reason: str | None = None,
+    sign_in: dict[str, Any] | None = None,
+) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
     A platform admin removes every block of the login. A tenant admin
-    removes the block of their own tenant only. The audit row names each
-    removed block with its scope and reason. Raises
-    :class:`PrincipalNotBlockedError` when there is none.
+    removes the block of their own tenant only. On their own login an
+    admin removes only the block of the current tenant. The table is read
+    for it, not the cached list: a block in every tenant, or for a tenant
+    admin a block in this tenant, raises :class:`OwnBlockStaysError` and
+    nothing is removed. The audit row names each removed block with its
+    scope and reason. Raises :class:`PrincipalNotBlockedError` when there
+    is none, and :class:`PrincipalBlockUnavailableError` when the table
+    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
+    go into the audit row when they are given.
     """
+    tenant_scope = str(operator.tenant_id)
+    own_login = sub == operator.sub
+    only_this_tenant = own_login or not operator.platform_admin
     condition = PrincipalBlock.sub == sub
-    if not operator.platform_admin:
-        condition = condition & (PrincipalBlock.scope == str(operator.tenant_id))
+    if only_this_tenant:
+        condition = condition & (PrincipalBlock.scope == tenant_scope)
     async with get_sessionmaker()() as session:
-        query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(condition)
-        removed = sorted((await session.execute(query)).tuples())
+        blocks = await _read_blocks(session, sub)
+        scopes = {scope for scope, _reason in blocks}
+        if own_login and (
+            BLOCK_SCOPE_ALL in scopes or (not operator.platform_admin and tenant_scope in scopes)
+        ):
+            raise OwnBlockStaysError
+        removed = [b for b in blocks if b[0] == tenant_scope] if only_this_tenant else blocks
         if not removed:
             raise PrincipalNotBlockedError
         await session.execute(delete(PrincipalBlock).where(condition))
+        payload: dict[str, Any] = {
+            "unblocked_sub": sub,
+            "scopes": [scope for scope, _reason in removed],
+            "removed_blocks": [{"scope": scope, "reason": why} for scope, why in removed],
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        if sign_in is not None:
+            payload["sign_in"] = sign_in
         add_audit_row(
             session,
             operator,
             op_id="principal.unblock",
             method="DELETE",
             path=f"/api/v1/principals/blocked/{sub}",
-            payload={
-                "unblocked_sub": sub,
-                "scopes": [scope for scope, _reason in removed],
-                "removed_blocks": [{"scope": scope, "reason": reason} for scope, reason in removed],
-            },
+            payload=payload,
         )
         await session.commit()
     reset_block_cache()

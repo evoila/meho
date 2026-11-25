@@ -2209,7 +2209,8 @@ type ApprovalSignInStatusState string
 // “rights_change_admins“ is how many admins of the caller's tenant could
 // approve a change of rights (#6641,
 // :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
-// count them. With one admin, a change of rights cannot be approved.
+// count them. With one admin, some changes of rights in MEHO's own login
+// realm cannot be approved.
 type ApprovalsStatus struct {
 	Custody                  string `json:"custody"`
 	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
@@ -7239,7 +7240,8 @@ type HealthResponse struct {
 	// ``rights_change_admins`` is how many admins of the caller's tenant could
 	// approve a change of rights (#6641,
 	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-	// count them. With one admin, a change of rights cannot be approved.
+	// count them. With one admin, some changes of rights in MEHO's own login
+	// realm cannot be approved.
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 
@@ -8980,6 +8982,22 @@ type OutcomeUnknownView struct {
 	RunStartedAt *string              `json:"run_started_at"`
 }
 
+// OutsideTenantFolderItem One target whose secret path is outside the tenant's folder, and why.
+type OutsideTenantFolderItem struct {
+	Name      string             `json:"name"`
+	Reason    string             `json:"reason"`
+	SecretRef string             `json:"secret_ref"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+}
+
+// OutsideTenantFolderList The targets outside the folder; “all_tenants“ says how far the list goes.
+type OutsideTenantFolderList struct {
+	AllTenants bool                      `json:"all_tenants"`
+	CheckOff   bool                      `json:"check_off"`
+	Items      []OutsideTenantFolderItem `json:"items"`
+	Message    *string                   `json:"message"`
+}
+
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
 //
 // “addon_contract_version“ is the contract version the add-on speaks;
@@ -10257,6 +10275,24 @@ type RunnerAssignment struct {
 	Items             *[]RunnerWorkItem `json:"items,omitempty"`
 }
 
+// RunnerEnrollRequest A runner's one-time code, its public key (a JWK, EC P-256) and its name.
+type RunnerEnrollRequest struct {
+	EnrollmentCode string                 `json:"enrollment_code"`
+	PublicKey      map[string]interface{} `json:"public_key"`
+
+	// RunnerName The name the runner was registered under (its MEHO_RUNNER_ID). A code of a runner with another name is refused before anything changes.
+	RunnerName string `json:"runner_name"`
+}
+
+// RunnerEnrollResponse What the runner needs to sign its login request.
+type RunnerEnrollResponse struct {
+	ClientId      string `json:"client_id"`
+	Issuer        string `json:"issuer"`
+	KeyId         string `json:"key_id"`
+	SigningAlg    string `json:"signing_alg"`
+	TokenEndpoint string `json:"token_endpoint"`
+}
+
 // RunnerPrincipal Principal context an executed op runs under, carried on each item.
 //
 // Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
@@ -10349,6 +10385,28 @@ type RunnerPrincipalRead struct {
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	WireVersion        *string            `json:"wire_version"`
+}
+
+// RunnerPrincipalRegistered The answer of “register“: the principal and its one-time enrollment code.
+//
+// The code is shown once and never stored. The runner sends it with its
+// public key to enroll; it works once and until “enrollment_code_expires_at“.
+type RunnerPrincipalRegistered struct {
+	CreatedAt               time.Time          `json:"created_at"`
+	CreatedBySub            string             `json:"created_by_sub"`
+	EnrollmentCode          string             `json:"enrollment_code"`
+	EnrollmentCodeExpiresAt time.Time          `json:"enrollment_code_expires_at"`
+	Id                      openapi_types.UUID `json:"id"`
+	KeycloakClientId        string             `json:"keycloak_client_id"`
+	KeycloakInternalId      string             `json:"keycloak_internal_id"`
+	LastSeenAt              *time.Time         `json:"last_seen_at"`
+	Name                    string             `json:"name"`
+	OwnerSub                string             `json:"owner_sub"`
+	PackageSetDigest        *string            `json:"package_set_digest"`
+	Revoked                 bool               `json:"revoked"`
+	TenantId                openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt               time.Time          `json:"updated_at"`
+	WireVersion             *string            `json:"wire_version"`
 }
 
 // RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
@@ -12869,6 +12927,14 @@ type UISessionContext struct {
 	TenantSlug      *string                 `json:"tenant_slug"`
 }
 
+// UnblockBody Body of “DELETE /api/v1/principals/blocked/{sub}“.
+//
+// The reason is needed when the login is the caller's own. On another
+// person's login it is optional and goes into the audit row.
+type UnblockBody struct {
+	Reason *string `json:"reason"`
+}
+
 // UnblockResponse Response of “DELETE /api/v1/principals/blocked/{sub}“.
 type UnblockResponse struct {
 	Removed int    `json:"removed"`
@@ -14546,6 +14612,12 @@ type KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams defines parameters for OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet.
+type OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams struct {
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // DiscoverTargetsApiV1TargetsDiscoverGetParams defines parameters for DiscoverTargetsApiV1TargetsDiscoverGet.
 type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
 	Product       string  `form:"product" json:"product"`
@@ -15285,6 +15357,9 @@ type ExplainApiV1PolicyExplainPostJSONRequestBody = PolicyExplainBody
 // BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody defines body for BlockPrincipalRouteApiV1PrincipalsBlockedPost for application/json ContentType.
 type BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody = BlockCreate
 
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody defines body for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete for application/json ContentType.
+type UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody = UnblockBody
+
 // ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
 type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
 
@@ -15320,6 +15395,9 @@ type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = Under
 
 // RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
 type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
+
+// EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody defines body for EnrollRunnerApiV1RunnerPrincipalsEnrollPost for application/json ContentType.
+type EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody = RunnerEnrollRequest
 
 // GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody defines body for GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost for application/json ContentType.
 type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody = RemoteWriteCapabilityGrant
@@ -18234,8 +18312,10 @@ type ClientInterface interface {
 
 	BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete request
-	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody request with any body
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18314,6 +18394,11 @@ type ClientInterface interface {
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody request with any body
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet request
 	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -18464,6 +18549,9 @@ type ClientInterface interface {
 
 	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet request
 	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet request
+	OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -21925,8 +22013,20 @@ func (c *Client) BlockPrincipalRouteApiV1PrincipalsBlockedPost(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(c.Server, sub, params)
+func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(c.Server, sub, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(c.Server, sub, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22287,6 +22387,30 @@ func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx co
 
 func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22935,6 +23059,18 @@ func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *Creat
 
 func (c *Client) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGet(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -37441,8 +37577,19 @@ func NewBlockPrincipalRouteApiV1PrincipalsBlockedPostRequestWithBody(server stri
 	return req, nil
 }
 
-// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest generates requests for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete
-func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams) (*http.Request, error) {
+// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest calls the generic UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete builder with application/json body
+func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(server, sub, params, "application/json", bodyReader)
+}
+
+// NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody generates requests for UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete with any type of body
+func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequestWithBody(server string, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -37467,10 +37614,12 @@ func NewUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteRequest(server strin
 		return nil, err
 	}
 
-	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -38778,6 +38927,46 @@ func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server s
 		}
 
 	}
+
+	return req, nil
+}
+
+// NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest calls the generic EnrollRunnerApiV1RunnerPrincipalsEnrollPost builder with application/json body
+func NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequest(server string, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody generates requests for EnrollRunnerApiV1RunnerPrincipalsEnrollPost with any type of body
+func NewEnrollRunnerApiV1RunnerPrincipalsEnrollPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/enroll")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -41606,6 +41795,70 @@ func NewKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetRequest(server strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest generates requests for OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet
+func NewOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetRequest(server string, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/checks/outside-tenant-folder")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -55922,8 +56175,10 @@ type ClientWithResponsesInterface interface {
 
 	BlockPrincipalRouteApiV1PrincipalsBlockedPostWithResponse(ctx context.Context, params *BlockPrincipalRouteApiV1PrincipalsBlockedPostParams, body BlockPrincipalRouteApiV1PrincipalsBlockedPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse, error)
 
-	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request
-	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
+	// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse request with any body
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
+
+	UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error)
 
 	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
 	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
@@ -56002,6 +56257,11 @@ type ClientWithResponsesInterface interface {
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
 
 	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse request with any body
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error)
+
+	EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error)
 
 	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request
 	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error)
@@ -56152,6 +56412,9 @@ type ClientWithResponsesInterface interface {
 
 	// KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse request
 	KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetWithResponse(ctx context.Context, params *KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetParams, reqEditors ...RequestEditorFn) (*KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse, error)
+
+	// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse request
+	OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error)
 
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
@@ -61017,7 +61280,7 @@ func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) StatusCode() int {
 type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *RunnerPrincipalRead
+	JSON201      *RunnerPrincipalRegistered
 	JSON422      *HTTPValidationError
 }
 
@@ -61031,6 +61294,29 @@ func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) Status() strin
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerEnrollResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -61990,6 +62276,29 @@ func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OutsideTenantFolderList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69694,9 +70003,17 @@ func (c *ClientWithResponses) BlockPrincipalRouteApiV1PrincipalsBlockedPostWithR
 	return ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp)
 }
 
-// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse request returning *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse
-func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
-	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx, sub, params, reqEditors...)
+// UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse request with arbitrary body returning *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse
+func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBodyWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithBody(ctx, sub, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(ctx context.Context, sub string, params *UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams, body UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	rsp, err := c.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDelete(ctx, sub, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -69959,6 +70276,23 @@ func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWi
 		return nil, err
 	}
 	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+// EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse request with arbitrary body returning *EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse
+func (c *ClientWithResponses) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	rsp, err := c.EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse(ctx context.Context, body EnrollRunnerApiV1RunnerPrincipalsEnrollPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	rsp, err := c.EnrollRunnerApiV1RunnerPrincipalsEnrollPost(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp)
 }
 
 // ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request returning *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse
@@ -70433,6 +70767,15 @@ func (c *ClientWithResponses) KeycloakRealmCheckApiV1TargetsChecksKeycloakRealmG
 		return nil, err
 	}
 	return ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp)
+}
+
+// OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse request returning *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse
+func (c *ClientWithResponses) OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse(ctx context.Context, params *OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetParams, reqEditors ...RequestEditorFn) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error) {
+	rsp, err := c.OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse(rsp)
 }
 
 // DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request returning *DiscoverTargetsApiV1TargetsDiscoverGetResponse
@@ -79301,11 +79644,44 @@ func ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp *http.Res
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest RunnerPrincipalRead
+		var dest RunnerPrincipalRegistered
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse parses an HTTP response from a EnrollRunnerApiV1RunnerPrincipalsEnrollPostWithResponse call
+func ParseEnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse(rsp *http.Response) (*EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnrollRunnerApiV1RunnerPrincipalsEnrollPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerEnrollResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -80639,6 +81015,39 @@ func ParseKeycloakRealmCheckApiV1TargetsChecksKeycloakRealmGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest KeycloakRealmCheck
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse parses an HTTP response from a OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetWithResponse call
+func ParseOutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse(rsp *http.Response) (*OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OutsideTenantFolderApiV1TargetsChecksOutsideTenantFolderGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OutsideTenantFolderList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

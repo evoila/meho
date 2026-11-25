@@ -376,7 +376,8 @@ class ApprovalsStatus(BaseModel):
     ``rights_change_admins`` is how many admins of the caller's tenant could
     approve a change of rights (#6641,
     :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-    count them. With one admin, a change of rights cannot be approved.
+    count them. With one admin, some changes of rights in MEHO's own login
+    realm cannot be approved.
     """
 
     model_config = ConfigDict(frozen=True)

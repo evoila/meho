@@ -18,7 +18,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/approvals"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -91,12 +93,18 @@ func newBlockCmd() *cobra.Command {
 
 func newUnblockCmd() *cobra.Command {
 	var flags commonFlags
+	var reason string
 	cmd := &cobra.Command{
 		Use:   "unblock <sub>",
-		Short: "Unblock a person in MEHO (tenant_admin)",
-		Long: "unblock calls DELETE /api/v1/principals/blocked/{sub}. A platform " +
-			"admin removes every block of the login. A tenant admin removes " +
-			"the block of their own tenant.",
+		Short: "Unblock a person in MEHO (tenant_admin; a platform admin for their own block)",
+		Long: "unblock calls DELETE /api/v1/principals/blocked/{sub}. A tenant admin " +
+			"removes the block of their own tenant. A platform admin with tenant_admin " +
+			"removes every block of another person's login. A platform admin whom a " +
+			"tenant admin blocked removes that block on their own login, in the tenant " +
+			"of the block. This needs a reason (--reason) and a fresh sign-in in the " +
+			"browser: unblock opens your browser and asks you to sign in again. Your " +
+			"`meho login` token is not enough for it. MEHO writes the reason and the " +
+			"sign-in to the audit log.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -105,22 +113,52 @@ func newUnblockCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), flags.jsonOut)
 			}
-			resp, err := deleteBlock(cmd.Context(), url, args[0])
+			authed, err := newAuthedClient(cmd.Context(), url)
 			if err != nil {
 				return renderRequestError(cmd, url, err, flags.jsonOut)
 			}
-			if resp.StatusCode() != http.StatusOK {
-				return renderHTTPStatus(cmd, url, resp.StatusCode(), resp.Body, flags.jsonOut)
+			var why *string
+			if cmd.Flags().Changed("reason") {
+				why = &reason
 			}
-			if flags.jsonOut {
-				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "unblocked %s\n", resp.JSON200.Sub)
-			return nil
+			return runUnblock(cmd, authed, url, args[0], why, flags.jsonOut)
 		},
 	}
+	cmd.Flags().StringVar(&reason, "reason", "",
+		"why the block is removed (required on your own login; kept in the audit log)")
 	flags.add(cmd)
 	return cmd
+}
+
+// runUnblock sends the unblock and writes the answer.
+func runUnblock(cmd *cobra.Command, authed *api.AuthedClient, url, sub string, reason *string, jsonOut bool) error {
+	resp, err := deleteBlock(cmd.Context(), authed, sub, reason)
+	var noBrowser *auth.NoBrowserError
+	if errors.As(err, &noBrowser) {
+		return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(
+			"this unblock needs a fresh sign-in, and no browser could be opened. "+
+				"Run this command on a computer where a browser can open. "+
+				"Sign-in link: "+noBrowser.URL), jsonOut)
+	}
+	if err != nil {
+		return renderRequestError(cmd, url, err, jsonOut)
+	}
+	if resp.StatusCode() != http.StatusOK {
+		detail := decodeDetailString(strings.TrimSpace(string(resp.Body)))
+		switch {
+		case resp.StatusCode() == http.StatusUnprocessableEntity && strings.HasPrefix(detail, reasonRequired):
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+				"Removing a block on your own login needs a reason: add --reason <text>."), jsonOut)
+		case resp.StatusCode() == statusTokenRejected && strings.HasPrefix(detail, freshSignInRequired):
+			return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(detail), jsonOut)
+		}
+		return renderHTTPStatus(cmd, url, resp.StatusCode(), resp.Body, jsonOut)
+	}
+	if jsonOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "unblocked %s\n", resp.JSON200.Sub)
+	return nil
 }
 
 func newBlockedCmd() *cobra.Command {
@@ -207,19 +245,56 @@ func postBlock(ctx context.Context, url string, body api.BlockCreate) (*api.Bloc
 	)
 }
 
-func deleteBlock(ctx context.Context, url, sub string) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
-	authed, err := newAuthedClient(ctx, url)
+// deleteBlock sends the unblock with the stored login. When MEHO asks
+// for a fresh sign-in (the unblock of the person's own login), it opens
+// the browser approval sign-in, as `meho approvals approve` does, and
+// sends the call once more with that token. The token stays in memory.
+func deleteBlock(ctx context.Context, authed *api.AuthedClient, sub string, reason *string) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+	call := func(ctx context.Context, editors ...api.RequestEditorFn) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+		return authed.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(
+			ctx, sub, &api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams{},
+			api.UnblockBody{Reason: reason}, editors...)
+	}
+	statusOf := func(r *api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse) int { return r.StatusCode() }
+	resp, err := call(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return retryOn401(ctx, authed,
-		func(ctx context.Context) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
-			return authed.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteWithResponse(
-				ctx, sub, &api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteParams{})
-		},
-		func(r *api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse) int { return r.StatusCode() },
-	)
+	if resp.StatusCode() != statusTokenRejected {
+		return resp, nil
+	}
+	if !approvals.NeedsFreshSignIn(resp.HTTPResponse) {
+		return retryOn401(ctx, authed, func(ctx context.Context) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+			return call(ctx)
+		}, statusOf)
+	}
+	src, err := startFreshSignIn(ctx, authed)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := src.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok.AccessToken == "" {
+		return nil, errors.New("meho: the browser sign-in returned no access token")
+	}
+	withSignIn := func(_ context.Context, req *http.Request) error {
+		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		return nil
+	}
+	return call(ctx, withSignIn)
 }
+
+// startFreshSignIn opens the browser approval sign-in. A package variable
+// so tests can stand in for the browser and the identity provider.
+var startFreshSignIn = approvals.BrowserApprovalSignIn
+
+// The machine-readable prefixes of the unblock refusals the command explains.
+const (
+	reasonRequired      = "unblock_reason_required"
+	freshSignInRequired = "fresh_sign_in_required"
+)
 
 // statusTokenRejected is HTTP 401: the backplane did not accept the stored token.
 const statusTokenRejected = 401

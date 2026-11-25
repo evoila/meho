@@ -350,6 +350,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
 		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
 		fmt.Fprint(stdoutW, formatServerTime(resp.ServerTime))
+		fmt.Fprintf(stdoutW, "  Approvals: %s\n", approvalsOther)
 		return nil
 	}
 
@@ -370,7 +371,7 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		fmt.Fprint(stdoutW, formatReadiness(*resp.Readiness))
 	}
 	if resp.Approvals != nil {
-		fmt.Fprintf(stdoutW, "  Approvals: %s\n", formatApprovals(*resp.Approvals))
+		fmt.Fprintf(stdoutW, "  Approvals: %s\n", formatApprovals(*resp.Approvals, resp.Operator))
 	}
 	if resp.Features != nil {
 		if line := formatFeatures(*resp.Features); line != "" {
@@ -618,17 +619,69 @@ func formatReadiness(r api.ReadinessStatus) string {
 	return b.String()
 }
 
+// Role texts of the approvals line. They follow the table "Who may
+// approve" in docs-site/guides/approvals-and-break-glass.md.
+const (
+	approvalsAdmin = "you may approve your own changes " +
+		"(a change of rights only with a click in the web console; " +
+		"in MEHO's own login realm a change of rights needs a platform admin, " +
+		"one you sent with a token needs a second person who is a platform admin, " +
+		"and so does one that can change the approval sign-in)"
+	approvalsOperator = "a second person approves your changes; you may approve " +
+		"your own `caution` change that waited because you sent it with a token, " +
+		"with a click in the web console; a change of rights is not covered"
+	approvalsReader = "you cannot run changes"
+	approvalsOther  = "who may approve depends on your group in the current tenant " +
+		"(see Who may approve in the approvals guide)"
+
+	breakGlassOperator = "break-glass is on: you may approve your own `safe` or " +
+		"`caution` change; `dangerous` and `destructive` changes still need a second person; " +
+		"a change of rights is not covered"
+	breakGlassAdmin = approvalsAdmin +
+		"; break-glass is on: anyone may approve their own `safe` or `caution` change; " +
+		"the switch does not cover a change of rights"
+	breakGlassOther = "break-glass is on: a person who may run changes may approve " +
+		"their own `safe` or `caution` change; a change of rights is not covered; " +
+		"the group rules still apply"
+)
+
+// approvalsPosture says who may approve what, for the caller's role in
+// the current tenant. With no current tenant, or a role the CLI does not
+// know, it says only what is true for every group.
+func approvalsPosture(op api.OperatorIdentity, breakGlass bool) string {
+	role := api.TenantRole("")
+	if op.TenantId != nil {
+		role = op.TenantRole
+	}
+	switch {
+	case role == api.TenantRoleTenantAdmin && breakGlass:
+		return breakGlassAdmin
+	case role == api.TenantRoleTenantAdmin:
+		return approvalsAdmin
+	case role == api.TenantRoleOperator && breakGlass:
+		return breakGlassOperator
+	case role == api.TenantRoleOperator:
+		return approvalsOperator
+	case role == api.TenantRoleReadOnly:
+		return approvalsReader
+	case breakGlass:
+		return breakGlassOther
+	}
+	return approvalsOther
+}
+
 // formatApprovals renders the approval settings in force (#4830) in
-// plain words: who must approve, whether a decision made on someone
-// else's instruction is allowed, and the state of the approval key.
-// A value the CLI does not know is printed as the backplane sent it.
-func formatApprovals(a api.ApprovalsStatus) string {
+// plain words: who may approve what for the caller's role, whether a
+// decision made on someone else's instruction is allowed, and the state
+// of the approval key. A value the CLI does not know is printed as the
+// backplane sent it.
+func formatApprovals(a api.ApprovalsStatus, op api.OperatorIdentity) string {
 	var posture, delegated, custody string
 	switch a.EffectivePosture {
 	case "four_eyes_enforced":
-		posture = "a second person must approve"
+		posture = approvalsPosture(op, false)
 	case "single_operator_break_glass":
-		posture = "one operator may approve their own request (break-glass)"
+		posture = approvalsPosture(op, true)
 	default:
 		posture = "approval posture " + a.EffectivePosture
 	}

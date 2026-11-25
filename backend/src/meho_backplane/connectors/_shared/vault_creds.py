@@ -91,6 +91,8 @@ any durable artifact.
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
@@ -685,6 +687,11 @@ async def _resolve_and_load(
         # a gsm: ref in a parameter is. Checked here, not in the backend, so
         # the readiness probe's own probe secret stays outside the rule.
         check_gsm_target_ref(store_ref, target_name=target.name)
+    if kind == "vault" and operator.raw_jwt and not _is_api_path_shaped(store_ref):
+        # The warning is for a read MEHO goes on to make: the store backend
+        # refuses a call with no operator token and a path in the store's
+        # API form first, and those reads write no folder warning.
+        _warn_if_outside_tenant_folder(target, operator, store_ref=store_ref, mount=mount)
     backend = resolve_credential_backend(kind)
     try:
         secret_data = await backend.load_secret_data(
@@ -861,6 +868,87 @@ async def missing_secret_field_map_sources(
         return []
     _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
     return sorted({src for src in field_map.values() if src not in secret_data})
+
+
+#: At most one folder warning per target per process in this many seconds.
+_FOLDER_WARNING_INTERVAL_SECONDS = 3600.0
+
+#: ``(tenant id, target id or name)`` -> monotonic time of the last warning.
+_folder_warning_last: dict[tuple[str, str], float] = {}
+
+#: Each of these ends a part of a path in the folder warning.
+_FOLDER_WARNING_PART_BORDER = re.compile(r"[/\\%?#]+")
+
+
+def _folder_warning_prefix(store_ref: str) -> str:
+    """Cut *store_ref* to its first part for the folder warning.
+
+    The path is split as it is stored, with no decoding. A slash, a
+    backslash, a percent sign, a question mark and a number sign each end a
+    part. ``targets/vc-01`` becomes ``targets/…`` and ``a%20b/c`` becomes
+    ``a/…``. A path with one part becomes ``…``, so the log never holds the
+    whole secret name.
+    """
+    parts = [p for p in _FOLDER_WARNING_PART_BORDER.split(store_ref.strip()) if p]
+    return f"{parts[0]}/…" if len(parts) > 1 else "…"
+
+
+def _warn_if_outside_tenant_folder(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    store_ref: str,
+    mount: str,
+) -> None:
+    """Log a warning when a target's own Vault path is outside the tenant's folder.
+
+    Runs for the callers whose read is not refused for this reason: the
+    check runner and a tenant with its own Vault login role are refused in
+    :meth:`VaultCredentialBackend.load_secret_data`. The read goes on
+    either way. The log line holds the target id and name, the tenant id and
+    ``secret_ref_prefix`` (see :func:`_folder_warning_prefix`): the first
+    part of the path, or only ``…`` for a path with one part. At most once
+    per target per hour. Nothing reaches the answer, the trace or the audit row.
+    Does nothing when the folder check is off. An error in this step is
+    caught and never stops the read.
+    """
+    try:
+        _log_outside_tenant_folder(target, operator, store_ref=store_ref, mount=mount)
+    except Exception:
+        return
+
+
+def _log_outside_tenant_folder(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    store_ref: str,
+    mount: str,
+) -> None:
+    """Write the folder warning (the body of :func:`_warn_if_outside_tenant_folder`)."""
+    if operator.check_runner_dispatch or _tenant_has_own_vault_role(operator):
+        return
+    from meho_backplane.connectors.vault.tenant_scope import outside_tenant_folder_reason
+
+    reason = outside_tenant_folder_reason(
+        operator.tenant_id, mount=mount, path=store_ref, read_only=True
+    )
+    if reason is None:
+        return
+    target_id = str(getattr(target, "id", "") or "")
+    key = (str(operator.tenant_id), target_id or target.name)
+    now = time.monotonic()
+    last = _folder_warning_last.get(key)
+    if last is not None and now - last < _FOLDER_WARNING_INTERVAL_SECONDS:
+        return
+    _folder_warning_last[key] = now
+    structlog.get_logger(__name__).warning(
+        "target_secret_ref_outside_tenant_folder",
+        target_id=target_id,
+        target_name=target.name,
+        tenant_id=str(operator.tenant_id),
+        secret_ref_prefix=_folder_warning_prefix(store_ref),
+    )
 
 
 def _tenant_has_own_vault_role(operator: Operator) -> bool:

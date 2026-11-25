@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
 	"github.com/evoila/meho/cli/internal/api"
 )
 
@@ -253,7 +255,7 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 	for _, want := range []string{
 		"  DB:    migrated, revision 0115\n",
 		"  Readiness: ready (keycloak, vault, db ok)\n",
-		"  Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured\n",
+		"  Approvals: who may approve depends on your group in the current tenant (see Who may approve in the approvals guide); decisions on someone else's instruction are refused; approval key configured\n",
 		"  Features: all configured\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -282,7 +284,7 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 		"  Readiness: not ready\n",
 		"    vault: failed (unreachable: ConnectError)\n",
 		"    ok: keycloak, db\n",
-		"  Approvals: one operator may approve their own request (break-glass); decisions on someone else's instruction are allowed; approval key missing\n",
+		"  Approvals: break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; the group rules still apply; decisions on someone else's instruction are allowed; approval key missing\n",
 		"  Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET), approval_custody (needs APPROVAL_HANDOFF_ENCRYPTION_KEY)\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -294,6 +296,80 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 	empty.Readiness = &api.ReadinessStatus{Ready: false}
 	if got := render(empty); !strings.Contains(got, "  Readiness: not ready (no checks reported)\n") {
 		t.Errorf("empty check list must say so:\n%s", got)
+	}
+}
+
+// TestFormatApprovals_ByRole pins the whole approvals line for each role
+// in the current tenant, with the emergency switch off and on. The texts
+// follow the table "Who may approve" in the approvals guide.
+func TestFormatApprovals_ByRole(t *testing.T) {
+	tenant := openapi_types.UUID{1}
+	const tail = "; decisions on someone else's instruction are refused; approval key configured"
+	withRole := func(r api.TenantRole) api.OperatorIdentity {
+		return api.OperatorIdentity{Sub: "s", TenantId: &tenant, TenantRole: r}
+	}
+	const neutral = "who may approve depends on your group in the current tenant (see Who may approve in the approvals guide)"
+	const bgOther = "break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; the group rules still apply"
+	cases := []struct {
+		name    string
+		op      api.OperatorIdentity
+		posture string
+		want    string
+	}{
+		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced",
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in)"},
+		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
+			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
+		{"reader", withRole(api.TenantRoleReadOnly), "four_eyes_enforced",
+			"you cannot run changes"},
+		{"unknown role", withRole(api.TenantRole("auditor")), "four_eyes_enforced", neutral},
+		{"empty role", withRole(api.TenantRole("")), "four_eyes_enforced", neutral},
+		{"no current tenant", api.OperatorIdentity{Sub: "s", TenantRole: api.TenantRoleTenantAdmin}, "four_eyes_enforced", neutral},
+		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass",
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
+		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
+			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
+		{"reader, break-glass", withRole(api.TenantRoleReadOnly), "single_operator_break_glass",
+			"you cannot run changes"},
+		{"unknown role, break-glass", withRole(api.TenantRole("auditor")), "single_operator_break_glass", bgOther},
+		{"no current tenant, break-glass", api.OperatorIdentity{Sub: "s"}, "single_operator_break_glass", bgOther},
+		{"new posture value", withRole(api.TenantRoleTenantAdmin), "something_new", "approval posture something_new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := api.ApprovalsStatus{
+				Custody:                  "configured",
+				EffectivePosture:         tc.posture,
+				DelegatedDecisionPosture: "production_own_hand_only",
+			}
+			if got, want := formatApprovals(a, tc.op), tc.want+tail; got != want {
+				t.Errorf("formatApprovals() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestRenderHumanHealth_ApprovalsUseCurrentTenantRole checks that the
+// status line takes the role of the current tenant from the answer.
+func TestRenderHumanHealth_ApprovalsUseCurrentTenantRole(t *testing.T) {
+	tenant := openapi_types.UUID{2}
+	resp := &api.HealthResponse{
+		Operator: api.OperatorIdentity{Sub: "s", TenantId: &tenant, TenantRole: api.TenantRoleReadOnly},
+		Vault:    api.VaultStatus{Reachable: true, ReadOk: true},
+		Db:       api.DbStatus{Migrated: ptrBool(true)},
+		Approvals: &api.ApprovalsStatus{
+			Custody:                  "configured",
+			EffectivePosture:         "four_eyes_enforced",
+			DelegatedDecisionPosture: "production_own_hand_only",
+		},
+	}
+	var buf bytes.Buffer
+	if err := PrintHealth(&buf, resp); err != nil {
+		t.Fatalf("PrintHealth: %v", err)
+	}
+	want := "  Approvals: you cannot run changes; decisions on someone else's instruction are refused; approval key configured\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, buf.String())
 	}
 }
 
@@ -431,7 +507,8 @@ func TestExitCodes(t *testing.T) {
 
 // TestRenderHumanHealth_Tenants: the person's tenants are listed with
 // the role in each, and a login with several tenants that chose none
-// gets the list, a hint and the DB line only (#5239).
+// gets the list, a hint, the DB line and the neutral approvals line only
+// (#5239). The answer carries no approval settings in that case.
 func TestRenderHumanHealth_Tenants(t *testing.T) {
 	tenantA := api.TenantEntry{Name: "lab-a", TenantRole: api.TenantRoleReadOnly}
 	tenantB := api.TenantEntry{Name: "lab-b", TenantRole: api.TenantRoleOperator}
@@ -452,6 +529,7 @@ func TestRenderHumanHealth_Tenants(t *testing.T) {
 		"  Tenants:\n    lab-a  read_only\n    lab-b  operator\n",
 		"No tenant chosen. Choose one with `meho tenants use <name>`.",
 		"DB:    migrated",
+		"  Approvals: who may approve depends on your group in the current tenant (see Who may approve in the approvals guide)\n",
 	} {
 		if !strings.Contains(unchosen, want) {
 			t.Errorf("missing %q in output:\n%s", want, unchosen)

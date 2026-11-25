@@ -583,9 +583,15 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
-    # The id (``sub``) of the login that a secret store accepted for the call
-    # (``meho`` when the store saw MEHO's own identity). NULL when the call
-    # read no secret. Never a token, a store path or a store address.
+    # The id (``sub``) of the login that a secret store accepted when the
+    # secret this call used was read. The read can be in this call or in an
+    # earlier call (a login MEHO kept in memory), so a value does not prove a
+    # new store read. Fixed texts: ``meho`` when the store saw MEHO's own
+    # identity; ``check-runner`` when the check runner read the secret and
+    # its token has no readable ``sub``; ``kept-login:reader-unknown`` when
+    # the call used a login MEHO kept in memory and it is not known whose
+    # login read it. NULL when no login read a secret for this call. Never a
+    # token, a store path or a store address.
     secret_read_as: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
@@ -5270,6 +5276,16 @@ class RunnerPrincipal(Base):
     # call (the runner list shows it). ``NULL`` until the runner calls after
     # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The one-time enrollment code (migration 0188): only its SHA-256 is
+    # stored, and the column is emptied when the runner is revoked. The id of
+    # the enrolled public key marks the code as used: the code then answers
+    # only a repeat with that same key.
+    enrollment_code_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enrollment_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    enrolled_key_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(

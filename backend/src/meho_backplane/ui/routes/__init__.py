@@ -114,6 +114,7 @@ from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.pairing import build_pairing_router
+from meho_backplane.ui.routes.principal_blocks import build_principal_blocks_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.run_notices import build_run_notices_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
@@ -228,6 +229,8 @@ def build_router() -> APIRouter:
     # ``{grant_id}`` detail route for the same reason (G10.8-T5 #1832).
     router.include_router(build_agent_grants_router())
     router.include_router(build_grants_router())
+    # Admin block list: ``/ui/blocked-people`` + its block / unblock forms.
+    router.include_router(build_principal_blocks_router())
     # Agent-runs read surface (G10.8-T3 #1830) before the agents-definition
     # router: ``/ui/agents/runs`` + ``/ui/agents/runs/{handle}`` are literal-
     # prefixed under ``/ui/agents`` and MUST win the first-match-wins lookup

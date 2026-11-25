@@ -2833,6 +2833,12 @@ type BlockRead struct {
 	Sub          string    `json:"sub"`
 }
 
+// BodyBlockUiBlockedPeoplePost defines model for Body__block_ui_blocked_people_post.
+type BodyBlockUiBlockedPeoplePost struct {
+	Reason *string `json:"reason,omitempty"`
+	Sub    *string `json:"sub,omitempty"`
+}
+
 // BodyCreateUiEventSourcesPost defines model for Body__create_ui_event_sources_post.
 type BodyCreateUiEventSourcesPost struct {
 	AuthStrategy string  `json:"auth_strategy"`
@@ -2873,6 +2879,12 @@ type BodyRenewDeleteGrantsUiGrantsServiceRenewDeleteGrantsPost struct {
 	ExpiresAt    *string `json:"expires_at"`
 	PrincipalSub *string `json:"principal_sub,omitempty"`
 	Reason       *string `json:"reason"`
+}
+
+// BodyUnblockUiBlockedPeopleUnblockPost defines model for Body__unblock_ui_blocked_people_unblock_post.
+type BodyUnblockUiBlockedPeopleUnblockPost struct {
+	Confirm *string `json:"confirm,omitempty"`
+	Sub     string  `json:"sub"`
 }
 
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
@@ -15567,6 +15579,12 @@ type ApprovalOutcomeCheckUiApprovalsRequestIdOutcomeCheckPostFormdataRequestBody
 // ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody defines body for ApprovalRejectUiApprovalsRequestIdRejectPost for application/x-www-form-urlencoded ContentType.
 type ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody = BodyApprovalRejectUiApprovalsRequestIdRejectPost
 
+// BlockUiBlockedPeoplePostFormdataRequestBody defines body for BlockUiBlockedPeoplePost for application/x-www-form-urlencoded ContentType.
+type BlockUiBlockedPeoplePostFormdataRequestBody = BodyBlockUiBlockedPeoplePost
+
+// UnblockUiBlockedPeopleUnblockPostFormdataRequestBody defines body for UnblockUiBlockedPeopleUnblockPost for application/x-www-form-urlencoded ContentType.
+type UnblockUiBlockedPeopleUnblockPostFormdataRequestBody = BodyUnblockUiBlockedPeopleUnblockPost
+
 // UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody defines body for UiBroadcastOverridesCreateUiBroadcastOverridesPost for application/x-www-form-urlencoded ContentType.
 type UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody = BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost
 
@@ -18911,6 +18929,19 @@ type ClientInterface interface {
 
 	// UiAutomationListUiAutomationGet request
 	UiAutomationListUiAutomationGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IndexUiBlockedPeopleGet request
+	IndexUiBlockedPeopleGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// BlockUiBlockedPeoplePostWithBody request with any body
+	BlockUiBlockedPeoplePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	BlockUiBlockedPeoplePostWithFormdataBody(ctx context.Context, body BlockUiBlockedPeoplePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnblockUiBlockedPeopleUnblockPostWithBody request with any body
+	UnblockUiBlockedPeopleUnblockPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UnblockUiBlockedPeopleUnblockPostWithFormdataBody(ctx context.Context, body UnblockUiBlockedPeopleUnblockPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastFeedUiBroadcastGet request
 	UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -24679,6 +24710,66 @@ func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...
 
 func (c *Client) UiAutomationListUiAutomationGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAutomationListUiAutomationGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IndexUiBlockedPeopleGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIndexUiBlockedPeopleGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BlockUiBlockedPeoplePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBlockUiBlockedPeoplePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BlockUiBlockedPeoplePostWithFormdataBody(ctx context.Context, body BlockUiBlockedPeoplePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBlockUiBlockedPeoplePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnblockUiBlockedPeopleUnblockPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockUiBlockedPeopleUnblockPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnblockUiBlockedPeopleUnblockPostWithFormdataBody(ctx context.Context, body UnblockUiBlockedPeopleUnblockPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnblockUiBlockedPeopleUnblockPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -47152,6 +47243,113 @@ func NewUiAutomationListUiAutomationGetRequest(server string) (*http.Request, er
 	return req, nil
 }
 
+// NewIndexUiBlockedPeopleGetRequest generates requests for IndexUiBlockedPeopleGet
+func NewIndexUiBlockedPeopleGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/blocked-people")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewBlockUiBlockedPeoplePostRequestWithFormdataBody calls the generic BlockUiBlockedPeoplePost builder with application/x-www-form-urlencoded body
+func NewBlockUiBlockedPeoplePostRequestWithFormdataBody(server string, body BlockUiBlockedPeoplePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewBlockUiBlockedPeoplePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewBlockUiBlockedPeoplePostRequestWithBody generates requests for BlockUiBlockedPeoplePost with any type of body
+func NewBlockUiBlockedPeoplePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/blocked-people")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUnblockUiBlockedPeopleUnblockPostRequestWithFormdataBody calls the generic UnblockUiBlockedPeopleUnblockPost builder with application/x-www-form-urlencoded body
+func NewUnblockUiBlockedPeopleUnblockPostRequestWithFormdataBody(server string, body UnblockUiBlockedPeopleUnblockPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUnblockUiBlockedPeopleUnblockPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUnblockUiBlockedPeopleUnblockPostRequestWithBody generates requests for UnblockUiBlockedPeopleUnblockPost with any type of body
+func NewUnblockUiBlockedPeopleUnblockPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/blocked-people/unblock")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiBroadcastFeedUiBroadcastGetRequest generates requests for UiBroadcastFeedUiBroadcastGet
 func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastFeedUiBroadcastGetParams) (*http.Request, error) {
 	var err error
@@ -56775,6 +56973,19 @@ type ClientWithResponsesInterface interface {
 	// UiAutomationListUiAutomationGetWithResponse request
 	UiAutomationListUiAutomationGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAutomationListUiAutomationGetResponse, error)
 
+	// IndexUiBlockedPeopleGetWithResponse request
+	IndexUiBlockedPeopleGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*IndexUiBlockedPeopleGetResponse, error)
+
+	// BlockUiBlockedPeoplePostWithBodyWithResponse request with any body
+	BlockUiBlockedPeoplePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BlockUiBlockedPeoplePostResponse, error)
+
+	BlockUiBlockedPeoplePostWithFormdataBodyWithResponse(ctx context.Context, body BlockUiBlockedPeoplePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*BlockUiBlockedPeoplePostResponse, error)
+
+	// UnblockUiBlockedPeopleUnblockPostWithBodyWithResponse request with any body
+	UnblockUiBlockedPeopleUnblockPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockUiBlockedPeopleUnblockPostResponse, error)
+
+	UnblockUiBlockedPeopleUnblockPostWithFormdataBodyWithResponse(ctx context.Context, body UnblockUiBlockedPeopleUnblockPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UnblockUiBlockedPeopleUnblockPostResponse, error)
+
 	// UiBroadcastFeedUiBroadcastGetWithResponse request
 	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
 
@@ -64419,6 +64630,79 @@ func (r UiAutomationListUiAutomationGetResponse) StatusCode() int {
 	return 0
 }
 
+type IndexUiBlockedPeopleGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r IndexUiBlockedPeopleGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IndexUiBlockedPeopleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type BlockUiBlockedPeoplePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r BlockUiBlockedPeoplePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r BlockUiBlockedPeoplePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnblockUiBlockedPeopleUnblockPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON403      *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
+	JSON404 *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
+	JSON422 *HTTPValidationError
+	JSON503 *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
+}
+
+// Status returns HTTPResponse.Status
+func (r UnblockUiBlockedPeopleUnblockPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnblockUiBlockedPeopleUnblockPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiBroadcastFeedUiBroadcastGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -71939,6 +72223,49 @@ func (c *ClientWithResponses) UiAutomationListUiAutomationGetWithResponse(ctx co
 		return nil, err
 	}
 	return ParseUiAutomationListUiAutomationGetResponse(rsp)
+}
+
+// IndexUiBlockedPeopleGetWithResponse request returning *IndexUiBlockedPeopleGetResponse
+func (c *ClientWithResponses) IndexUiBlockedPeopleGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*IndexUiBlockedPeopleGetResponse, error) {
+	rsp, err := c.IndexUiBlockedPeopleGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIndexUiBlockedPeopleGetResponse(rsp)
+}
+
+// BlockUiBlockedPeoplePostWithBodyWithResponse request with arbitrary body returning *BlockUiBlockedPeoplePostResponse
+func (c *ClientWithResponses) BlockUiBlockedPeoplePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BlockUiBlockedPeoplePostResponse, error) {
+	rsp, err := c.BlockUiBlockedPeoplePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBlockUiBlockedPeoplePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) BlockUiBlockedPeoplePostWithFormdataBodyWithResponse(ctx context.Context, body BlockUiBlockedPeoplePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*BlockUiBlockedPeoplePostResponse, error) {
+	rsp, err := c.BlockUiBlockedPeoplePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBlockUiBlockedPeoplePostResponse(rsp)
+}
+
+// UnblockUiBlockedPeopleUnblockPostWithBodyWithResponse request with arbitrary body returning *UnblockUiBlockedPeopleUnblockPostResponse
+func (c *ClientWithResponses) UnblockUiBlockedPeopleUnblockPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UnblockUiBlockedPeopleUnblockPostResponse, error) {
+	rsp, err := c.UnblockUiBlockedPeopleUnblockPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnblockUiBlockedPeopleUnblockPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UnblockUiBlockedPeopleUnblockPostWithFormdataBodyWithResponse(ctx context.Context, body UnblockUiBlockedPeopleUnblockPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UnblockUiBlockedPeopleUnblockPostResponse, error) {
+	rsp, err := c.UnblockUiBlockedPeopleUnblockPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnblockUiBlockedPeopleUnblockPostResponse(rsp)
 }
 
 // UiBroadcastFeedUiBroadcastGetWithResponse request returning *UiBroadcastFeedUiBroadcastGetResponse
@@ -83686,6 +84013,91 @@ func ParseUiAutomationListUiAutomationGetResponse(rsp *http.Response) (*UiAutoma
 	response := &UiAutomationListUiAutomationGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseIndexUiBlockedPeopleGetResponse parses an HTTP response from a IndexUiBlockedPeopleGetWithResponse call
+func ParseIndexUiBlockedPeopleGetResponse(rsp *http.Response) (*IndexUiBlockedPeopleGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IndexUiBlockedPeopleGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseBlockUiBlockedPeoplePostResponse parses an HTTP response from a BlockUiBlockedPeoplePostWithResponse call
+func ParseBlockUiBlockedPeoplePostResponse(rsp *http.Response) (*BlockUiBlockedPeoplePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &BlockUiBlockedPeoplePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUnblockUiBlockedPeopleUnblockPostResponse parses an HTTP response from a UnblockUiBlockedPeopleUnblockPostWithResponse call
+func ParseUnblockUiBlockedPeopleUnblockPostResponse(rsp *http.Response) (*UnblockUiBlockedPeopleUnblockPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnblockUiBlockedPeopleUnblockPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
 	}
 
 	return response, nil

@@ -1,0 +1,61 @@
+{% from "_components.html" import button %}
+{% extends "base.html" %}
+
+{% block page_title %}Blocked people &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+  <header class="max-w-3xl space-y-1">
+    <h1 class="text-2xl font-semibold">Blocked people</h1>
+    <p class="text-sm text-muted">
+      MEHO refuses every request of a blocked person within a few seconds. A platform admin blocks and unblocks a person in every tenant. A tenant admin blocks and unblocks a person in their own tenant.
+    </p>
+  </header>
+
+  <section class="space-y-3" aria-labelledby="block-heading">
+    <h2 id="block-heading" class="text-lg font-semibold">Block a person</h2>
+    <div id="block-form">
+      {% include "principal_blocks/_form.html" %}
+    </div>
+  </section>
+
+  <section class="space-y-3" aria-labelledby="blocked-heading">
+    <h2 id="blocked-heading" class="text-lg font-semibold">Blocked now</h2>
+    <div class="overflow-x-auto rounded-box border border-base-300">
+      <table class="table table-sm">
+        <thead><tr>
+          <th>Login id</th><th>Tenant</th><th>Reason</th><th>Blocked by</th><th>Blocked at</th><th><span class="sr-only">Actions</span></th>
+        </tr></thead>
+        <tbody>
+          {% for person in blocked %}
+            <tr data-blocked-sub="{{ person.sub }}">
+              <td class="max-w-xs break-all font-mono text-xs">{{ person.sub }}</td>
+              <td class="max-w-xs break-all text-xs">{% if person.scope == scope_all %}All tenants{% else %}<span class="font-mono">{{ person.scope }}</span>{% endif %}</td>
+              <td class="max-w-md break-words text-xs">{{ person.reason }}</td>
+              <td class="max-w-xs break-all font-mono text-xs">{{ person.blocked_by_sub }}</td>
+              <td class="whitespace-nowrap text-xs">{{ person.blocked_at }}</td>
+              <td class="text-right">
+                {% if person.sub == own_sub %}
+                  {% if person.scope == scope_all %}
+                    <span class="text-xs text-muted" data-own-login>Your own login, blocked in all tenants: another platform admin removes this block.</span>
+                  {% else %}
+                    <span class="text-xs text-muted" data-own-login>Your own login: in tenant <span class="font-mono">{{ person.scope }}</span>, run <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span> with a fresh sign-in. It removes only the block of that tenant.</span>
+                  {% endif %}
+                {% else %}
+                  <form method="post" action="/ui/blocked-people/unblock">
+                    {% include "principal_blocks/_hidden.html" %}
+                    <input type="hidden" name="sub" value="{{ person.sub }}" />
+                    {{ button("Unblock in all tenants…" if platform_admin else "Unblock…", variant="default", size="xs", type="submit") }}
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="py-8 text-center text-muted">Nobody is blocked.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</section>
+{% endblock %}

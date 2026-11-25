@@ -64,6 +64,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import (
+    PRINCIPAL_BLOCKED_MESSAGE,
+    PrincipalBlockUnavailableError,
+    is_principal_blocked,
+)
 from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -191,6 +196,7 @@ class MintRefusalCode(StrEnum):
     REMOTE_WRITE_NOT_ALLOWLISTED = "remote_write_not_allowlisted"
     REMOTE_WRITE_SIGNING_UNAVAILABLE = "remote_write_signing_unavailable"
     RUNNER_REVOKED = "runner_revoked"
+    ASKER_BLOCKED = "asker_blocked"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -371,8 +377,13 @@ async def mint_gateway_command(
     runner_id: str,
     target_descriptor: dict[str, Any] | None = None,
     expires_at: datetime | None = None,
+    approval_request_id: uuid.UUID | None = None,
 ) -> MintResult:
     """Mint a single-use capability command, or refuse fail-closed.
+
+    A ``remote-write`` mint names the approval request it uses
+    (*approval_request_id*). The mint uses that approval only for the login
+    that asked: the caller (*operator*) must be that login.
 
     Re-runs the dispatcher's pre-execution ladder against the same
     descriptor metadata (:func:`meho_backplane.operations.dispatcher.dispatch`
@@ -431,6 +442,9 @@ async def mint_gateway_command(
             for a targetless op.
         expires_at: An optional caller deadline, bounded down to the default
             TTL ceiling; the default TTL when omitted.
+        approval_request_id: The approved request a ``remote-write`` mint
+            uses. Without it, a ``remote-write`` mint is refused. A ``safe``
+            mint does not use it.
 
     Returns:
         A :class:`MintResult` — minted (``command`` + ``mint_audit_id`` set)
@@ -529,6 +543,7 @@ async def mint_gateway_command(
             expires_at=expires_at,
             started=started,
             safety_level=descriptor.safety_level,
+            approval_request_id=approval_request_id,
         )
 
     # --- Step 4: policy gate (only AUTO_EXECUTE mints the SAFE tier) ------
@@ -578,8 +593,9 @@ def _approval_refusal_reason(approval: ApprovalRequest | None, op_id: str) -> st
     """
     if approval is None:
         return (
-            f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
-            "binding for this (op, target, params); the caution tier mints only "
+            f"remote-write op {op_id!r} refused: no committed, unconsumed, "
+            "unexpired approval of this request for the login that asks, "
+            "this connector, target and params; the caution tier mints only "
             "against a human-approved ApprovalRequest (mechanism 1)"
         )
     if approval_release_changed(approval):
@@ -590,6 +606,37 @@ def _approval_refusal_reason(approval: ApprovalRequest | None, op_id: str) -> st
     return None
 
 
+async def _asker_block_refusal(
+    *,
+    op_id: str,
+    operator: Operator,
+    runner_id: str,
+) -> MintResult | None:
+    """Refuse the mint when the login that asked is blocked, as a resume does.
+
+    A block list that cannot be read refuses the mint too.
+    """
+    try:
+        blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
+    except PrincipalBlockUnavailableError:
+        return _refuse_remote_write(
+            MintRefusalCode.ASKER_BLOCKED,
+            f"remote-write op {op_id!r} refused: the block list could not be read",
+            op_id=op_id,
+            operator=operator,
+            runner_id=runner_id,
+        )
+    if not blocked:
+        return None
+    return _refuse_remote_write(
+        MintRefusalCode.ASKER_BLOCKED,
+        f"remote-write op {op_id!r} refused: {PRINCIPAL_BLOCKED_MESSAGE}",
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+    )
+
+
 async def _screen_remote_write(
     session: AsyncSession,
     *,
@@ -598,6 +645,8 @@ async def _screen_remote_write(
     target: Any,
     params: dict[str, Any],
     runner_id: str,
+    connector_id: str,
+    approval_request_id: uuid.UUID | None,
 ) -> tuple[Any, Any, MintResult | None]:
     """Run the three read-only remote-write pre-checks, in fail-closed order.
 
@@ -623,12 +672,19 @@ async def _screen_remote_write(
     raw_target_id = getattr(target, "id", None) if target is not None else None
     target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
 
-    approval = await find_remote_write_approval(
-        session,
-        tenant_id=operator.tenant_id,
-        op_id=op_id,
-        target_id=target_id,
-        params=params,
+    approval = (
+        None
+        if approval_request_id is None
+        else await find_remote_write_approval(
+            session,
+            tenant_id=operator.tenant_id,
+            approval_request_id=approval_request_id,
+            asker_sub=operator.sub,
+            connector_id=connector_id,
+            op_id=op_id,
+            target_id=target_id,
+            params=params,
+        )
     )
     approval_refusal = _approval_refusal_reason(approval, op_id)
     if approval_refusal is not None:
@@ -643,6 +699,12 @@ async def _screen_remote_write(
                 runner_id=runner_id,
             ),
         )
+
+    blocked_refusal = await _asker_block_refusal(
+        op_id=op_id, operator=operator, runner_id=runner_id
+    )
+    if blocked_refusal is not None:
+        return None, None, blocked_refusal
 
     try:
         signing_key = load_signing_key(get_settings().satellite_write_signing_key)
@@ -698,6 +760,7 @@ async def _mint_remote_write(
     expires_at: datetime | None,
     started: float,
     safety_level: str,
+    approval_request_id: uuid.UUID | None,
 ) -> MintResult:
     """Mint a signed, allowlisted remote-write capability (#3189 + #3190).
 
@@ -718,6 +781,8 @@ async def _mint_remote_write(
         target=target,
         params=params,
         runner_id=runner_id,
+        connector_id=connector_id,
+        approval_request_id=approval_request_id,
     )
     if refusal is not None:
         return refusal
@@ -754,6 +819,7 @@ async def _mint_remote_write(
         safety_level=safety_level,
         signing_key=signing_key,
         approval_request_id=approval.id,
+        asker_sub=approval.principal_sub,
     )
 
 
@@ -772,6 +838,7 @@ async def _finalize_mint(
     safety_level: str,
     signing_key: Any | None = None,
     approval_request_id: uuid.UUID | None = None,
+    asker_sub: str | None = None,
 ) -> MintResult:
     """Enqueue the bound command, optionally sign it, and write the mint audit row.
 
@@ -829,6 +896,9 @@ async def _finalize_mint(
     }
     if approval_request_id is not None:
         payload["approval_request_id"] = str(approval_request_id)
+    if asker_sub is not None:
+        payload["asker_sub"] = asker_sub
+        payload["caller_sub"] = operator.sub
     if signed:
         payload["signed"] = True
     await _write_gateway_audit_row(

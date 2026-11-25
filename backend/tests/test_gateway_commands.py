@@ -68,6 +68,7 @@ from meho_backplane.runner.work_item_signing import (
 from meho_backplane.settings import get_settings
 
 _TENANT = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+_MINTER_SUB = "minter-sub"
 _RUNNER = "runner-a"
 _CONNECTOR_ID = "net-1.x"
 _OP_ID = "net.ping"
@@ -115,7 +116,7 @@ async def _seed_committed_approval(
     approval = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=_TENANT,
-        principal_sub="requester-sub",
+        principal_sub=_MINTER_SUB,
         op_id=op_id,
         connector_id=_CONNECTOR_ID,
         target_id=target_id,
@@ -149,7 +150,7 @@ def _operator() -> Operator:
     # A non-agent (service) principal: the policy gate default-allows an
     # ordinary op, so a safe op with requires_approval=False auto-executes.
     return Operator(
-        sub="minter-sub",
+        sub=_MINTER_SUB,
         raw_jwt="",
         tenant_id=_TENANT,
         tenant_role=TenantRole.READ_ONLY,
@@ -364,6 +365,9 @@ async def test_mint_refuses_remote_write_gate_unsatisfied(
 async def _mint_caution(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    approval_id: uuid.UUID,
+    operator: Operator | None = None,
+    connector_id: str = _CONNECTOR_ID,
     params: dict[str, object] | None = None,
     target: object = None,
 ) -> gc.MintResult:
@@ -374,12 +378,13 @@ async def _mint_caution(
     async with sessionmaker() as session:
         result = await mint_gateway_command(
             session,
-            operator=_operator(),
-            connector_id=_CONNECTOR_ID,
+            operator=operator if operator is not None else _operator(),
+            connector_id=connector_id,
             op_id=_OP_ID,
             target=target,
             params=params if params is not None else dict(_PARAMS),
             runner_id=_RUNNER,
+            approval_request_id=approval_id,
         )
         await session.commit()
     return result
@@ -402,7 +407,7 @@ async def _seed_credential_write_approval() -> ApprovalRequest:
         request = await create_pending_request(
             session,
             operator=Operator(
-                sub="credential-requester",
+                sub=_MINTER_SUB,
                 raw_jwt="",
                 tenant_id=_TENANT,
                 tenant_role=TenantRole.OPERATOR,
@@ -436,7 +441,7 @@ async def test_mint_remote_write_binds_approval_and_signs(
     # allowlist (ANDed with the approval binding).
     await _seed_write_allowlist()
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert result.minted
     command = result.command
@@ -486,6 +491,7 @@ async def test_mint_remote_write_discards_credential_handoff_on_commit(
             target=None,
             params={"value": "test-only-credential-value"},
             runner_id=_RUNNER,
+            approval_request_id=request.id,
         )
         await session.commit()
 
@@ -512,6 +518,7 @@ async def test_mint_remote_write_rollback_preserves_credential_handoff(
             target=None,
             params={"value": "test-only-credential-value"},
             runner_id=_RUNNER,
+            approval_request_id=request.id,
         )
         assert result.minted
         await session.rollback()
@@ -532,7 +539,7 @@ async def test_mint_remote_write_refused_on_params_swap(
     """
     approval_id = await _seed_committed_approval(params={"host": "10.0.0.1"})
 
-    result = await _mint_caution(monkeypatch, params={"host": "10.9.9.9"})
+    result = await _mint_caution(monkeypatch, approval_id=approval_id, params={"host": "10.9.9.9"})
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
@@ -553,7 +560,7 @@ async def test_mint_remote_write_refused_for_older_release_approval(
     await _seed_write_allowlist()
     monkeypatch.setenv("GIT_SHA", "a" * 40)
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
@@ -574,7 +581,9 @@ async def test_mint_remote_write_refused_on_secret_value_swap(
     approval_id = await _seed_committed_approval(params=approved)
     await _seed_write_allowlist()
 
-    result = await _mint_caution(monkeypatch, params={**approved, "password": "other-test-value"})
+    result = await _mint_caution(
+        monkeypatch, approval_id=approval_id, params={**approved, "password": "other-test-value"}
+    )
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
@@ -593,7 +602,7 @@ async def test_mint_remote_write_leaves_no_secret_value_on_the_consumed_approval
     approval_id = await _seed_committed_approval(params=approved)
     await _seed_write_allowlist()
 
-    result = await _mint_caution(monkeypatch, params=dict(approved))
+    result = await _mint_caution(monkeypatch, approval_id=approval_id, params=dict(approved))
 
     assert result.minted
     assert await _approval_resumed_at(approval_id) is not None
@@ -615,7 +624,7 @@ async def test_mint_remote_write_binds_approval_stored_with_plain_hash(
     approval_id = await _seed_committed_approval(params_hash=plain.hexdigest())
     await _seed_write_allowlist()
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert result.minted
     assert await _approval_resumed_at(approval_id) is not None
@@ -625,16 +634,134 @@ async def test_mint_remote_write_approval_is_single_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One committed approval mints at most one capability."""
-    await _seed_committed_approval()
+    approval_id = await _seed_committed_approval()
     await _seed_write_allowlist()
 
-    first = await _mint_caution(monkeypatch)
-    second = await _mint_caution(monkeypatch)
+    first = await _mint_caution(monkeypatch, approval_id=approval_id)
+    second = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert first.minted
     assert not second.minted
     assert second.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
     assert await _count(GatewayCommand) == 1
+
+
+def _caller(sub: str, kind: PrincipalKind, role: TenantRole = TenantRole.OPERATOR) -> Operator:
+    return Operator(sub=sub, raw_jwt="", tenant_id=_TENANT, tenant_role=role, principal_kind=kind)
+
+
+async def test_mint_remote_write_uses_approval_only_for_the_asker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval of one login is not used for a mint by any other login."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+
+    for kind in PrincipalKind:
+        for role in (TenantRole.OPERATOR, TenantRole.READ_ONLY):
+            result = await _mint_caution(
+                monkeypatch,
+                approval_id=approval_id,
+                operator=_caller(f"other-{kind.value}-{role.value}", kind, role),
+            )
+            assert not result.minted
+            assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+    own = await _mint_caution(monkeypatch, approval_id=approval_id)
+    assert own.minted
+
+
+async def test_mint_remote_write_needs_the_named_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint uses the approval request it is given, not a look-alike."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(monkeypatch, approval_id=uuid.uuid4())
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_matches_the_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval covers the connector it was asked for."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(
+        monkeypatch, approval_id=approval_id, connector_id="other-product-1.0"
+    )
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_checks_the_approval_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval past its time limit is not used, even before the clean-up job."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == approval_id)
+            .values(expires_at=datetime.now(UTC) - timedelta(minutes=1))
+        )
+        await session.commit()
+
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_refuses_a_blocked_asker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint refuses when the login that asked is on the block list."""
+    from meho_backplane.auth.principal_block import block_principal, reset_block_cache
+
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+    admin = _caller("admin-person", PrincipalKind.USER, TenantRole.TENANT_ADMIN)
+    reset_block_cache()
+    await block_principal(admin, _MINTER_SUB, "left the team")
+    reset_block_cache()
+
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.ASKER_BLOCKED
+    assert await _approval_resumed_at(approval_id) is None
+    reset_block_cache()
+
+
+async def test_mint_remote_write_audit_row_names_asker_caller_and_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint audit row names the asker, the caller and the approval."""
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
+
+    assert result.minted
+    async with get_sessionmaker()() as session:
+        audit = (
+            await session.execute(select(AuditLog).where(AuditLog.path == "gateway.command.mint"))
+        ).scalar_one()
+    assert audit.payload["asker_sub"] == _MINTER_SUB
+    assert audit.payload["caller_sub"] == _MINTER_SUB
+    assert audit.payload["approval_request_id"] == str(approval_id)
 
 
 async def test_mint_remote_write_refused_without_signing_key(
@@ -649,7 +776,7 @@ async def test_mint_remote_write_refused_without_signing_key(
     monkeypatch.setenv("SATELLITE_WRITE_SIGNING_KEY", "")
     get_settings.cache_clear()
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE
@@ -666,7 +793,7 @@ async def test_mint_remote_write_ignores_non_approved_request(
     pending = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=_TENANT,
-        principal_sub="requester-sub",
+        principal_sub=_MINTER_SUB,
         op_id=_OP_ID,
         connector_id=_CONNECTOR_ID,
         target_id=None,
@@ -682,7 +809,7 @@ async def test_mint_remote_write_ignores_non_approved_request(
         session.add(pending)
         await session.commit()
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=pending.id)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
@@ -707,7 +834,7 @@ async def test_mint_remote_write_refused_without_allowlist(
     """
     approval_id = await _seed_committed_approval()
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
@@ -729,7 +856,7 @@ async def test_mint_remote_write_refused_off_allowlist(
     approval_id = await _seed_committed_approval()
     await _seed_write_allowlist(op_pattern="net.some_other_write")
 
-    result = await _mint_caution(monkeypatch)
+    result = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
@@ -747,10 +874,10 @@ async def test_mint_remote_write_stage1_single_class_admits_exactly_that_class(
     while a sibling caution op — approved but not on the allowlist — is refused.
     Proves the allowlist, not the approval, is what bounds the blast radius.
     """
-    await _seed_committed_approval()
+    approval_id = await _seed_committed_approval()
     await _seed_write_allowlist(op_pattern=_OP_ID)
 
-    admitted = await _mint_caution(monkeypatch)
+    admitted = await _mint_caution(monkeypatch, approval_id=approval_id)
 
     assert admitted.minted
     assert await _count(GatewayCommand) == 1

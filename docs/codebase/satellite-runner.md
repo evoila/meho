@@ -248,6 +248,11 @@ work item, plus approval-bound minting.
   defence) and **single-use** (the approval's one-way `resumed_at` latch,
   claimed in the mint session so it is consumed iff the mint commits). No
   approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
+  An approval covers one request of one asker, and the mint uses it only for
+  that asker: the caller must be the login that asked, the approval must
+  match the connector and must not be past its time limit, and the mint
+  refuses while the asker is blocked. The mint audit row names the asker,
+  the caller and the approval.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the

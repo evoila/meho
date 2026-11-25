@@ -25,23 +25,13 @@ a credential (a vCenter download URL, a pre-signed URL, a token in the
 query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
 its scheme and host before the bridge writes it.
 
-The HTTP client libraries that MEHO uses write trace lines for each call
-at DEBUG: header lines (``httpcore``, ``h2``, ``hpack``), the path and the
-query (``urllib3``, used by ``requests`` and ``hvac``), the full request
-(``botocore``) and the response body (``kubernetes_asyncio.client.rest``).
-``httpx2`` (used for sign-in and by the AI SDKs) writes the full URL at INFO,
-and ``httpcore2`` below it writes header lines at DEBUG. The AI SDKs
-(``anthropic``, ``openai``) write the request options, with the message
-body, and the response headers at DEBUG. ``urllib3`` also writes the request
-path and query at WARNING (a retry after a broken connection, a response
-with a malformed header block), ``botocore`` writes a header value at
-WARNING and ``aiohttp.client`` a proxy address, so these three are held at
-ERROR. :data:`_HTTP_STACK_LOGGERS` holds the level of each logger.
+MEHO holds the logger of each HTTP client library, and every child
+logger, at the level in :data:`_HTTP_STACK_LOGGERS`.
 :func:`_bridge_stdlib_logging` sets these levels and puts
-:class:`_HttpStackLevelFilter` on MEHO's handler, so a record below the held
-level never reaches a log line, also when a library changes the level of
-its own logger after :func:`configure_logging` ran (the Anthropic SDK does
-this at its first import when ``ANTHROPIC_LOG`` is set).
+:class:`_HttpStackLevelFilter` on MEHO's handler. The filter drops every
+record below the held level, also when a library changes the level of its
+own logger after :func:`configure_logging` ran (the Anthropic SDK does this
+at its first import when ``ANTHROPIC_LOG`` is set).
 
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
@@ -67,9 +57,9 @@ from structlog.tracebacks import ExceptionDictTransformer
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
 
 
-#: Loggers of the HTTP client libraries and the lowest level MEHO writes for
-#: each of them and their child loggers. Below that level their lines hold
-#: header values, paths, queries or bodies.
+#: Loggers of the HTTP client libraries and the level MEHO holds each of them,
+#: and their child loggers, at. The filter on MEHO's handler drops every
+#: record below that level.
 _HTTP_STACK_LOGGERS: dict[str, int] = {
     "httpcore": logging.WARNING,
     "httpx2": logging.WARNING,

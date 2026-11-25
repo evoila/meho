@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MEHO writes no response header value of an HTTP call into a log line."""
+"""Tests that no made-up path, query, cookie, header value or prompt text of an
+HTTP call reaches MEHO's log output, and that each HTTP library logger is held
+at its level."""
 
 from __future__ import annotations
 
@@ -40,6 +42,8 @@ _CHILD_LOGGERS = (
     "openai._base_client",
 )
 _STACK_LOGGERS = (*_HTTP_STACK_LOGGERS, *_CHILD_LOGGERS)
+_TOP_LOGGERS = tuple(dict.fromkeys(n.split(".")[0] for n in _STACK_LOGGERS))
+_CHANGED_LOGGERS = ("", "httpx", *_STACK_LOGGERS, *_TOP_LOGGERS)
 _ROOT_LEVELS = [logging.NOTSET, logging.DEBUG, logging.INFO, logging.WARNING]
 
 _ANTHROPIC_REPLY = (
@@ -143,20 +147,30 @@ def closing_server() -> Iterator[str]:
         sock.close()
 
 
+def _logger_states() -> dict[str, tuple[int, bool]]:
+    return {
+        n: (logging.getLogger(n).level, logging.getLogger(n).disabled) for n in _CHANGED_LOGGERS
+    }
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _loggers_unchanged_after_module() -> Iterator[None]:
+    """Check at the end of the module that each logger has its level from before."""
+    before = _logger_states()
+    yield
+    assert _logger_states() == before
+
+
 @pytest.fixture(autouse=True)
 def _restore_loggers() -> Iterator[None]:
-    root = logging.getLogger()
-    saved_root = root.level
-    names = ("httpx", *_STACK_LOGGERS)
-    saved = {n: (logging.getLogger(n).level, logging.getLogger(n).disabled) for n in names}
+    saved = _logger_states()
     # An earlier logging.config call in the same test process can disable these
     # loggers; turn them on so the test sees what MEHO's setup alone does.
-    for n in names:
+    for n in _CHANGED_LOGGERS:
         logging.getLogger(n).disabled = False
     try:
         yield
     finally:
-        root.setLevel(saved_root)
         for n, (lvl, disabled) in saved.items():
             logging.getLogger(n).setLevel(lvl)
             logging.getLogger(n).disabled = disabled

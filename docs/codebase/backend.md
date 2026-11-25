@@ -992,29 +992,34 @@ PYTHONPATH-leak imports.
 
 ### Log levels and HTTP calls
 
-At INFO, MEHO writes one line per httpx call with the method, the scheme and host, and the status. At DEBUG this line stays the same. The HTTP client libraries also write their own lines, with header values, paths, queries or bodies. `configure_logging()` holds each of their loggers, and every child logger, at a fixed level, whatever the root level is:
+For each call through httpx, MEHO's per-call line holds only the method, the scheme and host, and the status, at every log level.
 
-| Logger | Held at | Why |
-|---|---|---|
-| `httpcore`, `h2`, `hpack` (below httpx) | WARNING | header lines at DEBUG |
-| `httpx2`, `httpcore2` (sign-in and the AI SDKs) | WARNING | the full URL at INFO, header lines at DEBUG |
-| `anthropic`, `openai` (AI SDKs) | WARNING | request options with the message body, and response headers, at DEBUG |
-| `urllib3` (below `requests` and the Vault client `hvac`) | ERROR | the path and query at DEBUG, and at WARNING for a retry after a broken connection and for a response with a malformed header block |
-| `botocore` | ERROR | the full request at DEBUG, a header value at WARNING |
-| `aiohttp.client` | ERROR | a proxy address at WARNING |
-| `kubernetes_asyncio.client.rest` | WARNING | the response body at DEBUG |
-| `google.auth.transport` | WARNING | the request address, headers and body at DEBUG |
+`configure_logging()` holds the logger of each HTTP client library, and every child logger, at the level in the table, whatever the root level is.
 
-The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. MEHO sets these levels, and a filter on MEHO's own log handler drops every record below the held level. So a library's own log setting does not bring these lines back: for example `ANTHROPIC_LOG=debug`, which sets the `anthropic` and `httpx2` loggers to DEBUG when the SDK is first imported, or a library that calls `setLevel` on its logger later.
+| Logger | Held at |
+|---|---|
+| `httpcore`, `h2`, `hpack` (below httpx) | WARNING |
+| `httpx2`, `httpcore2` (sign-in and the AI SDKs) | WARNING |
+| `anthropic`, `openai` (AI SDKs) | WARNING |
+| `urllib3` (below `requests` and the Vault client `hvac`) | ERROR |
+| `botocore` | ERROR |
+| `aiohttp.client` | ERROR |
+| `kubernetes_asyncio.client.rest` | WARNING |
+| `google.auth.transport` | WARNING |
 
-At INFO, an operator does not see these routine lines of the libraries:
+The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. MEHO sets these levels, and a filter on MEHO's own log handler drops every record below the held level. So a library's own log setting does not bring these records back: for example `ANTHROPIC_LOG=debug`, which sets the `anthropic` and `httpx2` loggers to DEBUG when the SDK is first imported, or a library that calls `setLevel` on its logger later.
+
+At the default level (INFO), an operator does not see these lines of the libraries:
 
 - the per-call line of the HTTP client (`httpx2` "HTTP Request: ...");
 - the retry lines of the AI SDKs ("Retrying request ...");
 - the credential-source line of the cloud libraries (`botocore` "Found credentials in ...");
-- the token refresh line of the cloud libraries (`google.auth.transport` "Refreshing credentials ...", `botocore` SSO token refresh).
+- the token refresh line of the cloud libraries (`google.auth.transport` "Refreshing credentials ...", `botocore` SSO token refresh);
+- the `urllib3` warnings: the connection pool warning, the certificate name warning and the retry warning;
+- the `botocore` warnings: the credential refresh warnings, the token refresh warnings and the deprecated endpoint warning;
+- the two `aiohttp` client warnings: the `.netrc` file warning and the proxy kind warning.
 
-`tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept.
+`tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept. At the end of the module it checks that each logger the tests change has its level from before.
 
 ## Control flow
 

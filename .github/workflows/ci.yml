@@ -223,6 +223,11 @@ jobs:
     #                tests that read files outside `backend/`. Fails CLOSED
     #                like `docs_only`: it starts `true`, and merge_group, the
     #                nightly run and any diff problem keep it `true` (full run).
+    #   redaction_compare — `true` when a PR changes any file under
+    #                `backend/tests/redaction_compare/`, `.md` files too, so the
+    #                job `redaction-compare` judges that change also when
+    #                `backend_python` is `false`. Fails CLOSED like
+    #                `backend_python`: it starts `true`.
     #
     # WHY a `changes`-job + job-level `if:` and NOT `on.paths` (#2140):
     # GitHub treats a job skipped by its own `if:` as **Success** (it
@@ -282,6 +287,7 @@ jobs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       backend_python: ${{ steps.detect.outputs.backend_python }}
+      redaction_compare: ${{ steps.detect.outputs.redaction_compare }}
       single_connector: ${{ steps.detect.outputs.single_connector }}
       # `true` only when the picked tests were also stored.
       test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
@@ -311,11 +317,13 @@ jobs:
           migrations=true
           docs_only=false
           backend_python=true
+          redaction_compare=true
           single_connector=
           reason=
           c_migrations=
           c_docs_only=
           c_backend_python=
+          c_redaction_compare=
           c_single_connector=
 
           # Run `grep` on a file and return 0 (match), 1 (no match) or 2
@@ -418,6 +426,16 @@ jobs:
               1) c_backend_python=false; echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)" ;;
               *) reason="backend check failed (grep exit ${rc})"; return 1 ;;
             esac
+            # --- compare package (redaction-compare job) ---
+            # Any changed file of the compare package, `.md` files too, runs
+            # the job that judges it.
+            rc=0
+            grep -qE '^backend/tests/redaction_compare/' "${list}" || rc=$?
+            case "${rc}" in
+              0) c_redaction_compare=true; echo "compare package change detected -> redaction_compare=true" ;;
+              1) c_redaction_compare=false; echo "no compare package change -> redaction_compare=false" ;;
+              *) reason="compare package check failed (grep exit ${rc})"; return 1 ;;
+            esac
             # --- one-connector selection (#5297) ---
             # Only here, after every classifier gave an answer. The tool
             # reads the list file and prints the connector name when the
@@ -439,6 +457,7 @@ jobs:
             migrations="${c_migrations}"
             docs_only="${c_docs_only}"
             backend_python="${c_backend_python}"
+            redaction_compare="${c_redaction_compare}"
             single_connector="${c_single_connector}"
             echo "classified -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=${single_connector:-<empty>} (empty -> six unit shards)"
           else
@@ -448,6 +467,7 @@ jobs:
             echo "migrations=${migrations}"
             echo "docs_only=${docs_only}"
             echo "backend_python=${backend_python}"
+            echo "redaction_compare=${redaction_compare}"
             echo "single_connector=${single_connector}"
           } >> "$GITHUB_OUTPUT"
       - name: Pick unit tests with the test map
@@ -1553,6 +1573,9 @@ jobs:
     # Builds, for the base branch and for this pull request, the list of
     # hidden and shown parts of each fixed input on each secret-hiding step,
     # each side from its own code and input set, and judges the two lists.
+    # A change to a file under backend/tests/redaction_compare/, or to
+    # backend/tests/__init__.py, is a difference too and needs its own
+    # approved entry.
     # It fails when the base hides a part that the pull request shows, when a
     # plain part that the base shows is now hidden, when an answer changed in
     # another way, or when an input of the base is gone, unless
@@ -1574,7 +1597,9 @@ jobs:
     # write only its own records, and never the rule script, the base
     # records or the approved files that the judge reads.
     #
-    # The job log is public, so the judge runs with --summary-only: on
+    # The job log is public, so the container's error output goes to a file
+    # that is never printed (a failed record build prints one fixed line), and
+    # the judge runs with --summary-only: on
     # purpose the log shows no input, no step, no part and no number, only
     # one closing line (and any stale approved entry, which is committed
     # already). To see the differences, run the steps locally (see
@@ -1584,11 +1609,13 @@ jobs:
     # lookup of the base tree succeeds and finds no rule script. Otherwise
     # any failed step fails the job.
     #
-    # Non-required check. Only when the change touches backend/.
+    # Non-required check. Only when the change touches backend/, or any file
+    # of the compare package (also a `.md` file there).
     needs: changes
     if: >-
       (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-      needs.changes.outputs.backend_python == 'true'
+      (needs.changes.outputs.backend_python == 'true' ||
+       needs.changes.outputs.redaction_compare == 'true')
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # One environment sync on the runner (with the uv cache), one image pull
@@ -1674,20 +1701,38 @@ jobs:
             && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
           # The pull request: its own code and input set, with the base's
           # rule script, in a container with no mounts and no runner files.
+          # The files of the compare package, and backend/tests/__init__.py
+          # (it runs when the package is imported), that the pull request
+          # changes are listed from git here. Each listed file is a difference
+          # and needs its own reviewed entry. --no-renames lists both the old
+          # and the new path of a moved file; -z ends each path with a NUL
+          # byte and keeps it exactly as it is (no quotes, no escapes). A base script without --changed
+          # has no such check yet.
+          changed_args=()
+          if grep -q -e '--changed' "${dir}/redaction_compare.py"; then
+            git diff --name-only --no-renames -z "${base}" "${head}" -- backend/tests/__init__.py backend/tests/redaction_compare > "${dir}/changed.txt"
+            changed_args=(--changed "${dir}/changed.txt")
+          fi
           stage="${dir}/head-input"
           mkdir "${stage}"
           git archive "${head}" backend | tar -x -C "${stage}"
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
-          tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+          # The container's error output goes to a file that is never
+          # printed: the job log is public.
+          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
             work="$(mktemp -d)"
             tar -x -C "${work}"
             cd "${work}/backend"
             "${work}/uv" sync --frozen >&2
             "${work}/uv" run python "${work}/redaction_compare.py" --records "${work}/head.jsonl" >&2
             cat "${work}/head.jsonl"
-          ' > "${dir}/head.jsonl"
+          ' > "${dir}/head.jsonl" 2> "${dir}/head.err"; then
+            echo "The records of the pull request could not be built. Run the compare locally to see why (docs/codebase/redaction.md, \"Compare with main\")."
+            exit 1
+          fi
           python3 -I "${dir}/redaction_compare.py" \
             --judge "${dir}/base.jsonl" "${dir}/head.jsonl" \
+            "${changed_args[@]}" \
             --approved "${dir}/head-approved.yaml" \
             --base-approved "${dir}/base-approved.yaml" \
             --summary-only

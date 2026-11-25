@@ -4113,6 +4113,15 @@ install):</p>
 <p>MEHO may reach only its own parts and DNS. List here every system MEHO
 must reach, for example the vCenter and NSX. Without a rule, MEHO cannot
 reach the vCenter it runs on.</p>
+<p>MEHO also refuses a target on a private address by default. The vCenter
+and NSX are usually on one. List their networks in
+<code>config.targetSsrfAllowlist</code>, separated by commas:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># List only the networks of the systems MEHO manages. Never 0.0.0.0/0.</span>
+<span class="w">  </span><span class="nt">targetSsrfAllowlist</span><span class="p">:</span><span class="w"> </span><span class="s">"192.0.2.0/24"</span>
+</code></pre></div>
+<p>The network rule above decides what the pod may reach. This list decides
+which addresses MEHO accepts as a target. A target needs both.</p>
 <h2 id="step-4-install">Step 4: Install<a class="headerlink" href="#step-4-install" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>helm<span class="w"> </span>install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span>--version<span class="w"> </span><span class="m">0</span>.45.0<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-f<span class="w"> </span>values-vks.yaml<span class="w"> </span>-f<span class="w"> </span>values.yaml<span class="w"> </span><span class="se">\</span>

@@ -1005,6 +1005,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#tell-the-chart-where-your-ingress-controller-runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tell the chart where your ingress controller runs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#give-hosted-agents-a-model-optional" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1020,6 +1031,17 @@
     <span class="md-ellipsis">
       
         Let MEHO reach the systems it manages
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#let-meho-accept-targets-on-private-addresses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Let MEHO accept targets on private addresses
       
     </span>
   </a>
@@ -1103,6 +1125,17 @@
   
     <nav class="md-nav" aria-label="Notes for your platform">
       <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#k3s" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        k3s
+      
+    </span>
+  </a>
+  
+</li>
         
           <li class="md-nav__item">
   <a href="#vks-vsphere-kubernetes-service" class="md-nav__link">
@@ -3330,6 +3363,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#tell-the-chart-where-your-ingress-controller-runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tell the chart where your ingress controller runs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#give-hosted-agents-a-model-optional" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3345,6 +3389,17 @@
     <span class="md-ellipsis">
       
         Let MEHO reach the systems it manages
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#let-meho-accept-targets-on-private-addresses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Let MEHO accept targets on private addresses
       
     </span>
   </a>
@@ -3430,6 +3485,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#k3s" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        k3s
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#vks-vsphere-kubernetes-service" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3493,7 +3559,7 @@ This chapter does not need it.</p>
 <tbody>
 <tr>
 <td><strong>Kubernetes cluster</strong></td>
-<td>Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class. The built-in parts keep their data on disks the cluster makes.</td>
+<td>Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx; k3s and RKE2 bring Traefik: then change the ingress class, the controller namespace and two network rules, see <a href="#k3s">k3s</a>) and a default storage class. The built-in parts keep their data on disks the cluster makes.</td>
 </tr>
 <tr>
 <td><strong>Helm</strong></td>
@@ -3534,10 +3600,12 @@ uses an internal certificate authority, read
 <div class="highlight"><pre><span></span><code><span class="nt">image</span><span class="p">:</span>
 <span class="w">  </span><span class="c1"># Pin an immutable tag: v&lt;x.y.z&gt; for a release (see</span>
 <span class="w">  </span><span class="c1"># https://github.com/evoila/meho/releases).</span>
-<span class="w">  </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"v0.45.0"</span>
+<span class="w">  </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;REPLACE:</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">release</span><span class="nv"> </span><span class="s">tag&gt;"</span>
 
 <span class="nt">ingress</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="c1"># The class of your ingress controller. k3s and RKE2 use traefik: see</span>
+<span class="w">  </span><span class="c1"># the notes for your platform.</span>
 <span class="w">  </span><span class="nt">className</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nginx</span>
 <span class="w">  </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho.example.com</span>
 <span class="w">  </span><span class="nt">tls</span><span class="p">:</span>
@@ -3551,11 +3619,29 @@ uses an internal certificate authority, read
 <span class="w">  </span><span class="c1"># A UUID you pick once for your first tenant, and keep.</span>
 <span class="w">  </span><span class="c1"># For example, make one with: uuidgen | tr 'A-Z' 'a-z'</span>
 <span class="w">  </span><span class="nt">firstTenantId</span><span class="p">:</span><span class="w"> </span><span class="s">"&lt;REPLACE:</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">new</span><span class="nv"> </span><span class="s">UUID&gt;"</span>
+
+<span class="c1"># The web console at https://meho.example.com/ui/. It is off by default.</span>
+<span class="c1"># The install makes the Secret that holds its login secret.</span>
+<span class="nt">uiConsole</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">uiKeycloakClientId</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meho-web</span>
 </code></pre></div>
 <p>That is all. Leave <code>postgres.credentialsSecret</code>, <code>vault.address</code>,
 <code>config.vaultAddr</code>, <code>config.keycloakIssuerUrl</code> and <code>keycloak.issuer</code>
 empty. The chart sets them, and Helm stops with an error that names the
 key if you set one. You never type a database password.</p>
+<h3 id="tell-the-chart-where-your-ingress-controller-runs">Tell the chart where your ingress controller runs<a class="headerlink" href="#tell-the-chart-where-your-ingress-controller-runs" title="Permanent link">&para;</a></h3>
+<p>The network rules let only one namespace reach MEHO. The default is
+<code>ingress-nginx</code>. If your controller runs in another namespace, set
+<code>networkPolicy.ingressControllerNamespace</code> to it. Without it, the
+controller is blocked.</p>
+<p>MEHO also needs to reach its own address, <code>ingress.host</code>. The first-start
+checks <code>dns</code> and <code>certificate</code> use it. Name the pods of your ingress
+controller in <code>networkPolicy.ingressControllerEgress.podLabels</code>, and the
+port of their HTTPS entry point in <code>networkPolicy.ingressControllerEgress.port</code>
+(the default is 8443). With no labels, MEHO has no rule for its own
+address. <a href="#k3s">k3s</a> shows both keys for Traefik.</p>
 <h3 id="give-hosted-agents-a-model-optional">Give hosted agents a model (optional)<a class="headerlink" href="#give-hosted-agents-a-model-optional" title="Permanent link">&para;</a></h3>
 <p>Hosted agents and the sensor investigator need a model and its key. Set
 <code>agent.modelBackend</code>: <code>anthropic</code> (the default), <code>openai</code> for an
@@ -3606,6 +3692,21 @@ and a rule for the port you expect never matches. Write the rule for
 the real Pod and its port, not for the load balancer address. For
 ingress-nginx the port is usually 443. Check the <code>targetPort</code> of your
 ingress Service.</p>
+<h3 id="let-meho-accept-targets-on-private-addresses">Let MEHO accept targets on private addresses<a class="headerlink" href="#let-meho-accept-targets-on-private-addresses" title="Permanent link">&para;</a></h3>
+<p>MEHO refuses a target on a private address (for example <code>192.168.x.x</code>
+or <code>10.x.x.x</code>) by default. Most systems MEHO manages are on such
+addresses. To allow them, list their networks in
+<code>config.targetSsrfAllowlist</code>, separated by commas:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># List only the networks of the systems MEHO manages. Never 0.0.0.0/0.</span>
+<span class="w">  </span><span class="c1"># Never the pod and service networks of your cluster.</span>
+<span class="w">  </span><span class="nt">targetSsrfAllowlist</span><span class="p">:</span><span class="w"> </span><span class="s">"192.0.2.0/24"</span>
+</code></pre></div>
+<p>This is a second rule, next to <code>networkPolicy.extraEgress</code> above. The
+network rule decides what the pod may reach. This list decides which
+addresses MEHO accepts as a target. A target needs both. The default
+stays on until you set it. For the details, see
+<a href="../../guides/targets-and-secrets/">Targets and secrets</a>.</p>
 <h3 id="if-a-certificate-comes-from-an-internal-authority">If a certificate comes from an internal authority<a class="headerlink" href="#if-a-certificate-comes-from-an-internal-authority" title="Permanent link">&para;</a></h3>
 <p>Skip this when every certificate you use is public. If a target or your
 company login uses an internal certificate authority, MEHO must trust
@@ -3677,7 +3778,7 @@ certificate. See
 <h2 id="step-6-install-the-cli-and-log-in">Step 6: Install the CLI and log in<a class="headerlink" href="#step-6-install-the-cli-and-log-in" title="Permanent link">&para;</a></h2>
 <p>Download the <code>meho</code> CLI for your platform from the
 <a href="https://github.com/evoila/meho/releases">releases page</a>:</p>
-<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>&lt;the<span class="w"> </span>release<span class="w"> </span>tag<span class="w"> </span>of<span class="w"> </span>your<span class="w"> </span>backplane,<span class="w"> </span><span class="k">for</span><span class="w"> </span>example<span class="w"> </span>v0.45.0&gt;
+<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>&lt;the<span class="w"> </span>release<span class="w"> </span>tag<span class="w"> </span>of<span class="w"> </span>your<span class="w"> </span>backplane,<span class="w"> </span><span class="k">for</span><span class="w"> </span>example<span class="w"> </span>vX.Y.Z&gt;
 <span class="nv">TARBALL</span><span class="o">=</span>meho_<span class="si">${</span><span class="nv">TAG</span><span class="p">#v</span><span class="si">}</span>_linux_amd64.tar.gz<span class="w">   </span><span class="c1"># or darwin_arm64, etc.</span>
 curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/evoila/meho/releases/download/<span class="si">${</span><span class="nv">TAG</span><span class="si">}</span>/<span class="si">${</span><span class="nv">TARBALL</span><span class="si">}</span>
 curl<span class="w"> </span>-LO<span class="w"> </span>https://github.com/evoila/meho/releases/download/<span class="si">${</span><span class="nv">TAG</span><span class="si">}</span>/SHA256SUMS
@@ -3772,6 +3873,58 @@ options, so the chart stays at the version you run:</p>
 <p><strong>You now have a running MEHO and a logged-in operator.</strong> Go on with
 <a href="../setup-page/">the setup page and the settings file</a>.</p>
 <h2 id="notes-for-your-platform">Notes for your platform<a class="headerlink" href="#notes-for-your-platform" title="Permanent link">&para;</a></h2>
+<h3 id="k3s">k3s<a class="headerlink" href="#k3s" title="Permanent link">&para;</a></h3>
+<p>k3s brings Traefik, in the namespace <code>kube-system</code>, and enforces
+network rules. Use the example file
+<a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/values-k3s.yaml"><code>values-k3s.yaml</code></a>.
+It was made from the Traefik chart of k3s v1.37.2+k3s1. Download the
+file of your release, next to your <code>values.yaml</code>, and take it as it is:</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-fsSLO<span class="w"> </span>https://raw.githubusercontent.com/evoila/meho/&lt;release<span class="w"> </span>tag&gt;/deploy/values-examples/values-k3s.yaml
+</code></pre></div>
+<p>It sets:</p>
+<ul>
+<li><code>ingress.className: traefik</code>, and the annotation
+  <code>traefik.ingress.kubernetes.io/router.entrypoints: websecure</code>. MEHO
+  then answers on HTTPS only.</li>
+<li><code>networkPolicy.ingressControllerNamespace: kube-system</code>. Only pods in
+  <code>kube-system</code>, where Traefik runs, may reach MEHO. This rule names the
+  namespace, not the Traefik pods, so every pod in <code>kube-system</code> can reach
+  MEHO.</li>
+<li><code>networkPolicy.ingressControllerEgress.podLabels</code> with the label
+  <code>app.kubernetes.io/name: traefik</code>. MEHO can then reach its own address
+  through Traefik, on the pod port 8443.</li>
+<li><code>uiConsole.enabled: true</code> and <code>config.uiKeycloakClientId: meho-web</code>:
+  the web console.</li>
+<li><code>coreKeycloak.networkPolicy</code> and <code>coreVault.networkPolicy</code>, on. Only
+  MEHO and the setup Jobs reach them. Keycloak also lets in every pod in
+  <code>kube-system</code>, where Traefik runs, for browser and CLI logins.</li>
+<li><code>corePostgres.persistence.storageClass</code> and
+  <code>coreVault.persistence.storageClass</code>, empty. The disks use the default
+  class of k3s, <code>local-path</code>.</li>
+</ul>
+<p>In your own <code>values.yaml</code> from Step 3, remove only the line
+<code>className: nginx</code>. The example file sets the class. Keep the <code>uiConsole</code>
+and <code>config</code> lines: they set the same values as the example file. If you
+remove them, an empty <code>config:</code> is left, Helm reads it as no value, and
+the install fails. Then pass both files in Step 4, the example file
+first:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>meho<span class="w"> </span>oci://ghcr.io/evoila/meho-chart<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--namespace<span class="w"> </span>meho<span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>values-k3s.yaml<span class="w"> </span>-f<span class="w"> </span>values.yaml
+</code></pre></div>
+<p>MEHO's call to its own address works when the name <code>ingress.host</code>
+resolves to an address that <code>kubectl -n kube-system get svc traefik</code>
+shows under <code>EXTERNAL-IP</code>. k3s then sends the call straight to Traefik.
+We read this from the k3s and Kubernetes sources. It is not yet tested on
+a live k3s cluster. <a href="https://github.com/evoila/meho/issues/6922">Issue 6922</a>
+checks it.
+If the name resolves to another address (for example a public address
+that a router translates, or a proxy in front), the file's rule does not
+match. Add a rule for that address in <code>networkPolicy.extraEgress</code>.</p>
+<p>Also list the networks of your systems in <code>networkPolicy.extraEgress</code>
+and <code>config.targetSsrfAllowlist</code>, as in Step 3. Never put the pod and
+service networks of k3s (<code>10.42.0.0/16</code> and <code>10.43.0.0/16</code> by default)
+in <code>config.targetSsrfAllowlist</code>, so <code>10.0.0.0/8</code> is a bad value on k3s.</p>
 <h3 id="vks-vsphere-kubernetes-service">VKS (vSphere Kubernetes Service)<a class="headerlink" href="#vks-vsphere-kubernetes-service" title="Permanent link">&para;</a></h3>
 <p>VKS is the Kubernetes that VMware Cloud Foundation (VCF) runs on a
 vSphere Supervisor. MEHO is tested on two VKS clusters: Kubernetes

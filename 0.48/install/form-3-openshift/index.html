@@ -4362,6 +4362,15 @@ cat<span class="w"> </span>&gt;<span class="w"> </span>values-storage.yaml<span 
 <span class="s">    storageClass: $SC</span>
 <span class="s">EOF</span>
 </code></pre></div>
+<p><strong>Targets on private addresses.</strong> MEHO refuses a target on a private
+address (for example <code>192.168.x.x</code> or <code>10.x.x.x</code>) by default, also
+though the network rules are off here. List only the networks of the
+systems MEHO manages, separated by commas. Never <code>0.0.0.0/0</code>:</p>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>values-targets.yaml<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<span class="s">config:</span>
+<span class="s">  targetSsrfAllowlist: "192.0.2.0/24"</span>
+<span class="s">EOF</span>
+</code></pre></div>
 <p><strong>A test install</strong> with the check of <a href="#55-the-install-check-with-a-login">Step 5.5</a>:
 this makes a service login for the checks. Do not use it on a real
 install.</p>
@@ -4398,7 +4407,7 @@ With no internet, copy this image to your registry too (Step 2.3).</p>
 <p>This collects the files of Step 3.2 and 3.3 that you made, in the list
 <code>EXTRA</code>, and renders the install without changing anything:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">EXTRA</span><span class="o">=()</span>
-<span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>values-tls.yaml<span class="w"> </span>values-registry.yaml<span class="w"> </span>values-storage.yaml<span class="w"> </span>values-ci.yaml<span class="w"> </span>values-openbao-ubi.yaml<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="k">for</span><span class="w"> </span>f<span class="w"> </span><span class="k">in</span><span class="w"> </span>values-tls.yaml<span class="w"> </span>values-registry.yaml<span class="w"> </span>values-storage.yaml<span class="w"> </span>values-targets.yaml<span class="w"> </span>values-ci.yaml<span class="w"> </span>values-openbao-ubi.yaml<span class="p">;</span><span class="w"> </span><span class="k">do</span>
 <span class="w">  </span><span class="o">[</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$f</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">EXTRA</span><span class="o">+=(</span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$f</span><span class="s2">"</span><span class="o">)</span>
 <span class="k">done</span>
 <span class="nb">echo</span><span class="w"> </span><span class="s2">"extra files: </span><span class="si">${</span><span class="nv">EXTRA</span><span class="p">[*]</span><span class="si">}</span><span class="s2">"</span>

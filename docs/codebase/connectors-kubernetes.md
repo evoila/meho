@@ -741,6 +741,21 @@ secret: the approval preview shows all of them. Any other unknown key is
 rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
 labels and annotations of an existing Secret as they are.
 
+**`k8s.apply` manifest form.** One text, with the documents split by
+`---`. Each document has `apiVersion`, `kind` and `metadata.name`. Before
+the call waits for approval, a check (`_apply_park_check` in
+`ops_write_preview.py`) runs the same `_parse_manifest` the run uses, on
+the text only. Any other form is refused at once: nothing waits, no
+approval request is made and nothing goes to the cluster. Examples are a
+JSON array, a YAML list of documents, a `kind: List` without
+`metadata.name`, a document without `kind`, `apiVersion` or
+`metadata.name`, a text with no documents, and text that is not valid
+YAML. The refusal names the document by its number and does not repeat
+values of the manifest. `preview_operation` gives the same refusal. A
+document that the cluster refuses cannot be found from the text. When the
+cluster refuses one document of the text, the documents before it stay
+applied.
+
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real

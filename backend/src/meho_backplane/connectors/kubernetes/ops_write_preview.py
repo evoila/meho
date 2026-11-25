@@ -103,9 +103,14 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import yaml
 from kubernetes_asyncio import client
 
-from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
+from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
+    ApplyManifestError,
+    _parse_manifest,
+)
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
@@ -696,11 +701,44 @@ def _run_commands_shown_to_agents() -> bool:
     return False
 
 
+_APPLY_FORM = (
+    "Send one text with the documents split by `---`. "
+    "Each document has `apiVersion`, `kind` and `metadata.name`"
+)
+
+
+async def _apply_park_check(ctx: PreviewContext) -> str | None:
+    """Refuse a ``k8s.apply`` manifest that the run cannot parse, before the wait.
+
+    Runs the same :func:`_parse_manifest` the run uses, on the text only:
+    nothing goes to the cluster. A manifest that passes here passes the
+    parse step of the run. The reason names the document by its number
+    (and its ``apiVersion`` and ``kind`` when they are there) and never
+    repeats a value of the manifest: a YAML error text is not shown. A
+    param that is not a text is left to the params check.
+    """
+    manifest = ctx.params.get("manifest")
+    if not isinstance(manifest, str):
+        return None
+    try:
+        _parse_manifest(manifest)
+    except ApplyManifestError as exc:
+        if isinstance(exc.__cause__, yaml.YAMLError):
+            detail = "the text is not valid YAML or JSON"
+        elif str(exc).startswith("manifest document "):
+            detail = str(exc).removeprefix("manifest ")
+        else:
+            detail = "the text has no documents"
+        return f"The manifest cannot be applied: {detail}. {_APPLY_FORM}"
+    return None
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
+    register_park_check("k8s.apply", _apply_park_check)
     register_person_only_preview_keys(
         "k8s.apply", _run_commands_shown_to_agents, frozenset({RUN_COMMANDS_KEY})
     )

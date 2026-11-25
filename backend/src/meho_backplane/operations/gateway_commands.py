@@ -50,8 +50,10 @@ owns the commit so the mint (or consume + record + audit) lands atomically
 
 from __future__ import annotations
 
+import functools
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -644,39 +646,28 @@ async def _asker_block_refusal(
     *,
     op_id: str,
     operator: Operator,
-    runner_id: str,
-    session: AsyncSession,
-    approval_request_id: uuid.UUID | None,
+    refuse: Callable[[MintRefusalCode, str], Awaitable[MintResult]],
 ) -> MintResult | None:
     """Refuse the mint when the login that asked is blocked.
 
     The mint stays refused and the approval stays unused: no claim is taken.
-    One audit row records the refusal, as for every refused remote-write mint
-    (:func:`_refuse_remote_write`). A blocked login gets ``ASKER_BLOCKED``; a
-    block list that cannot be read gets ``ASKER_BLOCK_UNREADABLE``.
+    *refuse* is :func:`_refuse_remote_write` with the call's values filled in,
+    so one audit row records the refusal. A blocked login gets
+    ``ASKER_BLOCKED``; a block list that cannot be read gets
+    ``ASKER_BLOCK_UNREADABLE``.
     """
     try:
         blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
     except PrincipalBlockUnavailableError:
-        return await _refuse_remote_write(
+        return await refuse(
             MintRefusalCode.ASKER_BLOCK_UNREADABLE,
             f"remote-write op {op_id!r} refused: the block list could not be read",
-            op_id=op_id,
-            operator=operator,
-            runner_id=runner_id,
-            session=session,
-            approval_request_id=approval_request_id,
         )
     if not blocked:
         return None
-    return await _refuse_remote_write(
+    return await refuse(
         MintRefusalCode.ASKER_BLOCKED,
         f"remote-write op {op_id!r} refused: {PRINCIPAL_BLOCKED_MESSAGE}",
-        op_id=op_id,
-        operator=operator,
-        runner_id=runner_id,
-        session=session,
-        approval_request_id=approval_request_id,
     )
 
 
@@ -705,6 +696,14 @@ async def _screen_remote_write(
     """
     from meho_backplane.settings import get_settings
 
+    refuse = functools.partial(
+        _refuse_remote_write,
+        session=session,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
     raw_target_id = getattr(target, "id", None) if target is not None else None
     target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
 
@@ -727,24 +726,13 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            await _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
                 approval_refusal,
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
-                session=session,
-                approval_request_id=approval_request_id,
             ),
         )
 
-    blocked_refusal = await _asker_block_refusal(
-        op_id=op_id,
-        operator=operator,
-        runner_id=runner_id,
-        session=session,
-        approval_request_id=approval_request_id,
-    )
+    blocked_refusal = await _asker_block_refusal(op_id=op_id, operator=operator, refuse=refuse)
     if blocked_refusal is not None:
         return None, None, blocked_refusal
 
@@ -754,14 +742,9 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            await _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE,
                 f"remote-write op {op_id!r} refused: {exc}",
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
-                session=session,
-                approval_request_id=approval_request_id,
             ),
         )
 
@@ -779,14 +762,9 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            await _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED,
                 gate.reason,
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
-                session=session,
-                approval_request_id=approval_request_id,
             ),
         )
 

@@ -403,6 +403,25 @@ async def test_only_a_person_with_tenant_admin_blocks_and_unblocks(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_block_call_writes_no_block_and_one_audit_row(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+
+    refused = await _block(ac, _admin(key), sub="admin-person")
+
+    assert refused.status_code == 422
+    assert await _rows("admin-person") == []
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    block_rows = [r for r in rows if r.payload.get("op_id") == "principal.block"]
+    assert len(block_rows) == 1
+    assert block_rows[0].status_code == 422
+    assert block_rows[0].operator_sub == "admin-person"
+
+
+@pytest.mark.asyncio
 async def test_block_and_unblock_each_write_one_audit_row(
     _client: tuple[httpx.AsyncClient, Any],
 ) -> None:
@@ -765,6 +784,13 @@ async def test_blocked_platform_admin_cannot_remove_another_persons_block(
     assert refused.status_code == 403
     assert len(await _rows(_BLOCKED)) == 1
     assert len(await _rows(_PA)) == 1
+
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    unblock_rows = [r for r in rows if r.payload.get("op_id") == "principal.unblock"]
+    assert len(unblock_rows) == 1
+    assert unblock_rows[0].status_code == 403
+    assert unblock_rows[0].operator_sub == _PA
 
 
 @pytest.mark.asyncio

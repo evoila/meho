@@ -456,6 +456,43 @@ async def test_blocked_redirect_log_holds_host_name_only(
         assert mark not in rendered
 
 
+async def test_blocked_redirect_with_backslash_logs_one_fixed_mark(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_http_probe_op: None,
+) -> None:
+    """A refused redirect whose host part holds a backslash is logged as one fixed mark."""
+    from structlog.testing import capture_logs
+
+    from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS
+
+    server = await _start_http_server(
+        {
+            "/hop1": _Route(
+                status=302,
+                headers={"Location": "http://other.example.com\\PATHMARK?q=QUERYMARK"},
+            )
+        },
+        host="127.0.0.1",
+    )
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "localhost")
+    try:
+        with capture_logs() as captured:
+            result = await _dispatch_probe(
+                {"url": f"http://localhost:{server.port}/hop1", "method": "GET"}
+            )
+    finally:
+        server.server.close()
+        await server.server.wait_closed()
+
+    assert result.result["reason"] == "blocked_redirect", result.result
+    event = next(e for e in captured if e["event"] == "net.http_probe.blocked_redirect")
+    assert event["from_url"] == "localhost"
+    assert event["blocked_redirect"] == UNPARSEABLE_ADDRESS
+    rendered = repr(captured)
+    for mark in ("PATHMARK", "QUERYMARK"):
+        assert mark.lower() not in rendered.lower()
+
+
 # ---------------------------------------------------------------------------
 # Initial-host gating + audit row records the final URL
 # ---------------------------------------------------------------------------

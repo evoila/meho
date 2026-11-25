@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 __all__ = ["UNPARSEABLE_ADDRESS", "host_for_log"]
 
 #: The one fixed mark a log line holds when there is no host name to show.
 UNPARSEABLE_ADDRESS = "<unparseable-location>"
+
+# Letters (also non-ASCII ones of a decoded IDNA name), digits, "_", ".",
+# "-" and the ":" of an IPv6 address. ``httpx`` keeps other characters, such
+# as a backslash and the text after it, in ``URL.host``.
+_HOST_NAME = re.compile(r"[\w.:-]+")
 
 
 def host_for_log(address: str | httpx.URL) -> str:
@@ -16,11 +23,14 @@ def host_for_log(address: str | httpx.URL) -> str:
     The address may come from a vendor system (a ``Location`` header, a
     redirect target). The result never holds the scheme, the path, the query,
     the fragment or the user part. A relative address, or a value ``httpx``
-    cannot parse (also a host name that is not valid IDNA), gives
+    cannot parse (also a host name that is not valid IDNA), or a host part
+    with any character a host name does not have, gives
     :data:`UNPARSEABLE_ADDRESS`.
     """
     try:
         host = (address if isinstance(address, httpx.URL) else httpx.URL(address)).host
     except (httpx.InvalidURL, UnicodeError):
         return UNPARSEABLE_ADDRESS
-    return host or UNPARSEABLE_ADDRESS
+    if not _HOST_NAME.fullmatch(host):
+        return UNPARSEABLE_ADDRESS
+    return host

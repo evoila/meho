@@ -2142,12 +2142,11 @@ async def test_pooled_client_refuses_cross_origin_redirect_and_drops_creds() -> 
 
 @pytest.mark.asyncio
 async def test_cross_origin_redirect_warning_strips_url_query() -> None:
-    """The cross-origin-redirect WARNING logs scheme+host+path, never the query.
+    """The cross-origin-redirect WARNING logs the host name of the request only.
 
     A guest-transfer / session URL carries a one-time ticket in its query
-    string. When such a URL draws a cross-origin 3xx, the refusal WARNING must
-    name the origin + path for diagnosis but never the ticket (the query),
-    otherwise the one-time transfer ticket lands in the log.
+    string. When such a URL draws a cross-origin 3xx, the refusal WARNING
+    names only the host name, never the path or the query.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2182,6 +2181,8 @@ async def test_cross_origin_redirect_warning_strips_url_query() -> None:
         ),
         ("https://other.example.com", "other.example.com"),
         ("//other.example.com/PATHMARK?q=QUERYMARK", "other.example.com"),
+        # httpx keeps a backslash and the text after it in the host part.
+        ("https://other.example.com\\PATHMARK?q=QUERYMARK", "<unparseable-location>"),
     ],
 )
 async def test_cross_origin_redirect_warning_logs_location_host_only(
@@ -2215,6 +2216,8 @@ async def test_cross_origin_redirect_warning_logs_location_host_only(
         "https://[::1/PATHMARK?q=QUERYMARK",
         "https://xn--a.example.com/PATHMARK?q=QUERYMARK",
         "https:PATHMARK?q=QUERYMARK",
+        "https://other.example.com\\PATHMARK?q=QUERYMARK",
+        "https://other.example.com%2FPATHMARK",
     ],
 )
 def test_location_without_host_logs_one_fixed_mark(location: str) -> None:
@@ -2261,6 +2264,23 @@ async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) ->
     rendered = repr(captured)
     for mark in ("PATHMARK", "QUERYMARK"):
         assert mark not in rendered
+
+
+@pytest.mark.asyncio
+async def test_redirect_without_location_header_is_returned_without_warning() -> None:
+    """A 3xx answer without a Location header comes back as is, with no redirect warning."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302)
+
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com", transport=httpx.MockTransport(handler)
+    ) as client:
+        with capture_logs() as captured:
+            resp = await client.get("/guestFile")
+
+    assert resp.status_code == 302
+    assert not any(e["event"] == "connector_redirect_not_followed_cross_origin" for e in captured)
 
 
 @pytest.mark.asyncio

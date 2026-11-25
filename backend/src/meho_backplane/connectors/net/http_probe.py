@@ -714,7 +714,7 @@ def _advance_or_halt(
         # reachable=true (the prior host did answer), but the walk halts.
         _log.info(
             "net.http_probe.blocked_redirect",
-            blocked_redirect=next_host,
+            blocked_redirect=host_for_log(next_request.url),
             from_url=host_for_log(request.url),
         )
         return _result(

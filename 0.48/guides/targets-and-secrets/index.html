@@ -4055,7 +4055,8 @@ removes every alias. In YAML, write <code>secret_ref: null</code>.</p>
 <p>A Keycloak target must name the realm MEHO manages, in
 <code>extras.managed_realm</code>. MEHO has no built-in realm. Without it, MEHO
 refuses to create or update the target, and refuses every operation on
-it.</p>
+it. The target works on that realm only: a call that names another realm
+is refused.</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>lab-sso<span class="w"> </span>--product<span class="w"> </span>keycloak<span class="w"> </span>--host<span class="w"> </span>sso.example.com<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--extra<span class="w"> </span><span class="nv">managed_realm</span><span class="o">=</span>example
 </code></pre></div>

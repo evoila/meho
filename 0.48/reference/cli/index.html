@@ -20681,14 +20681,14 @@
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h4 id="meho-keycloak-realm-delete"><code>meho keycloak realm delete</code><a class="headerlink" href="#meho-keycloak-realm-delete" title="Permanent link">&para;</a></h4>
-<p>Delete a whole Keycloak realm (destructive, a second person must approve)</p>
+<p>Delete a whole Keycloak realm (destructive, approval cannot be turned off)</p>
 <div class="highlight"><pre><span></span><code>meho keycloak realm delete [flags]
 </code></pre></div>
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
 <li><code>--preview-hash</code> — the preview_hash from a first run of this command; with it, the delete waits for approval</li>
-<li><code>--realm</code> — the name of the realm to delete (required)</li>
+<li><code>--realm</code> — the name of the realm to delete: the target's managed realm (required)</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h4 id="meho-keycloak-realm-get"><code>meho keycloak realm get</code><a class="headerlink" href="#meho-keycloak-realm-get" title="Permanent link">&para;</a></h4>
@@ -20707,7 +20707,7 @@
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
-<li><code>--realm</code> — realm to update (defaults to the target's managed realm)</li>
+<li><code>--realm</code> — realm to update: must be the target's managed realm (the default); another realm is refused</li>
 <li><code>--representation-file</code>, <code>-f</code> — path to a JSON file with the partial RealmRepresentation body (required)</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>

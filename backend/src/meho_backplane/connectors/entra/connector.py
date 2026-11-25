@@ -66,8 +66,8 @@ from meho_backplane.connectors.entra._errors import EntraApiError, EntraUrlRefus
 from meho_backplane.connectors.entra._http import NoRedirectClient, send
 from meho_backplane.connectors.entra._paths import ORGANIZATION_PATH, ORGANIZATION_PERMISSION
 from meho_backplane.connectors.entra.session import (
-    EntraCredentials,
     EntraCredentialsLoader,
+    EntraLogin,
     EntraTargetConfig,
     EntraTargetConfigError,
     EntraTargetLike,
@@ -160,7 +160,7 @@ class EntraConnector(HttpConnector):
         self._credentials_loader: EntraCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
-        self._credentials: dict[_CredentialKey, EntraCredentials] = {}
+        self._credentials: dict[_CredentialKey, EntraLogin] = {}
         self._tokens: dict[_TokenKey, _CachedToken] = {}
         # The callers whose own Vault read of a target's secret passed.
         self._readers = SecretReaders()
@@ -246,9 +246,7 @@ class EntraConnector(HttpConnector):
             )
             return token
 
-    async def _credentials_for(
-        self, target: EntraTargetLike, operator: Operator
-    ) -> EntraCredentials:
+    async def _credentials_for(self, target: EntraTargetLike, operator: Operator) -> EntraLogin:
         """Return the target's login, from the cache or from its secret."""
         key: _CredentialKey = (*target_cache_key(target), str(target.secret_ref or ""))
         checked = _may_use_cache(operator)

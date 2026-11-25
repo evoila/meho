@@ -166,6 +166,7 @@ func printRoleMappingGet(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	realmRoles := roleNames(mappings["realmMappings"])
 	fmt.Fprintf(w, "  realm roles:   %s\n", joinOrNone(realmRoles))
 

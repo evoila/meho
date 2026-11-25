@@ -415,7 +415,8 @@ removes every alias. In YAML, write `secret_ref: null`.
 A Keycloak target must name the realm MEHO manages, in
 `extras.managed_realm`. MEHO has no built-in realm. Without it, MEHO
 refuses to create or update the target, and refuses every operation on
-it.
+it. The target works on that realm only: a call that names another realm
+is refused.
 
 ```bash
 meho targets add lab-sso --product keycloak --host sso.example.com \
@@ -450,9 +451,16 @@ when you leave it out.
 
 MEHO keeps each tenant's secrets under the tenant's own folder in the
 secret store (Vault or OpenBao). When a target's `secret_ref` points
-outside that folder, MEHO writes a warning to the server log, at most once
-an hour for each target. The call still works. Move the secret into the
-tenant's folder.
+outside that folder, MEHO writes a warning to the server log. It writes the
+warning at most once an hour for each target in each server process. After
+a restart, or with more than one server process, the warning can come more
+often. The warning never stops the read: the call still works. Move the
+secret into the tenant's folder.
+
+A target is listed, and a read of its secret warns, when its secret path
+lies outside the tenant's folder, whoever built the path. A target of a
+tenant with its own store role is listed too. A read of its secret is
+refused, with no warning.
 
 To list these targets, run this as an admin:
 

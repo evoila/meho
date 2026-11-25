@@ -15,8 +15,49 @@ Who may block:
 - A tenant admin blocks a person in their own tenant. The block never
   reaches another tenant.
 - Nobody blocks their own login (422 `cannot_block_self`).
-- Only a person with `tenant_admin` can block, unblock or list. An agent,
-  service or runner login gets 403. There is no MCP tool.
+- Only a person can block, unblock or list. An agent, service or runner
+  login gets 403. There is no MCP tool.
+- Block and list need `tenant_admin`. Unblock needs `tenant_admin`, or a
+  platform admin who removes their own block.
+
+Who removes a block:
+
+- A tenant admin removes the blocks of their own tenant.
+- A platform admin with `tenant_admin` in the current tenant removes every
+  block of another person's login.
+- Only a platform admin removes a block that a platform admin made (scope
+  `*`). The person under it gets 403 on unblock.
+- A tenant admin who is blocked in their tenant gets 403 on unblock.
+
+A platform admin's way back:
+
+- A platform admin whom a tenant admin blocked removes that block on their
+  own login, in the tenant of the block:
+  `meho principal unblock <sub> --reason "<why>"`.
+- This call needs a reason of 1 to 500 characters and a fresh approval
+  sign-in: the same check as an approve (`check_fresh_approval_sign_in` in
+  `auth/approval_sign_in.py`). Without a reason MEHO answers 422
+  `unblock_reason_required`; without a fresh sign-in, 401
+  `fresh_sign_in_required`. The block stays in both cases.
+- The audit row `principal.unblock` holds the reason and the sign-in
+  (`sign_in`).
+- The way back uses the approval sign-in client of the login server
+  (`meho-cli-approve` in MEHO's own setup). An install without that client
+  has no way back; another platform admin or a tenant admin of that tenant
+  removes the block then.
+- On their own login, MEHO removes only the block of the current tenant.
+  It reads the table for this, not the list it keeps for 5 seconds.
+- A platform admin who is blocked in the current tenant removes only their
+  own block there. Every other route of that tenant refuses them until the
+  block is gone.
+- The platform admin flag comes from the person's own token (the claim or
+  the realm role).
+- When the block list or the table cannot be read, the unblock answers 503
+  `principal_block_check_unavailable`, like every other route.
+
+To stop a platform admin: another platform admin blocks the person in
+every tenant. In the login server, take the platform admin role away and
+end the person's sessions and long logins.
 
 A blocked person reads: "This person is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
@@ -126,12 +167,26 @@ REST routes (`/api/v1/principals/blocked`):
   the blocks of their tenant.
 - `POST` with `{"sub", "reason"}`: block. A second block in the same
   scope updates the reason.
-- `DELETE /{sub}`: unblock. A platform admin removes every block of the
-  login. A tenant admin removes the block of their tenant. 404 when there
-  is none.
+- `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
+  every block of the login, but on their own login only the block of the
+  current tenant. A tenant admin removes the block of their tenant. 404
+  when there is none. On the caller's own login the call needs the body
+  `{"reason": "..."}` (1 to 500 characters, else 422
+  `unblock_reason_required`) and a token of a fresh approval sign-in (else
+  401 `fresh_sign_in_required` with the `WWW-Authenticate` challenge).
+  Both are checked before any block is read. On another person's login
+  the reason is optional and goes into the audit row. This route uses its own sign-in check
+  (`verify_jwt_platform_admin_way_back` in `auth/jwt.py`,
+  `verify_jwt_and_bind_platform_admin_way_back` in `middleware.py`): a
+  platform admin passes a block of the current tenant and reaches the
+  route, which lets a caller who is blocked there remove only their own
+  block. A block in every tenant always refuses.
 
 CLI: `meho principal block <sub> --reason <text>`,
-`meho principal unblock <sub>`, `meho principal blocked`.
+`meho principal unblock <sub> [--reason <text>]`, `meho principal blocked`.
+On a 401 with the challenge, `unblock` opens the browser approval sign-in
+(the same way as `meho approvals approve`) and sends the call again with
+that token; the token stays in memory for this one run.
 
 ## Dependencies
 

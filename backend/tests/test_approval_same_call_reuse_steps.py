@@ -27,7 +27,7 @@ import meho_backplane.operations.approval_queue as approval_queue_module
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.db.models import ApprovalRequest, AuditLog
 from meho_backplane.operations import (
     DispatchChild,
     dispatch,
@@ -35,7 +35,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
 )
 from meho_backplane.operations._validate import compute_params_hash
-from meho_backplane.operations.composite import composite_depth_var
+from meho_backplane.operations.composite import composite_depth_var, enforce_subop_policy
 from meho_backplane.settings import get_settings
 from tests.test_operations_composite import (
     _FakeTarget,
@@ -263,3 +263,73 @@ async def test_a_retry_of_a_step_waiting_since_before_the_upgrade_gets_its_reque
     assert retry.id == first.id
     assert getattr(retry, "_reused", False) is True
     assert len(await _requests()) == 1
+
+
+async def _step_at_top_level(target: _FakeTarget) -> OperationResult:
+    """The check of a step, called outside a multi-step operation."""
+    gate = await enforce_subop_policy(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_STEP_OP_ID,
+        safety_level="safe",
+        requires_approval=True,
+        target=target,
+        params=dict(_STEP_PARAMS),
+    )
+    assert gate is not None
+    return gate
+
+
+async def _reuse_audit_rows() -> list[AuditLog]:
+    async with get_sessionmaker()() as s:
+        stmt = select(AuditLog).where(AuditLog.path == "approval.reuse")
+        return list((await s.execute(stmt)).scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_a_step_checked_at_the_top_level_gets_its_own_request(
+    recorded: list[tuple[str, uuid.UUID]],
+) -> None:
+    await _register_ops()
+    target = _FakeTarget(product="vault")
+    direct = await _direct(target)
+    assert direct.status == "awaiting_approval", direct.error
+
+    step = await _step_at_top_level(target)
+
+    assert step.status == "awaiting_approval", step.error
+    direct_id = uuid.UUID(direct.extras["approval_request_id"])
+    step_id = uuid.UUID(step.extras["approval_request_id"])
+    assert step_id != direct_id
+    assert "approval_request_reused" not in step.extras
+    assert len(await _requests()) == 2
+    assert await _reuse_audit_rows() == []
+    assert recorded == [("pending", direct_id), ("pending", step_id)]
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_gets_a_reused_request_answers_normally(
+    monkeypatch: pytest.MonkeyPatch, recorded: list[tuple[str, uuid.UUID]]
+) -> None:
+    await _register_ops()
+    target = _FakeTarget(product="vault")
+    direct = await _direct(target)
+    assert direct.status == "awaiting_approval", direct.error
+    # The step path asks for its own request; make the queue ignore that and
+    # hand back the waiting request of the same call.
+    real = approval_queue_module._same_call_reuse_applies
+
+    def _ignore_keyword(run_id: Any, resume_parent: Any, requester: Any, *_rest: Any) -> bool:
+        return real(run_id, resume_parent, requester, True)
+
+    monkeypatch.setattr(approval_queue_module, "_same_call_reuse_applies", _ignore_keyword)
+    monkeypatch.setattr(approval_queue_module, "_is_composite_step", lambda: False)
+
+    step = await _step_at_top_level(target)
+
+    assert step.status == "awaiting_approval", step.error
+    assert step.extras["approval_request_id"] == direct.extras["approval_request_id"]
+    assert step.extras["approval_request_reused"] is True
+    assert len(await _requests()) == 1
+    assert len(await _reuse_audit_rows()) == 1
+    assert recorded == [("pending", uuid.UUID(direct.extras["approval_request_id"]))]

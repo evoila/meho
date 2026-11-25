@@ -45,14 +45,28 @@ One target is one tenant.
 
 ## Step 1: pick the login
 
-MEHO logs in as an app (a service principal) with a client secret. You can
+MEHO logs in as an app (a service principal). It can prove who it is in two
+ways:
+
+| Way | What MEHO keeps | When to use it |
+| --- | --- | --- |
+| **Certificate** (recommended) | a private key and the public certificate, in the secret store | a customer tenant, and any tenant that blocks new client secrets |
+| Client secret | a client secret, in the secret store | a lab or a first test |
+
+Microsoft advises a certificate, and no client secret in production. A tenant
+admin can also block new client secrets for all apps, and then only the
+certificate works. With a certificate, MEHO signs a short proof with the
+private key. Microsoft checks it with the public certificate that you upload
+to the app. The private key never leaves MEHO's secret store.
+
+You can
 reuse the login of an Azure target of the same tenant (see
 [`azure-onboarding.md`](azure-onboarding.md), step 1): the secret has the
 same shape. Or make a new app registration for Entra ID only. A login of its
 own keeps the Graph permissions apart from the Azure roles.
 
-You need the login's application (client) ID, its tenant ID and a client
-secret.
+You need the login's application (client) ID, its tenant ID and either a
+certificate or a client secret.
 
 ## Step 2: add the Graph permissions and grant admin consent
 
@@ -126,9 +140,52 @@ Skip this step when you reuse the secret of an Azure target. Then put that
 Azure target's `secret_ref` into the Entra ID target in step 4, instead of
 `entra/example-tenant`.
 
-Otherwise the secret holds three keys. MEHO reads it with the caller's own
+Otherwise the secret holds `tenant_id`, `client_id` and one of two ways (a
+certificate, or a client secret). MEHO reads it with the caller's own
 Vault identity, so the Vault policy must let your operators read this path
 (see [`connector-vault-policy.md`](connector-vault-policy.md)).
+
+**Certificate (recommended).**
+
+1. Make a key pair. Use a certificate life of 12 months or less.
+
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+     -subj "/CN=meho-entra" -keyout key.pem -out cert.pem
+   ```
+
+2. Write the private key straight into the secret store, with the
+   certificate. Do not paste the key into a chat or a ticket.
+
+   ```bash
+   vault kv put -mount=secret entra/example-tenant \
+     tenant_id="<tenant id>" \
+     client_id="<client id>" \
+     private_key=@key.pem \
+     certificate=@cert.pem
+   ```
+
+3. Delete `key.pem` from the disk. Upload only `cert.pem` (the public
+   certificate) to the app: Microsoft Entra admin center, App registrations,
+   your app, Certificates & secrets, Certificates, Upload certificate.
+4. Test it (step 5). Then remove the old client secret from the app.
+5. Put the end date of the certificate in your calendar. When it runs out,
+   make a new pair and repeat steps 1 to 3. MEHO reads the new secret on the
+   next call after a refused login, without a restart.
+
+The key must be an RSA key without a password, in PEM form. MEHO works out
+the certificate's thumbprint by itself. MEHO checks the key and the
+certificate each time it reads the secret, before it calls Microsoft:
+
+| Message says | What to fix |
+| --- | --- |
+| "not a readable PEM" | the key or the certificate is not PEM text, or the key has a password: write them again from `key.pem` and `cert.pem` |
+| "must be RSA" | make the pair with `rsa:2048` as in step 1 |
+| "does not belong to the certificate" | the key and the certificate come from two different pairs: write the matching pair |
+
+After you fix the secret, the next call reads it, without a restart.
+
+**Client secret.**
 
 ```bash
 vault kv put -mount=secret entra/example-tenant \
@@ -137,8 +194,11 @@ vault kv put -mount=secret entra/example-tenant \
   client_secret="<client secret>"
 ```
 
-MEHO never writes the client secret or the access token into audit rows,
-logs, traces or stored results.
+Keep one way only. A secret that holds both `client_secret` and the
+certificate keys, or neither, is refused.
+
+MEHO never writes the client secret, the private key or the access token into
+audit rows, logs, traces or stored results.
 
 ## Step 4: add the target
 
@@ -207,12 +267,17 @@ saved before the answer returns.
 | `connector_error`, `EntraPermissionError` | the login lacks the Graph permission the message names, or consent is missing | step 2; the remediation lists the permissions the token carries |
 | `connector_auth_failed` with `AADSTS7000215` | the client secret is wrong | write the right secret to Vault; no restart is needed |
 | `connector_auth_failed` with `AADSTS7000222` | the client secret has run out | make a new secret and write it to Vault |
+| `connector_auth_failed`, the message says "with the certificate" | Microsoft refused the proof | check that the certificate is uploaded to the app, has not run out, and that the `private_key` in the secret belongs to it |
 | `EntraTargetConfigError` | the target is wrong (host, port, GUID or cloud) | fix the field the message names |
 | `EntraSecretShapeError` | a secret key is missing or not a GUID | fix the key the message names |
 | `connector_error`, `EntraThrottledError` | Graph is limiting the calls of this login | wait the time the message names |
 
 ## References
 
+- Certificate credentials (the proof MEHO signs):
+  <https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials>
+- Security best practices for app registrations:
+  <https://learn.microsoft.com/en-us/entra/identity-platform/security-best-practices-for-app-registration>
 - Grant tenant-wide admin consent:
   <https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent>
 - Microsoft Graph permissions reference:

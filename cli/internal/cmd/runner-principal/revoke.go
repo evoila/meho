@@ -25,8 +25,8 @@ func newRevokeCmd() *cobra.Command {
 		Use:   "revoke <name>",
 		Short: "Revoke a runner principal — kill switch (tenant_admin)",
 		Long: "revoke calls DELETE /api/v1/runner-principals/{name}/revoke to " +
-			"immediately disable the Keycloak client (no new token grants) " +
-			"and mark the DB row revoked. " +
+			"immediately turn the runner's Keycloak client off (no new token " +
+			"grants) and delete it, and mark the DB row revoked. " +
 			"In-flight tokens remain valid until their exp. " +
 			"Returns 404 when no active principal with that name exists. " +
 			"Requires tenant_admin.",

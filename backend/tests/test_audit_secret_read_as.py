@@ -214,12 +214,9 @@ async def _read(
 @pytest.mark.parametrize(
     ("operator", "expected"),
     [
+        # An approved call, an agent that resumes itself and a hosted run are
+        # tested on their own path in test_audit_secret_read_as_real_paths.py.
         pytest.param(_operator("person-sub"), "person-sub", id="direct-call"),
-        pytest.param(
-            _operator("approver-sub"), "approver-sub", id="approved-call-runs-as-approver"
-        ),
-        pytest.param(_operator("agent:reader"), "agent:reader", id="agent-resumes-itself"),
-        pytest.param(_operator("person-sub"), "person-sub", id="hosted-run"),
         pytest.param(
             _operator("sensor-owner-sub", "runner-sub", check_runner_dispatch=True),
             "runner-sub",

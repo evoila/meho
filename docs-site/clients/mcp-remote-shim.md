@@ -1,4 +1,4 @@
-# Other MCP clients (the `mcp-remote` static-token shim)
+# Other MCP clients (the `mcp-remote` shim)
 
 Some MCP clients — Cursor as of this writing, and others — follow the
 RFC 9728 metadata trail correctly but **expose no `client_id` field**
@@ -7,26 +7,137 @@ which Keycloak's Trusted Hosts policy blocks, and the wire-up never
 completes. Pre-registering `meho-mcp` does not help: the client has
 nowhere to put the resulting id.
 
-The general-purpose workaround is a
-[`mcp-remote`](https://github.com/geelen/mcp-remote) stdio shim that
-carries a **pre-minted bearer token** instead of running OAuth. The
-client spawns the shim as a local stdio server; the shim injects the
-`Authorization` header and forwards Streamable-HTTP calls to `/mcp`.
+The general-purpose way around this is a
+[`mcp-remote`](https://github.com/geelen/mcp-remote) stdio shim. The
+client starts the shim as a local command. The shim signs in as the
+registered client `meho-mcp`, keeps the login, and forwards the calls to
+`/mcp`. This works for any client that can start a local command.
 
-!!! warning "This is a stopgap, not the first-class path"
+There are two ways to run the shim:
 
-    A pre-minted access token is **short-lived**. In this mode the shim
-    is *not* running the OAuth refresh flow, so when the token expires
-    every call fails until you re-mint it and restart the client. Prefer
-    a client that can carry a `client_id` — [Claude Code](claude-code.md),
-    or the OAuth-mode [Claude Desktop shim](claude-desktop.md), both of
-    which refresh automatically. Use the static-token shim only when the
-    client supports neither.
+1. **Login mode (use this one).** The shim signs in once and then renews
+   its login by itself. See [Connect with a login that renews
+   itself](#connect-with-a-login-that-renews-itself) and, for a machine
+   with no browser, [A machine without a browser](#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host).
+2. **Static token (last resort).** You make a token by hand and give it to
+   the shim. The token ends after 5 minutes. See
+   [The static token](#the-static-token-last-resort).
 
 Runs here, as everywhere in this section, from a machine **on the
 internal network / VPN**.
 
-## Mint a token
+## Connect with a login that renews itself
+
+Set the client's MCP server to a local command that runs `mcp-remote` in
+login mode. The exact config key differs per client (`command` + `args`,
+an `mcp.json`, a settings pane). The command is the same:
+
+```bash
+npx -y mcp-remote@0.1.38 https://meho.example.com/mcp 8456 \
+  --static-oauth-client-info '{"client_id": "meho-mcp"}' \
+  --static-oauth-client-metadata '{"scope": "mcp:read mcp:execute offline_access"}'
+```
+
+- `8456` is the local port where the shim waits for the sign-in to come
+  back. The realm's `meho-mcp` client accepts any local port.
+- `--static-oauth-client-info` names the registered client `meho-mcp`
+  (a public client, so there is no client secret).
+- `offline_access` in the scope makes the login last between uses.
+- The shim keeps the login in `~/.mcp-auth` and renews the 5-minute access
+  token by itself. You do not mint a token and you put no token in any
+  config.
+
+The redirect addresses the realm must accept, the CA trust setting for
+Node (`NODE_EXTRA_CA_CERTS`) and the sharp edges of the shim are the same
+as for Claude Desktop. They are on the
+[Claude Desktop page](claude-desktop.md#one-time-realm-redirect-uris)
+and are not copied here.
+
+The first time, the shim opens a browser for the sign-in. If the machine
+has no browser, follow the next section.
+
+## A machine without a browser (for example an agent on a jump host)
+
+Use this when the client runs where no browser can open, such as a
+headless agent on a jump host. You sign in once from your laptop, through
+an SSH tunnel. After that the shim renews the login by itself.
+
+You need a laptop with a browser and SSH access to the jump host.
+
+1. **Make the login folder private** (on the jump host). The shim stores
+   its login in `~/.mcp-auth`. It writes each file readable only by its
+   owner, but it makes the folders with your default permissions, which
+   usually let other users look inside. Close that first:
+
+    ```bash
+    umask 077
+    mkdir -p ~/.mcp-auth && chmod 700 ~/.mcp-auth
+    ```
+
+    Run the later steps as the same user, and run the client as that
+    user too.
+
+2. **Start the shim once, by hand** (on the jump host), with the command
+   from the section above. Leave it running. It prints an address after
+   the line `Please authorize this client by visiting:`. Copy that
+   address. It also prints `Browser opened automatically.` Ignore that
+   line on a machine with no browser: no browser opened.
+
+3. **Open an SSH tunnel** (on your laptop) for the shim's local port.
+   Leave it open:
+
+    ```bash
+    ssh -L 8456:127.0.0.1:8456 <jump-host>
+    ```
+
+    The port must be the one in the shim command. The shim listens only
+    on `127.0.0.1` of the jump host, so nobody else can reach it. The
+    sign-in comes back to `http://localhost:8456/oauth/callback`, and the
+    tunnel carries it to the shim.
+
+4. **Sign in** (on your laptop). Open the address from step 2 in your
+   laptop's browser and sign in. The browser then shows `Authorization
+   successful!`. The shim now holds the login.
+
+5. **Stop the shim** with Ctrl+C and close the tunnel. The login stays
+   in `~/.mcp-auth` on the jump host.
+
+6. **Start the client.** Set its MCP server to the same command, as the
+   same user. The shim finds the stored login and needs no sign-in.
+
+7. **Check it** with `meho_status` (see [Verify](#verify)).
+
+How long the login lasts:
+
+- The access token ends after 5 minutes. The shim renews it by itself
+  from the stored login. This needs no person and no tunnel.
+- The login ends after **48 hours without use**, or after **7 days at
+  most**, whichever comes first. These are the values of MEHO's built-in
+  login setup. On your own Keycloak see
+  [How long an MCP login lasts](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
+- When it ends, the shim asks for a new sign-in. Sign in again the same
+  way: do steps 2 to 5 again. Run the shim by hand for this, because a
+  client may hide the address the shim prints.
+
+Treat `~/.mcp-auth` like a password. Anyone who can read it can use your
+login until it ends. A call through the shim runs under your login, so
+MEHO's approval rules apply to it as to every other call: a call that
+needs approval waits for a person.
+
+## The static token (last resort)
+
+!!! warning "The token ends after 5 minutes"
+
+    The token ends after 5 minutes. Every call then fails until you make
+    a new token and restart the client. Use this only when the client
+    cannot run the login mode above. Prefer a client that can carry a
+    `client_id` — [Claude Code](claude-code.md), or the
+    [Claude Desktop shim](claude-desktop.md) — or the login mode on this
+    page.
+
+In this mode the shim runs no login. It sends the token you give it.
+
+### Mint a token
 
 Log in with `--print-token`. The CLI then writes only the access token to
 standard output. The login prompt and all other lines go to standard
@@ -45,7 +156,7 @@ Keep the `Bearer ` prefix (and its trailing space) inside the variable:
 and its README documents stashing a space-containing value in the
 environment as the robust form for a bearer header.
 
-## Point the client's stdio command at the shim
+### Point the client's stdio command at the shim
 
 Configure the client's MCP server as a local stdio command running
 `mcp-remote` with `--header`. The exact config key differs per client
@@ -78,9 +189,13 @@ and needs no redirect URI on the realm.
 
 Once the client attaches the toolset, run **`meho_status`** and
 **`list_targets`** — the same two-call check as every other client.
-A `401` with an `invalid_token` / `token_expired` detail almost always
-means the pre-minted token has expired: re-run the mint step and restart
-the client. The full set of token-rejection causes is on the
+Then wait more than 10 minutes and run **`meho_status`** again. In login
+mode it must still work, with no new sign-in. With a static token it
+fails after 5 minutes.
+
+A `401` with an `invalid_token` / `token_expired` detail on a static token
+means the token has expired: re-run the mint step and restart the client.
+In login mode it means the login has ended (see above): sign in again. The full set of token-rejection causes is on the
 [troubleshooting page](troubleshooting.md).
 
 ## The cleaner long-term answer

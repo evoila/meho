@@ -1,25 +1,26 @@
 {
-  "_comment_meho": "Drop this file into the root of the operator's local repo as `.mcp.json`. Claude Code picks it up on session start. Two variants are provided side-by-side: pick exactly one and delete the other. The operator's MEHO access token comes from `meho login`'s credentials store -- see GUIDE.md Step 3 for the token-extraction recipe.",
-
+  "_comment_meho": "Drop this file into the root of the operator's local repo as `.mcp.json`. Claude Code picks it up on session start. Two variants are provided side-by-side: pick exactly one and delete the other. Variant B signs in once and renews itself. Variant A uses a token that ends after 5 minutes; see GUIDE.md Step 3.",
   "mcpServers": {
     "_variant_a_direct_http": {
-      "_comment": "VARIANT A -- direct HTTP. Works today only for MCP clients that expose a `client_id` field (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) OR on Keycloak realms running CIMD with a CIMD-capable Claude Code build. Claude Code's HTTP-MCP without CIMD support cannot OAuth on a fresh realm (no `client_id` field in this shape -> RFC 7591 DCR -> Keycloak `Host not trusted` 403). See docs/cross-repo/mcp-client-setup.md for the diagnosis.",
+      "_comment": "VARIANT A -- direct HTTP. Works today only for MCP clients that expose a `client_id` field (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) OR on Keycloak realms running CIMD with a CIMD-capable Claude Code build. Claude Code's HTTP-MCP without CIMD support cannot OAuth on a fresh realm (no `client_id` field in this shape -> RFC 7591 DCR -> Keycloak `Host not trusted` 403). See docs/cross-repo/mcp-client-setup.md for the diagnosis. The token comes from `meho login --print-token` and ENDS AFTER 5 MINUTES: every call then fails until you make a new token and restart the client. Prefer VARIANT B.",
       "type": "http",
       "url": "https://meho.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${MEHO_MCP_TOKEN}"
       }
     },
-
     "_variant_b_mcp_remote_shim": {
-      "_comment": "VARIANT B -- stdio shim via `mcp-remote`. Works on every Claude Code version that supports stdio servers (effectively all of them), regardless of the realm's CIMD posture. The operator obtains a token out-of-band by reading the access_token field from $XDG_CONFIG_HOME/meho/credentials.json (the file `meho login` writes when the OS keyring is unavailable) and exports it as MEHO_MCP_TOKEN; mcp-remote injects it as `Authorization: Bearer ...` on every call. GUIDE.md Step 3 carries the full extraction recipe.",
+      "_comment": "VARIANT B -- stdio shim via `mcp-remote` in login mode. Works with any client that can start a local command. The shim signs in as the registered client `meho-mcp`, keeps the login in ~/.mcp-auth (make it private: umask 077), and renews the 5-minute access token by itself. No token goes into this file. The login ends after 48 hours without use, or after 7 days at most. On a machine with no browser, sign in once through an SSH tunnel: see docs-site/clients/mcp-remote-shim.md. 8456 is the local callback port; the realm's `meho-mcp` client accepts any local port.",
       "command": "npx",
       "args": [
         "-y",
-        "mcp-remote",
+        "mcp-remote@0.1.38",
         "https://meho.example.com/mcp",
-        "--header",
-        "Authorization: Bearer ${MEHO_MCP_TOKEN}"
+        "8456",
+        "--static-oauth-client-info",
+        "{\"client_id\": \"meho-mcp\"}",
+        "--static-oauth-client-metadata",
+        "{\"scope\": \"mcp:read mcp:execute offline_access\"}"
       ]
     }
   }

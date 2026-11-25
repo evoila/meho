@@ -246,7 +246,7 @@ def test_mcp_json_example_is_parseable_json_with_two_named_variants() -> None:
     # mcp-remote is the upstream stdio<->HTTP MCP shim; pin so a
     # future "replace with our own shim" PR has to update the doc
     # together.
-    assert "mcp-remote" in variant_b.get("args", [])
+    assert any(arg.split("@")[0] == "mcp-remote" for arg in variant_b.get("args", []))
 
 
 def test_prompt_encoded_add_to_memory_call_validates_against_live_input_schema() -> None:

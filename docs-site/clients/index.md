@@ -67,7 +67,7 @@ matches your client:
 | **Claude Desktop** | One-click `.mcpb` bundle (recommended), or a manual local [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim running the OAuth 2.1 + PKCE flow and forwarding to `/mcp`. The shim is the only Desktop transport for an internal-only backplane. | [Claude Desktop](claude-desktop.md) |
 | **Claude Code** | One-command MEHO plugin (recommended), or a manual native-HTTP `.mcp.json` with a loopback PKCE flow pinned to the pre-registered `meho-mcp` public client. The pattern both dogfood repos run daily. | [Claude Code](claude-code.md) |
 | **Codex** | Native HTTP in `~/.codex/config.toml`, with a loopback login pinned to the pre-registered `meho-mcp` public client. No shim needed. | [Codex](codex.md) |
-| **Cursor and other clients that can't carry a `client_id`** | A generic `mcp-remote` stdio shim carrying a CLI-minted bearer token. | [Other MCP clients](mcp-remote-shim.md) |
+| **Cursor and other clients that can't carry a `client_id`** | A generic `mcp-remote` stdio shim in login mode with the pre-registered `meho-mcp` client. The login renews itself, also on a machine with no browser (sign in once through an SSH tunnel). A bearer token you make by hand is the last resort: it ends after 5 minutes. | [Other MCP clients](mcp-remote-shim.md#connect-with-a-login-that-renews-itself) |
 
 Running Claude for a whole company? The Claude admin should read
 [Organisation setup for the Claude admin](organisation-setup.md): the

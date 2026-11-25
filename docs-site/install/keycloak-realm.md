@@ -1181,11 +1181,24 @@ stream ends at its next session check (at most
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.
 
-A block by a tenant admin holds in that tenant only. A platform admin
-can remove a tenant admin's block on their own login, with a token that
-still works. To stop a platform admin, another platform admin blocks the
-person: that block holds in every tenant, and only another platform
-admin can remove it.
+Who blocks whom:
+
+- A tenant admin blocks a person in their own tenant.
+- A platform admin blocks a person in every tenant. To block a platform
+  admin, another platform admin runs
+  `meho principal block <sub> --reason "<why>"`. Only a platform admin
+  can remove that block.
+- A platform admin whom a tenant admin blocked can remove that block on
+  their own login: `meho principal unblock <sub> --reason "<why>"`. MEHO
+  first asks for a fresh sign-in in the browser. The audit log keeps the
+  reason and the sign-in.
+- The way back uses the approval sign-in client of the login server
+  (`meho-cli-approve` in MEHO's own setup). An install without that
+  client has no way back; another platform admin or the login server
+  removes the block then.
+- To stop a platform admin for sure, also take the platform admin role
+  away in Keycloak and end the person's sessions and long logins (see
+  "To end a person's long login" above).
 
 If the realm does not offer `offline_access` to `meho-cli` (an older
 realm), `meho login` logs in without it. It prints one line: the login

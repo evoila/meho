@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/evoila/meho/cli/internal/api"
 )
 
@@ -43,6 +45,34 @@ func TestRunOutsideFolderListsTargets(t *testing.T) {
 	for _, want := range []string{"NAME", "SECRET_REF", "vcenter-lab", "targets/vcenter-lab", "outside"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunOutsideFolderTableHasTheTenantColumnForEveryTenant(t *testing.T) {
+	tenantA := uuid.MustParse("00000000-0000-0000-0000-00000000a0a0")
+	tenantB := uuid.MustParse("00000000-0000-0000-0000-00000000b0b0")
+	list := api.OutsideTenantFolderList{AllTenants: true, Items: []api.OutsideTenantFolderItem{
+		{Name: "first", TenantId: tenantA, SecretRef: "targets/first", Reason: "outside"},
+		{Name: "second", TenantId: tenantB, SecretRef: "targets/second", Reason: "outside"},
+	}}
+	srv := outsideFolderServer(t, list, nil)
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runOutsideFolder(cmd, outsideFolderOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runOutsideFolder: %v; stderr=%s", err, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want a header and two rows, got %d lines: %q", len(lines), stdout.String())
+	}
+	if fields := strings.Fields(lines[0]); len(fields) < 2 || fields[1] != "TENANT" {
+		t.Errorf("header: want TENANT as the second column, got %q", lines[0])
+	}
+	for i, want := range []string{tenantA.String(), tenantB.String()} {
+		if fields := strings.Fields(lines[i+1]); len(fields) < 2 || fields[1] != want {
+			t.Errorf("row %d: want tenant %q in the second column, got %q", i+1, want, lines[i+1])
 		}
 	}
 }

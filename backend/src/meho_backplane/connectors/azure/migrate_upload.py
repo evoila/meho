@@ -103,11 +103,12 @@ async def upload_file(
     """Upload *content* to *link* in one request. False when Azure's answer is not known.
 
     The file is sent once, whatever the answer: no new login after a 401 and
-    no wait and second try after a 429. A lost connection or a 5xx can come
-    after the file arrived, so they are not errors: the caller follows the
-    job to see. Every other answer from 300 up is a refusal: the file did not
-    arrive. It is raised as :class:`AzureRequestError` with a fixed text that
-    holds no part of the link (no host, path or signature).
+    no wait and second try after a 429. A lost connection, a 408 (a proxy on
+    the way can send it) or a 5xx can come after the file arrived, so they are
+    not errors: the caller follows the job to see. Every other answer from 300
+    up is a refusal: the file did not arrive. It is raised as
+    :class:`AzureRequestError` with a fixed text that holds no part of the link
+    (no host, path or signature).
     """
     host = upload_host(target, link)
     caller = _UploadCaller(
@@ -128,7 +129,7 @@ async def upload_file(
     status = response.status_code
     if status < 300:
         return True
-    if status >= 500:
+    if status == 408 or status >= 500:
         return False
     raise AzureRequestError(
         f"Azure target {target.name!r}: Azure Storage refused the upload (HTTP {status}). "

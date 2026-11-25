@@ -1691,16 +1691,22 @@ def test_the_largest_file_passes_the_check_and_the_schema() -> None:
         prepare_csv(text + "x")
 
 
-def test_the_largest_file_reaches_the_operation_through_mcp(
+@pytest.mark.asyncio
+async def test_the_largest_file_reaches_the_operation_through_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fastapi.testclient import TestClient
+    """The real dispatcher runs: the call waits for approval and holds the whole file."""
+    from sqlalchemy import select
 
-    from meho_backplane.connectors.schemas import OperationResult
+    from meho_backplane.connectors.azure import AZURE_CONNECTOR_ID
+    from meho_backplane.connectors.azure.typed_ops import register_azure_typed_operations
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.db.models import Target as TargetORM
     from meho_backplane.main import app
     from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
     from meho_backplane.mcp.server import _MAX_REQUEST_BODY_BYTES
-    from meho_backplane.operations import meta_tools
+    from meho_backplane.operations import reset_dispatcher_caches
     from meho_backplane.settings import get_settings
 
     for name, value in (
@@ -1711,17 +1717,35 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
     ):
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()
-    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "meho_backplane.operations.typed_register.encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    )
+    reset_dispatcher_caches()
+    await register_azure_typed_operations()
+    target = AzureTargetStub()
+    async with get_sessionmaker()() as session:
+        session.add(
+            TargetORM(
+                id=target.id,
+                tenant_id=target.tenant_id,
+                name="example-migrate-target",
+                aliases=[],
+                product="azure",
+                host=target.host,
+                port=target.port,
+                fqdn=None,
+                secret_ref=target.secret_ref,
+                auth_model=target.auth_model,
+                vpn_required=False,
+                extras=dict(target.extras),
+                fingerprint={},
+                preferred_impl_id=None,
+                notes="made by the Azure Migrate size test",
+            )
+        )
+        await session.commit()
 
-    async def registered_target(*_: Any, **__: Any) -> tuple[Any, None]:
-        return AzureTargetStub(), None
-
-    async def recording_dispatch(**kwargs: Any) -> OperationResult:
-        seen.append(kwargs)
-        return OperationResult(status="pending", op_id=kwargs["op_id"], duration_ms=0.0)
-
-    monkeypatch.setattr(meta_tools, "_resolve_target_or_error", registered_target)
-    monkeypatch.setattr(meta_tools, "dispatch", recording_dispatch)
     text = _largest_file()
     request = {
         "jsonrpc": "2.0",
@@ -1730,9 +1754,9 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
         "params": {
             "name": "call_operation",
             "arguments": {
-                "connector_id": "azure-arm-2026.10",
+                "connector_id": AZURE_CONNECTOR_ID,
                 "op_id": "azure.migrate.import.start",
-                "target": "example-target",
+                "target": "example-migrate-target",
                 "params": {**IMPORT_PARAMS, "csv": text},
             },
         },
@@ -1746,20 +1770,34 @@ def test_the_largest_file_reaches_the_operation_through_mcp(
 
     app.dependency_overrides[verify_mcp_jwt_and_bind] = fixture_operator
     try:
-        response = TestClient(app).post(
-            "/mcp", content=body, headers={"content-type": "application/json"}
-        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://meho.test"
+        ) as client:
+            response = await client.post(
+                "/mcp",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+            )
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        reset_dispatcher_caches()
         get_settings.cache_clear()
 
     assert response.status_code == 200
     assert response.json()["id"] == 7
-    # The operation got the whole file: the same bytes, size and SHA-256.
-    assert len(seen) == 1
-    assert seen[0]["connector_id"] == "azure-arm-2026.10"
-    assert seen[0]["op_id"] == "azure.migrate.import.start"
-    received = seen[0]["params"]["csv"].encode()
+    async with get_sessionmaker()() as session:
+        parked = (await session.execute(select(ApprovalRequest))).scalars().all()
+    # The call reached the approval step, for the registered connector and target,
+    # with the whole file: the same size and SHA-256.
+    assert len(parked) == 1
+    assert parked[0].connector_id == AZURE_CONNECTOR_ID
+    assert parked[0].op_id == "azure.migrate.import.start"
+    assert parked[0].target_id == target.id
+    assert parked[0].params is not None
+    received = str(parked[0].params["csv"]).encode()
     assert len(received) == MAX_CSV_BYTES
     assert hashlib.sha256(received).hexdigest() == hashlib.sha256(text.encode()).hexdigest()
 

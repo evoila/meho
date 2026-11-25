@@ -543,6 +543,55 @@ async def test_writes_use_admin_token_never_operator_jwt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_realm_create_runs_when_managed_realm_is_absent(
+    keycloak_write_e2e: KeycloakConnector,
+) -> None:
+    """The realm check reads the managed realm first; a 404 lets realm.create send its POST."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        read = mock.get("/admin/realms/example").respond(404)
+        create = mock.post("/admin/realms").respond(201, headers=_location("/admin/realms/example"))
+        result = await _dispatch("keycloak.realm.create", {"representation": {"realm": "example"}})
+    assert result["status"] == "ok", result.get("error")
+    assert read.called
+    assert create.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+@pytest.mark.parametrize("status", [401, 403])
+async def test_realm_create_stops_when_the_realm_read_is_refused(
+    keycloak_write_e2e: KeycloakConnector, status: int
+) -> None:
+    """A realm read that Keycloak refuses stops realm.create before its POST."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get("/admin/realms/example").respond(status)
+        create = mock.post("/admin/realms").respond(201)
+        result = await _dispatch("keycloak.realm.create", {"representation": {"realm": "example"}})
+    assert result["status"] != "ok"
+    assert not create.called
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_realm_create_stops_when_keycloak_answers_another_realm(
+    keycloak_write_e2e: KeycloakConnector,
+) -> None:
+    """Keycloak answering with another realm name stops realm.create before its POST."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get("/admin/realms/example").respond(200, json={"realm": "Example"})
+        create = mock.post("/admin/realms").respond(201)
+        result = await _dispatch("keycloak.realm.create", {"representation": {"realm": "example"}})
+    assert result["status"] != "ok"
+    assert result["error"] == "connector_error: KeycloakRealmAnswerError"
+    assert "managed_realm" in result["extras"]["exception_message"]
+    assert not create.called
+
+
+@pytest.mark.asyncio
 async def test_write_ops_visible_to_search_operations(
     keycloak_write_e2e: KeycloakConnector,
 ) -> None:

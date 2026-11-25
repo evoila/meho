@@ -15,12 +15,19 @@ says what to check. It holds no value from the answer.
 after the params check and the policy gate, in the same place as the
 handler itself, so it applies to every call that runs the handler.
 ``keycloak.user.check_login`` is not wrapped: it sends no admin request.
+
+:func:`realm_checked_or_absent` wraps ``keycloak.realm.create`` and
+``keycloak.realm.delete``. They also run when the managed realm does not
+exist yet (the read answers HTTP 404), so a first setup can make that realm
+and a teardown can run twice. Any other answer gets the same check.
 """
 
 from __future__ import annotations
 
 import functools
 from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
@@ -32,7 +39,12 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["KeycloakRealmAnswerError", "check_realm_answer", "realm_checked"]
+__all__ = [
+    "KeycloakRealmAnswerError",
+    "check_realm_answer",
+    "realm_checked",
+    "realm_checked_or_absent",
+]
 
 
 class KeycloakRealmAnswerError(ValueError):
@@ -43,12 +55,22 @@ async def check_realm_answer(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
+    *,
+    allow_absent: bool = False,
 ) -> None:
-    """Raise :class:`KeycloakRealmAnswerError` unless Keycloak answers with the managed realm."""
+    """Raise :class:`KeycloakRealmAnswerError` unless Keycloak answers with the managed realm.
+
+    With *allow_absent*, an HTTP 404 for the managed realm passes the check.
+    """
     managed = resolve_realm_config(target).managed_realm
-    answer: Any = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": managed}), operator=operator
-    )
+    try:
+        answer: Any = await connector._get_admin_json(
+            target, fill_path(_ADMIN_REALM_PATH, {"realm": managed}), operator=operator
+        )
+    except httpx.HTTPStatusError as exc:
+        if allow_absent and exc.response.status_code == 404:
+            return
+        raise
     name = answer.get("realm") if isinstance(answer, dict) else None
     if name != managed:
         raise KeycloakRealmAnswerError(
@@ -66,6 +88,19 @@ def realm_checked[R](
     @functools.wraps(handler)
     async def _wrapped(self: Any, operator: Operator, target: Any, params: dict[str, Any]) -> R:
         await check_realm_answer(self, operator, target)
+        return await handler(self, operator, target, params)
+
+    return _wrapped
+
+
+def realm_checked_or_absent[R](
+    handler: Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]],
+) -> Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]]:
+    """Like :func:`realm_checked`, but a managed realm that does not exist (404) passes."""
+
+    @functools.wraps(handler)
+    async def _wrapped(self: Any, operator: Operator, target: Any, params: dict[str, Any]) -> R:
+        await check_realm_answer(self, operator, target, allow_absent=True)
         return await handler(self, operator, target, params)
 
     return _wrapped

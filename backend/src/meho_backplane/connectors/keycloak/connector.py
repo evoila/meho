@@ -115,7 +115,10 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.realm_answer import realm_checked
+from meho_backplane.connectors.keycloak.realm_answer import (
+    realm_checked,
+    realm_checked_or_absent,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -1026,7 +1029,7 @@ class KeycloakConnector(HttpConnector):
 
     # -- typed-op write handler shims (G3.13-T4 #1406) ------------------
 
-    @realm_checked
+    @realm_checked_or_absent
     async def realm_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1182,7 +1185,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_delete(self, operator, target, params)
 
-    @realm_checked
+    @realm_checked_or_absent
     async def realm_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

@@ -11,6 +11,9 @@
 * The error names the target and says what to check. It holds no value from
   the answer.
 * The same name lets the operation run.
+* ``keycloak.realm.create`` and ``keycloak.realm.delete`` also run when the
+  managed realm does not exist (HTTP 404). Other operations, and other read
+  errors, still stop before anything more is sent.
 """
 
 from __future__ import annotations
@@ -19,10 +22,11 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak import KeycloakConnector, ops_write, ops_write_realm_delete
 from meho_backplane.connectors.keycloak.ops_authflow import APPROVAL_FLOW_OPS
 from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import PASSKEY_CODE_SKIP_OPS
 from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
@@ -55,6 +59,7 @@ _ALL_OPS = (
     *EVENT_OPS,
 )
 _CHECKED_OPS = [op for op in _ALL_OPS if op.op_id != _CHECK_LOGIN]
+_HANDLER = {op.op_id: op.handler_attr for op in _ALL_OPS}
 _MANAGED = "example"
 _ANSWER_MARKER = "answer-realm-marker"
 
@@ -143,3 +148,97 @@ async def test_same_name_lets_the_operation_run(monkeypatch: pytest.MonkeyPatch)
     result = await connector.realm_get(_operator(), _Target(), {})
     assert recorder.reads[0] == f"/admin/realms/{_MANAGED}"
     assert result is not None
+
+
+_ABSENT_OK = ("keycloak.realm.create", "keycloak.realm.delete")
+
+
+class _ReadFails(_Recorder):
+    """The read of the managed realm answers with an HTTP error status."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(None)
+        self.status = status
+
+    def install(self, connector: KeycloakConnector, monkeypatch: pytest.MonkeyPatch) -> None:
+        super().install(connector, monkeypatch)
+
+        async def _get_json(_target: Any, path: str, **_kw: Any) -> Any:
+            self.reads.append(path)
+            request = httpx.Request("GET", f"https://keycloak.example.test{path}")
+            response = httpx.Response(self.status, request=request)
+            raise httpx.HTTPStatusError("read failed", request=request, response=response)
+
+        monkeypatch.setattr(connector, "_get_admin_json", _get_json)
+
+
+def _stub_realm_writes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    ran: list[str] = []
+
+    async def _create(*_args: Any) -> dict[str, Any]:
+        ran.append("keycloak.realm.create")
+        return {}
+
+    async def _delete(*_args: Any) -> dict[str, Any]:
+        ran.append("keycloak.realm.delete")
+        return {}
+
+    monkeypatch.setattr(ops_write, "keycloak_realm_create", _create)
+    monkeypatch.setattr(ops_write_realm_delete, "keycloak_realm_delete", _delete)
+    return ran
+
+
+_OTHER_OPS = [op for op in _CHECKED_OPS if op.op_id not in _ABSENT_OK]
+
+
+@pytest.mark.parametrize("op", _OTHER_OPS, ids=[op.op_id for op in _OTHER_OPS])
+async def test_absent_managed_realm_refuses_other_ops(
+    op: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = KeycloakConnector()
+    recorder = _ReadFails(404)
+    recorder.install(connector, monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError):
+        await getattr(connector, op.handler_attr)(_operator(), _Target(), {})
+    assert recorder.reads == [f"/admin/realms/{_MANAGED}"]
+    assert recorder.sent == []
+
+
+@pytest.mark.parametrize("op_id", _ABSENT_OK)
+async def test_absent_managed_realm_lets_realm_create_and_delete_run(
+    op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = KeycloakConnector()
+    recorder = _ReadFails(404)
+    recorder.install(connector, monkeypatch)
+    ran = _stub_realm_writes(monkeypatch)
+    await getattr(connector, _HANDLER[op_id])(_operator(), _Target(), {})
+    assert recorder.reads == [f"/admin/realms/{_MANAGED}"]
+    assert ran == [op_id]
+
+
+@pytest.mark.parametrize("op_id", _ABSENT_OK)
+@pytest.mark.parametrize("status", [401, 403, 500])
+async def test_realm_create_and_delete_refuse_other_read_errors(
+    op_id: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = KeycloakConnector()
+    recorder = _ReadFails(status)
+    recorder.install(connector, monkeypatch)
+    ran = _stub_realm_writes(monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError):
+        await getattr(connector, _HANDLER[op_id])(_operator(), _Target(), {})
+    assert ran == []
+    assert recorder.sent == []
+
+
+@pytest.mark.parametrize("op_id", _ABSENT_OK)
+async def test_realm_create_and_delete_refuse_a_mismatch(
+    op_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connector = KeycloakConnector()
+    _Recorder({"realm": _ANSWER_MARKER}).install(connector, monkeypatch)
+    ran = _stub_realm_writes(monkeypatch)
+    with pytest.raises(KeycloakRealmAnswerError):
+        await getattr(connector, _HANDLER[op_id])(_operator(), _Target(), {})
+    assert ran == []

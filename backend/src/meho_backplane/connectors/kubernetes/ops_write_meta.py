@@ -522,10 +522,9 @@ _APPLY_LLM: dict[str, Any] = {
     ),
     "parameter_hints": {
         "manifest": (
-            "YAML/JSON; multi-doc supported via '---'. One text, documents split by "
-            "'---', each with apiVersion, kind and metadata.name; any other form is "
-            "refused before the wait for approval. When the cluster refuses one "
-            "document of the text, the documents before it stay applied."
+            "YAML/JSON; multi-doc supported via '---'. A manifest the run cannot "
+            "parse is refused before the wait for approval. When the cluster refuses "
+            "one document of the text, the documents before it stay applied."
         ),
         "dry_run": "'server' for a side-effect-free preview; 'none' to apply.",
         "force_conflicts": (

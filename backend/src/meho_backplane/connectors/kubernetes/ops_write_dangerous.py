@@ -213,9 +213,11 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
         if not api_version or not kind:
             raise ApplyManifestError(f"manifest document {idx} is missing apiVersion/kind")
         if not name:
-            raise ApplyManifestError(
-                f"manifest document {idx} ({api_version}/{kind}) is missing metadata.name"
-            )
+            if isinstance(api_version, str) and isinstance(kind, str):
+                shown = f" ({api_version}/{kind})"
+            else:
+                shown = ""
+            raise ApplyManifestError(f"manifest document {idx}{shown} is missing metadata.name")
         parsed.append(doc)
     if not parsed:
         raise ApplyManifestError("manifest contains no applyable documents")

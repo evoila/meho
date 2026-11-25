@@ -635,7 +635,7 @@ const (
 		"a change of rights is not covered"
 	breakGlassAdmin = approvalsAdmin +
 		"; break-glass is on: anyone may approve their own `safe` or `caution` change; " +
-		"a change of rights is not covered"
+		"the switch does not cover a change of rights"
 	breakGlassOther = "break-glass is on: a person who may run changes may approve " +
 		"their own `safe` or `caution` change; a change of rights is not covered; " +
 		"the group rules still apply"

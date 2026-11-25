@@ -326,7 +326,7 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		{"empty role", withRole(api.TenantRole("")), "four_eyes_enforced", neutral},
 		{"no current tenant", api.OperatorIdentity{Sub: "s", TenantRole: api.TenantRoleTenantAdmin}, "four_eyes_enforced", neutral},
 		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass",
-			"you may approve your own changes (a change of rights only with a click in the web console); break-glass is on: anyone may approve their own `safe` or `caution` change; a change of rights is not covered"},
+			"you may approve your own changes (a change of rights only with a click in the web console); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
 		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
 			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
 		{"reader, break-glass", withRole(api.TenantRoleReadOnly), "single_operator_break_glass",

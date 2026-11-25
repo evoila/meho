@@ -6,6 +6,7 @@ package runnerprincipal
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/spf13/cobra"
@@ -24,7 +25,7 @@ func newRegisterCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "register <name>",
-		Short: "Register a new runner principal (tenant_admin)",
+		Short: "Register a new runner principal (a person with tenant_admin)",
 		Long: "register calls POST /api/v1/runner-principals to create a new " +
 			"satellite-runner principal in the operator's tenant. " +
 			"Creates a Keycloak client (kind=runner, serviceAccounts=true) and a DB row. " +
@@ -33,9 +34,13 @@ func newRegisterCmd() *cobra.Command {
 			"read-only tenant_role, so the runner is caged to the gateway path " +
 			"prefixes (/api/v1/gateway/, /api/v1/checks/) and rejected 403 " +
 			"everywhere else. " +
+			"It also prints a one-time enrollment code (shown once, short expiry): " +
+			"the runner sends it with its own public key on its first start, so it " +
+			"can renew its own login. " +
 			"--owner-sub sets the kill-switch owner; defaults to the caller's sub. " +
-			"Returns 409 when a principal with the same name already exists. " +
-			"Requires tenant_admin.",
+			"Returns 409 when the name is taken, also by a revoked runner. " +
+			"Only a person with tenant_admin can register: a service login or an " +
+			"agent login gets 403 human_principal_required.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -89,8 +94,26 @@ func runRegister(cmd *cobra.Command, opts registerOptions) error {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "registered runner principal %q\n", entry.Name)
-	printEntrySummary(cmd.OutOrStdout(), entry)
+	printRegisteredSummary(cmd.OutOrStdout(), entry)
 	return nil
+}
+
+// printRegisteredSummary prints the principal and its one-time enrollment code.
+// The code is shown only here; the runner sends it with its own public key to
+// enroll, and it works once.
+func printRegisteredSummary(w io.Writer, e *api.RunnerPrincipalRegistered) {
+	printEntrySummary(w, &api.RunnerPrincipalRead{
+		CreatedAt:        e.CreatedAt,
+		CreatedBySub:     e.CreatedBySub,
+		Id:               e.Id,
+		KeycloakClientId: e.KeycloakClientId,
+		Name:             e.Name,
+		OwnerSub:         e.OwnerSub,
+		Revoked:          e.Revoked,
+	})
+	fmt.Fprintf(w, "  enrollment_code:     %s\n", e.EnrollmentCode)
+	fmt.Fprintf(w, "  code_expires_at:     %s\n", e.EnrollmentCodeExpiresAt.UTC().Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintln(w, "The code is shown once and works once. Set it as MEHO_RUNNER_ENROLLMENT_CODE on the runner's first start.")
 }
 
 // buildRegisterBody maps the verb's options onto the generated

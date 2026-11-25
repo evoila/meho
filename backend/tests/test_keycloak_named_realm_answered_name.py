@@ -31,17 +31,27 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
 from meho_backplane.auth import tenant_admins
 from meho_backplane.connectors.keycloak.realm_params import (
     check_realm_params,
     is_plain_realm_name,
 )
-from meho_backplane.db.models import ApprovalRequestStatus
-from meho_backplane.operations.approval_queue import rights_change_note
+from meho_backplane.connectors.keycloak.secret_endpoint import (
+    KeycloakClientSecretSourceEndpoint,
+    KeycloakCredentialSecretEndpoint,
+)
+from meho_backplane.connectors.secret.ops import register_secret_broker_operations
+from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoint
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations import dispatch
 from meho_backplane.operations.grant_approval import GRANT_REASON_STRICTER
+from tests._vault_fakes import install_fake_client
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
@@ -52,7 +62,6 @@ from tests.test_approval_grant_to_self import (
     _FakeTarget,
     _park,
     _person,
-    _row,
     _status,
 )
 from tests.test_keycloak_login_realm_every_write import (
@@ -311,7 +320,36 @@ _ONE_ADMIN_NOTE = (
 )
 
 
+@pytest.fixture
+async def _secret_move_registered() -> None:
+    """Register the ``secret.move`` row so the test can run it through ``dispatch``."""
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    await register_secret_broker_operations(embedding_service=service)
+
+
+def _count_side_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every read and write of a Vault or Keycloak side of a ``secret.move``."""
+    calls: list[str] = []
+    for cls in (
+        VaultKvSecretEndpoint,
+        KeycloakCredentialSecretEndpoint,
+        KeycloakClientSecretSourceEndpoint,
+    ):
+        for name in ("read_secret", "write_secret"):
+
+            async def _record(*_args: object, _name: str = f"{cls.__name__}.{name}") -> None:
+                calls.append(_name)
+                raise AssertionError(f"{_name} ran before approval")
+
+            monkeypatch.setattr(cls, name, _record)
+    return calls
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_secret_move_registered")
 @pytest.mark.parametrize("write", _SIDES, ids=["sink", "source"])
 async def test_a_plain_side_with_an_accented_admin_realm_waits_with_the_one_admin_note(
     write: _Write,
@@ -325,12 +363,31 @@ async def test_a_plain_side_with_an_accented_admin_realm_waits_with_the_one_admi
         return frozenset({_REQUESTER})
 
     monkeypatch.setattr(tenant_admins, "_read", _only_the_asker)
-    fake.realm_reads_fail.add(_OTHER_REALM)
-    effect, params = await _effect(fake, write, _OTHER_REALM)
-    request_id = await _park(params, effect, op_id=write.op_id)
+    vault = install_fake_client(monkeypatch)
+    side_calls = _count_side_calls(monkeypatch)
+    fake.realm = _OTHER_REALM
+    params = {**_fill(copy.deepcopy(write.params), _OTHER_REALM), "reason": "rotate"}
 
-    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
-    assert await rights_change_note(await _row(request_id)) == _ONE_ADMIN_NOTE
+    result = await dispatch(
+        operator=_person(_REQUESTER),
+        connector_id="secret-broker-1.x",
+        op_id="secret.move",
+        target=None,
+        params=params,
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.extras["approval_note"] == _ONE_ADMIN_NOTE
+    assert result.error is not None
+    assert result.error.endswith(_ONE_ADMIN_NOTE)
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert [(row.op_id, row.status) for row in rows] == [
+        ("secret.move", ApprovalRequestStatus.PENDING.value)
+    ]
+    assert rows[0].proposed_effect["preview"]["grant"]["login_realm"] is True
+    assert vault.secrets.kv.v2.put_calls == []
+    assert side_calls == []
 
 
 @pytest.mark.asyncio

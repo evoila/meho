@@ -1652,6 +1652,10 @@ password must be `accepted` and the old one `refused`.
   aggregate-only, and a waiting approval keeps its params in the encrypted
   handoff store.
 
+### Realm answer check (`realm_answer.py`)
+
+Every operation except `keycloak.user.check_login` first reads the target's managed realm (`GET /admin/realms/{realm}`) and compares the `realm` field of the answer with the target's `managed_realm`. The names must be exactly the same. A different name, a different letter case, a space at the end, a missing name or an answer that is not an object gives a `KeycloakRealmAnswerError`, and nothing else is sent to Keycloak. The error names the target and says what to check; it holds no value from the answer. The check is the `realm_checked` decorator on each operation method of `KeycloakConnector`, so it runs after the params check and the policy gate, on every call that runs the handler. The tests are in `test_keycloak_realm_answer_check.py`.
+
 ### Governed deletes (#3944)
 
 `keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`

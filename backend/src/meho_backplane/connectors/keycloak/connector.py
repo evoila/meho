@@ -115,6 +115,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.realm_answer import realm_checked
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -933,6 +934,7 @@ class KeycloakConnector(HttpConnector):
 
     # -- typed-op handler shims (G3.13-T2 #1394) ------------------------
 
+    @realm_checked
     async def realm_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -941,6 +943,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_realm_get(self, operator, target, params)
 
+    @realm_checked
     async def client_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -949,6 +952,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_list(self, operator, target, params)
 
+    @realm_checked
     async def client_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -957,6 +961,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_get(self, operator, target, params)
 
+    @realm_checked
     async def client_scope_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -965,6 +970,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_scope_list(self, operator, target, params)
 
+    @realm_checked
     async def user_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -973,6 +979,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_list(self, operator, target, params)
 
+    @realm_checked
     async def role_mapping_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -981,6 +988,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_get(self, operator, target, params)
 
+    @realm_checked
     async def role_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -989,6 +997,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_list(self, operator, target, params)
 
+    @realm_checked
     async def role_users(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -997,6 +1006,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_users(self, operator, target, params)
 
+    @realm_checked
     async def group_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1005,6 +1015,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_group_list(self, operator, target, params)
 
+    @realm_checked
     async def group_member_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1015,6 +1026,7 @@ class KeycloakConnector(HttpConnector):
 
     # -- typed-op write handler shims (G3.13-T4 #1406) ------------------
 
+    @realm_checked
     async def realm_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1023,6 +1035,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_realm_create(self, operator, target, params)
 
+    @realm_checked
     async def realm_update(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1031,6 +1044,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_realm_update(self, operator, target, params)
 
+    @realm_checked
     async def client_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1039,6 +1053,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_create(self, operator, target, params)
 
+    @realm_checked
     async def client_update(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1047,6 +1062,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_update(self, operator, target, params)
 
+    @realm_checked
     async def client_scope_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1055,6 +1071,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_scope_create(self, operator, target, params)
 
+    @realm_checked
     async def protocol_mapper_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1063,6 +1080,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_protocol_mapper_create(self, operator, target, params)
 
+    @realm_checked
     async def user_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1071,6 +1089,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_create(self, operator, target, params)
 
+    @realm_checked
     async def user_reset_password(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1081,6 +1100,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_user_reset_password(self, operator, target, params)
 
+    @realm_checked
     async def role_mapping_assign(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1089,6 +1109,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_assign(self, operator, target, params)
 
+    @realm_checked
     async def group_create(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1097,6 +1118,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_group_create(self, operator, target, params)
 
+    @realm_checked
     async def group_update_attributes(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1109,6 +1131,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_group_update_attributes(self, operator, target, params)
 
+    @realm_checked
     async def group_member_add(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1117,6 +1140,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_group_member_add(self, operator, target, params)
 
+    @realm_checked
     async def group_member_remove(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1127,6 +1151,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_group_member_remove(self, operator, target, params)
 
+    @realm_checked
     async def user_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1137,6 +1162,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_user_delete(self, operator, target, params)
 
+    @realm_checked
     async def group_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1147,6 +1173,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_group_delete(self, operator, target, params)
 
+    @realm_checked
     async def client_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1155,6 +1182,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_delete(self, operator, target, params)
 
+    @realm_checked
     async def realm_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1165,6 +1193,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_realm_delete(self, operator, target, params)
 
+    @realm_checked
     async def user_logout(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1173,6 +1202,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    @realm_checked
     async def user_required_actions_update(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1185,6 +1215,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_user_required_actions_update(self, operator, target, params)
 
+    @realm_checked
     async def user_otp_status(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1195,6 +1226,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_otp_status(self, operator, target, params)
 
+    @realm_checked
     async def user_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1203,6 +1235,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_get(self, operator, target, params)
 
+    @realm_checked
     async def user_sessions(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1211,6 +1244,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_sessions(self, operator, target, params)
 
+    @realm_checked
     async def user_lock_status(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1219,6 +1253,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_lock_status(self, operator, target, params)
 
+    @realm_checked
     async def realm_lock_settings(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1229,6 +1264,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_realm_lock_settings(self, operator, target, params)
 
+    @realm_checked
     async def user_disable(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1241,6 +1277,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_user_disable(self, operator, target, params)
 
+    @realm_checked
     async def user_enable(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1251,6 +1288,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_enable(self, operator, target, params)
 
+    @realm_checked
     async def client_scope_protocol_mapper_update(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1261,6 +1299,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_scope_protocol_mapper_update(self, operator, target, params)
 
+    @realm_checked
     async def role_mapping_client_assign(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1271,6 +1310,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_client_assign(self, operator, target, params)
 
+    @realm_checked
     async def role_mapping_client_remove(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1281,6 +1321,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_client_remove(self, operator, target, params)
 
+    @realm_checked
     async def user_update(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1289,6 +1330,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_update(self, operator, target, params)
 
+    @realm_checked
     async def user_credential_delete(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1309,6 +1351,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_check_login(self, operator, target, params)
 
+    @realm_checked
     async def authflow_ensure_approval_flow(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1319,6 +1362,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_approval_flow(self, operator, target, params)
 
+    @realm_checked
     async def authflow_ensure_passkey_code_skip(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1329,6 +1373,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_passkey_code_skip(self, operator, target, params)
 
+    @realm_checked
     async def authflow_ensure_approval_touch(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1339,6 +1384,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_authflow_ensure_approval_touch(self, operator, target, params)
 
+    @realm_checked
     async def auth_flow_step_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1349,6 +1395,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_auth_flow_step_list(self, operator, target, params)
 
+    @realm_checked
     async def required_action_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1359,6 +1406,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_required_action_list(self, operator, target, params)
 
+    @realm_checked
     async def events_config_get(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1369,6 +1417,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_events_config_get(self, operator, target, params)
 
+    @realm_checked
     async def events_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1377,6 +1426,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_events_list(self, operator, target, params)
 
+    @realm_checked
     async def admin_events_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1385,6 +1435,7 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_admin_events_list(self, operator, target, params)
 
+    @realm_checked
     async def identity_provider_list(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

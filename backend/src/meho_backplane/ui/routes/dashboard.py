@@ -105,7 +105,7 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "icon": "waypoints",
     },
     {
-        "title": "Connectors",
+        "title": "Targets",
         "summary": "Manage tenant targets + per-target credentials.",
         "href": "/ui/connectors",
         "icon": "plug",

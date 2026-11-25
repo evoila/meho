@@ -449,6 +449,18 @@ coreVault:
 EOF
 ```
 
+**Targets on private addresses.** MEHO refuses a target on a private
+address (for example `192.168.x.x` or `10.x.x.x`) by default, also
+though the network rules are off here. List only the networks of the
+systems MEHO manages, separated by commas. Never `0.0.0.0/0`:
+
+```bash
+cat > values-targets.yaml <<EOF
+config:
+  targetSsrfAllowlist: "192.0.2.0/24"
+EOF
+```
+
 **A test install** with the check of [Step 5.5](#55-the-install-check-with-a-login):
 this makes a service login for the checks. Do not use it on a real
 install.
@@ -496,7 +508,7 @@ This collects the files of Step 3.2 and 3.3 that you made, in the list
 
 ```bash
 EXTRA=()
-for f in values-tls.yaml values-registry.yaml values-storage.yaml values-ci.yaml values-openbao-ubi.yaml; do
+for f in values-tls.yaml values-registry.yaml values-storage.yaml values-targets.yaml values-ci.yaml values-openbao-ubi.yaml; do
   [ -f "$f" ] && EXTRA+=(-f "$f")
 done
 echo "extra files: ${EXTRA[*]}"

@@ -36,7 +36,8 @@ request.
 
 ## Files
 
-Every file here except `values-openshift.yaml` and `values-vks.yaml` brings
+Every file here except `values-openshift.yaml`, `values-vks.yaml` and
+`values-k3s.yaml` brings
 its own PostgreSQL,
 Keycloak and Vault (or GSM), so each sets `corePostgres.enabled`,
 `coreKeycloak.enabled` and `coreVault.enabled` to `false`. Since chart
@@ -44,7 +45,7 @@ Keycloak and Vault (or GSM), so each sets `corePostgres.enabled`,
 your own that brings its own parts needs the same three lines. For the
 built-in core, start from `deploy/linux-server/values-single-node.yaml`
 instead, from `values-openshift.yaml` on OpenShift, or from
-`values-vks.yaml` on VKS.
+`values-vks.yaml` on VKS, or from `values-k3s.yaml` on k3s.
 
 | File | Targets | Backed by |
 | --- | --- | --- |
@@ -53,6 +54,7 @@ instead, from `values-openshift.yaml` on OpenShift, or from
 | [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
 | [`values-openshift.yaml`](./values-openshift.yaml) | **OpenShift** with the built-in core, installed by an admin of one project under the default security rule `restricted-v2` (#4102). `global.openshift: true` lets OpenShift pick every pod's user id; the router turns the Ingress into Routes. The network rules stay off until the chart lets the router in (#4050). | Tested on a single-node OpenShift 4.22 in the lab on 2026-11-04. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname` and `coreKeycloak.firstTenantId`. |
 | [`values-vks.yaml`](./values-vks.yaml) | **VKS** (vSphere Kubernetes Service) with the built-in core, installed by an admin of one namespace under the enforced pod security rule `restricted` (#5833). VKS brings no ingress controller: the cluster admin installs Traefik into the namespace `traefik` first. VKS enforces network rules, so the file also turns on the rules of the built-in OpenBao and Keycloak (off by default) and lets Traefik into Keycloak. It turns on the web console (off by default) and keeps the Ingress on Traefik's HTTPS entry point, so nothing answers on plain HTTP. | Tested on a VKS cluster with Kubernetes v1.35.5 (VCF 9.1) in the lab on 2026-11-09. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname`, `coreKeycloak.firstTenantId` and `networkPolicy.extraEgress` (the vCenter and NSX networks). |
+| [`values-k3s.yaml`](./values-k3s.yaml) | **k3s** with its built-in Traefik and the built-in core. Traefik runs in `kube-system`, so the file lets that namespace into MEHO and names the Traefik pods, so MEHO can reach its own address (the first-start checks `dns` and `certificate` need it). It keeps the Ingress on Traefik's HTTPS entry point, turns on the web console (off by default), and turns on the network rules of the built-in OpenBao and Keycloak with the namespace `kube-system`, where Traefik runs, allowed into Keycloak. It has a commented example of `config.targetSsrfAllowlist`. | The Traefik labels and port come from the Traefik chart of k3s v1.37.2+k3s1, checked by `helm template`. A render test keeps the file valid: `backend/tests/test_chart_k3s.py`. Not yet run on a live k3s cluster. Your own values file adds `image.tag`, `ingress.host`, `coreKeycloak.hostname`, `coreKeycloak.firstTenantId` and `networkPolicy.extraEgress`. |
 | [`values-bring-your-own-fixture.yaml`](./values-bring-your-own-fixture.yaml) | **Not a template — a test fixture** (#4039). With the built-in core parts off, `helm template` of this file must stay the same from one chart version to the next; `backend/tests/test_chart_bring_your_own_render.py` compares it with a saved copy. | Built from the non-secret parts of the values file of our own bring-your-own install, with example host names and addresses. |
 
 ## Using `values-example-lab.yaml`

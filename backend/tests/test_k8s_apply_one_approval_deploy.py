@@ -3,15 +3,18 @@
 
 """One deploy through ``k8s.apply`` needs one approval.
 
-The agent hint of ``k8s.apply`` says two things: look at the change first
-with ``preview_operation`` (it needs no approval), and send all manifests of
-one deploy in one ``k8s.apply`` call. These tests run that path against a
-stand-in cluster:
+With the switch ``K8S_APPLY_ONE_APPROVAL_HINT`` on, the agent texts of
+``k8s.apply`` say two things: ``preview_operation`` needs no approval and shows
+the manifest text that was sent, and all manifests of one deploy go in one
+``k8s.apply`` call, as one manifest text with the documents split by ``---``.
+These tests run that path against a stand-in cluster:
 
 * the preview of three manifests creates no approval request, and it does not
   contact the cluster;
 * the one real call with three manifests creates exactly one approval request;
-* after the approval, the handler applies the three manifests in order.
+* after the approval, the handler applies the three manifests in order;
+* an exact-op ``search_operations`` answer carries the switch-on texts where
+  the agent reads them.
 
 The stand-in cluster is a fake of the Kubernetes dynamic client. It refuses an
 object whose namespace does not exist yet, like a real API server does.
@@ -42,8 +45,15 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
-from meho_backplane.operations.meta_tools import call_operation, preview_operation
-from meho_backplane.operations.typed_register import run_typed_op_registrars
+from meho_backplane.operations.meta_tools import (
+    call_operation,
+    preview_operation,
+    search_operations,
+)
+from meho_backplane.operations.typed_register import (
+    clear_typed_op_snapshot,
+    run_typed_op_registrars,
+)
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_known_person
 
@@ -54,9 +64,9 @@ _DEPLOY = "\n---\n".join(
     [
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: web\n",
         "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: web\n"
-        "spec:\n  replicas: 1\n",
+        + "spec:\n  replicas: 1\n",
         "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\n  namespace: web\n"
-        "spec:\n  ports:\n    - port: 80\n",
+        + "spec:\n  ports:\n    - port: 80\n",
     ]
 )
 
@@ -106,6 +116,8 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("K8S_APPLY_ONE_APPROVAL_HINT", raising=False)
+    monkeypatch.delenv("OPERATION_CONTRACT_GUIDANCE", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -116,9 +128,11 @@ def _reset_module_state() -> Iterator[None]:
     builders = dict(_PREVIEW_BUILDERS)
     reset_dispatcher_caches()
     clear_registry()
+    clear_typed_op_snapshot()
     yield
     reset_dispatcher_caches()
     clear_registry()
+    clear_typed_op_snapshot()
     _PREVIEW_BUILDERS.clear()
     _PREVIEW_BUILDERS.update(builders)
 
@@ -275,3 +289,42 @@ async def test_a_dry_run_call_waits_for_approval_too(cluster: _FakeCluster) -> N
     call = await call_operation(_operator("op-requester"), {**_args(), "params": params})
     assert call["status"] == "awaiting_approval", call
     assert len(await _approval_rows()) == 1
+
+
+_SWITCH_ON_SUMMARY = (
+    "Server-side apply one or more manifests in order; needs one approval per call."
+)
+
+
+@pytest.mark.parametrize(
+    ("hint_switch", "guidance_switch"),
+    [(True, True), (True, False), (False, False)],
+)
+@pytest.mark.asyncio
+async def test_search_operations_shows_the_texts_where_the_agent_reads_them(
+    cluster: _FakeCluster,
+    monkeypatch: pytest.MonkeyPatch,
+    hint_switch: bool,
+    guidance_switch: bool,
+) -> None:
+    """The summary shows with the hint switch alone; ``when_to_use`` needs the guidance switch."""
+    monkeypatch.setenv("K8S_APPLY_ONE_APPROVAL_HINT", str(hint_switch).lower())
+    monkeypatch.setenv("OPERATION_CONTRACT_GUIDANCE", str(guidance_switch).lower())
+    get_settings.cache_clear()
+    await _seed()
+    answer = await search_operations(
+        _operator("op-requester"), {"connector_id": _CONNECTOR_ID, "op_id": "k8s.apply"}
+    )
+    operation = answer["operation"]
+    if not hint_switch:
+        assert operation["summary"] != _SWITCH_ON_SUMMARY
+        assert "dry_run='server' previews" in operation["summary"]
+        return
+    assert operation["summary"] == _SWITCH_ON_SUMMARY
+    if guidance_switch:
+        when_to_use = operation["guidance"]["when_to_use"]
+        assert "preview_operation needs no approval" in when_to_use
+        assert "documents split by '---'" in when_to_use
+        assert "still waits for approval" in operation["guidance"]["parameter_hints"]["dry_run"]
+    else:
+        assert "guidance" not in operation

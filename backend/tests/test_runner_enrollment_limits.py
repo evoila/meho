@@ -25,14 +25,10 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.runner_enrollment import audit_refused_body
-from meho_backplane.auth.runner_enrollment_limits import (
-    give_back_refusal_slot,
-    read_left_out_total,
-    take_refusal_slot,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, RunnerPrincipal
 from meho_backplane.main import app
@@ -235,7 +231,6 @@ async def test_a_body_that_fails_the_check_repeats_nothing_and_a_right_code_writ
         "runner": name,
         "reason": "request_body_invalid",
         "key_id": None,
-        "left_out_total": 0,
     }
     stored = json.dumps(
         [getattr(row, column.key) for column in AuditLog.__table__.columns], default=str
@@ -397,27 +392,41 @@ async def test_a_refusal_row_after_a_gap_carries_the_whole_count(
     with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
         for _ in range(4):
             client.post(_ENROLL, json=bad)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60 * 7):
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 45 * 24 * 3600):
         client.post(_ENROLL, json=bad)
     counts = sorted(r.payload.get("left_out_before", 0) for r in await _refused_rows())
     assert counts == [0, 3]
 
 
 _ENROLL_MODULE = "meho_backplane.auth.runner_enrollment"
+_T0 = 1_700_000_030.0
 
 
-def _stop_after_the_count_is_read() -> Any:
-    """A ``read_left_out_total`` that reads the count, then stops the first write."""
+def _stop_after_the_claim() -> Any:
+    """A ``claim_refusal_row`` that decides, then stops the first write before its commit."""
+    from meho_backplane.auth.runner_enrollment_limits import claim_refusal_row
+
     stopped: list[bool] = []
 
-    async def read_then_stop(runner_id: uuid.UUID, reason: str) -> int | None:
-        total = await read_left_out_total(runner_id, reason)
+    async def claim_then_stop(session: AsyncSession, runner_id: uuid.UUID, reason: str) -> Any:
+        left_out = await claim_refusal_row(session, runner_id, reason)
         if stopped:
-            return total
+            return left_out
         stopped.append(True)
         raise RuntimeError("worker stopped")
 
-    return patch(f"{_ENROLL_MODULE}.read_left_out_total", read_then_stop)
+    return patch(f"{_ENROLL_MODULE}.claim_refusal_row", claim_then_stop)
+
+
+def _lose_the_commit_reply() -> Any:
+    """Commit, then raise as if the database reply was lost."""
+    real_commit = AsyncSession.commit
+
+    async def commit_then_raise(self: AsyncSession) -> None:
+        await real_commit(self)
+        raise ConnectionResetError("reply lost")
+
+    return patch.object(AsyncSession, "commit", commit_then_raise)
 
 
 async def _left_out_counts(name: str) -> list[int]:
@@ -425,22 +434,24 @@ async def _left_out_counts(name: str) -> list[int]:
     return sorted(r.payload.get("left_out_before", 0) for r in rows)
 
 
+async def _refusal_at(code: str, at: float) -> None:
+    with patch(f"{LIMITS}.time.time", return_value=at):
+        await audit_refused_body(code)
+
+
 @pytest.mark.asyncio
-async def test_a_write_stopped_after_the_count_is_read_leaves_the_count_for_the_next_row(
+async def test_a_write_stopped_before_its_commit_saves_neither_row_nor_count(
     client: TestClient, valkey: FakeValkey
 ) -> None:
-    name = "site-give-back"
+    name = "site-stopped"
     code = (await _register(client, name))["enrollment_code"]
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
-        for _ in range(3):
-            await audit_refused_body(code)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
-        with _stop_after_the_count_is_read(), pytest.raises(RuntimeError):
-            await audit_refused_body(code)
-        await audit_refused_body(code)
-        await audit_refused_body(code)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 120):
-        await audit_refused_body(code)
+    for _ in range(3):
+        await _refusal_at(code, _T0)
+    with _stop_after_the_claim(), pytest.raises(RuntimeError):
+        await _refusal_at(code, _T0 + 60)
+    await _refusal_at(code, _T0 + 60)
+    await _refusal_at(code, _T0 + 60)
+    await _refusal_at(code, _T0 + 120)
     # 7 refusals: 3 rows and 3 left out. The stopped write has neither.
     assert await _left_out_counts(name) == [0, 1, 2]
 
@@ -453,56 +464,69 @@ async def test_a_failed_refusal_write_through_the_route_keeps_the_count(
     code = (await _register(client, name))["enrollment_code"]
     bad = {"enrollment_code": code}
     broken = TestClient(app, raise_server_exceptions=False)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
+    with patch(f"{LIMITS}.time.time", return_value=_T0):
         for _ in range(3):
             client.post(_ENROLL, json=bad)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
-        with _stop_after_the_count_is_read():
+    with patch(f"{LIMITS}.time.time", return_value=_T0 + 60):
+        with _stop_after_the_claim():
             assert broken.post(_ENROLL, json=bad).status_code == 500
         assert client.post(_ENROLL, json=bad).status_code == 422
     assert await _left_out_counts(name) == [0, 2]
 
 
-@pytest.mark.parametrize("retry_at", ["before", "after"])
 @pytest.mark.asyncio
-async def test_a_retry_during_the_slot_handoff_counts_every_refusal_once(
-    client: TestClient, valkey: FakeValkey, retry_at: str
-) -> None:
-    name = f"site-handoff-{retry_at}"
-    code = (await _register(client, name))["enrollment_code"]
-    real_give_back = give_back_refusal_slot
-
-    async def give_back_with_a_retry(slot: Any) -> None:
-        if retry_at == "after":
-            await real_give_back(slot)
-        await audit_refused_body(code)
-        if retry_at == "before":
-            await real_give_back(slot)
-
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
-        await audit_refused_body(code)
-        await audit_refused_body(code)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
-        with (
-            _stop_after_the_count_is_read(),
-            patch(f"{_ENROLL_MODULE}.give_back_refusal_slot", give_back_with_a_retry),
-            pytest.raises(RuntimeError),
-        ):
-            await audit_refused_body(code)
-        await audit_refused_body(code)
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 120):
-        await audit_refused_body(code)
-    # 6 refusals: 3 rows and 2 left out. The stopped write has neither.
-    assert await _left_out_counts(name) == {"before": [0, 0, 2], "after": [0, 1, 1]}[retry_at]
-
-
-@pytest.mark.asyncio
-async def test_a_refusal_row_is_written_when_the_counter_cannot_be_reached(
+async def test_the_left_out_count_stays_when_valkey_loses_its_data(
     client: TestClient, valkey: FakeValkey
 ) -> None:
-    code = (await _register(client, "site-no-counter"))["enrollment_code"]
+    name = "site-valkey-restart"
+    code = (await _register(client, name))["enrollment_code"]
+    for _ in range(3):
+        await _refusal_at(code, _T0)
+    valkey.store.clear()
+    await _refusal_at(code, _T0 + 60)
+    assert await _left_out_counts(name) == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_commit_reply_counts_the_refusal_once(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    name = "site-lost-reply"
+    code = (await _register(client, name))["enrollment_code"]
+    await _refusal_at(code, _T0)
+    with _lose_the_commit_reply(), pytest.raises(ConnectionResetError):
+        await _refusal_at(code, _T0 + 10)  # left out: counted, no row
+    with _lose_the_commit_reply(), pytest.raises(ConnectionResetError):
+        await _refusal_at(code, _T0 + 60)  # its own row, with the count
+    await _refusal_at(code, _T0 + 70)
+    await _refusal_at(code, _T0 + 120)
+    # 5 refusals: 3 rows and 2 left out, each counted once.
+    assert await _left_out_counts(name) == [0, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_writer_with_a_clock_behind_counts_each_refusal_once(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    name = "site-clock-behind"
+    code = (await _register(client, name))["enrollment_code"]
+    await _refusal_at(code, _T0)
+    await _refusal_at(code, _T0 + 10)
+    await _refusal_at(code, _T0 + 20)
+    await _refusal_at(code, _T0 + 70)  # row: 2 left out
+    await _refusal_at(code, _T0 + 65)  # second writer, clock 5 s behind: left out
+    await _refusal_at(code, _T0 - 60)  # clock far behind: its own row
+    await _refusal_at(code, _T0 - 50)  # left out
+    await _refusal_at(code, _T0 + 140)  # row
+    # 8 refusals: 4 rows and 4 left out, each counted once.
+    assert await _left_out_counts(name) == [0, 1, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_refusal_rows_need_no_valkey(client: TestClient, valkey: FakeValkey) -> None:
+    name = "site-no-counter"
+    code = (await _register(client, name))["enrollment_code"]
     bad = {"enrollment_code": code}
-    before = len(await _refused_rows())
 
     async def _open(source: str) -> None:
         return None
@@ -511,9 +535,12 @@ async def test_a_refusal_row_is_written_when_the_counter_cannot_be_reached(
         patch("meho_backplane.api.v1.runner_enrollment.enforce_enroll_request_limit", _open),
         patch(f"{LIMITS}.get_broadcast_client", BrokenValkey),
     ):
-        assert client.post(_ENROLL, json=bad).status_code == 422
-        assert client.post(_ENROLL, json=bad).status_code == 422
-    assert len(await _refused_rows()) == before + 2
+        with patch(f"{LIMITS}.time.time", return_value=_T0):
+            assert client.post(_ENROLL, json=bad).status_code == 422
+            assert client.post(_ENROLL, json=bad).status_code == 422
+        with patch(f"{LIMITS}.time.time", return_value=_T0 + 60):
+            assert client.post(_ENROLL, json=bad).status_code == 422
+    assert await _left_out_counts(name) == [0, 1]
 
 
 async def _claim_without_started_row(name: str, key_id: str) -> None:
@@ -594,7 +621,7 @@ async def test_a_failed_bad_body_audit_keeps_the_code_out_of_the_logged_error(
     key = _jwk(tmp_path)
     with (
         patch(
-            "meho_backplane.auth.runner_enrollment._write_refusal",
+            "meho_backplane.auth.runner_enrollment.claim_refusal_row",
             side_effect=RuntimeError("audit write failed"),
         ),
         pytest.raises(RuntimeError) as raised,
@@ -660,54 +687,6 @@ async def test_a_right_code_with_a_lone_surrogate_in_the_name_gets_422_and_one_r
     rows = await _refused_rows()
     assert len(rows) == before + 1
     assert any(
-        r.payload
-        == {"runner": name, "reason": "request_body_invalid", "key_id": None, "left_out_total": 0}
+        r.payload == {"runner": name, "reason": "request_body_invalid", "key_id": None}
         for r in rows
     )
-
-
-_RUNNER = uuid.UUID(int=7)
-
-
-@pytest.mark.asyncio
-async def test_overlapping_refusals_give_back_only_the_slot_that_was_taken(
-    valkey: FakeValkey,
-) -> None:
-    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
-        first = await take_refusal_slot(_RUNNER, "r")
-        assert first is not None
-        assert await take_refusal_slot(_RUNNER, "r") is None
-        await give_back_refusal_slot(first)
-        retry = await take_refusal_slot(_RUNNER, "r")
-    assert retry is not None
-    assert await read_left_out_total(_RUNNER, "r") == 1
-
-
-@pytest.mark.asyncio
-async def test_a_slot_given_back_after_the_minute_changed_frees_its_own_minute(
-    valkey: FakeValkey,
-) -> None:
-    start = 1_700_000_030.0
-    with patch(f"{LIMITS}.time.time", return_value=start):
-        first = await take_refusal_slot(_RUNNER, "r")
-    assert first is not None
-    with patch(f"{LIMITS}.time.time", return_value=start + 60):
-        second = await take_refusal_slot(_RUNNER, "r")
-        assert second is not None
-        await give_back_refusal_slot(first)
-        assert await take_refusal_slot(_RUNNER, "r") is None
-    assert first.key not in valkey.store and second.key in valkey.store
-    with patch(f"{LIMITS}.time.time", return_value=start):
-        assert await take_refusal_slot(_RUNNER, "r") is not None
-
-
-@pytest.mark.asyncio
-async def test_the_left_out_count_is_kept_until_a_row_records_it(valkey: FakeValkey) -> None:
-    start = 1_700_000_030.0
-    with patch(f"{LIMITS}.time.time", return_value=start):
-        assert await take_refusal_slot(_RUNNER, "r") is not None
-        assert await take_refusal_slot(_RUNNER, "r") is None
-        assert await take_refusal_slot(_RUNNER, "r") is None
-    with patch(f"{LIMITS}.time.time", return_value=start + 45 * 24 * 3600):
-        assert await take_refusal_slot(_RUNNER, "r") is not None
-        assert await read_left_out_total(_RUNNER, "r") == 2

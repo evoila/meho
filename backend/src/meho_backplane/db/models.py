@@ -5311,6 +5311,29 @@ class RunnerPrincipal(Base):
     )
 
 
+class RunnerEnrollRefusal(Base):
+    """The refusal audit rows of one runner and reason (migration 0189).
+
+    The open enrollment route writes at most one refusal audit row per runner
+    and reason each minute. ``last_row_at`` is when the newest such row was
+    written. ``left_out`` counts the refusals since then that got no row of
+    their own; the next row records the count and sets it back to zero. The
+    count and the audit row change in one database transaction
+    (:mod:`~meho_backplane.auth.runner_enrollment_limits`).
+    """
+
+    __tablename__ = "runner_enroll_refusal"
+
+    runner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(), ForeignKey("runner_principal.id", ondelete="CASCADE"), primary_key=True
+    )
+    reason: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_row_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    left_out: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sa.text("0")
+    )
+
+
 class MachineLogin(Base):
     """A login id that MEHO has seen as an agent, service or runner login.
 

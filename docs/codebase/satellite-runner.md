@@ -1034,17 +1034,17 @@ comes before the body check. A code over 256 characters gets 403 before any
 database read. A code that is not valid UTF-8 (a lone surrogate sent as a
 JSON escape) matches no stored code and is refused like any wrong code. A
 runner gets at most one refusal row per reason and minute
-(`auth/runner_enrollment_limits.py`). The row's slot is one key per minute, set
-with `SET NX`. Each refusal that is left out adds one to a counter of that
-runner and reason. The counter only goes up and has no end time. Each row
-stores the counter value it read as `left_out_total`. Its `left_out_before`
-says how many refusals were left out since the newest row of that runner and
-reason, however late the row comes. The row reads the stored value of the newest row, reads the counter
-and is inserted in one transaction, under an advisory lock per runner and
-reason: a second row write waits for this commit. So a row that is not
-committed takes no count away, and its count goes into the next row once. A row
-that cannot be written deletes the exact slot key it took (also after the
-minute changed). When Valkey cannot be reached there, the row is written anyway. A body that fails the body check gets 422 without `input`,
+(`auth/runner_enrollment_limits.py`). The state is the database table
+`runner_enroll_refusal` (migration 0189): one row per runner and reason, with
+the time of the newest refusal row (`last_row_at`) and the refusals since then
+that got no row (`left_out`). A refusal less than a minute from `last_row_at`
+adds one to `left_out`. Any other refusal writes its audit row with
+`left_out_before` (the count, when it is not zero) and sets the count back to
+zero. The change of the count and the audit row are one database transaction,
+under an advisory lock per runner and reason on PostgreSQL, so a second
+refusal waits for this commit. A commit that fails saves neither, and a commit
+whose answer is lost has saved both, so each refusal is counted once: in the
+count or in its own row. Refusal rows use no Valkey. A body that fails the body check gets 422 without `input`,
 without the names of fields the sender added (an extra field is always
 `extra_field` in `loc`, also when it is named `body`), and with only numbers in
 `ctx`. When its code matches a runner that is not revoked, one refusal row

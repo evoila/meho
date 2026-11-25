@@ -631,7 +631,6 @@ async def test_a_refused_enrollment_with_a_right_code_writes_one_audit_row(
         "runner": name,
         "reason": reason,
         "key_id": key_id,
-        "left_out_total": 0,
     }
     _assert_no_secret_in(row, code, offered)
 
@@ -701,7 +700,6 @@ async def test_a_right_code_with_a_key_in_a_wrong_form_gets_422_and_one_audit_ro
             "runner": name,
             "reason": "public_key_invalid",
             "key_id": None,
-            "left_out_total": 0,
         }
         _assert_no_secret_in(row, code, {})
         stored = [

@@ -39,11 +39,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
-from meho_backplane.auth.runner_enrollment_limits import (
-    give_back_refusal_slot,
-    read_left_out_total,
-    take_refusal_slot,
-)
+from meho_backplane.auth.runner_enrollment_limits import claim_refusal_row
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
@@ -322,99 +318,40 @@ def _offered_key_id(public_jwk: Any) -> str | None:
 async def _audit_refusal(
     row: RunnerPrincipal, status_code: int, reason: str, public_jwk: Any
 ) -> None:
-    """One audit row for a refused enrollment whose code matched *row*.
+    """Record a refused enrollment whose code matched *row*.
 
-    The row holds the runner's name, the answer's status, the reason and the
-    id of the offered key. It never holds the code or the key. A runner gets
-    one row per reason and minute; the next row that is written says how many
-    refusals were left out since the row before. When the row cannot be written,
-    the slot is given back.
-    """
-    slot = await take_refusal_slot(row.id, reason)
-    if slot is None:
-        return
-    try:
-        await _write_refusal(row, status_code, reason, public_jwk)
-    except BaseException:
-        await give_back_refusal_slot(slot)
-        raise
-
-
-def _refusal_lock_key(runner_id: uuid.UUID, reason: str) -> int:
-    """Map a runner and a reason to a stable, non-negative 63-bit lock key."""
-    digest = hashlib.blake2b(
-        b"meho:runner-refusal\0" + runner_id.bytes + reason.encode(), digest_size=8
-    ).digest()
-    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
-
-
-async def _recorded_left_out_total(session: AsyncSession, row: RunnerPrincipal, reason: str) -> int:
-    """The left-out count stored on the newest refusal row of this runner and reason."""
-    payload = (
-        await session.execute(
-            select(AuditLog.payload)
-            .where(
-                AuditLog.path == _REFUSED_AUDIT_PATH,
-                AuditLog.operator_sub == row.keycloak_client_id,
-                AuditLog.tenant_id == row.tenant_id,
-                AuditLog.payload["reason"].as_string() == reason,
-            )
-            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    value = (payload or {}).get("left_out_total", 0)
-    return value if isinstance(value, int) else 0
-
-
-async def _write_refusal(
-    row: RunnerPrincipal, status_code: int, reason: str, public_jwk: Any
-) -> None:
-    """Commit the refusal row with the refusals left out since the row before.
-
-    The left-out counter only goes up. The newest row stores the value it
-    read, and this row counts the difference. The read of both values and the
-    insert are one transaction, under a lock per runner and reason on
-    PostgreSQL: a second writer waits for this commit and then reads this
-    row. A row that is not committed changes nothing, so its count goes into
-    the next row, once.
+    A runner gets one audit row per reason and minute. It holds the runner's
+    name, the answer's status, the reason and the id of the offered key, and
+    says how many refusals were left out since the row before
+    (``left_out_before``). It never holds the code or the key. A refusal with
+    no row of its own adds one to that count. The count and the row are
+    saved in one transaction: a commit that fails saves neither.
     """
     async with get_sessionmaker()() as session:
-        conn = await session.connection()
-        if conn.dialect.name == "postgresql":
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(:k)"),
-                {"k": _refusal_lock_key(row.id, reason)},
+        left_out = await claim_refusal_row(session, row.id, reason)
+        if left_out is not None:
+            payload: dict[str, Any] = {
+                "runner": row.name,
+                "reason": reason,
+                "key_id": _offered_key_id(public_jwk),
+            }
+            if left_out:
+                payload["left_out_before"] = left_out
+            session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    occurred_at=datetime.now(UTC),
+                    operator_sub=row.keycloak_client_id,
+                    actor_sub=row.keycloak_client_id,
+                    tenant_id=row.tenant_id,
+                    event_class=AuditEventClass.SECURITY_EVENT,
+                    method=INTERNAL_METHOD,
+                    path=_REFUSED_AUDIT_PATH,
+                    status_code=status_code,
+                    duration_ms=Decimal("0.0"),
+                    payload=payload,
+                )
             )
-        recorded = await _recorded_left_out_total(session, row, reason)
-        total = await read_left_out_total(row.id, reason)
-        if total is None:
-            total = recorded
-        # A total under the stored one means Valkey started again from zero.
-        left_out = total - recorded if total >= recorded else total
-        payload: dict[str, Any] = {
-            "runner": row.name,
-            "reason": reason,
-            "key_id": _offered_key_id(public_jwk),
-            "left_out_total": total,
-        }
-        if left_out:
-            payload["left_out_before"] = left_out
-        session.add(
-            AuditLog(
-                id=uuid.uuid4(),
-                occurred_at=datetime.now(UTC),
-                operator_sub=row.keycloak_client_id,
-                actor_sub=row.keycloak_client_id,
-                tenant_id=row.tenant_id,
-                event_class=AuditEventClass.SECURITY_EVENT,
-                method=INTERNAL_METHOD,
-                path=_REFUSED_AUDIT_PATH,
-                status_code=status_code,
-                duration_ms=Decimal("0.0"),
-                payload=payload,
-            )
-        )
         await session.commit()
 
 

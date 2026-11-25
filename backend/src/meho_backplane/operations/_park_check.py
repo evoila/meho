@@ -34,8 +34,16 @@ An op can also turn on a check that runs before the policy gate
 anything of the vendor for the call. :func:`gate_check_refusal` runs it in
 the dispatcher right before the policy gate, so before the reads that decide
 who must approve and before any approval card is built, and
-``preview_operation`` runs it first. The approved run skips it: the handler
-checks again.
+``preview_operation`` runs it first. The caller's rights come first: when
+they refuse the call
+(:func:`~meho_backplane.operations._validate.rights_denial`), the check does
+not run, so MEHO reads nothing of the vendor and the policy gate gives its
+own refusal. The approved run skips it: the handler checks again.
+
+A read inside an approval card can also refuse the call
+(:func:`note_refusal`). The dispatcher and ``preview_operation`` collect
+such refusals while they build the card (:func:`refusal_scope`) and then
+refuse the call with the first one, before anything is stored.
 The check is fail-closed: a check that raises refuses the call, with a
 reason that names only the exception class. An expired login during the
 check is renewed once (:func:`_refresh_rejected_session`).
@@ -43,7 +51,9 @@ check is renewed once (:func:`_refresh_rejected_session`).
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -60,8 +70,11 @@ if TYPE_CHECKING:
 __all__ = [
     "ParkCheck",
     "gate_check_refusal",
+    "gate_check_registered",
+    "note_refusal",
     "park_check_refusal",
     "park_check_registered",
+    "refusal_scope",
     "register_gate_check",
     "register_park_check",
     "run_park_check",
@@ -103,6 +116,39 @@ def park_check_registered(op_id: str) -> bool:
     return op_id in _PARK_CHECKS
 
 
+def gate_check_registered(op_id: str) -> bool:
+    """Whether *op_id* has a check before the policy gate."""
+    return op_id in _GATE_CHECKS
+
+
+#: The refusals that reads inside an approval card noted (:func:`refusal_scope`).
+_NOTED_REFUSALS: ContextVar[list[str] | None] = ContextVar("park_noted_refusals", default=None)
+
+
+@contextmanager
+def refusal_scope() -> Iterator[list[str]]:
+    """Collect the refusals that the reads inside this block note (:func:`note_refusal`)."""
+    noted: list[str] = []
+    token = _NOTED_REFUSALS.set(noted)
+    try:
+        yield noted
+    finally:
+        _NOTED_REFUSALS.reset(token)
+
+
+def note_refusal(reason: str) -> None:
+    """Refuse the call whose approval card is being built, with *reason*.
+
+    A read inside the card calls it when the call must not wait for
+    approval, also when the card itself goes on without that read. The
+    *reason* must name no value of the vendor's answer. Outside
+    :func:`refusal_scope` it does nothing.
+    """
+    noted = _NOTED_REFUSALS.get()
+    if noted is not None:
+        noted.append(reason)
+
+
 async def _refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
     """Drop the login the vendor rejected; ``True`` when the check can run again.
 
@@ -142,30 +188,41 @@ async def run_park_check(ctx: PreviewContext) -> str | None:
 
 
 async def _run_check(ctx: PreviewContext, check: ParkCheck | None) -> str | None:
-    """Run *check* as :func:`run_park_check` describes."""
-    op_id = ctx.descriptor.op_id
+    """Run *check* as :func:`run_park_check` describes.
+
+    When a read inside the check noted a refusal (:func:`note_refusal`),
+    that refusal is the answer, also when the check raised or let the call
+    wait.
+    """
     if check is None:
         return None
-    try:
+    with refusal_scope() as noted:
         try:
-            return await check(ctx)
-        except httpx.HTTPStatusError as exc:
-            if not await _refresh_rejected_session(ctx, exc):
-                raise
+            reason = await _check_with_fresh_login(ctx, check)
+        except Exception as exc:
+            # The class name only: a traceback with locals could show a param
+            # value, a login header or a vendor text.
+            _log.warning(
+                "park_check_failed",
+                op_id=ctx.descriptor.op_id,
+                operator_sub=getattr(ctx.operator, "sub", None),
+                error_type=type(exc).__name__,
+            )
+            reason = (
+                "the check that runs before the wait for approval failed "
+                f"({type(exc).__name__}); call the operation again"
+            )
+    return noted[0] if noted else reason
+
+
+async def _check_with_fresh_login(ctx: PreviewContext, check: ParkCheck) -> str | None:
+    """Run *check*; once more after a fresh login when the vendor rejected the cached one."""
+    try:
         return await check(ctx)
-    except Exception as exc:
-        # The class name only: a traceback with locals could show a param
-        # value, a login header or a vendor text.
-        _log.warning(
-            "park_check_failed",
-            op_id=op_id,
-            operator_sub=getattr(ctx.operator, "sub", None),
-            error_type=type(exc).__name__,
-        )
-        return (
-            "the check that runs before the wait for approval failed "
-            f"({type(exc).__name__}); call the operation again"
-        )
+    except httpx.HTTPStatusError as exc:
+        if not await _refresh_rejected_session(ctx, exc):
+            raise
+    return await check(ctx)
 
 
 async def park_check_refusal(
@@ -211,8 +268,24 @@ async def gate_check_refusal(
     """The ``refused_before_approval`` result when the op's check before the gate says no.
 
     The same as :func:`park_check_refusal`, for the check of
-    :func:`register_gate_check`.
+    :func:`register_gate_check`. The check runs only when the caller's
+    rights do not refuse the call; else ``None``, and the policy gate
+    refuses it.
     """
+    if not gate_check_registered(descriptor.op_id):
+        return None
+    # Imported lazily: the policy gate module imports the dispatcher's helpers.
+    from meho_backplane.operations._validate import rights_denial
+
+    denial = await rights_denial(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+    )
+    if denial is not None:
+        return None
     return await _refusal(
         _GATE_CHECKS.get(descriptor.op_id),
         op_id=op_id,

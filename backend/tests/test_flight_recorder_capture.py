@@ -467,12 +467,16 @@ def test_paused_block_records_no_span_and_capture_goes_on_after_it() -> None:
         capture._active_capture_var.reset(token)
 
 
+def _fail_inside_the_block() -> None:
+    raise RuntimeError("raised inside the paused block")
+
+
 def test_paused_block_puts_capture_back_after_an_error_inside_it() -> None:
     scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
     token = capture._active_capture_var.set(scope)
     try:
         with pytest.raises(RuntimeError), capture.paused():
-            raise RuntimeError("raised inside the paused block")
+            _fail_inside_the_block()
         start = capture.span_start()
         assert start is not None
         capture.record_vendor_call(
@@ -484,6 +488,51 @@ def test_paused_block_puts_capture_back_after_an_error_inside_it() -> None:
         assert len(scope.spans) == 1
     finally:
         capture._active_capture_var.reset(token)
+
+
+def _record_get(status: int) -> None:
+    capture.record_vendor_call(
+        capture.span_start(),
+        method="GET",
+        request_headers={},
+        response=SimpleNamespace(status_code=status),
+    )
+
+
+@pytest.mark.parametrize("released", [True, False], ids=["released", "not-released"])
+def test_held_spans_reach_the_trace_only_when_released(released: bool) -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.held() as spans:
+            _record_get(200)
+            assert scope.spans == []
+            if released:
+                spans.release()
+        assert len(scope.spans) == (1 if released else 0)
+        _record_get(201)
+        assert [span.status for span in scope.spans][-1] == "201"
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def test_held_block_puts_capture_back_after_an_error_inside_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with pytest.raises(RuntimeError), capture.held():
+            _fail_inside_the_block()
+        _record_get(200)
+        assert len(scope.spans) == 1
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def test_held_block_without_capture_records_nothing() -> None:
+    with capture.held() as spans:
+        _record_get(200)
+        spans.release()
+    assert capture._active_capture_var.get() is None
 
 
 # ---------------------------------------------------------------------------

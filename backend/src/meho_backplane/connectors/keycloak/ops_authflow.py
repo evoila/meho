@@ -95,7 +95,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
-from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
+from meho_backplane.connectors.keycloak.realm_params import read_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.core.keycloak_levels import (
     APPROVAL_LEVEL,
@@ -401,8 +401,9 @@ async def _read_levels(
     It stops when the map is not a JSON object, or when another name already
     has level 2.
     """
-    rep = await connector._get_admin_json(target, path, operator=operator)
-    check_answered_realm(ENSURE_APPROVAL_FLOW_OP_ID, rep, target)
+    rep = await read_answered_realm(
+        connector, ENSURE_APPROVAL_FLOW_OP_ID, target, path, operator=operator
+    )
     attributes = dict(rep.get("attributes") or {})
     levels = parse_level_map(attributes.get(LEVEL_MAP))
     if levels is None:

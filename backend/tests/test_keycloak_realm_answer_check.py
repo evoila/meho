@@ -21,6 +21,15 @@
   the answer.
 * ``keycloak.realm.update`` with a ``realm`` value goes on only when the
   answer for that realm carries exactly that name.
+* The caller's rights come first: a call the caller may not make reads
+  nothing of Keycloak and gets the policy gate's own refusal.
+* A later read inside an approval card that gets another realm's answer
+  refuses the call too, and nothing is stored.
+* A check read that gets no answer (a TLS error) leaves the call its own
+  error code.
+* The read-back after a realm update reports no field of another realm.
+* A refused preview keeps ``policy_rule`` and ``approvers`` with
+  ``POLICY_ENGINE_SHADOW`` on.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ import respx
 from sqlalchemy import select
 from structlog.testing import capture_logs
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.keycloak import (
     KeycloakConnector,
     ops_login_check,
@@ -54,7 +63,12 @@ from meho_backplane.connectors.keycloak.session import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.operations import _park_check, dispatch, reset_dispatcher_caches
+from meho_backplane.operations import (
+    _park_check,
+    dispatch,
+    reset_dispatcher_caches,
+    service_read_scopes,
+)
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._request_preview import (
     _validate_params_envelope,
@@ -705,13 +719,179 @@ async def test_a_realm_that_answers_with_its_own_name_is_updated_once(
     assert _puts(keycloak) == [f"PUT {_REALM_PATH}"]
 
 
+_CARD_REFUSAL = "Keycloak did not answer with the realm 'example', so MEHO returns"
+
+
 @pytest.mark.parametrize("cards", [True], ids=["cards-on"], indirect=True)
-async def test_the_realm_update_card_holds_no_value_of_another_realm(seeded: Operator) -> None:
+async def test_a_card_read_of_another_realm_refuses_the_realm_update(seeded: Operator) -> None:
+    """The check read passes, the card's own read of the realm answers with another realm."""
     keycloak = _RealmUpdateKeycloak({"realm": "Example", "displayName": _ANSWER_MARKER})
-    result = await _call(seeded, "keycloak.realm.update", keycloak)
-    assert result.status == "awaiting_approval", result.error
-    (row,) = await _approval_rows()
-    assert _ANSWER_MARKER not in json.dumps(row.proposed_effect, default=str)
+    with capture_logs() as logs:
+        result = await _call(seeded, "keycloak.realm.update", keycloak)
+    dumped = json.dumps(result.model_dump(mode="json"), default=str)
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "refused_before_approval"
+    assert result.error is not None
+    assert f"keycloak.realm.update: {_CARD_REFUSAL}" in result.error
+    assert _ANSWER_MARKER not in dumped
+    assert _puts(keycloak) == []
+    assert await _approval_rows() == []
+    assert _ANSWER_MARKER not in await _audit_text(seeded)
+    assert _ANSWER_MARKER not in json.dumps(logs, default=str)
+
+
+@pytest.mark.usefixtures("real_managed_realm_check")
+@pytest.mark.parametrize("cards", [True], ids=["cards-on"], indirect=True)
+@pytest.mark.parametrize("op_id", _CARD_OPS)
+async def test_a_later_read_of_another_realm_refuses_every_card(
+    seeded: Operator, op_id: str
+) -> None:
+    """Only the first read of the realm (the check) answers with the managed realm."""
+    keycloak = _RealmUpdateKeycloak({"realm": "Example", "displayName": _ANSWER_MARKER})
+    result = await _call(seeded, op_id, keycloak)
+    assert result.extras.get("error_code") == "refused_before_approval", result.error
+    assert _CARD_REFUSAL in (result.error or "")
+    assert _ANSWER_MARKER not in json.dumps(result.model_dump(mode="json"), default=str)
+    assert await _approval_rows() == []
+
+
+# ---------------------------------------------------------------------------
+# The caller's rights come before the check read
+# ---------------------------------------------------------------------------
+
+_SCOPE_REFUSAL = "read_scope_denied: this login may not read this target"
+
+
+@pytest.fixture
+def scoped_service(seeded: Operator, monkeypatch: pytest.MonkeyPatch) -> Operator:
+    """A service login whose read scope does not hold the Keycloak target."""
+
+    async def _denied(**_kw: Any) -> str:
+        return _SCOPE_REFUSAL
+
+    monkeypatch.setattr(service_read_scopes, "read_scope_denial", _denied)
+    return seeded.model_copy(update={"principal_kind": PrincipalKind.SERVICE})
+
+
+_READS = ["keycloak.realm.get", "keycloak.user.list", "keycloak.client.get"]
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+@pytest.mark.parametrize("op_id", _READS)
+async def test_a_caller_outside_its_read_scope_reads_nothing_of_keycloak(
+    scoped_service: Operator, op_id: str
+) -> None:
+    keycloak = _Keycloak({"realm": _ANSWER_MARKER, "displayName": _ANSWER_MARKER})
+    result = await _call(scoped_service, op_id, keycloak)
+    assert result.status == "denied"
+    assert _SCOPE_REFUSAL in (result.error or "")
+    assert _REFUSAL not in (result.error or "")
+    assert keycloak.calls == []
+    keycloak = _Keycloak({"realm": _ANSWER_MARKER, "displayName": _ANSWER_MARKER})
+    envelope = await _preview(scoped_service, op_id, keycloak)
+    assert envelope["policy_verdict"] == "deny"
+    assert _REFUSAL not in json.dumps(envelope, default=str)
+    assert keycloak.calls == []
+
+
+# ---------------------------------------------------------------------------
+# No answer at all: the call keeps its own error code
+# ---------------------------------------------------------------------------
+
+
+class _UntrustedCertificate(_Keycloak):
+    """Every admin request fails the TLS check; the token request too unless *token_ok*."""
+
+    def __init__(self, *, token_ok: bool) -> None:
+        super().__init__(None)
+        self.token_ok = token_ok
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if self.token_ok and request.url.path.endswith("/protocol/openid-connect/token"):
+            return super().__call__(request)
+        self.calls.append(f"{request.method} {request.url.path}")
+        raise httpx.ConnectError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed", request=request
+        )
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+async def test_an_untrusted_certificate_keeps_the_tls_error_code(seeded: Operator) -> None:
+    result = await _call(seeded, "keycloak.realm.get", _UntrustedCertificate(token_ok=True))
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_tls_verify_failed"
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+@pytest.mark.parametrize("op_id", ["keycloak.realm.get", "keycloak.user.disable"])
+async def test_a_failed_sign_in_keeps_its_own_error(seeded: Operator, op_id: str) -> None:
+    """The token request fails the TLS check: the call gives the sign-in error, not a refusal."""
+    result = await _call(seeded, op_id, _UntrustedCertificate(token_ok=False))
+    assert result.extras.get("error_code") != "refused_before_approval"
+    assert _REFUSAL not in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# The read-back after a realm update
+# ---------------------------------------------------------------------------
+
+
+class _ReadBackKeycloak(_Keycloak):
+    """The realm answers with the managed realm until the PUT, then with *later*."""
+
+    def __init__(self, later: Any) -> None:
+        super().__init__({"realm": _MANAGED, "displayName": "Old"})
+        self.later = later
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == _REALM_PATH and _puts(self):
+            self.calls.append(f"GET {request.url.path}")
+            return httpx.Response(200, json=self.later)
+        return super().__call__(request)
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+async def test_a_read_back_of_another_realm_reports_no_field_of_it(seeded: Operator) -> None:
+    keycloak = _ReadBackKeycloak({"realm": "Example", _ANSWER_MARKER: "x", "displayName": "y"})
+    params = {"representation": {"displayName": "New"}}
+    result = await _approved_update(seeded, params, keycloak)
+    assert result.status == "ok", result.error
+    assert _puts(keycloak) == [f"PUT {_REALM_PATH}"]
+    assert result.result["read_back_checked"] is False
+    assert result.result["unrequested_changes"] == []
+    assert _ANSWER_MARKER not in json.dumps(result.model_dump(mode="json"), default=str)
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+async def test_a_read_back_of_the_managed_realm_is_checked(seeded: Operator) -> None:
+    keycloak = _ReadBackKeycloak({"realm": _MANAGED, "displayName": "New", "enabled": False})
+    result = await _approved_update(seeded, {"representation": {"displayName": "New"}}, keycloak)
+    assert result.status == "ok", result.error
+    assert result.result["read_back_checked"] is True
+    assert result.result["unrequested_changes"] == ["enabled"]
+
+
+# ---------------------------------------------------------------------------
+# The refused preview keeps the policy fields of every preview
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cards", [False], ids=["cards-off"], indirect=True)
+@pytest.mark.parametrize("shadow", [True, False], ids=["shadow-on", "shadow-off"])
+async def test_a_refused_preview_has_the_policy_fields_only_with_the_shadow_switch(
+    seeded: Operator, shadow: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true" if shadow else "false")
+    get_settings.cache_clear()
+    keycloak = _Keycloak({"realm": _ANSWER_MARKER})
+    envelope = await _preview(seeded, "keycloak.user.disable", keycloak)
+    assert envelope["extras"]["error_code"] == "refused_before_approval"
+    if shadow:
+        assert envelope["policy_rule"] is None
+        assert envelope["approvers"] == []
+    else:
+        assert "policy_rule" not in envelope
+        assert "approvers" not in envelope
 
 
 # ---------------------------------------------------------------------------

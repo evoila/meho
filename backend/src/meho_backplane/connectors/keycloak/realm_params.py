@@ -33,7 +33,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
-from meho_backplane.operations._park_check import ParkCheck, register_park_check
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.operations._park_check import ParkCheck, note_refusal, register_park_check
 from meho_backplane.operations._validate import (
     ParamsCheck,
     params_problem,
@@ -42,6 +43,8 @@ from meho_backplane.operations._validate import (
 from meho_backplane.targets.required_extras import check_realm_name, realm_name_problem
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
     from meho_backplane.operations._preview import PreviewContext
 
@@ -52,6 +55,7 @@ __all__ = [
     "check_realm_params",
     "is_plain_realm_name",
     "new_realm_problem",
+    "read_answered_realm",
     "realm_fence_park_check",
     "realm_fence_problem",
     "realm_param",
@@ -159,16 +163,46 @@ def check_answered_realm(op_id: str, answer: Any, target: KeycloakTargetLike) ->
     the same letters, case and accents. Any other name, no name, or an
     answer that is not an object raises :class:`ValueError`. The text names
     the managed realm only. Every operation that reads the realm's settings
-    calls it on the answer, and
+    calls it on the answer (:func:`read_answered_realm`), and
     :class:`~meho_backplane.connectors.keycloak.managed_realm_check.ManagedRealmChecks`
-    calls it before a request inside the realm.
+    calls it before a request inside the realm. While an approval card is
+    built, a wrong answer also refuses the call
+    (:func:`~meho_backplane.operations._park_check.note_refusal`), also when
+    the card goes on without that read.
     """
     managed = resolve_realm_config(target).managed_realm
     if not isinstance(answer, dict) or answer.get("realm") != managed:
-        raise ValueError(
+        text = (
             f"{op_id}: Keycloak did not answer with the realm {managed!r}, so MEHO "
             "returns and changes nothing. Check the managed realm of the target."
         )
+        note_refusal(text)
+        raise ValueError(text)
+
+
+async def read_answered_realm(
+    connector: KeycloakConnector,
+    op_id: str,
+    target: KeycloakTargetLike,
+    path: str,
+    *,
+    operator: Operator,
+) -> dict[str, Any]:
+    """GET the realm at *path* and check the answer with :func:`check_answered_realm`.
+
+    The flight recorder keeps the call in the trace only when the answer
+    passes the check (or the GET fails), so the stored trace and the agent
+    copy hold no settings of another realm.
+    """
+    with flight_recorder_capture.held() as spans:
+        try:
+            answer = await connector._get_admin_json(target, path, operator=operator)
+        except Exception:
+            spans.release()
+            raise
+        check_answered_realm(op_id, answer, target)
+        spans.release()
+    return answer
 
 
 def is_plain_realm_name(name: str) -> bool:

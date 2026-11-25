@@ -1658,8 +1658,16 @@ Every Keycloak operation first reads the target's managed realm (`GET /admin/rea
 
 The check runs at two points, with the same refusal text:
 
-- **Before the policy gate.** `realm_gate_check` is registered for every operation with `register_gate_check` (`operations/_park_check.py`). The dispatcher runs it right before the policy gate, and `preview_operation` runs it first. So it runs before the reads that decide who must approve, and before any approval card or preview reads Keycloak, with the cards switch (`KEYCLOAK_RIGHTS_CHANGE_CARDS`) on or off. A refusal is `refused_before_approval`: MEHO stores no approval request, and the card, the preview answer, the audit row and the logs hold no value from Keycloak's answer.
+- **Before the policy gate.** `realm_gate_check` is registered for every operation with `register_gate_check` (`operations/_park_check.py`). The dispatcher runs it right before the policy gate, and `preview_operation` runs it first. So it runs before the reads that decide who must approve, and before any approval card or preview reads Keycloak, with the cards switch (`KEYCLOAK_RIGHTS_CHANGE_CARDS`) on or off. A refusal is `refused_before_approval`: MEHO stores no approval request, and the card, the preview answer, the audit row and the logs hold no value from Keycloak's answer. It runs only when the caller's rights let the call go on (`_validate.rights_denial`), so a caller who may not make the call (for example a service login whose read scope does not hold the target) gets its own refusal, and MEHO reads nothing of Keycloak.
 - **In the handler.** The `realm_checked` decorator wraps each operation method of `KeycloakConnector`, so the check runs again when the call runs, also after an approval. `keycloak.user.check_login` sends no admin request of its own: it reads the managed realm this way before it reads the password from Vault and before the login request.
+
+Both points first check a realm that the call names in its params (`realm_fence_problem` in `realm_params.py`). A realm other than the managed realm is refused with no request to Keycloak, also on an approved call.
+
+When the check read gets no answer at all (a connection or TLS error), the check before the policy gate lets the call go on, so the call returns its own error code (for example `connector_tls_verify_failed`). Every later read inside the realm still checks the realm first.
+
+Each read of the realm's settings goes through `read_answered_realm` (`realm_params.py`): it checks the answer's name, and the flight recorder keeps the read in the trace only when the name is right (`flight_recorder.capture.held`). While an approval card is built, a read of the realm that gets another realm's answer refuses the call (`check_answered_realm` calls `_park_check.note_refusal`), also when the card would go on without that read. The refusal text is the handler's text.
+
+After `keycloak.realm.update` sends its PUT, the read-back counts only when Keycloak answers with exactly the realm's name (`read_merge_write(read_back_realm=...)` in `ops_write_merge.py`). Any other answer leaves `read_back_checked` false and reports no field of it: the write was sent, but MEHO could not check it.
 
 `keycloak.realm.create` and `keycloak.realm.delete` (`ABSENT_OK_OPS`, `realm_checked_or_absent`) also go on when the managed realm does not exist (the read answers HTTP 404), so a first setup can make that realm and a teardown can run twice. Any other answer gets the same check, and any other read error stops the operation.
 

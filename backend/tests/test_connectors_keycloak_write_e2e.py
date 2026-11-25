@@ -34,6 +34,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextvars import Token
 from typing import Any
 
+import httpx
 import pytest
 import respx
 
@@ -51,6 +52,7 @@ from meho_backplane.connectors.keycloak.session import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder import capture
+from meho_backplane.flight_recorder.agent_view import agent_view_attributes
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import search_operations
@@ -714,3 +716,52 @@ async def test_write_ops_visible_to_search_operations(
         surfaced |= {hit["op_id"] for hit in result["hits"]}
     missing = set(EXPECTED_WRITE_OP_IDS) - surfaced
     assert not missing, f"search_operations did not surface: {missing}"
+
+
+async def _realm_get_with_answers(
+    connector: KeycloakConnector, answers: list[dict[str, Any]]
+) -> respx.Route:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        read = mock.get("/admin/realms/example").mock(
+            side_effect=[httpx.Response(200, json=answer) for answer in answers]
+        )
+        await connector.realm_get(_OPERATOR, target, {})
+    return read
+
+
+def _trace_and_agent_copy(scope: capture._CaptureScope) -> str:
+    return json.dumps(
+        [[s.name, s.attributes, agent_view_attributes(s.attributes)] for s in scope.spans],
+        default=str,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_a_realm_read_of_another_realm_stays_out_of_the_trace(
+    keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
+) -> None:
+    """The check read passes; the operation's own read answers with another realm."""
+    later = {"realm": "Example", "displayName": _OTHER_REALM_MARKER}
+    with pytest.raises(ValueError, match="did not answer with the realm") as refused:
+        await _realm_get_with_answers(keycloak_write_e2e, [{"realm": "example"}, later])
+    assert _OTHER_REALM_MARKER not in str(refused.value)
+    assert not [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
+    assert _OTHER_REALM_MARKER not in _trace_and_agent_copy(recording)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_a_realm_read_of_the_managed_realm_is_in_the_trace(
+    keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
+) -> None:
+    answer = {"realm": "example", "displayName": "shown-in-the-trace"}
+    read = await _realm_get_with_answers(keycloak_write_e2e, [{"realm": "example"}, answer])
+    assert read.call_count == 2
+    realm_spans = [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
+    assert len(realm_spans) == 1
+    assert "shown-in-the-trace" in _trace_and_agent_copy(recording)

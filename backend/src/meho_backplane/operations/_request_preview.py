@@ -82,6 +82,7 @@ from meho_backplane.operations._catalog_guard import (
 from meho_backplane.operations._errors import (
     result_denied,
     result_license_read_off,
+    result_park_check_refused,
     result_target_required,
     result_unqualified_target_version,
 )
@@ -103,6 +104,7 @@ from meho_backplane.operations._park_check import (
     gate_check_refusal,
     park_check_refusal,
     park_check_registered,
+    refusal_scope,
 )
 from meho_backplane.operations._preview import (
     _SENSITIVE_CLASSES,
@@ -644,9 +646,9 @@ async def _gate_check_envelope(
     The check (:func:`~meho_backplane.operations._park_check.register_gate_check`)
     runs before the policy gate and before any preview builder, as in the
     dispatcher, so the preview reads nothing more of the vendor when it
-    refuses. The envelope then says ``deny`` without running the gate. A
-    call that fails the params check is left to that check, as in the
-    dispatcher.
+    refuses. A caller whose rights refuse the call gets no check, as in the
+    dispatcher. A call that fails the params check is left to that check,
+    as in the dispatcher.
     """
     op_id = descriptor.op_id
     if (
@@ -667,6 +669,26 @@ async def _gate_check_envelope(
     )
     if refusal is None:
         return None
+    return await _refusal_governance(operator, descriptor, connector_id, refusal)
+
+
+async def _refusal_governance(
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    refusal: Any,
+) -> dict[str, Any]:
+    """The preview envelope of a call that is refused before the policy gate runs.
+
+    It says ``deny`` without running the gate, so the vendor is not read
+    again. With ``POLICY_ENGINE_SHADOW`` on it keeps the ``policy_rule``
+    and ``approvers`` fields of every preview: no rule was matched, and no
+    one approves a call that is refused.
+    """
+    # Imported lazily, like in :func:`governance_and_gate`.
+    from meho_backplane.policy.who_approves import preview_policy_fields
+
+    op_id = descriptor.op_id
     return {
         **_refused_envelope(
             refusal, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
@@ -675,6 +697,13 @@ async def _gate_check_envelope(
         "requires_approval": descriptor.requires_approval,
         "policy_verdict": PermissionVerdict.DENY.value,
         "policy_reason": refusal.extras.get("reason"),
+        **await preview_policy_fields(
+            tenant_id=operator.tenant_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            verdict=PermissionVerdict.DENY,
+            stamp=None,
+        ),
     }
 
 
@@ -1066,8 +1095,9 @@ async def preview_dispatch(
     raise_descriptor_for_params(descriptor, params)
     if refused := await _gate_check_envelope(operator, descriptor, connector_id, target, params):
         return refused
-    # The park check and the governance fields each run the policy gate.
-    with agent_no_grant_log_scope():
+    # The park check and the governance fields each run the policy gate. A
+    # read inside the card can refuse the call (``_park_check.note_refusal``).
+    with agent_no_grant_log_scope(), refusal_scope() as noted:
         envelope = await _park_check_envelope(
             operator=operator,
             descriptor=descriptor,
@@ -1091,6 +1121,9 @@ async def preview_dispatch(
             connector_id=connector_id,
             params=params,
         )
+    if noted:
+        refusal = result_park_check_refused(descriptor.op_id, noted[0], 0.0)
+        return await _refusal_governance(operator, descriptor, connector_id, refusal)
     return {**envelope, **governance}
 
 

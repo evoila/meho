@@ -42,7 +42,7 @@ from meho_backplane.connectors.keycloak.ops_user_state import _iso
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
-from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
+from meho_backplane.connectors.keycloak.realm_params import read_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -101,11 +101,10 @@ async def _recording_is_on(
     flag: str,
 ) -> bool:
     """Whether the realm saves this kind of event. Not a bool is an error."""
-    body = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
-    )
     op_id = "keycloak.events.list" if flag == _LOGIN_FLAG else "keycloak.admin_events.list"
-    check_answered_realm(op_id, body, target)
+    body = await read_answered_realm(
+        connector, op_id, target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    )
     value = body.get(flag)
     if not isinstance(value, bool):
         raise KeycloakUnexpectedResponseError(f"the realm answer has no {flag} flag")

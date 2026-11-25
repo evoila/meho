@@ -91,6 +91,11 @@ block, so the stored trace and the agent copy hold only the calls of the
 operation itself. Capture goes on after the block. The Keycloak realm check
 uses it (`docs/codebase/connectors-keycloak.md`).
 
+A call whose answer the connector must check first runs inside
+`with capture.held() as spans:`. Its spans stay out of the trace until the
+connector calls `spans.release()` after the check passed. Spans that are not
+released are dropped. The Keycloak reads of a realm's settings use it.
+
 ## Audit
 
 Every applied change is folded into the request's `audit_log` row via `audit_*`

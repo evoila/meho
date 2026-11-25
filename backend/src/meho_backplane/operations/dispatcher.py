@@ -404,6 +404,7 @@ from meho_backplane.operations._errors import (
     result_invalid_params,
     result_license_read_off,
     result_no_connector,
+    result_park_check_refused,
     result_preview_binding_required,
     result_preview_hash_mismatch,
     result_probe_pool_busy,
@@ -438,7 +439,11 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
-from meho_backplane.operations._park_check import gate_check_refusal, park_check_refusal
+from meho_backplane.operations._park_check import (
+    gate_check_refusal,
+    park_check_refusal,
+    refusal_scope,
+)
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -4022,14 +4027,27 @@ async def _handle_needs_approval(
     # banner at park time instead of failing only after a four-eyes
     # approval. Fail-soft too: a probe fault degrades to no banner. When the
     # build raises, the request still stores the catalog risk level.
-    proposed_effect = await _build_park_effect(
-        op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    with refusal_scope() as noted:
+        proposed_effect = await _build_park_effect(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+    if noted:
+        # A read inside the card refused the call (``_park_check.note_refusal``),
+        # for example a Keycloak answer for another realm: nothing is stored.
+        return await _audit_denied_and_return(
+            result_park_check_refused(op_id, noted[0], duration_ms),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the
@@ -4629,7 +4647,8 @@ async def _dispatch_now(
         if not _approved:
             # The op's check before the gate (``register_gate_check``) runs
             # before the policy gate reads the vendor to decide who must
-            # approve, and before an approval card is built.
+            # approve, and before an approval card is built. It runs only
+            # when the caller's rights do not refuse the call already.
             refusal = await gate_check_refusal(
                 op_id=op_id,
                 connector_id=connector_id,

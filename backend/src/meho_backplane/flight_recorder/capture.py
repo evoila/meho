@@ -86,9 +86,11 @@ from meho_backplane.redaction.flight_recorder import redact_span
 
 __all__ = [
     "CaptureHandle",
+    "HeldSpans",
     "SpanStart",
     "begin_dispatch_capture",
     "end_dispatch_capture",
+    "held",
     "paused",
     "record_jsonflux_reduction",
     "record_vendor_call",
@@ -343,6 +345,52 @@ def paused() -> Iterator[None]:
     token = _active_capture_var.set(None)
     try:
         yield
+    finally:
+        _active_capture_var.reset(token)
+
+
+class HeldSpans:
+    """The spans of a :func:`held` block, kept out of the trace until :meth:`release`."""
+
+    def __init__(self, outer: _CaptureScope | None, buffer: _CaptureScope | None) -> None:
+        self._outer = outer
+        self._buffer = buffer
+
+    def release(self) -> None:
+        """Add the spans held so far to the trace."""
+        if self._outer is None or self._buffer is None:
+            return
+        for span in self._buffer.spans:
+            self._outer.add(span)
+        for kind, count in self._buffer.overflow.items():
+            self._outer.overflow[kind] = self._outer.overflow.get(kind, 0) + count
+        if self._buffer.redaction_uncertain:
+            self._outer.redaction_uncertain = True
+        self._buffer.spans.clear()
+        self._buffer.overflow.clear()
+        self._buffer.total_bytes = 0
+        self._buffer.redaction_uncertain = False
+
+
+@contextmanager
+def held() -> Iterator[HeldSpans]:
+    """Keep the spans of the calls made inside this block out of the trace until released.
+
+    A connector uses it for a call whose answer it must check first: only
+    after the check passes does it call :meth:`HeldSpans.release`. Spans that
+    are not released are dropped, so the stored trace and the agent copy
+    hold no answer that failed the check. Capture goes on as before after
+    the block.
+    """
+    outer = _active_capture_var.get()
+    buffer = (
+        _CaptureScope(audit_id=outer.audit_id, tenant_id=outer.tenant_id, target_id=outer.target_id)
+        if outer is not None
+        else None
+    )
+    token = _active_capture_var.set(buffer)
+    try:
+        yield HeldSpans(outer, buffer)
     finally:
         _active_capture_var.reset(token)
 

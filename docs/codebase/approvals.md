@@ -4253,7 +4253,22 @@ the vendor for the call.
   call of the op, also one that would run at once. The run after an
   approval skips it, so the handler checks again. `preview_operation` runs it
   first, when the params pass the schema, and a refusal there says
-  `policy_verdict: deny` without running the gate.
+  `policy_verdict: deny` without running the gate. With
+  `POLICY_ENGINE_SHADOW` on, that preview answer still has `policy_rule`
+  (`null`: no rule was matched) and `approvers` (empty).
+- **Rights first.** The check runs only when the caller's rights do not
+  refuse the call already (`_validate.rights_denial`: the requester check,
+  the MCP profile, the role floor, an agent's grants and a service login's
+  read scope). It reads nothing of the vendor. So a call the caller may not
+  make reads nothing of the vendor, and the caller gets the policy gate's
+  own refusal.
+- **A refusal from inside the card.** A read inside an approval card can
+  refuse the call with `_park_check.note_refusal(reason)`, also when the
+  card goes on without that read. The dispatcher collects these while it
+  builds the card (`_park_check.refusal_scope`) and then refuses the call
+  with `refused_before_approval` and the first reason. Nothing is stored.
+  `preview_operation` does the same, and so does a check before the wait
+  for approval whose read noted a refusal.
 - **A refusal** writes one `denied` audit row through
   `_audit_denied_and_return`.
 - **Used by** every Keycloak operation (the realm answer check,

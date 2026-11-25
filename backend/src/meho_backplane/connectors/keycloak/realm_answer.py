@@ -18,8 +18,23 @@ The check runs twice for a call:
   :func:`~meho_backplane.operations._park_check.register_gate_check`). So it
   runs before the reads that decide who must approve and before any approval
   card or preview reads Keycloak. A refusal there stores no approval request.
+  It runs only after the caller's rights let the call go on, so a call the
+  caller may not make reads nothing of Keycloak.
 * :func:`realm_checked` wraps the handler method of every operation, so the
   check runs again when the call runs, also after an approval.
+
+Both first check the realm a call names in its params
+(:func:`~meho_backplane.connectors.keycloak.realm_params.realm_fence_problem`).
+A realm other than the managed realm is refused before any request.
+
+A read inside an approval card that gets another realm's answer refuses the
+call too (:func:`~meho_backplane.connectors.keycloak.realm_params.check_answered_realm`).
+
+When the check read gets no answer at all (for example the TLS certificate
+of the server is not trusted), the check before the policy gate lets the
+call go on. The call then meets the same error and returns it with its own
+error code (for example ``connector_tls_verify_failed``). Every later read
+inside the realm still checks the realm first.
 
 ``keycloak.realm.create`` and ``keycloak.realm.delete`` use
 :func:`realm_checked_or_absent` and :data:`ABSENT_OK_OPS`: they also go on
@@ -42,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
+from meho_backplane.connectors.keycloak.realm_params import realm_fence_problem
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._park_check import ParkCheck, register_gate_check
@@ -117,15 +133,35 @@ def realm_gate_check(op_id: str) -> ParkCheck:
         connector = ctx.connector_instance
         if not isinstance(connector, KeycloakConnector) or ctx.target is None:
             return None
+        problem = realm_fence_problem(op_id, ctx.params, ctx.target)
+        if problem is not None:
+            return problem
         try:
             await check_realm_answer(
                 connector, ctx.operator, ctx.target, allow_absent=op_id in ABSENT_OK_OPS
             )
         except KeycloakRealmAnswerError as exc:
             return str(exc)
+        except Exception as exc:
+            if _got_no_answer(exc):
+                # The call meets the same error and returns it with its own code.
+                return None
+            raise
         return None
 
     return check
+
+
+def _got_no_answer(exc: BaseException) -> bool:
+    """Whether *exc* comes from a request that got no answer (a connection or TLS error)."""
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            return False
+        if isinstance(seen, httpx.TransportError):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
 
 
 def register_realm_gate_checks(op_ids: Iterable[str]) -> None:
@@ -134,29 +170,46 @@ def register_realm_gate_checks(op_ids: Iterable[str]) -> None:
         register_gate_check(op_id, realm_gate_check(op_id))
 
 
-def realm_checked[R](
-    handler: Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]],
-) -> Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]]:
-    """Wrap an operation handler method so it runs only after :func:`check_realm_answer`."""
+@functools.cache
+def _op_ids_by_handler() -> dict[str, str]:
+    """``handler_attr`` -> ``op_id`` of every Keycloak operation."""
+    # Imported here: the connector module imports this one.
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
+    return {op.handler_attr: op.op_id for op in KeycloakConnector.operation_specs()}
+
+
+def _checked[R](
+    handler: Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]],
+    *,
+    allow_absent: bool,
+) -> Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]]:
     @functools.wraps(handler)
     async def _wrapped(self: Any, operator: Operator, target: Any, params: dict[str, Any]) -> R:
-        await check_realm_answer(self, operator, target)
+        op_id = _op_ids_by_handler().get(handler.__name__)
+        problem = realm_fence_problem(op_id, params, target) if op_id is not None else None
+        if problem is not None:
+            raise ValueError(problem)
+        await check_realm_answer(self, operator, target, allow_absent=allow_absent)
         return await handler(self, operator, target, params)
 
     _wrapped.realm_answer_checked = True  # type: ignore[attr-defined]
     return _wrapped
+
+
+def realm_checked[R](
+    handler: Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]],
+) -> Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]]:
+    """Wrap an operation handler method so it runs only after :func:`check_realm_answer`.
+
+    A realm the call names in its params that is not the managed realm is
+    refused first, with no request.
+    """
+    return _checked(handler, allow_absent=False)
 
 
 def realm_checked_or_absent[R](
     handler: Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]],
 ) -> Callable[[Any, Operator, Any, dict[str, Any]], Awaitable[R]]:
     """Like :func:`realm_checked`, but a managed realm that does not exist (404) passes."""
-
-    @functools.wraps(handler)
-    async def _wrapped(self: Any, operator: Operator, target: Any, params: dict[str, Any]) -> R:
-        await check_realm_answer(self, operator, target, allow_absent=True)
-        return await handler(self, operator, target, params)
-
-    _wrapped.realm_answer_checked = True  # type: ignore[attr-defined]
-    return _wrapped
+    return _checked(handler, allow_absent=True)

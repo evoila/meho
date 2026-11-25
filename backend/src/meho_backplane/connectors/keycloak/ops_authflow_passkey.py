@@ -73,7 +73,7 @@ from meho_backplane.connectors.keycloak.ops_write_merge import (
     unrequested_changes,
 )
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
-from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
+from meho_backplane.connectors.keycloak.realm_params import read_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import PreviewContext
 
@@ -503,7 +503,9 @@ async def _bind(
     must not be written back to its old value. The op stops when the realm's
     browser flow is no longer *expected_flow*.
     """
-    before = await connector._get_admin_json(target, realm_path, operator=operator)
+    before = await read_answered_realm(
+        connector, ENSURE_PASSKEY_CODE_SKIP_OP_ID, target, realm_path, operator=operator
+    )
     if before.get("browserFlow") != expected_flow:
         raise KeycloakPasskeyFlowError(
             "realm_changed",
@@ -520,7 +522,16 @@ async def _bind(
         json=merge_representation(before, requested),
         idempotent_conflict=False,
     )
-    after = await connector._get_admin_json(target, realm_path, operator=operator)
+    try:
+        after = await read_answered_realm(
+            connector, ENSURE_PASSKEY_CODE_SKIP_OP_ID, target, realm_path, operator=operator
+        )
+    except ValueError as exc:
+        raise KeycloakPasskeyFlowError(
+            "check_failed",
+            f"the realm was bound to {PASSKEY_FLOW_ALIAS!r}, but Keycloak did not read it "
+            "back as the managed realm, so MEHO could not check the change. Check the realm.",
+        ) from exc
     if after.get("browserFlow") != PASSKEY_FLOW_ALIAS:
         raise KeycloakPasskeyFlowError(
             "check_failed",
@@ -541,8 +552,9 @@ async def keycloak_authflow_ensure_passkey_code_skip(
     del params  # the op takes no params; the schema refuses any
     realm = resolve_realm_config(target).managed_realm
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
-    before = await self._get_admin_json(target, realm_path, operator=operator)
-    check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
+    before = await read_answered_realm(
+        self, ENSURE_PASSKEY_CODE_SKIP_OP_ID, target, realm_path, operator=operator
+    )
     bound = before.get("browserFlow")
     if not isinstance(bound, str) or not bound:
         raise KeycloakUnexpectedResponseError("the realm has no browserFlow")

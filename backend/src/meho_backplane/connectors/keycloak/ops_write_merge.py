@@ -50,6 +50,7 @@ import httpx
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import ResponseTooLargeError
 from meho_backplane.connectors.keycloak.connector import KeycloakAdminTokenError
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -144,6 +145,7 @@ async def read_merge_write(
     read_back_path: str | None = None,
     before: dict[str, Any] | None = None,
     read_back_into: dict[str, Any] | None = None,
+    read_back_realm: str | None = None,
 ) -> dict[str, Any]:
     """GET the object at *path*, merge *requested* on top, PUT it back, read it again.
 
@@ -156,7 +158,10 @@ async def read_merge_write(
     the fields the caller sent, the fields that changed without being sent,
     and whether the read-back ran. When *read_back_into* is given and the
     read-back ran, the object that was read back is put in it, so the caller
-    can report what Keycloak holds now.
+    can report what Keycloak holds now. With *read_back_realm* (a realm
+    update), the read-back counts only when Keycloak answers with exactly
+    that realm name. Any other answer leaves ``read_back_checked`` false and
+    reports no field of it; the flight recorder keeps no span of it either.
     """
     if before is None:
         before = await connector._get_admin_json(target, path, operator=operator)
@@ -169,19 +174,28 @@ async def read_merge_write(
         "unrequested_changes": [],
         "read_back_checked": False,
     }
-    try:
-        after = await connector._get_admin_json(target, read_back_path or path, operator=operator)
-    except (
-        httpx.HTTPError,
-        ResponseTooLargeError,
-        OSError,
-        ValueError,
-        KeycloakAdminTokenError,
-        CredentialsReadError,
-    ):
-        # The PUT already succeeded; a failed check must not report the
-        # write as failed. The caller sees read_back_checked=false.
-        return outcome
+    with flight_recorder_capture.held() as spans:
+        try:
+            after = await connector._get_admin_json(
+                target, read_back_path or path, operator=operator
+            )
+        except (
+            httpx.HTTPError,
+            ResponseTooLargeError,
+            OSError,
+            ValueError,
+            KeycloakAdminTokenError,
+            CredentialsReadError,
+        ):
+            # The PUT already succeeded; a failed check must not report the
+            # write as failed. The caller sees read_back_checked=false.
+            spans.release()
+            return outcome
+        if read_back_realm is not None and (
+            not isinstance(after, dict) or after.get("realm") != read_back_realm
+        ):
+            return outcome
+        spans.release()
     if not isinstance(after, dict):
         return outcome
     outcome["read_back_checked"] = True

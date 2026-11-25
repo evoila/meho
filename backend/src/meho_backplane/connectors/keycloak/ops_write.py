@@ -148,6 +148,7 @@ from meho_backplane.connectors.keycloak.realm_params import (
     realm_param,
 )
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -373,9 +374,16 @@ async def keycloak_realm_update(
     )
     representation = dict(params["representation"])
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
-    current = await self._get_admin_json(target, path, operator=operator)
-    refuse_login_realm_write(realm_name, current, representation)
-    check_answered_realm("keycloak.realm.update", current, target)
+    # Kept in the trace only when the answer names the realm (as read_answered_realm).
+    with flight_recorder_capture.held() as spans:
+        try:
+            current = await self._get_admin_json(target, path, operator=operator)
+        except Exception:
+            spans.release()
+            raise
+        refuse_login_realm_write(realm_name, current, representation)
+        check_answered_realm("keycloak.realm.update", current, target)
+        spans.release()
     if params.get(SMTP_PASSWORD_REF_PARAM):
         password = await _read_password_from_vault(
             operator, target, params, prefix=SMTP_PASSWORD_PREFIX
@@ -391,6 +399,7 @@ async def keycloak_realm_update(
         requested=representation,
         read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
         before=current,
+        read_back_realm=new_name,
     )
     return {"realm": realm_name, "updated": True, **check}
 

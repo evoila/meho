@@ -39,7 +39,7 @@ from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakUnexpectedResponseError,
 )
-from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
+from meho_backplane.connectors.keycloak.realm_params import read_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -89,10 +89,13 @@ def _pick(row: Any, fields: tuple[str, ...], what: str) -> dict[str, Any]:
 async def _browser_flow_alias(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> str:
-    realm_row = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    realm_row = await read_answered_realm(
+        connector,
+        "keycloak.auth_flow.step.list",
+        target,
+        fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+        operator=operator,
     )
-    check_answered_realm("keycloak.auth_flow.step.list", realm_row, target)
     alias = realm_row.get("browserFlow")
     if not isinstance(alias, str) or not alias:
         raise KeycloakUnexpectedResponseError("the realm names no browser flow")

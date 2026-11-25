@@ -10902,7 +10902,7 @@
           "principals"
         ],
         "summary": "Unblock Principal Route",
-        "description": "Unblock a login. A platform admin removes every block of it.",
+        "description": "Unblock a login. On their own login an admin removes this tenant's block only.",
         "operationId": "unblock_principal_route_api_v1_principals_blocked__sub__delete",
         "parameters": [
           {

@@ -27,6 +27,10 @@ Who may remove a block, and the way back for a platform admin:
   tenant still refuses the person until the block is gone.
 - A blocked platform admin removes only their own block, never the block
   of another person.
+- On their own login an admin removes only the block of the current
+  tenant. A block in another tenant stays. MEHO reads the table for this,
+  not the list it keeps for 5 seconds, so a block in every tenant that
+  another process just made also stays (403).
 - A block that a platform admin made (scope `*`) stays until a platform
   admin who is not blocked removes it. The person under it gets 403 on
   unblock.
@@ -35,8 +39,8 @@ Who may remove a block, and the way back for a platform admin:
 - The platform admin flag comes from the person's own token (the claim or
   the realm role). A token without it, or with a malformed one, has no way
   back through this rule.
-- When the block list cannot be read, the unblock answers 503, like every
-  other route.
+- When the block list or the table cannot be read, the unblock answers
+  503 `principal_block_check_unavailable`, like every other route.
 
 A blocked person reads: "This person is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
@@ -147,7 +151,8 @@ REST routes (`/api/v1/principals/blocked`):
 - `POST` with `{"sub", "reason"}`: block. A second block in the same
   scope updates the reason.
 - `DELETE /{sub}`: unblock. A platform admin removes every block of the
-  login. A tenant admin removes the block of their tenant. 404 when there
+  login, but on their own login only the block of the current tenant. A
+  tenant admin removes the block of their tenant. 404 when there
   is none. This route uses its own sign-in check
   (`verify_jwt_platform_admin_way_back` in `auth/jwt.py`,
   `verify_jwt_and_bind_platform_admin_way_back` in `middleware.py`): a

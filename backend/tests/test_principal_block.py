@@ -32,6 +32,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from httpx import ASGITransport
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -41,6 +43,7 @@ from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     PrincipalBlockUnavailableError,
     block_principal,
+    is_principal_blocked,
     reset_block_cache,
 )
 from meho_backplane.connectors.schemas import OperationResult
@@ -843,3 +846,81 @@ async def test_unreadable_block_list_gives_a_platform_admin_no_way_through(
     response = await _unblock(ac, _pa_token(key), _PA)
     assert response.status_code == 503
     assert response.json()["detail"] == "principal_block_check_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_way_back_removes_only_the_block_of_the_current_tenant(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key, tenant=_TENANT_A), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key, tenant=_TENANT_B), sub=_PA)).status_code == 201
+
+    removed = await _unblock(ac, _pa_token(key), _PA, tenant=_TENANT_A)
+
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"sub": _PA, "removed": 1}
+    (row,) = await _rows(_PA)
+    assert row.scope == str(_TENANT_B)
+
+
+@pytest.mark.asyncio
+async def test_way_back_reads_the_table_and_a_new_block_in_every_tenant_stays(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    # This process holds the list with the tenant block only.
+    assert await is_principal_blocked(_PA, None) is False
+    # Another process adds a block in every tenant; the cached list does not show it yet.
+    async with get_sessionmaker()() as session:
+        session.add(
+            PrincipalBlock(
+                sub=_PA,
+                scope=BLOCK_SCOPE_ALL,
+                tenant_id=None,
+                reason="blocked everywhere",
+                blocked_by_sub="other-platform-person",
+                blocked_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    refused = await _unblock(ac, _pa_token(key), _PA, tenant=_TENANT_A)
+
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}"
+    assert sorted(row.scope for row in await _rows(_PA)) == sorted(
+        [BLOCK_SCOPE_ALL, str(_TENANT_A)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_unblock_answers_503_when_the_table_read_fails_with_the_list_cached(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    assert (await _block(ac, _admin(key), sub=_PA)).status_code == 201
+    assert (await _block(ac, _admin(key))).status_code == 201
+    # The cached list lets sign-in pass without a read of the table.
+    assert await is_principal_blocked(_PA, _TENANT_A) is True
+
+    real_execute = AsyncSession.execute
+
+    async def _execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(statement, "is_select", False) and "principal_block" in str(statement):
+            raise OperationalError(str(statement), {}, Exception("database is gone"))
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _execute)
+
+    for token, sub in ((_pa_token(key), _PA), (_admin(key), _BLOCKED)):
+        response = await _unblock(ac, token, sub, tenant=_TENANT_A)
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "principal_block_check_unavailable"
+    monkeypatch.undo()
+    assert len(await _rows(_PA)) == 1
+    assert len(await _rows(_BLOCKED)) == 1

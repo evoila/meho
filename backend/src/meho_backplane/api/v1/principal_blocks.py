@@ -17,9 +17,11 @@ Routes (REST and CLI only; there is no MCP tool):
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
   is no block the admin may remove. A platform admin whom a tenant admin
   blocked in this tenant removes that block on their own login: this is
-  their way back, also on an install with one tenant. A block that a
-  platform admin made (every tenant) stays until a platform admin
-  removes it. A tenant admin who is blocked cannot remove a block.
+  their way back, also on an install with one tenant. On their own login
+  the route removes only the block of this tenant, and it reads the
+  table first. A block that a platform admin made (every tenant) stays
+  until another platform admin removes it. A tenant admin who is
+  blocked cannot remove a block.
 
 Every route needs ``tenant_admin`` (the unblock route also takes a
 platform admin of any tenant role) and a person's login: an agent,
@@ -43,6 +45,7 @@ from meho_backplane.auth.principal_block import (
     REASON_MAX_LENGTH,
     BlockedPerson,
     CannotBlockSelfError,
+    OwnBlockStaysError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
@@ -162,29 +165,32 @@ async def unblock_principal_route(
     sub: Annotated[str, Path(min_length=1, max_length=_SUB_MAX_LENGTH)],
     operator: Operator = Depends(_require_unblock_caller),
 ) -> UnblockResponse:
-    """Unblock a login. A platform admin removes every block of it."""
+    """Unblock a login. On their own login an admin removes this tenant's block only."""
     # A caller who is blocked in this tenant may remove only their own
     # block, and only as a platform admin: a blocked tenant admin never
     # reaches this point.
     structlog.contextvars.bind_contextvars(audit_op_id="principal.unblock", audit_op_class="write")
-    if sub != operator.sub:
-        try:
-            caller_blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
-        except PrincipalBlockUnavailableError as exc:
-            raise HTTPException(
-                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="principal_block_check_unavailable",
-            ) from exc
-        if caller_blocked:
-            raise HTTPException(
-                status_code=http_status.HTTP_403_FORBIDDEN,
-                detail=f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}",
-            )
     try:
+        if sub != operator.sub and await is_principal_blocked(operator.sub, operator.tenant_id):
+            raise _blocked()
         removed = await unblock_principal(operator, sub)
+    except PrincipalBlockUnavailableError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="principal_block_check_unavailable",
+        ) from exc
+    except OwnBlockStaysError as exc:
+        raise _blocked() from exc
     except PrincipalNotBlockedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="principal_not_blocked",
         ) from exc
     return UnblockResponse(sub=sub, removed=removed)
+
+
+def _blocked() -> HTTPException:
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"principal_blocked: {PRINCIPAL_BLOCKED_MESSAGE}",
+    )

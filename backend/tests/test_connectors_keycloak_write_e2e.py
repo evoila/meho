@@ -652,7 +652,7 @@ async def test_recorded_refusal_holds_no_value_of_the_other_realm(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("real_keycloak_realm_check")
+@pytest.mark.usefixtures("real_keycloak_realm_check", "real_managed_realm_check")
 async def test_recorded_trace_holds_only_the_client_read_when_the_realm_matches(
     keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
 ) -> None:
@@ -667,6 +667,29 @@ async def test_recorded_trace_holds_only_the_client_read_when_the_realm_matches(
     assert _OTHER_REALM_MARKER not in json.dumps(
         [[s.name, s.attributes] for s in recording.spans], default=str
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check", "real_managed_realm_check")
+async def test_recording_goes_on_after_a_404_check_read(
+    keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
+) -> None:
+    """The check read answers 404 inside the paused block; the operation's own read is recorded.
+
+    ``keycloak.realm.delete`` reads the realm itself after the check. The 404 of the check
+    read does not leave recording paused, so that read is in the trace.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        read = mock.get("/admin/realms/example").respond(404)
+        result = await keycloak_write_e2e.realm_delete(_OPERATOR, target, {"realm": "example"})
+    assert result["already_absent"] is True
+    assert read.call_count == 2
+    realm_spans = [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
+    assert len(realm_spans) == 1
 
 
 @pytest.mark.asyncio

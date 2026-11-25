@@ -99,7 +99,11 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
-from meho_backplane.operations._park_check import park_check_refusal, park_check_registered
+from meho_backplane.operations._park_check import (
+    gate_check_refusal,
+    park_check_refusal,
+    park_check_registered,
+)
 from meho_backplane.operations._preview import (
     _SENSITIVE_CLASSES,
     _scrub_secret_param_keys,
@@ -628,6 +632,52 @@ async def _park_check_envelope(
     )
 
 
+async def _gate_check_envelope(
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The ``refused_before_approval`` envelope when the op's check before the gate says no.
+
+    The check (:func:`~meho_backplane.operations._park_check.register_gate_check`)
+    runs before the policy gate and before any preview builder, as in the
+    dispatcher, so the preview reads nothing more of the vendor when it
+    refuses. The envelope then says ``deny`` without running the gate. A
+    call that fails the params check is left to that check, as in the
+    dispatcher.
+    """
+    op_id = descriptor.op_id
+    if (
+        _validate_params_envelope(
+            descriptor=descriptor, connector_id=connector_id, op_id=op_id, params=params
+        )
+        is not None
+    ):
+        return None
+    refusal = await gate_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=0.0,
+    )
+    if refusal is None:
+        return None
+    return {
+        **_refused_envelope(
+            refusal, op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        ),
+        "safety_level": descriptor.safety_level,
+        "requires_approval": descriptor.requires_approval,
+        "policy_verdict": PermissionVerdict.DENY.value,
+        "policy_reason": refusal.extras.get("reason"),
+    }
+
+
 async def _governance_fields(
     *,
     operator: Operator,
@@ -1014,6 +1064,8 @@ async def preview_dispatch(
     # the agent sees one follows the op and PREVIEW_TYPED_WRITES alone.
     previewable = _is_previewable(descriptor)
     raise_descriptor_for_params(descriptor, params)
+    if refused := await _gate_check_envelope(operator, descriptor, connector_id, target, params):
+        return refused
     # The park check and the governance fields each run the policy gate.
     with agent_no_grant_log_scope():
         envelope = await _park_check_envelope(

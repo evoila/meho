@@ -28,6 +28,14 @@ for approval, before anything is stored:
 
 A refusal is the ``refused_before_approval`` result
 (:func:`~meho_backplane.operations._errors.result_park_check_refused`).
+
+An op can also turn on a check that runs before the policy gate
+(:func:`register_gate_check`), for a check that must pass before MEHO reads
+anything of the vendor for the call. :func:`gate_check_refusal` runs it in
+the dispatcher right before the policy gate, so before the reads that decide
+who must approve and before any approval card is built, and
+``preview_operation`` runs it first. The approved run skips it: the handler
+checks again.
 The check is fail-closed: a check that raises refuses the call, with a
 reason that names only the exception class. An expired login during the
 check is renewed once (:func:`_refresh_rejected_session`).
@@ -51,8 +59,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ParkCheck",
+    "gate_check_refusal",
     "park_check_refusal",
     "park_check_registered",
+    "register_gate_check",
     "register_park_check",
     "run_park_check",
 ]
@@ -67,6 +77,9 @@ ParkCheck = Callable[[PreviewContext], Awaitable[str | None]]
 #: approval with its params as they are.
 _PARK_CHECKS: dict[str, ParkCheck] = {}
 
+#: ``op_id`` -> check that runs before the policy gate (:func:`register_gate_check`).
+_GATE_CHECKS: dict[str, ParkCheck] = {}
+
 
 def register_park_check(op_id: str, check: ParkCheck) -> None:
     """Register *check* as the check *op_id* runs before it waits for approval.
@@ -74,6 +87,15 @@ def register_park_check(op_id: str, check: ParkCheck) -> None:
     Registering again overwrites, so a re-import (test reload) is safe.
     """
     _PARK_CHECKS[op_id] = check
+
+
+def register_gate_check(op_id: str, check: ParkCheck) -> None:
+    """Register *check* as the check *op_id* runs before the policy gate.
+
+    Same shape and the same fail-closed run as a check before the wait for
+    approval. Registering again overwrites.
+    """
+    _GATE_CHECKS[op_id] = check
 
 
 def park_check_registered(op_id: str) -> bool:
@@ -116,8 +138,12 @@ async def run_park_check(ctx: PreviewContext) -> str | None:
     refuses the call (fail-closed): the reason names the exception class
     only, so no param value and no vendor text reaches the caller.
     """
+    return await _run_check(ctx, _PARK_CHECKS.get(ctx.descriptor.op_id))
+
+
+async def _run_check(ctx: PreviewContext, check: ParkCheck | None) -> str | None:
+    """Run *check* as :func:`run_park_check` describes."""
     op_id = ctx.descriptor.op_id
-    check = _PARK_CHECKS.get(op_id)
     if check is None:
         return None
     try:
@@ -160,7 +186,58 @@ async def park_check_refusal(
     ``connector_instance=None``, and the check decides what that means.
     Writes nothing: the caller records the refusal.
     """
-    if not park_check_registered(descriptor.op_id):
+    return await _refusal(
+        _PARK_CHECKS.get(descriptor.op_id),
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+
+
+async def gate_check_refusal(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    duration_ms: float,
+) -> OperationResult | None:
+    """The ``refused_before_approval`` result when the op's check before the gate says no.
+
+    The same as :func:`park_check_refusal`, for the check of
+    :func:`register_gate_check`.
+    """
+    return await _refusal(
+        _GATE_CHECKS.get(descriptor.op_id),
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+
+
+async def _refusal(
+    check: ParkCheck | None,
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    duration_ms: float,
+) -> OperationResult | None:
+    """Run *check* for the call; the refusal result, or ``None``."""
+    if check is None:
         return None
     # Imported lazily: the dispatcher imports this module.
     from meho_backplane.operations.dispatcher import _resolve_connector_instance
@@ -173,7 +250,7 @@ async def park_check_refusal(
         connector_instance, resolution_error = None, None
     if resolution_error is not None:
         connector_instance = None
-    reason = await run_park_check(
+    reason = await _run_check(
         PreviewContext(
             descriptor=descriptor,
             connector_instance=connector_instance,
@@ -181,7 +258,8 @@ async def park_check_refusal(
             target=target,
             params=params,
             connector_id=connector_id,
-        )
+        ),
+        check,
     )
     if reason is None:
         return None

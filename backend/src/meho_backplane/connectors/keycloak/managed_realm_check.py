@@ -79,6 +79,13 @@ class ManagedRealmChecks:
         finally:
             _RUN_CHECKS.reset(token)
 
+    def note_passed(self, target: KeycloakTargetLike) -> None:
+        """Count a check of *target* that passed in this run, so the next request reads no more."""
+        passed = _RUN_CHECKS.get()
+        if passed is not None:
+            key = (target_cache_key(target), resolve_realm_config(target).managed_realm)
+            passed[key] = time.monotonic() + CHECK_SECONDS
+
     def forget(self, target: KeycloakTargetLike) -> None:
         """Drop every passed check of *target*; the next request checks again."""
         passed = _RUN_CHECKS.get()

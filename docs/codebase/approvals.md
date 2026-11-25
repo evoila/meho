@@ -4239,6 +4239,26 @@ field, so an op can turn on its own check.
 
 Tests: `backend/tests/test_operations_park_check.py`.
 
+### A check before the policy gate
+
+An op can also register a check that runs before the policy gate:
+`_park_check.register_gate_check(op_id, check)`. It has the same shape, the
+same fail-closed run and the same `refused_before_approval` refusal as the
+check above. It is for a check that must pass before MEHO reads anything of
+the vendor for the call.
+
+- **Where it runs.** `_park_check.gate_check_refusal` runs it in the
+  dispatcher right before the policy gate, so before the reads that decide
+  who must approve and before any approval card is built. It runs for every
+  call of the op, also one that would run at once. The run after an
+  approval skips it, so the handler checks again. `preview_operation` runs it
+  first, when the params pass the schema, and a refusal there says
+  `policy_verdict: deny` without running the gate.
+- **A refusal** writes one `denied` audit row through
+  `_audit_denied_and_return`.
+- **Used by** every Keycloak operation (the realm answer check,
+  `docs/codebase/connectors-keycloak.md`).
+
 ## Permission preflight hook (#1504)
 
 The generic `proposed_effect` *preview* above is suppressed for

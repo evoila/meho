@@ -1371,6 +1371,7 @@ class KeycloakConnector(HttpConnector):
         async with meho_access_scope():
             return await keycloak_user_credential_delete(self, operator, target, params)
 
+    @realm_checked
     async def user_check_login(
         self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1477,6 +1478,41 @@ class KeycloakConnector(HttpConnector):
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
+    def operation_specs(cls) -> tuple[Any, ...]:
+        """Every Keycloak operation spec, in the order :meth:`register_operations` uses."""
+        from meho_backplane.connectors.keycloak.ops_authflow import APPROVAL_FLOW_OPS
+        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
+            PASSKEY_CODE_SKIP_OPS,
+        )
+        from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
+        from meho_backplane.connectors.keycloak.ops_events import EVENT_OPS
+        from meho_backplane.connectors.keycloak.ops_flow_reads import FLOW_READ_OPS
+        from meho_backplane.connectors.keycloak.ops_identity_provider import IDENTITY_PROVIDER_OPS
+        from meho_backplane.connectors.keycloak.ops_lock_status import LOCK_STATUS_OPS
+        from meho_backplane.connectors.keycloak.ops_login_check import LOGIN_CHECK_OPS
+        from meho_backplane.connectors.keycloak.ops_read import READ_OPS
+        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
+            USER_REQUIRED_ACTION_OPS,
+        )
+        from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
+        from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
+
+        return (
+            *READ_OPS,
+            *WRITE_OPS,
+            *LOGIN_CHECK_OPS,
+            *APPROVAL_FLOW_OPS,
+            *PASSKEY_CODE_SKIP_OPS,
+            *TOUCH_OPS,
+            *IDENTITY_PROVIDER_OPS,
+            *USER_REQUIRED_ACTION_OPS,
+            *USER_STATE_OPS,
+            *LOCK_STATUS_OPS,
+            *FLOW_READ_OPS,
+            *EVENT_OPS,
+        )
+
+    @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`READ_OPS` into ``endpoint_descriptor``.
 
@@ -1512,43 +1548,19 @@ class KeycloakConnector(HttpConnector):
         # pure-fingerprint / pure-probe unit test should not pay. Lifespan
         # callers already have the embedding service warmed by the time
         # this runs.
-        from meho_backplane.connectors.keycloak.ops_authflow import (
-            APPROVAL_FLOW_OPS,
-            WHEN_TO_USE_AUTHFLOW_BY_GROUP,
-        )
-        from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
-            PASSKEY_CODE_SKIP_OPS,
-        )
-        from meho_backplane.connectors.keycloak.ops_authflow_touch_schemas import TOUCH_OPS
-        from meho_backplane.connectors.keycloak.ops_events import (
-            EVENT_OPS,
-            WHEN_TO_USE_EVENTS_BY_GROUP,
-        )
+        from meho_backplane.connectors.keycloak.ops_authflow import WHEN_TO_USE_AUTHFLOW_BY_GROUP
+        from meho_backplane.connectors.keycloak.ops_events import WHEN_TO_USE_EVENTS_BY_GROUP
         from meho_backplane.connectors.keycloak.ops_flow_reads import (
-            FLOW_READ_OPS,
             WHEN_TO_USE_FLOW_READ_BY_GROUP,
         )
         from meho_backplane.connectors.keycloak.ops_identity_provider import (
-            IDENTITY_PROVIDER_OPS,
             WHEN_TO_USE_IDENTITY_PROVIDER_BY_GROUP,
         )
-        from meho_backplane.connectors.keycloak.ops_lock_status import LOCK_STATUS_OPS
         from meho_backplane.connectors.keycloak.ops_login_check import (
-            LOGIN_CHECK_OPS,
             WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
         )
-        from meho_backplane.connectors.keycloak.ops_read import (
-            READ_OPS,
-            WHEN_TO_USE_BY_GROUP,
-        )
-        from meho_backplane.connectors.keycloak.ops_user_required_actions import (
-            USER_REQUIRED_ACTION_OPS,
-        )
-        from meho_backplane.connectors.keycloak.ops_user_state import USER_STATE_OPS
-        from meho_backplane.connectors.keycloak.ops_write import (
-            WHEN_TO_USE_WRITE_BY_GROUP,
-            WRITE_OPS,
-        )
+        from meho_backplane.connectors.keycloak.ops_read import WHEN_TO_USE_BY_GROUP
+        from meho_backplane.connectors.keycloak.ops_write import WHEN_TO_USE_WRITE_BY_GROUP
         from meho_backplane.operations.typed_register import register_typed_operation
 
         # The two when_to_use maps are disjoint by group_key suffix
@@ -1565,20 +1577,7 @@ class KeycloakConnector(HttpConnector):
         }
 
         bindings: list[tuple[Any, Any]] = []
-        for op in (
-            *READ_OPS,
-            *WRITE_OPS,
-            *LOGIN_CHECK_OPS,
-            *APPROVAL_FLOW_OPS,
-            *PASSKEY_CODE_SKIP_OPS,
-            *TOUCH_OPS,
-            *IDENTITY_PROVIDER_OPS,
-            *USER_REQUIRED_ACTION_OPS,
-            *USER_STATE_OPS,
-            *LOCK_STATUS_OPS,
-            *FLOW_READ_OPS,
-            *EVENT_OPS,
-        ):
+        for op in cls.operation_specs():
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(

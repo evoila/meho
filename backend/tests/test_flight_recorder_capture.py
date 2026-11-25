@@ -467,6 +467,25 @@ def test_paused_block_records_no_span_and_capture_goes_on_after_it() -> None:
         capture._active_capture_var.reset(token)
 
 
+def test_paused_block_puts_capture_back_after_an_error_inside_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with pytest.raises(RuntimeError), capture.paused():
+            raise RuntimeError("raised inside the paused block")
+        start = capture.span_start()
+        assert start is not None
+        capture.record_vendor_call(
+            start,
+            method="POST",
+            request_headers={},
+            response=SimpleNamespace(status_code=201),
+        )
+        assert len(scope.spans) == 1
+    finally:
+        capture._active_capture_var.reset(token)
+
+
 # ---------------------------------------------------------------------------
 # F7 -- a forced recorder failure never breaks the connector call
 # ---------------------------------------------------------------------------

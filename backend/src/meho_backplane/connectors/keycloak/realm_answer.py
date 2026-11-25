@@ -11,45 +11,61 @@ When they differ, or the answer has no realm name, the operation returns an
 error and sends nothing more to Keycloak. The error names the target and
 says what to check. It holds no value from the answer.
 
-:func:`realm_checked` wraps the handler method of an operation. It runs
-after the params check and the policy gate, in the same place as the
-handler itself, so it applies to every call that runs the handler.
-``keycloak.user.check_login`` is not wrapped: it sends no admin request.
+The check runs twice for a call:
 
-:func:`realm_checked_or_absent` wraps ``keycloak.realm.create`` and
-``keycloak.realm.delete``. They also run when the managed realm does not
-exist yet (the read answers HTTP 404), so a first setup can make that realm
-and a teardown can run twice. Any other answer gets the same check.
+* :func:`realm_gate_check` runs before the policy gate (the dispatcher and
+  ``preview_operation``, see
+  :func:`~meho_backplane.operations._park_check.register_gate_check`). So it
+  runs before the reads that decide who must approve and before any approval
+  card or preview reads Keycloak. A refusal there stores no approval request.
+* :func:`realm_checked` wraps the handler method of every operation, so the
+  check runs again when the call runs, also after an approval.
+
+``keycloak.realm.create`` and ``keycloak.realm.delete`` use
+:func:`realm_checked_or_absent` and :data:`ABSENT_OK_OPS`: they also go on
+when the managed realm does not exist yet (the read answers HTTP 404), so a
+first setup can make that realm and a teardown can run twice. Any other
+answer gets the same check.
 
 The flight recorder records no span for the check read, so a stored trace
 holds only the calls of the operation itself and no value of the realm that
-Keycloak answered with.
+Keycloak answered with. A passed check also counts for the realm check
+before each request of the same run
+(:meth:`~meho_backplane.connectors.keycloak.managed_realm_check.ManagedRealmChecks.note_passed`).
 """
 
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.operations._park_check import ParkCheck, register_gate_check
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
+    from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "ABSENT_OK_OPS",
     "KeycloakRealmAnswerError",
     "check_realm_answer",
     "realm_checked",
     "realm_checked_or_absent",
+    "realm_gate_check",
+    "register_realm_gate_checks",
 ]
+
+#: The operations that also go on when the managed realm does not exist (HTTP 404).
+ABSENT_OK_OPS: Final = frozenset({"keycloak.realm.create", "keycloak.realm.delete"})
 
 
 class KeycloakRealmAnswerError(ValueError):
@@ -84,6 +100,38 @@ async def check_realm_answer(
             "realm this target manages. Check the 'managed_realm' of the target and the "
             "address of the Keycloak server."
         )
+    connector._realm_checks.note_passed(target)
+
+
+def realm_gate_check(op_id: str) -> ParkCheck:
+    """The check of *op_id* before the policy gate: the refusal text, or ``None``.
+
+    The text is the one the handler gives. A target or connector that does
+    not resolve is left to the dispatcher, which refuses the call itself.
+    """
+
+    async def check(ctx: PreviewContext) -> str | None:
+        # Imported here: the connector module imports this one.
+        from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+        connector = ctx.connector_instance
+        if not isinstance(connector, KeycloakConnector) or ctx.target is None:
+            return None
+        try:
+            await check_realm_answer(
+                connector, ctx.operator, ctx.target, allow_absent=op_id in ABSENT_OK_OPS
+            )
+        except KeycloakRealmAnswerError as exc:
+            return str(exc)
+        return None
+
+    return check
+
+
+def register_realm_gate_checks(op_ids: Iterable[str]) -> None:
+    """Run :func:`realm_gate_check` before the policy gate of each of *op_ids*."""
+    for op_id in op_ids:
+        register_gate_check(op_id, realm_gate_check(op_id))
 
 
 def realm_checked[R](
@@ -96,6 +144,7 @@ def realm_checked[R](
         await check_realm_answer(self, operator, target)
         return await handler(self, operator, target, params)
 
+    _wrapped.realm_answer_checked = True  # type: ignore[attr-defined]
     return _wrapped
 
 
@@ -109,4 +158,5 @@ def realm_checked_or_absent[R](
         await check_realm_answer(self, operator, target, allow_absent=True)
         return await handler(self, operator, target, params)
 
+    _wrapped.realm_answer_checked = True  # type: ignore[attr-defined]
     return _wrapped

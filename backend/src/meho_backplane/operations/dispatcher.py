@@ -438,7 +438,7 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
-from meho_backplane.operations._park_check import park_check_refusal
+from meho_backplane.operations._park_check import gate_check_refusal, park_check_refusal
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -4627,6 +4627,29 @@ async def _dispatch_now(
         # Some params make a call wait for a person on every call.
         raise_descriptor_for_params(descriptor, params)
         if not _approved:
+            # The op's check before the gate (``register_gate_check``) runs
+            # before the policy gate reads the vendor to decide who must
+            # approve, and before an approval card is built.
+            refusal = await gate_check_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                duration_ms=_elapsed_ms(started),
+            )
+            if refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                return await _audit_denied_and_return(
+                    refusal,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=refusal.duration_ms,
+                )
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
             # awaits a DB read to load the principal's AgentPermission rows.

@@ -44,6 +44,7 @@ import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
+from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry
@@ -1634,3 +1635,78 @@ async def test_the_retry_row_hashes_the_params_with_secret_values_masked() -> No
     assert stored == compute_audit_params_hash({"name": "web-01", "password": "other-test-value"})
     assert stored != compute_params_hash(params)
     assert "first-test-value" not in str(reuse_rows[0].payload)
+
+
+async def _park_with_actor(actor: str | None) -> ApprovalRequest:
+    """Park the same call, with *actor* bound as the acting agent (or none)."""
+    if actor is None:
+        return await _park_same_call()
+    with actor_delegation(actor):
+        return await _park_same_call()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_an_acting_agent_does_not_get_the_request_of_a_direct_call() -> None:
+    direct = await _park_with_actor(None)
+    acting = await _park_with_actor("agent:bot-a")
+
+    assert acting.id != direct.id
+    assert getattr(acting, "_reused", False) is False
+    assert acting.principal_act == "agent:bot-a"
+    assert direct.principal_act is None
+    assert await _approval_row_count() == 2
+    assert await _request_audit_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_direct_call_does_not_get_the_request_of_a_call_with_an_acting_agent() -> None:
+    acting = await _park_with_actor("agent:bot-a")
+    direct = await _park_with_actor(None)
+
+    assert direct.id != acting.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_another_acting_agent_gets_its_own_request() -> None:
+    first = await _park_with_actor("agent:bot-a")
+    other = await _park_with_actor("agent:bot-b")
+
+    assert other.id != first.id
+    assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_call_with_the_same_acting_agent_gets_the_waiting_request() -> None:
+    first = await _park_with_actor("agent:bot-a")
+    again = await _park_with_actor("agent:bot-a")
+
+    assert again.id == first.id
+    assert getattr(again, "_reused", False) is True
+    assert await _approval_row_count() == 1
+    assert await _request_audit_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on")
+async def test_a_person_behind_a_call_with_another_acting_agent_cannot_approve_its_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+    with actor_delegation("agent:bot-a"):
+        second = await _park_machine_call(monkeypatch, _person_behind("person-b"))
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert second.principal_act == "agent:bot-a"
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s, second.id, operator=_operator(sub="person-b"))
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, second.id, operator=_operator(sub="person-c"))
+    assert approved.status == ApprovalRequestStatus.APPROVED

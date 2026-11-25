@@ -97,6 +97,7 @@ from meho_backplane.operations.answer_ready import (
     read_more_line,
 )
 from meho_backplane.operations.reducer import SECRET_REVEAL_CONTEXT_KEY
+from meho_backplane.operations.required_fields import REQUIRED_FIELDS_CONTEXT_KEY
 from meho_backplane.operations.result_document import (
     DOCUMENT_RECORD,
     document_drill_in_rationale,
@@ -553,9 +554,24 @@ class JsonFluxReducer:
 
         A ``reveal_secret: true`` run (:data:`SECRET_REVEAL_CONTEXT_KEY`)
         gets ``(payload, None)``: nothing is stored.
+
+        The fields a connector always keeps (:func:`_required_values`) come
+        first in every summary, whole, outside the summary's size limits.
         """
         del schema  # schema is inferred from captured rows
 
+        result, handle = await self._reduce(payload, context)
+        if handle is None or result is payload or not isinstance(result, dict):
+            return result, handle
+        kept = _required_values(payload, context)
+        if not kept:
+            return result, handle
+        return {**kept, **{k: v for k, v in result.items() if k not in kept}}, handle
+
+    async def _reduce(
+        self, payload: Any, context: dict[str, Any] | None
+    ) -> tuple[Any, ResultHandle | None]:
+        """:meth:`reduce` without the fields a connector always keeps."""
         if context and context.get(SECRET_REVEAL_CONTEXT_KEY) is True:
             return payload, None
         if _always_document(context):
@@ -678,7 +694,8 @@ class JsonFluxReducer:
             return payload, None
         summary = {}
         if isinstance(payload, dict):
-            summary, omitted = _default_scalar_siblings(payload, None)
+            kept = frozenset(_required_values(payload, context))
+            summary, omitted = _default_scalar_siblings(payload, None, skip=kept)
             if omitted:
                 summary["omitted_scalar_count"] = len(omitted)
         summary.update(
@@ -1432,11 +1449,32 @@ def _preserved_scalars(
     hinted = _hinted_scalars(payload, envelope_key, context)
     if not isinstance(payload, dict) or envelope_key is None or _is_credential_class(context):
         return hinted, {}
-    preserved, omitted = _default_scalar_siblings(payload, envelope_key, skip=frozenset(hinted))
+    kept = frozenset({*hinted, *_required_values(payload, context)})
+    preserved, omitted = _default_scalar_siblings(payload, envelope_key, skip=kept)
     preserved.update(hinted)
     if omitted:
         preserved["omitted_scalar_count"] = len(omitted)
     return preserved, omitted
+
+
+def _required_values(payload: Any, context: dict[str, Any] | None) -> dict[str, Any]:
+    """The plain values of *payload* that every summary keeps.
+
+    The names come from the connector of the operation
+    (:mod:`~meho_backplane.operations.required_fields`). A value that is a
+    list or an object is not kept, and neither is one of the reducer's own
+    summary keys (:data:`_RESERVED_SUMMARY_KEYS`).
+    """
+    names = context.get(REQUIRED_FIELDS_CONTEXT_KEY) if context else None
+    if not names or not isinstance(payload, dict):
+        return {}
+    return {
+        name: payload[name]
+        for name in names
+        if name in payload
+        and name not in _RESERVED_SUMMARY_KEYS
+        and isinstance(payload[name], _SCALAR_VALUE_TYPES)
+    }
 
 
 def _hinted_scalars(

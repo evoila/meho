@@ -303,4 +303,4 @@ def test_a_plain_import_registers_the_checks_before_approval() -> None:
     checks = json.loads(done.stdout.strip().splitlines()[-1])
     for op_id in LOGIN_USER_WRITES:
         assert checks[op_id] == "refuse_other_user_check.<locals>._check", (op_id, checks)
-    assert checks["secret.move"] == "refuse_sink_before_approval"
+    assert checks["secret.move"] == "check_secret_move_before_approval"

@@ -1737,6 +1737,58 @@ jobs:
             --base-approved "${dir}/base-approved.yaml" \
             --summary-only
 
+      - name: Judge the approval table against the base branch
+        # backend/tests/snapshots/approval_table.json lists every built-in
+        # typed operation with its class, risk level, approval need and
+        # never-covered kind. The judge fails when an operation gets a lower
+        # level, loses approval, loses "no grant can cover it", leaves a
+        # credential class or is removed, unless
+        # backend/tests/snapshots/approval_table_approved.yaml lists the
+        # change with a reason. The rule script and the base's table come
+        # from the base commit (`git show`). Nothing of the pull request is
+        # run: the judge reads only its committed table, and a unit test
+        # keeps that table equal to the code. The names it prints are
+        # operation ids, which are public. Passes when the base has no
+        # script or no table yet. See docs/codebase/approvals.md, "The
+        # approval table".
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse --verify "HEAD^1^{commit}")"
+          head="$(git rev-parse --verify "HEAD^{commit}")"
+          script=scripts/ci/approval_table_judge.py
+          table=backend/tests/snapshots/approval_table.json
+          approved=backend/tests/snapshots/approval_table_approved.yaml
+          # ls-tree fails when git cannot read the tree; an empty answer means
+          # no such file. Each answer is its own assignment, so set -e stops
+          # the job when git fails.
+          listed_script="$(git ls-tree --name-only "${base}" -- "${script}")"
+          listed_table="$(git ls-tree --name-only "${base}" -- "${table}")"
+          if [ -z "${listed_script}" ] || [ -z "${listed_table}" ]; then
+            echo "no approval table on the base branch yet"
+            exit 0
+          fi
+          dir="$(mktemp -d "${RUNNER_TEMP}/approval-table.XXXXXX")"
+          git show "${base}:${script}" > "${dir}/approval_table_judge.py"
+          git show "${base}:${table}" > "${dir}/base.json"
+          git show "${head}:${table}" > "${dir}/head.json"
+          # The committed approved file of a commit; no file counts as empty.
+          committed_approved() {
+            local found
+            found="$(git ls-tree --name-only "$1" -- "${approved}")"
+            if [ -n "${found}" ]; then
+              git show "$1:${approved}" > "$2"
+            else
+              printf 'approved: []\n' > "$2"
+            fi
+          }
+          committed_approved "${base}" "${dir}/base-approved.yaml"
+          committed_approved "${head}" "${dir}/head-approved.yaml"
+          python3 -I "${dir}/approval_table_judge.py" \
+            --judge "${dir}/base.json" "${dir}/head.json" \
+            --approved "${dir}/head-approved.yaml" \
+            --base-approved "${dir}/base-approved.yaml"
+
   connector-package-template:
     name: Connector package template
     # #5564. Tests the made-up sample connector package in

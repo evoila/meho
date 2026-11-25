@@ -3465,7 +3465,7 @@ meho keycloak realm create [flags]
 
 #### `meho keycloak realm delete`
 
-Delete a whole Keycloak realm (destructive, a second person must approve)
+Delete a whole Keycloak realm (destructive, approval cannot be turned off)
 
 ```
 meho keycloak realm delete [flags]
@@ -3474,7 +3474,7 @@ meho keycloak realm delete [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
-- `--realm` — the name of the realm to delete (required)
+- `--realm` — the name of the realm to delete: the target's managed realm (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -3499,7 +3499,7 @@ meho keycloak realm update [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
-- `--realm` — realm to update (defaults to the target's managed realm)
+- `--realm` — realm to update: must be the target's managed realm (the default); another realm is refused
 - `--representation-file`, `-f` — path to a JSON file with the partial RealmRepresentation body (required)
 - `--target` — target slug to dispatch against (required)
 
@@ -4335,7 +4335,7 @@ meho principal blocked [flags]
 
 ### `meho principal unblock`
 
-Unblock a person in MEHO (tenant_admin)
+Unblock a person in MEHO (tenant_admin; a platform admin for their own block)
 
 ```
 meho principal unblock <sub> [flags]
@@ -4343,6 +4343,7 @@ meho principal unblock <sub> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the block is removed (required on your own login; kept in the audit log)
 
 ## `meho promote`
 

@@ -2297,9 +2297,10 @@ The read checks no agent grant.
   writes one more `approval.status` row with that outcome. An unknown `status` text in
   an otherwise valid result is passed on as stored, as the REST read does.
 - The answer by state: waiting gives the same `awaiting_approval` answer as
-  the first call, with its `audit_id` and, for a change of rights in MEHO's
-  own login realm asked by the only admin of the tenant, its
-  `extras.approval_note`; approved and not finished gives `status: "pending"` with
+  the first call, with its `audit_id` and, when the request has the note of
+  `rights_change_note` (see
+  [approvals.md](approvals.md#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
+  its `extras.approval_note`; approved and not finished gives `status: "pending"` with
   `extras.result_state` (`not_started` or `started`); approved and run gives
   the stored result with `extras.result_state` added (`executed`, `failed`
   or `uncertain`; with `uncertain` MEHO does not know if the change

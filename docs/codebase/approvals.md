@@ -1699,9 +1699,10 @@ there.
     approve.
 
   `policy.apply`, `policy.classify` (they have no realm) and a change in
-  another realm get no one-admin note. Two or more admins, a count that is
-  not known, and a request whose asker is not an admin (an Operator, an
-  agent or a service login) give no note. A failed read of the note gives
+  another realm get no one-admin note. Two or more admins and a count that
+  is not known give no note. When the tenant has at least one admin, a
+  request whose asker is not an admin (an Operator, an agent or a service
+  login) gets no note. A failed read of the note gives
   no note; the call still waits for approval. The one-admin note is in
   `extras.approval_note` and at the end of `error`: "A platform admin must
   approve this change. It is in MEHO's own login realm, in `master` or in
@@ -1730,7 +1731,7 @@ there.
   |---|---|
   | none | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
   | one, the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note |
-  | one, another person | no note, because that admin can approve |
+  | one, another person | no note. In MEHO's own login realm, in `master` and in the target's admin realm, only a platform admin approves; MEHO counts tenant admins and platform admins together, so there is no note also when that other admin is a tenant admin only. |
   | two or more | no note |
   | not known | no note |
 
@@ -2883,9 +2884,9 @@ for approval.
   The answer keeps its `status` and `extras`, but its text is
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
-  secret value. When the request has the rights note (a change of rights in
-  MEHO's own login realm, asked by the only admin of the tenant), the note
-  follows this text. On an approved request, the note keeps only "MEHO
+  secret value. When the request has the note of `rights_change_note` (see
+  [the note for a tenant with one admin](#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
+  the note follows this text. On an approved request, the note keeps only "MEHO
   found no other admin in this tenant." and the guide link, also in
   `extras.approval_note`: the part about who must approve is left out. A
   retry of a waiting request keeps the text "requires approval before

@@ -63,10 +63,11 @@
       </p>
       {%- if extras.get("approval_note") %}
         {#- A note the person must read about the wait. It shows for a waiting
-            change of rights that a platform admin must approve (in MEHO's own
-            login realm, in `master` or in the target's admin realm, or where
-            MEHO could not make sure that it is not) when MEHO found no other
-            admin in the tenant. -#}
+            change of rights when MEHO is sure that the tenant has no admin,
+            and for a waiting change of rights that a platform admin must
+            approve (in MEHO's own login realm, in `master` or in the target's
+            admin realm, or where MEHO could not make sure that it is not) when
+            the person who asked is the only admin. -#}
         <p class="mt-1 text-xs font-semibold [overflow-wrap:anywhere]" data-write-approval-note>{{ extras.get("approval_note") }}</p>
       {%- endif %}
       {% if approval_id %}

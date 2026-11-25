@@ -10,7 +10,7 @@ step that waits in its policy gate while another step is refused.
 
 The second part drives each shared send place on its own: the request hook
 of the HTTP connector base, the Kubernetes client wrapper, the SSH command
-runner, and the start of an operation's handler.
+runner (also through the sudo helpers), and the start of an operation's handler.
 
 The last part checks that the two open live streams end when the login is
 blocked.
@@ -43,7 +43,9 @@ from meho_backplane.auth.principal_block_run import tracking_run
 from meho_backplane.connectors.adapters import ssh as ssh_module
 from meho_backplane.connectors.adapters.http import HttpConnector, _note_request_sent
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
+from meho_backplane.connectors.linux import _sudo as linux_sudo
 from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.rke2 import _sudo as rke2_sudo
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.operations import (
@@ -568,21 +570,59 @@ class _SshStandIn(ssh_module.SshConnector):
         raise NotImplementedError
 
 
+class _EmptyStream:
+    async def read(self, _n: int) -> bytes:
+        return b""
+
+
+class _FinishedProcess:
+    """A remote command that ended at once with no output."""
+
+    def __init__(self, cmd: str) -> None:
+        self.command = cmd
+        self.env: dict[str, str] = {}
+        self.subsystem = None
+        self.exit_status = 0
+        self.exit_signal = None
+        self.returncode = 0
+        self.stdout = _EmptyStream()
+        self.stderr = _EmptyStream()
+
+    async def __aenter__(self) -> _FinishedProcess:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+class _RecordingConnection:
+    """A pooled SSH connection; it counts the commands that went out."""
+
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    def create_process(self, cmd: str, **_kwargs: Any) -> _FinishedProcess:
+        self.ran.append(cmd)
+        return _FinishedProcess(cmd)
+
+
+def _ssh_connector(monkeypatch: pytest.MonkeyPatch) -> tuple[_SshStandIn, _RecordingConnection]:
+    conn = _RecordingConnection()
+
+    async def _connect(self: Any, target: Any, operator: Any) -> _RecordingConnection:
+        return conn
+
+    monkeypatch.setattr(ssh_module.SshConnector, "_connect", _connect)
+    return _SshStandIn(), conn
+
+
 async def test_ssh_command_runner_stops_the_command_of_a_blocked_login(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ran: list[str] = []
-
-    async def _connect(self: Any, target: Any, operator: Any) -> object:
-        return object()
-
-    async def _run_capped(conn: Any, cmd: str, **_kwargs: Any) -> Any:
-        ran.append(cmd)
-        return SimpleNamespace(exit_status=0, stdout="", stderr="")
-
-    monkeypatch.setattr(ssh_module.SshConnector, "_connect", _connect)
-    monkeypatch.setattr(ssh_module, "run_capped", _run_capped)
-    connector = _SshStandIn()
+    connector, conn = _ssh_connector(monkeypatch)
     target = SimpleNamespace(name="stand-in")
     operator = _operator()
     with tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)):
@@ -591,7 +631,27 @@ async def test_ssh_command_runner_stops_the_command_of_a_blocked_login(
         with pytest.raises(PrincipalBlockedStepError):
             await connector._run_command(target, "second", operator=operator)
 
-    assert ran == ["first"]
+    assert conn.ran == ["first"]
+
+
+@pytest.mark.parametrize(
+    "helper", [linux_sudo.run_remote_bash_with_sudo, rke2_sudo.run_remote_bash_with_sudo]
+)
+async def test_sudo_helper_stops_the_second_sudo_command_of_a_blocked_login(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    helper: Callable[..., Awaitable[Any]],
+) -> None:
+    connector, conn = _ssh_connector(monkeypatch)
+    target = SimpleNamespace(name="stand-in")
+    operator = _operator()
+    with tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)):
+        await helper(connector, target, "echo one", operator=operator, sudo_password="pw")
+        await _block_the_caller()
+        with pytest.raises(PrincipalBlockedStepError):
+            await helper(connector, target, "echo two", operator=operator, sudo_password="pw")
+
+    assert len(conn.ran) == 1
 
 
 async def test_outside_a_running_call_nothing_is_checked(session: AsyncSession) -> None:

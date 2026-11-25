@@ -30,10 +30,12 @@ Where it is checked (all through :func:`is_principal_blocked`):
 * an approved call, which does not run while the person who asked is
   blocked (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_asker_blocked`);
 * each step of a multi-step operation;
-* every send to a target, right before it goes out
+* each send place, right before the send goes out
   (:func:`raise_if_send_refused`): a request of the HTTP connector base,
-  a request of the Kubernetes client, an SSH command, the start of a
-  governed step and the start of each operation's handler. So a block made
+  a request of the Kubernetes client, an SSH command (``run_capped``), the
+  start of a governed step and the start of each operation's handler. A
+  connector that sends through a vendor library is checked at the start
+  of its handler. So a block made
   while a call runs stops its next send. The logins a send checks are the
   login of the running call and every login bound with
   :func:`checking_logins_for_steps`: the operator of a multi-step
@@ -286,10 +288,10 @@ def _earlier_refusal() -> PrincipalBlockedStepError | None:
 
 
 async def raise_if_send_refused() -> None:
-    """The one check every outgoing send passes, right before it goes out.
+    """The one check each send place calls, right before the send goes out.
 
     Called by the places that send to a target: the request hook of the HTTP
-    connector base, the Kubernetes client wrapper, the SSH command runner,
+    connector base, the Kubernetes client wrapper, ``run_capped`` (every SSH command),
     the step runner of multi-step operations, and the start of each
     operation's handler. The login is the one the dispatcher noted for the
     running call (:func:`~meho_backplane.auth.principal_block_run.tracking_run`),

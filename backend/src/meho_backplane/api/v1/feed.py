@@ -201,7 +201,11 @@ class StreamLiveness:
         return self.still_valid is None or await self.still_valid()
 
     def wait_ms(self) -> int:
-        """The next archive wait: at most :data:`_WAIT_MS`, never past ``ends_at``."""
+        """The next archive wait, never past ``ends_at``.
+
+        At most :data:`_WAIT_MS`, or :data:`_BLOCK_POLL_MS` when the stream
+        checks the login.
+        """
         left_ms = (self.ends_at - time.monotonic()) * 1000
         longest = _WAIT_MS if self.still_valid is None else _BLOCK_POLL_MS
         return max(1, int(min(float(longest), left_ms)))

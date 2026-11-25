@@ -60,9 +60,10 @@ Where the list is checked:
 | `refuse_resume_if_asker_blocked` (`operations/approval_queue.py`) | An approved call does not run while the person who asked is blocked. The request is refused like a release change: the claim is taken, one audit row is written, and the refusal is the stored result. The in-process agent waiter calls it too. |
 
 A block made while a call runs stops its next send. This holds for every
-operation call, not only for a multi-step operation. Every send to a target
-passes `raise_if_send_refused` (`auth/principal_block.py`) right before it
-goes out. The check reads the login that the dispatcher noted for the running
+operation call, not only for a multi-step operation. Each send place in the
+table below calls `raise_if_send_refused` (`auth/principal_block.py`) right
+before the send goes out. A connector that sends through a vendor library
+(Vault, Postgres) is checked at the start of its handler. The check reads the login that the dispatcher noted for the running
 call (`tracking_run` in `auth/principal_block_run.py`) and every login bound
 with `checking_logins_for_steps`. It runs after the call has its credentials,
 so a long wait for credentials does not skip it. The copy of the list is at
@@ -74,9 +75,9 @@ The send places:
 
 | Place | What it covers |
 |---|---|
-| `_read_capped_json_response` and the request hook of the HTTP connector base (`connectors/adapters/http.py`) | Every request of a connector built on the base, also each request a redirect sends. |
+| `_stream_capped_json_response` and the request hook of the HTTP connector base (`connectors/adapters/http.py`) | Every request of a connector built on the base, also each request a redirect sends. |
 | `instrument_api_client` (`connectors/kubernetes/_wire_span.py`) | Every REST request of the Kubernetes client, for each Kubernetes operation. Not the websocket client of `k8s.exec`. |
-| `SshConnector._run_command` (`connectors/adapters/ssh.py`) | Every command of an SSH-based connector that runs through the shared runner. |
+| `run_capped` (`connectors/adapters/ssh.py`) | Every SSH command: the shared runner `SshConnector._run_command` and the sudo helpers of the Linux, RKE2 and BIND9 connectors, which call `run_capped` on their own. |
 | `run_governed_subop`, `enforce_subop_policy` (`operations/composite.py`) | A governed step, after its policy gate and before its journal entry starts. A step that waited in the gate while another step was refused is not sent. |
 | `_run_source_kind_handler` (`operations/dispatcher.py`) | The start of every operation's handler, for every kind of connector. |
 

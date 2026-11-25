@@ -1686,6 +1686,20 @@ admin's change of rights. MEHO says so; it builds no exception.
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
   admin": a warning with the same sentence for one admin, ok for two or
   more, and no line when the count is not known or the backplane is older.
+- The note for each number of admins (`only_admin_note`):
+
+  | Admins | Note |
+  |---|---|
+  | none | "This tenant has no admin." and the guide link. No "second admin" sentence, because one more admin would not be enough. |
+  | one, the requester | "This change needs a second admin to approve it. This tenant has only one admin." and the link |
+  | one, another person | no note, because that admin can approve |
+  | two or more | no note |
+  | not known | no note |
+
+  The "no admin" note shows only for a sure count of zero. Today the read of
+  the realm gives "not known" instead of zero (see above), so this note comes
+  into use when that read changes. On an approved request (a retry with the
+  same key), the "second admin" sentence goes and the rest stays in every row.
 
 ## The "may I approve this?" answer (#3329)
 
@@ -3682,10 +3696,13 @@ also ends the per-call wait of an operation that a connector marked with
 `declare_per_call_approval`. After it, a person in the web console runs a
 `caution` operation at once, a `dangerous` operation still waits because of its
 risk level, and a standing grant or a run approval still does not cover the
-operation. The edit is refused for a destructive operation (`approval_off_destructive`) and for a change of rights (`approval_off_rights_change`).
+operation. The edit is refused for a destructive operation
+(`approval_off_destructive`), for an operation with a caller-address
+parameter (`approval_off_caller_address`), and for a change of rights
+(`approval_off_rights_change`).
 An operation that writes or makes a credential, for example `harbor.robot.create`
 or `pfsense.openvpn.user.create`, keeps its approval: the edit does not end its
-wait. It
+wait. The edit
 needs `platform_admin`, a written reason, and a person. This holds for
 every edit that ends approval, also removing an override that required
 it (`meho connector remove-override`, `DELETE

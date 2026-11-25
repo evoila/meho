@@ -18,9 +18,13 @@ points outside that folder, so an admin can move the secrets into it.
 * When the folder check is off on this install, the list is empty and
   ``check_off`` is true.
 
-Only Vault and OpenBao paths are checked, with the same rule as the
-warning a read of the secret writes, so a target is listed exactly when
-that read warns. The answer holds names, tenant ids, the path and the
+Only Vault and OpenBao paths are checked. The list and the warning use
+the same path rule: a target is listed, and a read of its secret warns,
+when its secret path lies outside the tenant's folder, whoever built the
+path. A target of a tenant with its own store role is listed, and a read
+of its secret is refused with no warning. The list checks each path
+against the default store mount; the warning checks the mount of the real
+read. The answer holds names, tenant ids, the path and the
 reason, never a secret value.
 The list is read from the targets table when asked.
 """

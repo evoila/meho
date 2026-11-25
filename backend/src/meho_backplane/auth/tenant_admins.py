@@ -58,6 +58,7 @@ from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "NEEDS_SECOND_ADMIN",
+    "NO_ADMIN",
     "ONLY_ONE_ADMIN",
     "RIGHTS_CHANGE_GUIDE_URL",
     "admin_count",
@@ -70,6 +71,9 @@ NEEDS_SECOND_ADMIN: Final[str] = "This change needs a second admin to approve it
 
 #: The sentence a person reads when no other admin could approve their change.
 ONLY_ONE_ADMIN: Final[str] = f"{NEEDS_SECOND_ADMIN} This tenant has only one admin."
+
+#: The sentence a person reads when the tenant has no admin who could approve at all.
+NO_ADMIN: Final[str] = "This tenant has no admin."
 
 #: The guide part that explains who approves a change of rights.
 RIGHTS_CHANGE_GUIDE_URL: Final[str] = (
@@ -248,9 +252,17 @@ async def admin_count(tenant_id: uuid.UUID) -> int | None:
 async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
     """The note for a change of rights that no other admin could approve, else ``None``.
 
-    ``None`` too when the count is not known: then MEHO says nothing new.
+    * No admin at all: :data:`NO_ADMIN`. It has no "second admin" sentence,
+      because a second admin alone would not be enough.
+    * The requester is the only admin: :data:`ONLY_ONE_ADMIN`.
+    * ``None`` when another admin could approve, and when the count is not
+      known: then MEHO says nothing new.
     """
     ids = await tenant_admin_ids(tenant_id)
-    if ids is None or ids - {requester_sub.casefold()}:
+    if ids is None:
+        return None
+    if not ids:
+        return f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    if ids - {requester_sub.casefold()}:
         return None
     return f"{ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

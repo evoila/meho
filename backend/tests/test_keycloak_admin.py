@@ -190,6 +190,61 @@ async def test_disable_client_not_found_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_signed_jwt_key_is_set_and_the_rest_stays() -> None:
+    """The key write sets the key attributes and keeps the other ones."""
+    state: dict[str, object] = {
+        "id": _INTERNAL_ID,
+        "enabled": True,
+        "clientAuthenticatorType": "client-secret",
+        "attributes": {"kind": "runner"},
+    }
+
+    def _put(request: httpx.Request) -> httpx.Response:
+        state.update(json.loads(request.content))
+        return httpx.Response(204)
+
+    jwks = {"keys": [{"kty": "EC", "kid": "k1"}]}
+    with respx.mock as r:
+        _mock_token(r)
+        url = f"{_ADMIN_URL}/clients/{_INTERNAL_ID}"
+        r.get(url).mock(side_effect=lambda _request: httpx.Response(200, json=state))
+        r.put(url).mock(side_effect=_put)
+        async with _client() as kc:
+            await kc.set_client_signed_jwt_key(_INTERNAL_ID, jwks=jwks, signing_alg="ES256")
+            assert state["clientAuthenticatorType"] == "client-jwt"
+            assert state["attributes"] == {
+                "kind": "runner",
+                "use.jwks.url": "false",
+                "use.jwks.string": "true",
+                "jwks.string": json.dumps(jwks),
+                "token.endpoint.auth.signing.alg": "ES256",
+            }
+    assert state["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_key_write_that_lands_after_a_disable_leaves_the_client_disabled() -> None:
+    """The key write sends no ``enabled``, so a late write keeps the client off."""
+    state: dict[str, object] = {"id": _INTERNAL_ID, "enabled": True, "attributes": {}}
+    sent: list[dict[str, object]] = []
+
+    def _put(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        state.update(body)
+        return httpx.Response(204)
+
+    with respx.mock as r:
+        _mock_token(r)
+        url = f"{_ADMIN_URL}/clients/{_INTERNAL_ID}"
+        r.get(url).mock(side_effect=lambda _request: httpx.Response(200, json=dict(state)))
+        r.put(url).mock(side_effect=_put)
+        async with _client() as kc:
+            await kc.set_client_signed_jwt_key(_INTERNAL_ID, jwks={"keys": []}, signing_alg="ES256")
+    assert "enabled" not in sent[0]
+
+
+@pytest.mark.asyncio
 async def test_delete_client_ok() -> None:
     with respx.mock as r:
         _mock_token(r)

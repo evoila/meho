@@ -20,10 +20,13 @@ Route inventory
   404 when absent. Role: ``operator``.
 * ``POST /api/v1/runner-principals`` — register a new runner principal
   (creates the Keycloak client + inserts DB row). Returns the row with
-  HTTP 201. 409 on duplicate ``(tenant, name)``. Role: ``tenant_admin``.
+  HTTP 201. 409 when the Keycloak client id is already taken. Role:
+  ``tenant_admin``, and the caller must be a person: a service login or an
+  agent login gets 403 ``human_principal_required``, and a runner login gets
+  403 ``runner_scope_violation``.
 * ``DELETE /api/v1/runner-principals/{name}/revoke`` — revoke a runner
-  (kill switch: disables Keycloak client + marks row revoked). Returns the
-  updated row. Role: ``tenant_admin``.
+  (kill switch: turns the runner's Keycloak client off and deletes it, and
+  marks the row revoked). Returns the updated row. Role: ``tenant_admin``.
 * ``GET /api/v1/runner-principals/{name}/write-allowlist`` — list the
   runner's granted ``remote-write`` capabilities (#3190). Role: ``operator``.
 * ``POST /api/v1/runner-principals/{name}/write-allowlist`` — grant one
@@ -68,13 +71,14 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.auth.runner_principals import (
     NAME_MAX_LENGTH,
     RunnerPrincipalCreate,
     RunnerPrincipalExistsError,
     RunnerPrincipalNotFoundError,
     RunnerPrincipalRead,
+    RunnerPrincipalRegistered,
     RunnerPrincipalService,
 )
 from meho_backplane.auth.runner_write_allowlist import (
@@ -82,6 +86,7 @@ from meho_backplane.auth.runner_write_allowlist import (
     RunnerWriteAllowlistEntryRead,
     RunnerWriteAllowlistService,
 )
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SchedulerVaultBrokerError,
@@ -93,6 +98,19 @@ router = APIRouter(prefix="/api/v1/runner-principals", tags=["runner-principals"
 
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+_REGISTER_NEEDS_PERSON: Final[str] = (
+    "only a person can register a runner, because the answer carries an "
+    "enrollment code. A person with the tenant_admin role runs "
+    "`meho runner-principal register <name>` with their own sign-in."
+)
+
+
+def _require_person(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """Refuse a service, agent or runner login before the route runs."""
+    ensure_human_principal(operator, remediation=_REGISTER_NEEDS_PERSON)
+    return operator
+
 
 _OP_IDS: Final[dict[str, str]] = {
     "list": "runner_principal.list",
@@ -184,21 +202,29 @@ async def show_runner_principal(
 
 @router.post(
     "",
-    response_model=RunnerPrincipalRead,
+    response_model=RunnerPrincipalRegistered,
     status_code=http_status.HTTP_201_CREATED,
+    dependencies=[Depends(_require_person)],
 )
 async def register_runner_principal(
     body: RunnerPrincipalCreate,
     operator: Operator = _require_admin,
-) -> RunnerPrincipalRead:
+) -> RunnerPrincipalRegistered:
     """Register a new runner principal (creates Keycloak client + DB row).
 
-    ``tenant_admin`` only. The minted Keycloak client's token carries a
+    The answer carries a one-time enrollment code, shown only here. The runner
+    sends it with its own public key to ``POST /api/v1/runner-principals/enroll``.
+
+    Only a person with ``tenant_admin`` may call it. A service login or an
+    agent login gets 403 ``human_principal_required``, and a runner login gets
+    403 ``runner_scope_violation``, before anything is made. The minted
+    Keycloak client's token carries a
     hardcoded ``principal_kind=runner`` mapper and a read-only
     ``tenant_role``, so the resulting principal is caged to the gateway
     path prefixes and rejected everywhere else (see the module docstring).
-    Returns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is
-    not configured.
+    Returns 409 when a runner with the same Keycloak client id exists, also a
+    revoked one or one of another tenant; 503 when Keycloak admin is not
+    configured.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["register"],
@@ -249,9 +275,9 @@ async def revoke_runner_principal(
 ) -> RunnerPrincipalRead:
     """Revoke a runner principal (kill switch).
 
-    Disables the Keycloak client (blocks new token grants) and marks the DB
-    row ``revoked=true``. Returns the updated row. ``tenant_admin`` only.
-    Returns 404 when absent or already revoked.
+    Turns the runner's Keycloak client off (blocks new token grants) and
+    deletes it, and marks the DB row ``revoked=true``. Returns the updated row.
+    ``tenant_admin`` only. Returns 404 when absent or already revoked.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["revoke"],

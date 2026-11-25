@@ -45,6 +45,11 @@ a heartbeat or a wait. A signed-out, revoked or expired session, or a
 lost role, ends the stream. The browser's ``EventSource`` then opens a
 new one with ``Last-Event-Id``; the session middleware sends a session
 that ended to the login page.
+
+The stream also ends within a few seconds when an admin blocks the person
+(the block list is read at every check, not only every
+``ui_session_read_revalidation_seconds``), and when the block list cannot be
+read.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ from meho_backplane.api.v1.feed import (
     StreamLiveness,
     announcement_feed_frames,
     feed_response,
+    login_not_blocked,
     resolve_feed_start,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -99,12 +105,22 @@ def session_liveness(request: Request, session_ctx: UISessionContext) -> StreamL
     The route's ``require_ui_operator`` check just passed. Later checks
     run :func:`require_ui_operator` again, at most every
     ``ui_session_read_revalidation_seconds`` (``0``: before every frame).
+    The stream also ends within a few seconds when an admin blocks the
+    person, or when the block list cannot be read.
     """
     interval = float(get_settings().ui_session_read_revalidation_seconds)
     last_ok = time.monotonic()
 
     async def still_valid() -> bool:
         nonlocal last_ok
+        # The block list is read at every check (its copy is a few seconds
+        # old at most), not only at the session check below.
+        if not await login_not_blocked(session_reader(session_ctx)):
+            _log.info(
+                "ui_broadcast_stream_login_blocked",
+                session_ref=session_ref(session_ctx.session_id),
+            )
+            return False
         now = time.monotonic()
         if now - last_ok < interval:
             return True

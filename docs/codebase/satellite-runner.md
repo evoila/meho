@@ -248,6 +248,11 @@ work item, plus approval-bound minting.
   defence) and **single-use** (the approval's one-way `resumed_at` latch,
   claimed in the mint session so it is consumed iff the mint commits). No
   approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
+  An approval covers one request of one asker, and the mint uses it only for
+  that asker: the caller must be the login that asked, the approval must
+  match the connector and must not be past its time limit, and the mint
+  refuses while the asker is blocked. The mint audit row names the asker,
+  the caller and the approval.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
@@ -968,24 +973,33 @@ authenticator. The lines the code follows:
     private key in `MEHO_RUNNER_KEY_DIR`; MEHO stores only the public key on
     the client, as a key set in `jwks.string`.
 
+Three facts of the key login:
+
+- MEHO stores the runner's public key set on the Keycloak client, because
+  central cannot reach the runner. (Keycloak's page recommends a JWKS URL.)
+- The client's "Max expiration" setting is not set. The runner's signed
+  request lives 60 seconds, which equals Keycloak's default.
+- Replay protection of the request id (`jti`) is on Keycloak's side.
+
 The system it is proven on: the live test
 `backend/tests/integration/test_runner_key_login_keycloak.py` runs in CI
 against the Keycloak image `keycloak/keycloak:26.0` (the value of
-`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). The proof on an
-operator's own Keycloak comes with a later step on a real install.
+`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). It was proven on
+the Keycloak image `keycloak/keycloak:26.0` of the CI live test.
 
 **The key file.** `runner/login.py::_read_key_file` checks the mode of the
 open key file before it reads the key. Any right for the group or for
 other users (any of the last six mode bits) stops the runner with a
 `RunnerLoginError` that names the file and its mode, says to set mode `0600`
 and names the docs page; no request is sent. Any other mode works (for example
-`0600` and `0400`). From the Kubernetes docs
-([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
-In a Kubernetes pod with
-`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
-the runner then stops. Mount the key so that it keeps mode `0600`: set no
-`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
-volume driver that does not change file rights.
+`0600` and `0400`). In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key
+file at each mount, and the runner then stops. Mount the key so that it keeps
+mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does
+not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode
+only when the top folder of the volume already has the `fsGroup` group and the
+rights Kubernetes expects. When it does not, Kubernetes changes the rights of
+every file in the volume, and the runner stops (see
+[Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
 
 **Register.** Only a person with `tenant_admin` can register a runner, because
 the answer carries the enrollment code. A service login or an agent login

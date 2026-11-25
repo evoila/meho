@@ -135,6 +135,7 @@ func printClientScopeList(w io.Writer, r *CallResult) {
 		fallbackResultRender(w, r)
 		return
 	}
+	printManagedRealm(w, r)
 	fmt.Fprintf(w, "  %-30s %-18s %s\n", "NAME", "PROTOCOL", "MAPPERS")
 	for _, row := range rows {
 		name := truncate(stringField(row, "name"), 30)

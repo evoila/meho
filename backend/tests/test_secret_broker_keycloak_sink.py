@@ -29,7 +29,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -50,13 +50,16 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakTargetLike,
 )
 from meho_backplane.connectors.schemas import OperationResult
-from meho_backplane.connectors.secret.endpoints import SECRET_ENDPOINT_REGISTRY
+from meho_backplane.connectors.secret.endpoints import SECRET_ENDPOINT_REGISTRY, SecretMaterial
+from meho_backplane.connectors.secret.move_preview import check_secret_move_realms
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+from meho_backplane.operations._park_check import park_check_registered
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
@@ -128,13 +131,13 @@ def _stub_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
     return _load()
 
 
-async def _seed_keycloak_target() -> None:
+async def _seed_keycloak_target(name: str = _TARGET_NAME, aliases: list[str] | None = None) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         target = TargetORM(
             tenant_id=_OPERATOR_TENANT_ID,
-            name=_TARGET_NAME,
-            aliases=[],
+            name=name,
+            aliases=aliases or [],
             product="keycloak",
             host=_KC_HOST,
             port=443,
@@ -307,6 +310,142 @@ async def test_vault_to_keycloak_move_writes_credential_server_side(
 
 
 # ---------------------------------------------------------------------------
+# One realm per target — a ref on another realm is refused
+# ---------------------------------------------------------------------------
+
+_OTHER_REALM = "other-realm"
+
+
+def _park_ctx(params: dict[str, Any]) -> PreviewContext:
+    return PreviewContext(
+        descriptor=cast(Any, None),
+        connector_instance=None,
+        operator=_OPERATOR,
+        target=None,
+        params=params,
+    )
+
+
+@pytest.mark.asyncio
+async def test_keycloak_sink_on_another_realm_is_refused_when_the_move_runs(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    """The sink refuses a ref on another realm than the managed one; nothing reaches Keycloak."""
+    endpoint = KeycloakCredentialSecretEndpoint(
+        f"{_TARGET_NAME}/{_OTHER_REALM}/{_USERNAME}#password"
+    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_token(mock)
+        with pytest.raises(KeycloakSecretRefError, match=f"works on the realm '{_REALM}' only"):
+            await endpoint.write_secret(_OPERATOR, SecretMaterial(b"unused"))
+    assert not mock.calls, "a ref on another realm must send nothing to Keycloak"
+
+
+@pytest.mark.asyncio
+async def test_keycloak_sink_on_another_realm_is_refused_before_approval(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    """The park check of secret.move refuses a sink on another realm and names no param value."""
+    params = {
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+        "to": f"keycloak:{_TARGET_NAME}/{_OTHER_REALM}/{_USERNAME}#password",
+    }
+    problem = await check_secret_move_realms(_park_ctx(params))
+    assert problem is not None
+    assert f"works on the realm '{_REALM}' only" in problem
+    assert _OTHER_REALM not in problem
+    assert _TARGET_NAME not in problem
+
+
+@pytest.mark.asyncio
+async def test_keycloak_sink_on_the_managed_realm_passes_the_check_before_approval(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    params = {
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+        "to": f"keycloak:{_TARGET_NAME}/{_REALM}/{_USERNAME}#password",
+    }
+    assert await check_secret_move_realms(_park_ctx(params)) is None
+
+
+def test_secret_move_registers_the_realm_check_before_approval() -> None:
+    assert park_check_registered("secret.move")
+
+
+async def _approval_rows() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as session:
+        return list((await session.execute(select(ApprovalRequest))).scalars().all())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realm", [_OTHER_REALM, "master"])
+async def test_a_move_to_another_realm_through_the_dispatcher_is_refused_before_approval(
+    keycloak_sink_env: KeycloakConnector, monkeypatch: pytest.MonkeyPatch, realm: str
+) -> None:
+    """The check that is registered for secret.move refuses: nothing stored, nothing sent."""
+    fake = install_fake_client(monkeypatch, secret={"password": _SENTINEL})
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_token(mock)
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params={
+                "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+                "to": f"keycloak:{_TARGET_NAME}/{realm}/{_USERNAME}#password",
+            },
+        )
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == "refused_before_approval"
+    assert f"this target works on the realm '{_REALM}' only" in (result.error or "")
+    assert realm not in (result.error or "").replace(_REALM, "")
+    assert await _approval_rows() == []
+    assert not mock.calls
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_target_name_that_fits_two_targets_is_refused_before_approval(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    """Two Keycloak targets with the same name (an alias): a clear reason, no param value."""
+    for name in ("kc-first", "kc-second"):
+        await _seed_keycloak_target(name=name, aliases=["shared-name"])
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_token(mock)
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params={
+                "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
+                "to": f"keycloak:shared-name/{_REALM}/{_USERNAME}#password",
+            },
+        )
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == "refused_before_approval"
+    text = result.error or ""
+    assert "the target name fits more than one target" in text
+    for value in ("shared-name", "kc-first", "kc-second", _REALM, _USERNAME):
+        assert value not in text
+    assert await _approval_rows() == []
+    assert not mock.calls
+
+
+@pytest.mark.asyncio
+async def test_check_target_refuses_another_realm_and_accepts_the_managed_one(
+    keycloak_sink_env: KeycloakConnector,
+) -> None:
+    ref = f"{_TARGET_NAME}/{_REALM}/{_USERNAME}#password"
+    await KeycloakCredentialSecretEndpoint(ref).check_target(_OPERATOR)
+    await _manage_realm(_OTHER_REALM)
+    with pytest.raises(KeycloakSecretRefError, match=f"works on the realm '{_OTHER_REALM}' only"):
+        await KeycloakCredentialSecretEndpoint(ref).check_target(_OPERATOR)
+
+
+# ---------------------------------------------------------------------------
 # The user the target signs in with is refused
 # ---------------------------------------------------------------------------
 
@@ -323,6 +462,17 @@ def _move_to(username: str) -> dict[str, Any]:
         "to": f"keycloak:{_TARGET_NAME}/{_SIGN_IN_REALM}/{username}#password",
         "reason": "rotate a password",
     }
+
+
+async def _manage_realm(realm: str) -> None:
+    """Make *realm* the managed realm of the seeded target: a ref works only there."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = (
+            await session.execute(select(TargetORM).where(TargetORM.name == _TARGET_NAME))
+        ).scalar_one()
+        target.extras = {"managed_realm": realm}
+        await session.commit()
 
 
 def _mount_sign_in_realm(mock: respx.MockRouter) -> respx.Route:
@@ -348,6 +498,7 @@ def _mount_sign_in_realm(mock: respx.MockRouter) -> respx.Route:
 async def test_the_sink_refuses_the_sign_in_user_when_the_move_runs(
     monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
 ) -> None:
+    await _manage_realm(_SIGN_IN_REALM)
     install_fake_client(monkeypatch, secret={"password": _SENTINEL})
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put_route = _mount_sign_in_realm(mock)
@@ -361,6 +512,7 @@ async def test_the_sink_refuses_the_sign_in_user_when_the_move_runs(
 async def test_the_sink_refuses_the_sign_in_user_before_approval(
     keycloak_sink_env: KeycloakConnector,
 ) -> None:
+    await _manage_realm(_SIGN_IN_REALM)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put_route = _mount_sign_in_realm(mock)
         refused = await dispatch(
@@ -442,6 +594,7 @@ def _move_to_meho_login() -> dict[str, Any]:
 async def test_the_sink_refuses_a_meho_service_login_before_approval(
     monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
 ) -> None:
+    await _manage_realm(_MEHO_REALM)
     monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", _MEHO_ADMIN_CLIENT)
     get_settings.cache_clear()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -462,6 +615,7 @@ async def test_the_sink_refuses_a_meho_service_login_before_approval(
 async def test_the_sink_refuses_a_meho_service_login_when_the_move_runs(
     monkeypatch: pytest.MonkeyPatch, keycloak_sink_env: KeycloakConnector
 ) -> None:
+    await _manage_realm(_MEHO_REALM)
     monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", _MEHO_ADMIN_CLIENT)
     get_settings.cache_clear()
     install_fake_client(monkeypatch, secret={"password": _SENTINEL})

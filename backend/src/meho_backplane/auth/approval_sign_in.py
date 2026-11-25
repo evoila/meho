@@ -274,7 +274,11 @@ class ApprovalAuth:
 
 
 def fresh_sign_in_required(
-    *, reason: str, max_age_seconds: int | None = None, extra: str | None = None
+    *,
+    reason: str,
+    max_age_seconds: int | None = None,
+    extra: str | None = None,
+    remediation: str = FRESH_SIGN_IN_REMEDIATION,
 ) -> HTTPException:
     """Build the ``401`` that asks for a fresh sign-in (RFC 9470 §3).
 
@@ -282,11 +286,12 @@ def fresh_sign_in_required(
     builds it. *reason* is the machine-readable prefix of ``detail``.
     *max_age_seconds* is the ``max_age`` of the challenge; it defaults to
     the approval window (``FRESH_SIGN_IN_MAX_AGE_SECONDS``). *extra* is
-    one more sentence at the end of ``detail``.
+    one more sentence at the end of ``detail``. *remediation* is the text
+    after the prefix; it names the command that opens the sign-in.
     """
     if max_age_seconds is None:
         max_age_seconds = get_settings().fresh_sign_in_max_age_seconds
-    detail = f"{reason}: {FRESH_SIGN_IN_REMEDIATION}"
+    detail = f"{reason}: {remediation}"
     if extra:
         detail = f"{detail} {extra}"
     return fresh_sign_in_challenge(detail, max_age_seconds=max_age_seconds)
@@ -366,6 +371,7 @@ def check_fresh_approval_sign_in(
     now: float | None = None,
     level_in_force: str | None = None,
     level_check_failed: bool = False,
+    remediation: str = FRESH_SIGN_IN_REMEDIATION,
 ) -> ApprovalAuth:
     """Return the proof for a token approve, or raise the ``401`` challenge.
 
@@ -389,6 +395,8 @@ def check_fresh_approval_sign_in(
     one missing part, the detail adds :data:`LEVEL_MISSING_REMEDIATION`,
     or :data:`LEVEL_UNCHECKED_REMEDIATION` when *level_check_failed* says
     the level is required only because MEHO's check of the realm failed.
+    *remediation* is the text of the ``401`` after its prefix; the unblock
+    of a person's own login names its own command there.
     """
     mode = level_in_force or settings.approval_sign_in_level
     if mode not in ("off", "observe"):
@@ -417,6 +425,7 @@ def check_fresh_approval_sign_in(
             reason="fresh_sign_in_required",
             max_age_seconds=settings.fresh_sign_in_max_age_seconds,
             extra=_level_remedy(level_check_failed) if other_checks_pass else None,
+            remediation=remediation,
         )
     level_missing = mode == "observe" and not level
     if level_missing:

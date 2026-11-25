@@ -344,6 +344,9 @@ names (`proposed_effect.blast_radius.object`) with the live one
   not the sibling values the children list.
 - The live card says the object is gone: the run goes ahead and the
   handler answers "already absent" or "not found" itself.
+- A card says the object is there (`present: true`), but its id or key
+  has no value: the run is refused (`REASON_UNREADABLE`). MEHO cannot
+  compare the object, so it is not read as absent.
 - The card does not build now (the op does not resolve, the builder
   declines, or it fails while reading, for example a user is found but
   the read of their groups fails): the run is refused
@@ -2897,6 +2900,17 @@ of this is the same:
   runner login can change between two calls. So a call whose people
   behind differ gets its own request with its own list. A person's own
   call has no people behind on either side.
+- the acting agent (`principal_act`). In this lookup
+  (`_find_same_call_pending_request`), a call with an acting agent never
+  gets the request of a direct call, and the other way round. A direct
+  call has none on either side.
+
+The check of a step of a multi-step operation (`enforce_subop_policy`)
+passes `allow_same_call_reuse=False` to `create_pending_request`, so a step
+always gets its own request and a normal "waits for approval" answer.
+
+A retry key that was linked to a request while the switch was on keeps
+finding that request after the switch is turned off.
 
 The answer has the same `approval_request_id` and
 `extras.approval_request_reused: true`. No new request row is made, and no
@@ -2904,9 +2918,36 @@ second `approval.pending` event is sent. The call writes one audit row of
 its own in the same transaction (`_write_reuse_audit_row`). It is not a
 second `approval.request` row:
 
-- `path` is `approval.reuse`, `status_code` is 202 (waits for approval),
-  and `event_class` is `policy_decision`.
+- `path` is `approval.reuse` and `event_class` is `policy_decision`.
+  `status_code` is 202 when the request waits for approval. The row of a
+  retry with the same key can have 200 instead: the table below says which
+  status code goes with each state (200 for an approved request).
 - `payload.approval_request_id` names the reused request.
+- The row of a retry with the same key (`APPROVAL_RETRY_OWN_AUDIT_ROW`) also
+  has `payload.request_state`, the state of the request it found, and a
+  status code that fits it:
+
+  | `request_state` | Meaning | `status_code` |
+  |---|---|---|
+  | `waiting` | The request waits for approval. | 202 |
+  | `approved_not_started` | Approved, and the run has not started. | 200 |
+  | `approved_started` | Approved, and the run has started without a stored result. | 200 |
+  | `approved_executed` | Approved, and the run ended ok. | 200 |
+  | `approved_failed` | Approved, and the run failed. | 200 |
+  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 |
+
+  An audit read shows an `approval.reuse` row by its status code. A row
+  with 202 reads as `pending`, and a row with 200 reads as `ok` in the
+  audit query (REST, CLI, MCP) and as "OK" in the web console
+  (`_derive_result_status` in `audit_query/query.py`, `resolve_status` in
+  `ui/references.py`). On this row, `ok` means that the retry got a request
+  a person approved. It does not say that the run went well:
+  `payload.request_state` holds the run state (for example
+  `approved_failed` or `approved_uncertain`).
+
+  The row of a call that gets the waiting request of the same call
+  (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
+  `request_state` and its status code is 202.
 - `payload.params_hash` is the hash of this call's params
   (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the

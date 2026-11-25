@@ -216,9 +216,15 @@ class AuditEntry(BaseModel):
     # the real ``audit_log.actor_sub`` column, and the agent's name from it.
     actor_sub: str | None = None
     actor_name: str | None = None
-    # The id of the login that a secret store accepted for the call (``meho``
-    # when the store saw MEHO's own identity), from ``audit_log.secret_read_as``.
-    # ``None`` when the call read no secret. An answer carries the field only
+    # The id of the login that a secret store accepted when the secret this
+    # call used was read, from ``audit_log.secret_read_as``. The read can be
+    # in this call or in an earlier call (a login MEHO kept in memory), so a
+    # value does not prove a new store read. Or one of three fixed texts:
+    # ``meho`` when the store saw MEHO's own identity; ``check-runner`` when
+    # the check runner read the secret and its token has no readable id;
+    # ``kept-login:reader-unknown`` when the call used a login MEHO kept in
+    # memory and it is not known whose login read it. ``None`` when no login
+    # read a secret for this call. An answer carries the field only
     # while ``AUDIT_SECRET_READ_AS`` is on (see ``_hide_secret_read_as``).
     secret_read_as: str | None = None
     broadcast_event_id: uuid.UUID | None

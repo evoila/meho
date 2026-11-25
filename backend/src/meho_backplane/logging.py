@@ -32,10 +32,16 @@ query (``urllib3``, used by ``requests`` and ``hvac``), the full request
 ``httpx2`` (used for sign-in and by the AI SDKs) writes the full URL at INFO,
 and ``httpcore2`` below it writes header lines at DEBUG. The AI SDKs
 (``anthropic``, ``openai``) write the request options, with the message
-body, and the response headers at DEBUG.
-:func:`_bridge_stdlib_logging` holds the loggers in
-:data:`_HTTP_STACK_LOGGERS` at WARNING, whatever the root level is, so
-these trace lines never reach a log line.
+body, and the response headers at DEBUG. ``urllib3`` also writes the request
+path and query at WARNING (a retry after a broken connection, a response
+with a malformed header block), ``botocore`` writes a header value at
+WARNING and ``aiohttp.client`` a proxy address, so these three are held at
+ERROR. :data:`_HTTP_STACK_LOGGERS` holds the level of each logger.
+:func:`_bridge_stdlib_logging` sets these levels and puts
+:class:`_HttpStackLevelFilter` on MEHO's handler, so a record below the held
+level never reaches a log line, also when a library changes the level of
+its own logger after :func:`configure_logging` ran (the Anthropic SDK does
+this at its first import when ``ANTHROPIC_LOG`` is set).
 
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
@@ -61,22 +67,47 @@ from structlog.tracebacks import ExceptionDictTransformer
 _STDLIB_BRIDGE_HANDLER_NAME = "meho-stdlib-json-bridge"
 
 
-#: Loggers of the HTTP client libraries. Their DEBUG lines hold header
-#: values, paths, queries or bodies, so they stay at WARNING at every root level.
-_HTTP_STACK_LOGGERS = (
-    "httpcore",
-    "httpx2",
-    "httpcore2",
-    "anthropic",
-    "openai",
-    "h2",
-    "hpack",
-    "urllib3",
-    "botocore",
-    "aiohttp.client",
-    "kubernetes_asyncio.client.rest",
-    "google.auth.transport",
-)
+#: Loggers of the HTTP client libraries and the lowest level MEHO writes for
+#: each of them and their child loggers. Below that level their lines hold
+#: header values, paths, queries or bodies.
+_HTTP_STACK_LOGGERS: dict[str, int] = {
+    "httpcore": logging.WARNING,
+    "httpx2": logging.WARNING,
+    "httpcore2": logging.WARNING,
+    "anthropic": logging.WARNING,
+    "openai": logging.WARNING,
+    "h2": logging.WARNING,
+    "hpack": logging.WARNING,
+    "urllib3": logging.ERROR,
+    "botocore": logging.ERROR,
+    "aiohttp.client": logging.ERROR,
+    "kubernetes_asyncio.client.rest": logging.WARNING,
+    "google.auth.transport": logging.WARNING,
+}
+
+
+def _held_level(name: str) -> int | None:
+    """Return the held level of a listed logger or of a child of one."""
+    while True:
+        held = _HTTP_STACK_LOGGERS.get(name)
+        if held is not None:
+            return held
+        parent, dot, _ = name.rpartition(".")
+        if not dot:
+            return None
+        name = parent
+
+
+class _HttpStackLevelFilter(logging.Filter):
+    """Drop a record of an HTTP library logger below its held level.
+
+    Sits on MEHO's handler, so the hold does not depend on the level of the
+    library's own logger, which the library can change at any time.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        held = _held_level(record.name)
+        return held is None or record.levelno >= held
 
 
 class _HttpxUrlFilter(logging.Filter):
@@ -196,6 +227,7 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     handler = _LazyStdoutHandler()
     handler.name = _STDLIB_BRIDGE_HANDLER_NAME
     handler.setFormatter(formatter)
+    handler.addFilter(_HttpStackLevelFilter())
 
     root = logging.getLogger()
     for existing in [h for h in root.handlers if h.name == _STDLIB_BRIDGE_HANDLER_NAME]:
@@ -203,8 +235,8 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     root.addHandler(handler)
     root.setLevel(level)
     logging.getLogger("httpx").addFilter(_HTTPX_URL_FILTER)
-    for name in _HTTP_STACK_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    for name, held in _HTTP_STACK_LOGGERS.items():
+        logging.getLogger(name).setLevel(held)
 
     for name in ("uvicorn", "uvicorn.error"):
         bridged = logging.getLogger(name)

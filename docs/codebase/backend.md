@@ -992,7 +992,29 @@ PYTHONPATH-leak imports.
 
 ### Log levels and HTTP calls
 
-At INFO, MEHO writes one line per httpx call with the method, the scheme and host, and the status. At DEBUG this line stays the same. The HTTP client libraries also write their own trace lines at DEBUG, with header values, paths, queries or bodies. `configure_logging()` holds their loggers at WARNING, whatever the root level is: `httpcore`, `h2` and `hpack` (below httpx), `httpx2` and `httpcore2` (used for sign-in and by the AI SDKs; `httpx2` writes the full URL at INFO), the AI SDKs `anthropic` and `openai` (request options with the message body, and response headers), `urllib3` (below `requests` and the Vault client `hvac`), `botocore`, `aiohttp.client`, `kubernetes_asyncio.client.rest` and `google.auth.transport`. The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. `tests/test_logging_http_stack_quiet.py` makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server at DEBUG and INFO, and checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a DEBUG line of each listed logger is dropped.
+At INFO, MEHO writes one line per httpx call with the method, the scheme and host, and the status. At DEBUG this line stays the same. The HTTP client libraries also write their own lines, with header values, paths, queries or bodies. `configure_logging()` holds each of their loggers, and every child logger, at a fixed level, whatever the root level is:
+
+| Logger | Held at | Why |
+|---|---|---|
+| `httpcore`, `h2`, `hpack` (below httpx) | WARNING | header lines at DEBUG |
+| `httpx2`, `httpcore2` (sign-in and the AI SDKs) | WARNING | the full URL at INFO, header lines at DEBUG |
+| `anthropic`, `openai` (AI SDKs) | WARNING | request options with the message body, and response headers, at DEBUG |
+| `urllib3` (below `requests` and the Vault client `hvac`) | ERROR | the path and query at DEBUG, and at WARNING for a retry after a broken connection and for a response with a malformed header block |
+| `botocore` | ERROR | the full request at DEBUG, a header value at WARNING |
+| `aiohttp.client` | ERROR | a proxy address at WARNING |
+| `kubernetes_asyncio.client.rest` | WARNING | the response body at DEBUG |
+| `google.auth.transport` | WARNING | the request address, headers and body at DEBUG |
+
+The list is `_HTTP_STACK_LOGGERS` in `src/meho_backplane/logging.py`. A new HTTP client library goes on this list. MEHO sets these levels, and a filter on MEHO's own log handler drops every record below the held level. So a library's own log setting does not bring these lines back: for example `ANTHROPIC_LOG=debug`, which sets the `anthropic` and `httpx2` loggers to DEBUG when the SDK is first imported, or a library that calls `setLevel` on its logger later.
+
+At INFO, an operator does not see these routine lines of the libraries:
+
+- the per-call line of the HTTP client (`httpx2` "HTTP Request: ...");
+- the retry lines of the AI SDKs ("Retrying request ...");
+- the credential-source line of the cloud libraries (`botocore` "Found credentials in ...");
+- the token refresh line of the cloud libraries (`google.auth.transport` "Refreshing credentials ...", `botocore` SSO token refresh).
+
+`tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept.
 
 ## Control flow
 

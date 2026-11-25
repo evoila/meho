@@ -938,11 +938,10 @@ _MARKERS = (
 
 def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
     """A redirect with made-up marker values in every part that must stay hidden."""
-    request = httpx.Request(
-        "PUT",
-        f"https://marker-sent-user:marker-sent-pass@svc.example.com{sent_path}"
-        "?t=marker-sent-query#marker-sent-fragment",
+    sent = httpx.URL(f"{_BASE}{sent_path}?t=marker-sent-query#marker-sent-fragment").copy_with(
+        username="marker-sent-user", password="marker-sent-pass"
     )
+    request = httpx.Request("PUT", sent)
     response = httpx.Response(
         status,
         headers={

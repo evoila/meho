@@ -1677,8 +1677,11 @@ class Settings(BaseModel):
         ``dispatch_child``, or one saved to restart after approval) and a
         re-run for an earlier requester always get their own request, and
         a direct call never gets the request of such a step.
-        When off, every such call makes a new request. Env
-        ``APPROVAL_SAME_CALL_REUSE``.
+        The acting agent must be the same too (none for a direct call).
+        The check of a step of a multi-step operation never uses the reuse.
+        When off, every such call makes a new request. A retry key that was
+        linked to a request while the switch was on keeps finding that
+        request after it is turned off. Env ``APPROVAL_SAME_CALL_REUSE``.
     approval_retry_own_audit_row:
         Off by default. When on, a retry that gets the waiting (or approved)
         request through the same ``idempotency_key`` writes its own
@@ -2825,6 +2828,12 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The realm in every Keycloak answer, behind a switch that is off by
+    #: default. When on, each dict answer of a Keycloak operation starts with
+    #: ``managed_realm``: the realm the call acted on
+    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
+    #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
+    keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -4010,6 +4019,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        keycloak_answer_realm=parse_bool_env(
+            os.environ.get("KEYCLOAK_ANSWER_REALM"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

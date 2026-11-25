@@ -115,6 +115,7 @@ from meho_backplane.operations._preview import (
     proposed_effect_for_agent,
     without_internal_effect_keys,
     without_person_only_effect_keys,
+    without_switched_object_field,
 )
 from meho_backplane.operations.approval_context import (
     ReviewerContext,
@@ -667,6 +668,11 @@ class RejectResponseBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _reads_whole_card(operator: Operator) -> bool:
+    """Whether *operator* is a person, who reads the card as stored."""
+    return is_human_principal(operator) and not is_agent_caller(operator)
+
+
 def _reviewer_context_view(ctx: ReviewerContext) -> ReviewerContextView:
     """Project the shared resolver's dataclass onto the REST view (#3353).
 
@@ -770,7 +776,7 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     a person (:func:`without_person_only_effect_keys`). No caller reads the
     internal keys (:func:`without_internal_effect_keys`).
     """
-    if is_human_principal(operator) and not is_agent_caller(operator):
+    if _reads_whole_card(operator):
         return without_internal_effect_keys(row.proposed_effect)
     if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
         return without_person_only_effect_keys(row.proposed_effect)
@@ -1178,6 +1184,9 @@ async def get_approval_request(
         # subject / lineage for ``meho approvals show``. Fail-open: the
         # resolver never raises, so a resolution miss just omits the block.
         reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
+        if not _reads_whole_card(operator):
+            shown = without_switched_object_field(row.op_id, reviewer_context.blast_radius)
+            reviewer_context = reviewer_context.model_copy(update={"blast_radius": shown})
         delegation = await get_decision_delegation(session, row)
         floor = await load_install_floor(session)
     return _view(

@@ -25,7 +25,7 @@ from typing import Any
 import meho_backplane.connectors.kubernetes.op_classes  # noqa: F401
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations import DispatchChild, register_typed_operation
-from meho_backplane.operations.composite import run_governed_subop
+from meho_backplane.operations.composite import enforce_subop_policy, run_governed_subop
 
 from . import _composite_wait_audit_helpers as h
 
@@ -66,6 +66,7 @@ CHILD_CREDENTIAL_WRITE_OP_ID = "vault.composite.child_credential_write_wait_chan
 STORING_READ_OP_ID = "vault.composite.change_storing_read_wait_change"
 CHILD_READ_UNDER_RUN_APPROVAL_OP_ID = "vault.composite.wait_child_read_wait_change"
 CHILD_READ_WAIT_CHANGE_OP_ID = "vault.composite.child_read_wait_change"
+GATED_READ_WAIT_CHANGE_OP_ID = "vault.composite.gated_read_wait_change"
 
 
 def reset() -> None:
@@ -353,6 +354,30 @@ async def wait_child_read_wait_change_composite(
         return read
     for op_id, waits in ((SECOND_WAIT_STEP, True), (CHANGE_STEP, False)):
         step = await _step(operator, target, op_id, {"id": "t-1"}, waits=waits)
+        if step.stopped is not None:
+            return step.stopped
+    return {"done": True}
+
+
+async def gated_read_wait_change_composite(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A credential read checked by ``enforce_subop_policy``, a step that waits, a change."""
+    gated = await enforce_subop_policy(
+        operator=operator,
+        connector_id=h.STEP_CONNECTOR_ID,
+        op_id=CREDENTIAL_READ_STEP,
+        safety_level="safe",
+        requires_approval=False,
+        target=target,
+        params={"path": "app"},
+    )
+    if gated is not None:
+        return gated
+    read = await _read()
+    version = {"id": "t-1", "version": read["version"]}
+    for op_id, waits in ((WAIT_STEP, True), (CHANGE_STEP, False)):
+        step = await _step(operator, target, op_id, version, waits=waits)
         if step.stopped is not None:
             return step.stopped
     return {"done": True}

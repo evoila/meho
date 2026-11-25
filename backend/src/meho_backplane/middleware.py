@@ -103,7 +103,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from meho_backplane.auth.client_identity import bind_request_client
 from meho_backplane.auth.conventions_drift_login import reject_conventions_drift_only_elsewhere
 from meho_backplane.auth.current_tenant import bind_tenant_role_source
-from meho_backplane.auth.jwt import verify_jwt
+from meho_backplane.auth.jwt import verify_jwt, verify_jwt_platform_admin_way_back
 from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
@@ -121,6 +121,7 @@ __all__ = [
     "BroadcastDetailMiddleware",
     "RequestContextMiddleware",
     "verify_jwt_and_bind",
+    "verify_jwt_and_bind_platform_admin_way_back",
 ]
 
 #: Path-prefix allowlist for ``principal_kind=runner`` tokens (Initiative
@@ -573,6 +574,23 @@ async def verify_jwt_and_bind(
         The same :class:`Operator` that ``verify_jwt`` produced — the
         wrapper is transparent to the route handler.
     """
+    return await _bind_operator(request, operator)
+
+
+async def verify_jwt_and_bind_platform_admin_way_back(
+    request: Request,
+    operator: Operator = Depends(verify_jwt_platform_admin_way_back),
+) -> Operator:
+    """Like :func:`verify_jwt_and_bind`, for the unblock route only.
+
+    It follows :func:`~meho_backplane.auth.jwt.verify_jwt_platform_admin_way_back`,
+    so a platform admin blocked in the current tenant reaches the route.
+    """
+    return await _bind_operator(request, operator)
+
+
+async def _bind_operator(request: Request, operator: Operator) -> Operator:
+    """Bind the log context, apply the login cages and seed the tenant."""
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),

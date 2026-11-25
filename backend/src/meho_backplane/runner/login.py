@@ -252,9 +252,11 @@ class _LoginRecord:
         except (ValueError, KeyError, TypeError) as exc:
             raise _SavedLoginError(f"the login record {path} is damaged") from exc
         if record.signing_alg != _SIGNING_ALG:
-            raise _SavedLoginError(
+            # A plain RunnerLoginError: startup stops here, and the enrollment
+            # code is not sent again.
+            raise RunnerLoginError(
                 f"the login record {path} has signing type {record.signing_alg}; "
-                f"the runner reads only {_SIGNING_ALG}"
+                f"the runner reads only {_SIGNING_ALG}. {_RECOVERY}"
             )
         return record
 

@@ -511,6 +511,12 @@ async def test_the_runner_reads_only_es256_in_the_answer_and_in_the_saved_login(
     with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
         await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
     assert central.requests == []
+    with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
+        await open_signed_jwt_login(
+            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+        )
+    assert central.requests == []
+    assert json.loads((tmp_path / LOGIN_FILE_NAME).read_text())["signing_alg"] == "HS256"
 
 
 @pytest.mark.asyncio

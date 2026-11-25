@@ -247,6 +247,12 @@ def test_mcp_json_example_is_parseable_json_with_two_named_variants() -> None:
     # future "replace with our own shim" PR has to update the doc
     # together.
     assert any(arg.split("@")[0] == "mcp-remote" for arg in variant_b.get("args", []))
+    # Login mode: the shim signs in itself, so the example holds no
+    # Authorization header and no token.
+    variant_b_args = variant_b.get("args", [])
+    assert "--header" not in variant_b_args
+    assert not any("Authorization" in str(arg) or "Bearer" in str(arg) for arg in variant_b_args)
+    assert "headers" not in variant_b
 
 
 def test_prompt_encoded_add_to_memory_call_validates_against_live_input_schema() -> None:

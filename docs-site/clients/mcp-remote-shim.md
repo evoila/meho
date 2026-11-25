@@ -47,6 +47,23 @@ npx -y mcp-remote@0.1.38 https://meho.example.com/mcp 8456 \
   token by itself. You do not mint a token and you put no token in any
   config.
 
+If your login belongs to several tenants, add the tenant header to the
+command, in the same way for the sign-in and for the client:
+
+```bash
+npx -y mcp-remote@0.1.38 https://meho.example.com/mcp 8456 \
+  --static-oauth-client-info '{"client_id": "meho-mcp"}' \
+  --static-oauth-client-metadata '{"scope": "mcp:read mcp:execute offline_access"}' \
+  --header 'Meho-Tenant:<tenant name or ID>'
+```
+
+Without it, only `meho_status` works. Why, and how a tenant is chosen, is
+in [Which tenant a session works in](mcp-surface-and-scopes.md#which-tenant-a-session-works-in).
+
+The shim needs Node.js with `npx` on the machine where it runs. For an
+internal CA, set `NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the
+environment of the shim.
+
 The redirect addresses the realm must accept, the CA trust setting for
 Node (`NODE_EXTRA_CA_CERTS`) and the sharp edges of the shim are the same
 as for Claude Desktop. They are on the
@@ -62,7 +79,10 @@ Use this when the client runs where no browser can open, such as a
 headless agent on a jump host. You sign in once from your laptop, through
 an SSH tunnel. After that the shim renews the login by itself.
 
-You need a laptop with a browser and SSH access to the jump host.
+You need a laptop with a browser and SSH access to the jump host. The
+jump host needs Node.js with `npx`. For an internal CA, set
+`NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the environment of
+every shim run on it, by hand (step 2) and from the client (step 6).
 
 1. **Make the login folder private** (on the jump host). The shim stores
    its login in `~/.mcp-auth`. It writes each file readable only by its
@@ -81,7 +101,8 @@ You need a laptop with a browser and SSH access to the jump host.
    from the section above. Leave it running. It prints an address after
    the line `Please authorize this client by visiting:`. Copy that
    address. It also prints `Browser opened automatically.` Ignore that
-   line on a machine with no browser: no browser opened.
+   line on a machine with no browser: no browser opened. With several
+   tenants, the command must hold the `--header 'Meho-Tenant:...'` part.
 
 3. **Open an SSH tunnel** (on your laptop) for the shim's local port.
    Leave it open:
@@ -104,6 +125,13 @@ You need a laptop with a browser and SSH access to the jump host.
 
 6. **Start the client.** Set its MCP server to the same command, as the
    same user. The shim finds the stored login and needs no sign-in.
+
+    The command must be exactly the same as in step 2: the same address,
+    the same `--header` parts and the same `mcp-remote` version. The shim
+    files the login under the address and the headers (and keeps it in a
+    folder named for the version). With any difference, it finds no
+    login and starts a new sign-in, which a headless client cannot finish.
+    With several tenants, the tenant header must be in both places.
 
 7. **Check it** with `meho_status` (see [Verify](#verify)).
 

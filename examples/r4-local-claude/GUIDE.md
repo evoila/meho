@@ -250,8 +250,14 @@ registered client `meho-mcp`, keeps the login in `~/.mcp-auth`, and
 renews the 5-minute access token by itself. You make no token. The
 login ends after 48 hours without use, or after 7 days at most.
 
+The shim needs Node.js with `npx`. For an internal CA, set
+`NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the environment of the
+shim. If your login belongs to several tenants, add
+`"--header", "Meho-Tenant:<tenant name or ID>"` to `args`.
+
 On a machine with no browser (for example a jump host), sign in
-once through an SSH tunnel. The steps are on the
+once through an SSH tunnel. Use exactly the same command for the sign-in
+and for the client. The steps are on the
 [Other MCP clients](../../docs-site/clients/mcp-remote-shim.md#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host)
 page. A bearer token you make by hand is the last resort on that page.
 

@@ -924,16 +924,33 @@ async def test_a_waiting_answer_has_the_audit_id_of_the_first_call(
 async def test_a_waiting_change_of_rights_with_one_admin_has_the_note(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _switch(monkeypatch, status=True)
-    request_id = await _park()
-    await _set(request_id, rights_change=True)
+    """A member add in MEHO's own login realm, asked by the only admin of the tenant."""
+    from meho_backplane.operations import grant_approval
 
-    async def _only_one(tenant_id: uuid.UUID, requester_sub: str) -> str:
-        return "You are the only admin."
+    _switch(monkeypatch, status=True)
+    member_add = "keycloak.group.member.add"
+    monkeypatch.setitem(
+        grant_approval._GRANT_OPS,
+        member_add,
+        grant_approval._GrantOp(("user_id",), ("group_id",)),
+    )
+    request_id = await _park(connector_id="keycloak-admin-26.x", op_id=member_add)
+    await _set(
+        request_id,
+        rights_change=True,
+        proposed_effect={"op_id": member_add, "preview": {"grant": {"login_realm": True}}},
+    )
+
+    async def _only_one(
+        tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool
+    ) -> str | None:
+        return "You are the only admin." if login_realm else None
 
     monkeypatch.setattr("meho_backplane.operations.approval_queue.only_admin_note", _only_one)
 
-    answer = _answer(_call(client, request_id))
+    answer = _answer(
+        _call(client, request_id, connector_id="keycloak-admin-26.x", op_id=member_add)
+    )
 
     assert answer["extras"]["approval_note"] == "You are the only admin."
     assert "You are the only admin." in answer["error"]

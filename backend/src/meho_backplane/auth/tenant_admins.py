@@ -69,6 +69,7 @@ from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "LOGIN_REALM_APPROVER",
+    "NO_ADMIN",
     "ONLY_ONE_ADMIN",
     "RIGHTS_CHANGE_GUIDE_URL",
     "admin_count",
@@ -90,6 +91,9 @@ LOGIN_REALM_APPROVER: Final[str] = (
 
 #: The sentence a person reads when MEHO found no other admin in the tenant.
 ONLY_ONE_ADMIN: Final[str] = "MEHO found no other admin in this tenant."
+
+#: The sentence a person reads when the tenant has no admin who could approve at all.
+NO_ADMIN: Final[str] = "This tenant has no admin."
 
 #: The guide part that explains who approves a change of rights.
 RIGHTS_CHANGE_GUIDE_URL: Final[str] = (
@@ -268,14 +272,23 @@ async def admin_count(tenant_id: uuid.UUID) -> int | None:
 async def only_admin_note(tenant_id: uuid.UUID, requester_sub: str) -> str | None:
     """The note for a waiting change of rights a platform admin must approve, else ``None``.
 
-    The note shows only when *requester_sub* is the only admin of the tenant.
     The caller asks only for a change of rights in MEHO's own login realm, in
     ``master`` or in the target's admin realm, or in a realm MEHO could not
     read.
-    ``None`` when another admin is found, when the person who asked is not
-    an admin, and when the count is not known: then MEHO says nothing new.
+
+    * No admin at all: :data:`NO_ADMIN`. It has no sentence about who must
+      approve, because one more admin alone would not be enough.
+    * The requester is the only admin: :data:`LOGIN_REALM_APPROVER` and
+      :data:`ONLY_ONE_ADMIN`.
+    * ``None`` when another admin is found, when the person who asked is
+      not an admin, and when the count is not known: then MEHO says nothing
+      new.
     """
     ids = await tenant_admin_ids(tenant_id)
-    if ids is None or ids - {requester_sub.casefold()}:
+    if ids is None:
+        return None
+    if not ids:
+        return f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    if ids - {requester_sub.casefold()}:
         return None
     return f"{LOGIN_REALM_APPROVER} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

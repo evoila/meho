@@ -1718,6 +1718,20 @@ change in the web console, so MEHO shows no note there.
   `keycloak.authflow.ensure_approval_flow`: a platform admin in the web
   console runs it at once; asked with a token, it waits and a second
   platform admin approves it.
+- The note for each number of admins (`only_admin_note`):
+
+  | Admins | Note |
+  |---|---|
+  | none | "This tenant has no admin." and the guide link. No sentence about who must approve, because one more admin would not be enough. |
+  | one, the requester | the full note above and the link |
+  | one, another person | no note, because that admin can approve |
+  | two or more | no note |
+  | not known | no note |
+
+  The "no admin" note shows only for a sure count of zero. Today the read of
+  the realm gives "not known" instead of zero (see above), so this note comes
+  into use when that read changes. On an approved request (a retry with the
+  same key), the part about who must approve goes and the rest stays in every row.
 
 ## The "may I approve this?" answer (#3329)
 

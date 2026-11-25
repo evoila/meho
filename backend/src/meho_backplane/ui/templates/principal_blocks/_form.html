@@ -1,7 +1,8 @@
 {% from "_components.html" import button %}
 {% set values = values | default({}) %}
 {% set errors = errors | default({}) %}
-<form class="space-y-4 max-w-xl" hx-post="/ui/blocked-people" hx-target="#block-form" hx-swap="innerHTML" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' hx-disabled-elt="find button[type=submit]" aria-label="Block a person">
+<form class="space-y-4 max-w-xl" method="post" action="/ui/blocked-people" aria-label="Block a person">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
   <label class="block space-y-1">
     <span class="text-sm font-medium">Login id</span>
     <input type="text" name="sub" value="{{ values.get('sub', '') }}" required maxlength="255" class="input w-full font-mono{% if errors.get('sub') %} input-error{% endif %}" />

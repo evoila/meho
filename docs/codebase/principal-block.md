@@ -142,9 +142,16 @@ functions as the REST routes, so the rules are the same: only a person
 with `tenant_admin` may open the page or send a form (403 for anyone
 else), a tenant admin works in their own tenant, a platform admin in
 every tenant, and blocking your own login shows a refusal and writes no
-block. Every form carries the console's CSRF token. Each block and
-unblock writes one audit row. A refused form answers 422 and shows the
-message next to its field.
+block. The admin check uses the signed-in session only. The confirm step
+names the login and its scope: for a platform admin the button reads
+"Unblock in all tenants", and the prompt says that every block of the
+login goes, also the blocks of tenant admins. Both forms are plain `POST`
+forms with the CSRF token in a hidden field, so they work without
+JavaScript. A done form answers 303 back to the page. A refused block
+answers 422 and shows the page with the message next to its field. Each
+block and unblock writes one audit row (`principal.block` or
+`principal.unblock`); the request row of the form keeps its own
+`http.post:` name.
 
 ## Dependencies
 

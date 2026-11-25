@@ -4057,12 +4057,19 @@ admin block list (`docs/codebase/principal-block.md`):
 
 - `GET /ui/blocked-people` -- the blocks the admin may see, and the
   block form.
-- `POST /ui/blocked-people` -- block a login (`sub`, `reason`). A refused
-  form answers 422 and draws the form again with the typed values.
-- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`).
+- `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
+  303 back to the page. Refused: 422, the page again with the typed
+  values and the message next to its field.
+- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Done: 303
+  back to the page. No block to remove: 404.
+
+Both forms are plain `POST` forms with the CSRF token in a hidden field,
+so they work without JavaScript. The unblock prompt names the login and
+its scope (all tenants for a platform admin).
 
 The three routes need a person with `tenant_admin`
-(`resolve_human_admin_or_403`). They call `list_blocked`,
+(`resolve_human_admin_or_403`, with the session of the session cookie
+only). They call `list_blocked`,
 `block_principal` and `unblock_principal`, the same functions as the REST
 routes, so a tenant admin works in their own tenant, a platform admin in
 every tenant, and nobody blocks their own login. The page adds no MCP tool.

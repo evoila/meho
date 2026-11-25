@@ -20491,17 +20491,6 @@
         ],
         "summary": " Index",
         "operationId": "_index_ui_blocked_people_get",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UISessionContext",
-                "nullable": true,
-                "title": "Session Ctx"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -20509,16 +20498,6 @@
               "text/html": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -20541,22 +20520,15 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "Successful Response",
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "422": {
+            "description": "The page again, with the error next to its field.",
             "content": {
               "text/html": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -20582,12 +20554,20 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Successful Response",
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "404": {
+            "description": "The login has no block you may remove.",
             "content": {
-              "text/html": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
                 }
               }
             }
@@ -30168,10 +30148,6 @@
             "type": "string",
             "title": "Reason",
             "default": ""
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",
@@ -30342,10 +30318,6 @@
             "maxLength": 255,
             "minLength": 1,
             "title": "Sub"
-          },
-          "session_ctx": {
-            "$ref": "#/components/schemas/UISessionContext",
-            "nullable": true
           }
         },
         "type": "object",

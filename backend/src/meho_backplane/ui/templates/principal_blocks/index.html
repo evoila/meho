@@ -4,17 +4,17 @@
 {% block page_title %}Blocked people &middot; MEHO Operator Console{% endblock %}
 
 {% block content %}
-<section class="space-y-6" hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'>
+<section class="space-y-6">
   <header class="max-w-3xl space-y-1">
     <h1 class="text-2xl font-semibold">Blocked people</h1>
     <p class="text-sm text-muted">
-      MEHO refuses every request of a blocked person within a few seconds. A platform admin blocks a person in every tenant. A tenant admin blocks a person in their own tenant.
+      MEHO refuses every request of a blocked person within a few seconds. A platform admin blocks and unblocks a person in every tenant. A tenant admin blocks and unblocks a person in their own tenant.
     </p>
   </header>
 
   <section class="space-y-3" aria-labelledby="block-heading">
     <h2 id="block-heading" class="text-lg font-semibold">Block a person</h2>
-    <div id="block-form" hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }">
+    <div id="block-form">
       {% include "principal_blocks/_form.html" %}
     </div>
   </section>
@@ -35,9 +35,15 @@
               <td class="max-w-xs break-all font-mono text-xs">{{ person.blocked_by_sub }}</td>
               <td class="whitespace-nowrap text-xs">{{ person.blocked_at }}</td>
               <td class="text-right">
-                <form hx-post="/ui/blocked-people/unblock" hx-confirm="Unblock this person?">
+                {% if platform_admin %}
+                  {% set confirm_text = "Unblock the login " ~ person.sub ~ " in all tenants? This removes every block of this login, also the blocks that tenant admins set." %}
+                {% else %}
+                  {% set confirm_text = "Unblock the login " ~ person.sub ~ " in this tenant?" %}
+                {% endif %}
+                <form method="post" action="/ui/blocked-people/unblock" data-confirm="{{ confirm_text }}" onsubmit="return confirm(this.dataset.confirm);">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                   <input type="hidden" name="sub" value="{{ person.sub }}" />
-                  {{ button("Unblock", variant="default", size="xs", type="submit") }}
+                  {{ button("Unblock in all tenants" if platform_admin else "Unblock", variant="default", size="xs", type="submit") }}
                 </form>
               </td>
             </tr>

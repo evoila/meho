@@ -2897,7 +2897,8 @@ of this is the same:
   runner login can change between two calls. So a call whose people
   behind differ gets its own request with its own list. A person's own
   call has no people behind on either side.
-- the acting agent (`principal_act`). A call with an acting agent never
+- the acting agent (`principal_act`). In this lookup
+  (`_find_same_call_pending_request`), a call with an acting agent never
   gets the request of a direct call, and the other way round. A direct
   call has none on either side.
 

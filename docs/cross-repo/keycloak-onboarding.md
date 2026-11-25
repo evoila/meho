@@ -262,7 +262,8 @@ Other rules:
   (`realm_name_mismatch` otherwise), and with the realm's id
   (`realm_id_missing` otherwise: the target's login needs `view-realm`).
   When the approved call runs, the realm id must still be the id on the
-  approval card (`realm_id_changed` otherwise).
+  approval card (`realm_id_changed` otherwise). A call under a delete grant
+  in sandbox mode compares with the preview MEHO built for that call.
   Approval cannot be turned off for this
   operation.
 

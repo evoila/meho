@@ -53,8 +53,10 @@ MEHO builds the card again and compares the realm id
 deleted and made again under the same name has a new id, so the run is
 refused and nothing is deleted. The handler's own read, right before the
 DELETE, compares the realm id once more with the id on the approval card.
-When they differ, the call is refused with the ``realm_id_changed`` code and
-no DELETE is sent.
+A call that a delete grant clears (sandbox mode) has no approval card: there
+the handler compares with the fresh preview MEHO built for that call. When
+the ids differ, or the card has no id, the call is refused with the
+``realm_id_changed`` code and no DELETE is sent.
 
 References
 ----------
@@ -90,7 +92,7 @@ from meho_backplane.connectors.keycloak.session import (
     DEFAULT_ADMIN_REALM,
     resolve_realm_config,
 )
-from meho_backplane.operations._preview import approved_preview
+from meho_backplane.operations._preview import approved_preview, grant_preview
 from meho_backplane.targets.keycloak_realm_warnings import (
     backplane_login_realms as _backplane_login_realms,
 )
@@ -256,18 +258,26 @@ async def realm_blast_radius(
 
 
 def _check_approved_id(rep: dict[str, Any]) -> None:
-    """In an approved run, refuse a realm whose id is not the id on the approval card."""
+    """Refuse a realm whose id is not the id MEHO showed for this call.
+
+    An approved run compares with the approval card. A run under a delete
+    grant compares with the fresh preview MEHO built for that call.
+    """
     card = approved_preview(REALM_DELETE_OP)
+    shown_on = "the approval card"
+    if card is None:
+        card = grant_preview(REALM_DELETE_OP)
+        shown_on = "the preview MEHO built for this call"
     if card is None:
         return
     block = card.get("blast_radius")
     shown = block.get("object") if isinstance(block, dict) else None
     approved_id = shown.get("id") if isinstance(shown, dict) else None
-    if approved_id != rep["id"]:
+    if not isinstance(approved_id, str) or not approved_id or approved_id != rep["id"]:
         raise KeycloakDeleteRefusedError(
             REALM_DELETE_OP,
             "realm_id_changed",
-            "Keycloak answered with another realm id than the one on the approval card. "
+            f"Keycloak answered with another realm id than the one on {shown_on}. "
             "Nothing was deleted. Send a new request.",
         )
 

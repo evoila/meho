@@ -440,6 +440,7 @@ from meho_backplane.operations._preview import (
     build_permission_preflight,
     build_proposed_effect,
     describe_preview_provenance,
+    grant_preview_var,
 )
 from meho_backplane.operations._preview_steps import agent_acts as _agent_acts
 from meho_backplane.operations._preview_steps import agent_step_refusal
@@ -3693,7 +3694,10 @@ async def destructive_binding_evidence(
     )
     if refusal is not None or proposed_effect is None:
         return None
-    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
+    blast_radius = proposed_effect[BLAST_RADIUS_KEY]
+    # The handler compares the object it reads right before the delete with this preview.
+    grant_preview_var.set((op_id, {BLAST_RADIUS_KEY: blast_radius}))
+    return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: blast_radius}
 
 
 def _preflight_denied_refusal(
@@ -4446,6 +4450,8 @@ async def _dispatch_now(
     # (``composite.enforce_subop_policy``). A child dispatch inherits it and
     # reads it after its policy gate below.
     _approved_run_token = approved_run_var.set(True) if _approved else None
+    # The fresh preview that clears a delete grant belongs to this dispatch only.
+    _grant_preview_token = grant_preview_var.set(None)
     # #5211: ``audit_*`` keys the handler binds belong to this dispatch's
     # row only; the ``finally`` puts the caller's keys back.
     _audit_extras = snapshot_audit_extras()
@@ -4827,6 +4833,7 @@ async def _dispatch_now(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        grant_preview_var.reset(_grant_preview_token)
         if _approved_run_token is not None:
             approved_run_var.reset(_approved_run_token)
         restore_audit_extras(_audit_extras)

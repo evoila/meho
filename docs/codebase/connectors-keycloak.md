@@ -1752,7 +1752,11 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
 - **The approved realm id.** In the approved run, the handler's own read
   right before the DELETE must answer with the realm id on the approval
   card. Another id is refused with the `realm_id_changed` code, and no
-  DELETE is sent.
+  DELETE is sent. A call that a delete grant clears in sandbox mode has no
+  approval card. There the handler compares with the realm id of the fresh
+  preview that MEHO built for that call
+  (`destructive_binding_evidence` in `operations/dispatcher.py` keeps it in
+  `grant_preview_var` for that one call). So every run compares the id.
 - **Approval** cannot be turned off for this operation.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
@@ -2284,9 +2288,11 @@ there for at most 5 seconds; each run starts with a new one. A request
 outside a run (a `keycloak:` side of `secret.move`, an approval card, the
 check before an approved run) reads the realm first every time, so a call
 never uses a check of an earlier call. Every admin login can read the name. A
-`keycloak.realm.create` that names no realm makes the managed realm, so its
-approval check judges it by that name, like a create that names it
-(`ops_write_login_realm_rule.py`).
+`keycloak.realm.create` that names no realm (no `realm` value, an empty
+name or a null name, also in `representation`) counts as a write in the
+login realm on every target, so a platform admin must approve it
+(`ops_write_login_realm_rule.py`). A create that names the managed realm is
+judged by that name.
 The secret broker refs follow the same fence: `managed_realm_problem`
 (`secret_endpoint.py`) refuses a `keycloak:` ref whose `<realm>` is not the
 managed realm of its target. `check_secret_move_realms`

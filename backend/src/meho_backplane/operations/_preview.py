@@ -113,6 +113,8 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "grant_preview",
+    "grant_preview_var",
     "has_permission_preflight",
     "has_preview_builder",
     "preview_failure_reason",
@@ -185,6 +187,26 @@ approved_preview_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar
     "approved_preview",
     default=None,
 )
+
+
+#: The fresh preview MEHO built for a ``destructive`` call that a delete grant
+#: clears, as ``(op_id, preview)``. *preview* holds the ``blast_radius`` block
+#: of that preview, the shape of an approval card. Set by
+#: :func:`~meho_backplane.operations.dispatcher.destructive_binding_evidence`
+#: when its checks pass; each dispatch binds ``None`` first and puts the
+#: caller's value back when it ends. ``None`` for every other dispatch.
+grant_preview_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
+    "grant_preview",
+    default=None,
+)
+
+
+def grant_preview(op_id: str) -> dict[str, Any] | None:
+    """The fresh preview of *op_id* that cleared its delete grant, or ``None``."""
+    bound = grant_preview_var.get()
+    if bound is None or bound[0] != op_id:
+        return None
+    return bound[1]
 
 
 def approved_preview(op_id: str) -> dict[str, Any] | None:

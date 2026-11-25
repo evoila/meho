@@ -881,9 +881,6 @@ def test_redirect_without_location_keeps_the_generic_result() -> None:
     assert _classify(exc).error.startswith("connector_error: HTTPStatusError")
 
 
-_GENERIC_KEYS = {"error_code", "exception_class", "exception_message", "http_status"}
-
-
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_with_the_switch_off_a_change_redirect_gets_the_generic_answer(
     status: int, answer_switch: Any

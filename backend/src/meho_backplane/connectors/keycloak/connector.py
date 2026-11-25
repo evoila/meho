@@ -116,6 +116,8 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.realm_answer import (
+    REALM_CHECK_TRACE_BODY,
+    realm_check_read_active,
     realm_checked,
     realm_checked_or_absent,
 )
@@ -661,8 +663,12 @@ class KeycloakConnector(HttpConnector):
         (:func:`~meho_backplane.connectors.keycloak.redaction.redact_trace_fields`),
         so the stored trace and the agent copy hold ``***REDACTED***`` there.
         An empty body is recorded as it is. A body that is not JSON is
-        replaced by a fixed marker. Never raises.
+        replaced by a fixed marker. The read of the realm check
+        (:mod:`~meho_backplane.connectors.keycloak.realm_answer`) is always
+        recorded with a fixed text in place of its answer. Never raises.
         """
+        if realm_check_read_active():
+            return dict(REALM_CHECK_TRACE_BODY)
         if not response.content:
             return None
         try:

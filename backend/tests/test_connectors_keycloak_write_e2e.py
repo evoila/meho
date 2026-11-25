@@ -28,8 +28,10 @@ Acceptance criteria verified (Issue #1406)
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextvars import Token
 from typing import Any
 
 import pytest
@@ -40,6 +42,10 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import WRITE_OPS
+from meho_backplane.connectors.keycloak.realm_answer import (
+    REALM_CHECK_TRACE_BODY,
+    KeycloakRealmAnswerError,
+)
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
@@ -47,6 +53,7 @@ from meho_backplane.connectors.keycloak.session import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import search_operations
@@ -589,6 +596,79 @@ async def test_realm_create_stops_when_keycloak_answers_another_realm(
     assert result["error"] == "connector_error: KeycloakRealmAnswerError"
     assert "managed_realm" in result["extras"]["exception_message"]
     assert not create.called
+
+
+_OTHER_REALM_MARKER = "other-realm-marker"
+
+
+@pytest.fixture
+def recording() -> Iterator[capture._CaptureScope]:
+    """Turn the flight recorder on for the calls of one test, as the dispatcher does."""
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    op = capture._OpContext(
+        op_id="keycloak.client.get",
+        connector_id=_CONNECTOR_ID,
+        impl_id=_CONNECTOR_ID,
+        product="keycloak",
+        tags=(),
+        body_paths=(),
+        delete_shaped_patterns=(),
+    )
+    cap_token: Token[Any] = capture._active_capture_var.set(scope)
+    op_token: Token[Any] = capture._op_context_var.set(op)
+    try:
+        yield scope
+    finally:
+        capture._op_context_var.reset(op_token)
+        capture._active_capture_var.reset(cap_token)
+
+
+async def _client_get_with_realm_answer(
+    connector: KeycloakConnector, realm_answer: dict[str, Any]
+) -> respx.Route:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get("/admin/realms/example").respond(200, json=realm_answer)
+        client_read = mock.get(f"/admin/realms/example/clients/{_CLIENT_UUID}").respond(
+            200, json=_EXISTING_CLIENT
+        )
+        await connector.client_get(_OPERATOR, target, {"id": _CLIENT_UUID})
+    return client_read
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_recorded_refusal_holds_no_value_of_the_other_realm(
+    keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
+) -> None:
+    """With recording on, a refused client.get keeps the other realm's answer out of the trace."""
+    answer = {"realm": _OTHER_REALM_MARKER, "displayName": _OTHER_REALM_MARKER}
+    with pytest.raises(KeycloakRealmAnswerError) as refused:
+        await _client_get_with_realm_answer(keycloak_write_e2e, answer)
+    assert _OTHER_REALM_MARKER not in str(refused.value)
+    realm_reads = [s for s in recording.spans if s.name.endswith("/admin/realms/example")]
+    assert len(realm_reads) == 1
+    assert realm_reads[0].attributes["response_body"] == REALM_CHECK_TRACE_BODY
+    trace = json.dumps([[s.name, s.attributes] for s in recording.spans], default=str)
+    assert _OTHER_REALM_MARKER not in trace
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
+async def test_recorded_check_read_holds_a_fixed_text_when_the_realm_matches(
+    keycloak_write_e2e: KeycloakConnector, recording: capture._CaptureScope
+) -> None:
+    """The check read records a fixed text; the operation's own read is recorded as before."""
+    client_read = await _client_get_with_realm_answer(
+        keycloak_write_e2e, {"realm": "example", "displayName": _OTHER_REALM_MARKER}
+    )
+    assert client_read.call_count == 1
+    bodies = {s.name.rsplit("/", 1)[-1]: s.attributes["response_body"] for s in recording.spans}
+    assert bodies["example"] == REALM_CHECK_TRACE_BODY
+    assert "meho-web" in json.dumps(bodies[_CLIENT_UUID])
 
 
 @pytest.mark.asyncio

@@ -165,11 +165,12 @@ func newKVPutCmd() *cobra.Command {
 			"password, so it stays out of the command line and the shell\n" +
 			"history. --cas N enables a check-and-set write: the put only\n" +
 			"succeeds if the secret's current version equals N (use --cas 0\n" +
-			"to assert the secret does not yet exist). This is a write op — the dispatcher emits an audit row at\n" +
-			"op_class=write.\n\n" +
+			"to assert the secret does not yet exist). The dispatcher records\n" +
+			"this write at op_class=credential_write. The write waits for a\n" +
+			"person's approval.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho vault kv put secret tenants/<tenant-id>/<name> --data @creds.json\n" +
-			"  meho vault kv put --target vault-lab secret app/db --data @secret.json --cas 3",
+			"  meho vault kv put --target vault-lab secret tenants/<tenant-id>/<name> --data @creds.json --cas 3",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,

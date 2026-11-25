@@ -172,7 +172,6 @@ WALKS_SOMETHING_ELSE = {
     "tests/test_connectors_bind9_atomic.py": "a temp folder",
     "tests/test_capture_secret_scan.py": "the saved test captures",
     "tests/test_connectors_vmware_rest_8_0_spec_reconcile.py": "the vmware_rest folder",
-    "tests/test_gateway_mint_callers_name_the_approval.py": "the backend source",
     "tests/test_kb_service.py": "a fake rglob in a knowledge folder",
     "tests/test_operations_connector_auth_failed.py": "the Go CLI source",
     "tests/test_time_limits.py": "the test files",

@@ -116,6 +116,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_operations_own_message_of_secret_op.py",
     # Every function in the package that writes an approval decision.
     "tests/test_people_behind_doors_guard.py",
+    # Every call in the package that asks the gateway for a run command.
+    "tests/test_gateway_mint_callers_name_the_approval.py",
     # Every guide and codebase docs page.
     "tests/test_people_behind_docs.py",
 )

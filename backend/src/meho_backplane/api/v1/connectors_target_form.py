@@ -12,6 +12,11 @@ reads the secret store and never returns a value of any secret.
 
 Errors: 404 with a plain message when no connector serves the product.
 
+The caller sees the connector classes installed with MEHO, and a class made
+by an import only when the caller may see that connector: the import is
+built in, or it belongs to the caller's tenant. A connector that another
+tenant imported answers 404, as if it did not exist.
+
 This route must be registered before the ``/{connector_id}`` routes of
 :mod:`meho_backplane.api.v1.connectors_ingest`, so ``target-form`` is not read
 as a connector id. See ``docs/codebase/connector-target-form.md``.
@@ -23,11 +28,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from pydantic import BaseModel
 
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
+from meho_backplane.connectors.registry import connectors_for_tenant
 from meho_backplane.connectors.target_form import CredentialWay, TargetField
-from meho_backplane.operations.connector_declaration_check import registered_connector_classes
+from meho_backplane.operations._lookup import connector_triples_visible_to
 
 __all__ = ["TargetFormClass", "TargetFormResponse", "router"]
 
@@ -133,16 +139,43 @@ def _describe(cls: type[Connector]) -> TargetFormClass:
     )
 
 
+async def _classes_for(operator: Operator, wanted: str) -> list[type[Connector]]:
+    """The classes of product *wanted* that *operator* may see, each once, in a stable order.
+
+    A hand-written class is installed with MEHO, so every tenant sees it.
+    Any other class (one made by an import) counts only when its connector
+    is in :func:`connector_triples_visible_to` for the caller's tenant.
+    """
+    matching = [
+        (key, cls)
+        for key, cls in sorted(connectors_for_tenant(operator.tenant_id).items())
+        if cls.product.lower() == wanted
+    ]
+    if not matching:
+        return []
+    visible: set[tuple[str, str, str]] | None = None
+    kept: set[type[Connector]] = set()
+    for key, cls in matching:
+        if shim_kind(cls) != "none":
+            if visible is None:
+                visible = await connector_triples_visible_to(operator.tenant_id)
+            if key not in visible:
+                continue
+        kept.add(cls)
+    return sorted(kept, key=lambda cls: (cls.product, cls.version, cls.impl_id, cls.__name__))
+
+
 @router.get(
     "/target-form",
     response_model=TargetFormResponse,
     summary="What a target of a product needs",
-    dependencies=[_require_operator],
 )
-async def get_target_form(product: str = _PRODUCT_QUERY) -> TargetFormResponse:
+async def get_target_form(
+    product: str = _PRODUCT_QUERY,
+    operator: Operator = _require_operator,
+) -> TargetFormResponse:
     """Return the target form declarations of every connector class of *product*."""
-    wanted = product.strip().lower()
-    classes = [cls for cls in registered_connector_classes() if cls.product.lower() == wanted]
+    classes = await _classes_for(operator, product.strip().lower())
     if not classes:
         raise HTTPException(
             http_status.HTTP_404_NOT_FOUND,

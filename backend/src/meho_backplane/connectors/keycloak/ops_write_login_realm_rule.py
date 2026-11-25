@@ -35,10 +35,10 @@ no ``harmless_keys_only`` fact does not run either, in every realm.
 
 Which realm a write changes: the ``realm`` param (and for
 ``keycloak.realm.create`` the ``realm`` of the representation) when the
-write has one, else the target's managed realm. A ``keycloak.realm.create``
-that names no realm makes the managed realm, so it is judged by that name
-like a create that names it
-(:func:`~.ops_write_grant.is_login_realm`). A realm that a param names is
+write has one, else the target's managed realm
+(:func:`~.ops_write_grant.is_login_realm`). A ``keycloak.realm.create`` that
+names no realm counts as a write in the login realm on every target, so a
+platform admin approves it. A realm that a param names is
 judged by the name Keycloak answers with for it
 (:func:`~.ops_write_grant.named_realm_is_protected`). When MEHO cannot read
 the realm, it counts as the login realm.
@@ -67,7 +67,6 @@ from meho_backplane.connectors.keycloak.rights_changes import (
     NOT_RIGHTS_CHANGE_OPS,
     RIGHTS_CHANGE_OPS,
 )
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.op_classes import needs_per_call_approval
 from meho_backplane.operations._preview import (
     register_agent_preview_filter,
@@ -159,8 +158,8 @@ async def _changes_login_realm(op_id: str, ctx: PreviewContext) -> bool:
             given = [name for name in names if name is not None]
             new = op_id == "keycloak.realm.create"
             if new and not given:
-                # The handler makes the managed realm when the call names none.
-                given = [resolve_realm_config(ctx.target).managed_realm]
+                # A create that names no realm: a platform admin approves it.
+                return True
             if given:
                 for name in given:
                     if await named_realm_is_protected(ctx, name, new=new):

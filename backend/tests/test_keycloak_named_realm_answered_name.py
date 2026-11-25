@@ -151,18 +151,29 @@ async def test_a_named_realm_that_keycloak_answers_as_the_login_realm_at_run_sta
 _NEW = _Write(_CREATE, {"realm": "{realm}", "representation": {"realm": "{realm}"}})
 
 
-#: The same create with no name: the handler makes the target's managed realm.
-_NEW_UNNAMED = _Write(_CREATE, {"representation": {"enabled": True}}, target_realm="team-new")
+#: Creates that name no realm: no ``realm`` value, an empty name, a null name.
+_NEW_UNNAMED: list[_Write] = [
+    _Write(_CREATE, {"representation": {"enabled": True}}, target_realm="team-new"),
+    _Write(
+        _CREATE,
+        {"realm": "", "representation": {"realm": "", "enabled": True}},
+        target_realm="team-new",
+    ),
+    _Write(
+        _CREATE,
+        {"realm": None, "representation": {"realm": None, "enabled": True}},
+        target_realm="team-new",
+    ),
+]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("write", [_NEW, _NEW_UNNAMED], ids=["named", "unnamed"])
 async def test_a_new_realm_with_a_plain_name_needs_only_a_tenant_admin(
-    write: _Write,
     fake: _FakeKeycloak,  # noqa: F811
 ) -> None:
+    """A create that names the target's managed realm keeps a tenant admin as approver."""
     fake.missing_realms.add("team-new")
-    effect, params = await _effect(fake, write, "team-new")
+    effect, params = await _effect(fake, _NEW, "team-new")
     assert effect["preview"]["grant"]["login_realm"] is False
     request_id = await _park(params, effect, op_id=_CREATE)
 
@@ -183,6 +194,24 @@ async def test_a_new_realm_that_keycloak_answers_as_a_protected_realm_needs_a_pl
     request_id = await _park(params, effect, op_id=_CREATE)
 
     assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _NEW_UNNAMED, ids=["no-realm", "empty-name", "null-name"])
+async def test_a_new_realm_with_no_name_needs_a_platform_admin_on_every_target(
+    write: _Write,
+    fake: _FakeKeycloak,  # noqa: F811
+) -> None:
+    """The target's managed realm is not a login realm; a platform admin must still approve."""
+    fake.missing_realms.add("team-new")
+    effect, params = await _effect(fake, write, "team-new")
+    assert check_realm_params(_CREATE)(params) is None
+    assert effect["preview"]["grant"]["login_realm"] is True
+    request_id = await _park(params, effect, op_id=_CREATE)
+
+    assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
 
 
 @pytest.mark.asyncio

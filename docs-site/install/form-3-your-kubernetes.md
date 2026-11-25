@@ -368,6 +368,9 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
 MEHO's call to its own address works when the name `ingress.host`
 resolves to an address that `kubectl -n kube-system get svc traefik`
 shows under `EXTERNAL-IP`. k3s then sends the call straight to Traefik.
+We read this from the k3s and Kubernetes sources. It is not yet tested on
+a live k3s cluster. [Issue 6922](https://github.com/evoila/meho/issues/6922)
+checks it.
 If the name resolves to another address (for example a public address
 that a router translates, or a proxy in front), the file's rule does not
 match. Add a rule for that address in `networkPolicy.extraEgress`.

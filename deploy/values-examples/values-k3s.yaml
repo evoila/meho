@@ -49,7 +49,7 @@ networkPolicy:
   # when the name of `ingress.host` resolves to an address in the Service
   # status (`kubectl -n kube-system get svc traefik`). For any other address,
   # add a rule in `networkPolicy.extraEgress`. Read from the sources, not yet
-  # run on a live cluster.
+  # run on a live cluster. Issue 6922 in evoila/meho checks it.
   ingressControllerEgress:
     podLabels:
       app.kubernetes.io/name: traefik

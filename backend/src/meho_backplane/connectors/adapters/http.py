@@ -909,6 +909,24 @@ def change_sent_once_before() -> Iterator[None]:
         _change_sent_before.reset(token)
 
 
+@contextlib.contextmanager
+def last_send_of_a_change() -> Iterator[None]:
+    """Mark the change request sent inside as the second and last send.
+
+    For a typed connector that sends a change once more itself, for example
+    after a token refresh on a 401. The request inside follows no redirect,
+    so the change reaches the target at most twice. Renew the token before
+    this block, so a login keeps its usual redirect rule.
+    """
+    repeat = _change_sent_before.set(True)
+    own = _operation_request.set(True)
+    try:
+        yield
+    finally:
+        _operation_request.reset(own)
+        _change_sent_before.reset(repeat)
+
+
 def _sent_address(url: httpx.URL) -> tuple[str, str, int | None, str, str]:
     """The address a request goes to: scheme, host, port, encoded path and query.
 

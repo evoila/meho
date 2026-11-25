@@ -100,7 +100,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, last_send_of_a_change
 from meho_backplane.connectors.gcloud.backup_bucket import BackupBucketOps
 from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,
@@ -773,23 +773,49 @@ class GcloudConnector(
         the SA-JSON-key refusal gate runs (under the operator's identity)
         before any token is built or GCP request issued (#985).
 
-        On a 401 response, the token is refreshed once and the request retried.
-        Any subsequent non-2xx raises ``httpx.HTTPStatusError``.
+        On a 401 response, the token is refreshed once and the request retried
+        (:meth:`_send_change_abs`). Any subsequent non-2xx raises
+        ``httpx.HTTPStatusError``.
+        """
+        resp = await self._send_change_abs(
+            target, "POST", abs_url, operator=operator, json_body=json_body or {}
+        )
+        resp.raise_for_status()
+        return resp.json()  # type: ignore[no-any-return]
+
+    async def _send_change_abs(
+        self,
+        target: GcloudTargetLike,
+        method: str,
+        abs_url: str,
+        *,
+        operator: Operator,
+        json_body: dict[str, Any] | None,
+    ) -> httpx.Response:
+        """Send a change to an absolute GCP API URL; on a 401, send it once more.
+
+        The change reaches the target at most twice. Every request counts:
+        the first send, a followed redirect and the send after the token
+        refresh. So after a 401 MEHO sends the change again only when the
+        first send was one request, and that second send follows no
+        redirect. The answer is returned as it is; the caller checks it.
         """
         token = await self._ensure_token(target, operator)
         client = await self._http_client(target)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        resp = await client.post(abs_url, json=json_body or {}, headers=headers)
-
-        if resp.status_code == 401:
+        resp = await client.request(
+            method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
+        )
+        if resp.status_code == 401 and not resp.history:
             _log.info("gcloud_401_token_refresh_post", target=target.name, url=abs_url)
             new_token = await self.refresh_token(target)
-            headers = {"Authorization": f"Bearer {new_token}"}
-            resp = await client.post(abs_url, json=json_body or {}, headers=headers)
-
-        resp.raise_for_status()
-        return resp.json()  # type: ignore[no-any-return]
+            with last_send_of_a_change():
+                resp = await client.request(
+                    method,
+                    abs_url,
+                    json=json_body,
+                    headers={"Authorization": f"Bearer {new_token}"},
+                )
+        return resp
 
     # ------------------------------------------------------------------
     # Typed-op registration (G3.7-T5 #848)

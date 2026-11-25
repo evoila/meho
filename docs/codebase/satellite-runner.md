@@ -881,8 +881,9 @@ the same machine, and then no proxy from the environment is used
   (all give 403 `enrollment_code_invalid`). An expired code with no key yet
   gets this 403 before the name and the key are checked. A used code gets it
   for any key other than its own, before the name is checked. With a good,
-  unused code it refuses a private member in the key and a key that is not
-  P-256 (422, the list shape of every other validation error).
+  unused code it refuses a private member in the key, a key that is not P-256
+  and a value that is no JWK object or is missing (422
+  `runner_public_key_invalid`, the list shape of every other validation error).
 - The runner sends its `MEHO_RUNNER_ID` as `runner_name`. When the code
   belongs to a runner with another name, the route answers 409
   `enrollment_code_for_another_runner` before anything changes, so the code
@@ -974,15 +975,22 @@ against the Keycloak image `keycloak/keycloak:26.0` (the value of
 operator's own Keycloak comes with a later step on a real install.
 
 **The key file.** `runner/login.py::_read_key_file` checks the mode of the
-open key file before it reads the key. Any right for other users stops the
-runner with a `RunnerLoginError` that names the file and says to set mode
-`0600`; no request is sent. A group right gives one warning line
-(`runner_key_group_access`), because a Kubernetes pod with `fsGroup` adds
-group rights.
+open key file before it reads the key. Any right for the group or for
+other users (any of the last six mode bits) stops the runner with a
+`RunnerLoginError` that names the file and its mode, says to set mode `0600`
+and names the docs page; no request is sent. Any other mode works (for example
+`0600` and `0400`). From the Kubernetes docs
+([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
+In a Kubernetes pod with
+`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
+the runner then stops. Mount the key so that it keeps mode `0600`: set no
+`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
+volume driver that does not change file rights.
 
 **Register.** Only a person with `tenant_admin` can register a runner, because
-the answer carries the enrollment code. A service, agent or runner login gets
-403 `human_principal_required` before anything is made. Before the Keycloak
+the answer carries the enrollment code. A service login or an agent login
+gets 403 `human_principal_required`, and a runner login gets 403
+`runner_scope_violation`, before anything is made. Before the Keycloak
 client is made, `RunnerPrincipalService.register` looks for a row with the
 same Keycloak client id, also a revoked row and a row of another tenant; when
 one exists it answers 409 `runner_principal_already_exists`, and no client and
@@ -992,8 +1000,9 @@ no Vault secret is made.
 code and the enrollment is still refused, `enroll_runner_key` writes one audit
 row in that runner's tenant (path `runner.principal.key_enrollment_refused`).
 It holds the runner's name, the answer's status, a reason (`runner_name_mismatch`
-409, `public_key_invalid` 422, `code_expired` 403,
-`code_used_by_another_key` 403) and the id of the offered key when the key can
+409, `public_key_invalid` 422 for a key in any wrong form, `code_expired` 403,
+`code_used_by_another_key` 403, `runner_revoked` 403 for a revoke that ran
+while the enrollment waited) and the id of the offered key when the key can
 be read. It holds no code and no key. A code that matches no runner writes no
 audit row; the route writes a log line.
 

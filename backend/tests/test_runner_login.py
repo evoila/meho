@@ -601,9 +601,11 @@ async def _enrolled(tmp_path: Path) -> _Central:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", [0o644, 0o606, 0o604, 0o601])
+@pytest.mark.parametrize(
+    "mode", [0o640, 0o660, 0o604, 0o644, 0o620, 0o610, 0o602, 0o601, 0o606, 0o440]
+)
 @pytest.mark.parametrize("with_code", [False, True])
-async def test_a_key_file_that_other_users_can_use_stops_the_runner(
+async def test_a_key_file_with_group_or_other_rights_stops_the_runner(
     tmp_path: Path, mode: int, with_code: bool
 ) -> None:
     central = await _enrolled(tmp_path)
@@ -611,37 +613,34 @@ async def test_a_key_file_that_other_users_can_use_stops_the_runner(
         (tmp_path / LOGIN_FILE_NAME).unlink()
     (tmp_path / KEY_FILE_NAME).chmod(mode)
     settings = _settings(tmp_path, enrollment_code="c") if with_code else _settings(tmp_path)
-    with pytest.raises(RunnerLoginError, match="0600") as raised:
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(RunnerLoginError, match="0600") as raised,
+    ):
         await open_signed_jwt_login(settings, transport=central.transport())
-    assert str(tmp_path / KEY_FILE_NAME) in str(raised.value)
+    error = str(raised.value)
+    assert str(tmp_path / KEY_FILE_NAME) in error
+    assert f"has mode {mode:04o}" in error
+    assert "https://evoila.github.io/meho/latest/guides/satellite-gateway/" in error
     assert central.requests == []
+    assert [e for e in logs if e["log_level"] == "warning"] == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", [0o600, 0o400])
-async def test_a_key_file_only_its_owner_can_use_works(tmp_path: Path, mode: int) -> None:
+@pytest.mark.parametrize("with_code", [False, True])
+async def test_a_key_file_only_its_owner_can_use_works(
+    tmp_path: Path, mode: int, with_code: bool
+) -> None:
     central = await _enrolled(tmp_path)
+    if with_code:
+        (tmp_path / LOGIN_FILE_NAME).unlink()
     (tmp_path / KEY_FILE_NAME).chmod(mode)
-    with structlog.testing.capture_logs() as logs:
-        provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
-        assert provider is not None
-        assert await provider.get_token() == "token-1"
-    assert not [e for e in logs if e["event"] == "runner_key_group_access"]
-
-
-@pytest.mark.asyncio
-async def test_a_key_file_with_group_rights_works_and_writes_one_warning(tmp_path: Path) -> None:
-    central = await _enrolled(tmp_path)
-    (tmp_path / KEY_FILE_NAME).chmod(0o640)
-    with structlog.testing.capture_logs() as logs:
-        provider = await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
-        assert provider is not None
-        assert await provider.get_token() == "token-1"
-    warnings = [e for e in logs if e["event"] == "runner_key_group_access"]
-    assert len(warnings) == 1
-    assert warnings[0]["log_level"] == "warning"
-    assert warnings[0]["path"] == str(tmp_path / KEY_FILE_NAME)
-    assert warnings[0]["mode"] == "0640"
+    settings = _settings(tmp_path, enrollment_code="c") if with_code else _settings(tmp_path)
+    provider = await open_signed_jwt_login(settings, transport=central.transport())
+    assert provider is not None
+    token = await provider.get_token()
+    assert token == "token-1"
 
 
 @pytest.mark.asyncio

@@ -173,10 +173,16 @@ runner signs its own login request and gets a short token. It asks for a
 new token before the old one ends, and once more after a `401`. No person
 hands it a token. The private key never leaves the site.
 
-The runner uses the key file only when other users on the machine have no
-rights to it: it stops with an error that says to set mode `0600`. When only
-the group has rights (for example from a Kubernetes `fsGroup`), it uses the
-key and writes a warning.
+The runner uses the key file only when its group and other users have no
+rights to it (for example mode `0600` or `0400`). With any other mode it stops
+with an error that names the file and its mode and says to set mode `0600`.
+From the Kubernetes docs
+([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
+In a Kubernetes pod with
+`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
+the runner then stops. Mount the key so that it keeps mode `0600`: set no
+`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
+volume driver that does not change file rights.
 
 This login follows RFC 7523, a signed JWT as the proof of a client's login
 ([section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3)), and
@@ -307,7 +313,7 @@ tenant_admin writes for each runner (step 4 above) also still works.
 | A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is not `safe`. | Only `safe` reads run on a satellite; run changes centrally through the approval path (see [Changes through a satellite](#changes-through-a-satellite-not-built-yet)). |
 | Results are stored after the uplink comes back | The uplink was down; results spooled to disk and re-posted when it recovered. With `RUNNER_CHECKS_ENABLED` on, results of a sensor with a `runner_name` count as check results. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
 | `403` registering a runner principal | `meho runner-principal register` needs a person with **tenant_admin**; `revoke` needs **tenant_admin**. A service login or an agent login gets `403 human_principal_required` on register. | Register with your own sign-in as a person with tenant_admin; `show` / `list` are operator-level. |
-| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | Other users on the machine have rights to the key file in `MEHO_RUNNER_KEY_DIR`. | Run `chmod 600` on the file and start the runner again. |
+| The runner exits 1 with `runner_login_error` and "has mode", "Set its mode to 0600" | The group or other users have rights to the key file in `MEHO_RUNNER_KEY_DIR`. In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key file at each mount. | Run `chmod 600` on the file and start the runner again. In a pod, mount the key so that it keeps mode `0600`: set no `fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a volume driver that does not change file rights. |
 
 ## What is not built yet
 

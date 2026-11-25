@@ -78,6 +78,8 @@ _RECOVERY: Final[str] = (
     "and keep the old one: its results carry the old name and central refuses them "
     "under the new one"
 )
+#: The docs page with the rule for the key file's mode.
+_KEY_FILE_DOCS: Final[str] = "https://evoila.github.io/meho/latest/guides/satellite-gateway/"
 #: What a person does when the code belongs to a runner with another name.
 _OTHER_RUNNER: Final[str] = (
     "the enrollment code is for another runner; set MEHO_RUNNER_ID to the name that was "
@@ -139,18 +141,16 @@ def uses_proxy_settings(url: str) -> bool:
 def _read_key_file(path: Path) -> bytes:
     """The bytes of the key file, after a check of its mode on the open file.
 
-    Rights for other users stop the runner. Group rights work, with a warning:
-    a Kubernetes pod with ``fsGroup`` adds them.
+    Any right for the group or for other users stops the runner.
     """
     with path.open("rb") as handle:
         mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
-        if mode & 0o007:
+        if mode & 0o077:
             raise RunnerLoginError(
-                f"the runner key {path} has mode {mode:04o}, so other users can use it. "
-                f"Set its mode to 0600 (chmod 600 {path}) and start the runner again."
+                f"the runner key {path} has mode {mode:04o}, so its group or other users have "
+                f"rights to it. Set its mode to 0600 (chmod 600 {path}) and start the runner "
+                f"again. See {_KEY_FILE_DOCS}"
             )
-        if mode & 0o070:
-            _log.warning("runner_key_group_access", path=str(path), mode=f"{mode:04o}")
         return handle.read()
 
 

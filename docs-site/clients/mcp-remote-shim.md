@@ -1,11 +1,16 @@
 # Other MCP clients (the `mcp-remote` shim)
 
-Some MCP clients — Cursor and opencode as of this writing, and others — follow the
+Some MCP clients — Cursor as of this writing, and others — follow the
 RFC 9728 metadata trail correctly but **expose no `client_id` field**
 in their config. They then fall back to Dynamic Client Registration,
 which Keycloak's Trusted Hosts policy blocks, and the wire-up never
 completes. Pre-registering `meho-mcp` does not help: the client has
 nowhere to put the resulting id.
+
+opencode has its own login for remote MCP servers, with a client ID
+setting (`oauth.clientId`). That login has not been tested against MEHO.
+The setup tested with opencode is the local shim on this page (see
+[Example: opencode](#example-opencode)).
 
 The general-purpose way around this is a
 [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio shim. The
@@ -108,20 +113,27 @@ every shim run on it, by hand (step 2) and from the client (step 6).
    Leave it open:
 
     ```bash
-    ssh -L 8456:127.0.0.1:8456 <jump-host>
+    ssh -L 127.0.0.1:8456:127.0.0.1:8456 <jump-host>
     ```
 
-    The port must be the one in the shim command. The shim listens only
-    on `127.0.0.1` of the jump host, so nobody else can reach it. The
-    sign-in comes back to `http://localhost:8456/oauth/callback`, and the
-    tunnel carries it to the shim.
+    The port must be the one in the shim command. `127.0.0.1:` at the
+    start keeps the laptop end of the tunnel on your laptop only. The
+    shim listens only on `127.0.0.1` of the jump host. So the port is
+    closed to other machines, but other users on the jump host can still
+    reach it. Keep the shim running only for the sign-in. The sign-in
+    comes back to `http://localhost:8456/oauth/callback`, and the tunnel
+    carries it to the shim.
 
 4. **Sign in** (on your laptop). Open the address from step 2 in your
    laptop's browser and sign in. The browser then shows `Authorization
-   successful!`. The shim now holds the login.
+   successful!`. The shim is not done yet: it still has to finish the
+   sign-in and save the login. Wait until the shim prints `Press Ctrl+C
+   to exit` on the jump host.
 
-5. **Stop the shim** with Ctrl+C and close the tunnel. The login stays
-   in `~/.mcp-auth` on the jump host.
+5. **Stop the shim** with Ctrl+C, but only after it printed `Press Ctrl+C
+   to exit`, and close the tunnel. The login stays in `~/.mcp-auth` on
+   the jump host. If you stop it earlier, no login may be saved, and the
+   client then cannot connect.
 
 6. **Start the client.** Set its MCP server to the same command, as the
    same user. The shim finds the stored login and needs no sign-in.
@@ -172,9 +184,12 @@ How long the login lasts:
   most**, whichever comes first. These are the values of MEHO's built-in
   login setup. On your own Keycloak see
   [How long an MCP login lasts](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
-- When it ends, the shim asks for a new sign-in. Sign in again the same
-  way: do steps 2 to 5 again. Run the shim by hand for this, because a
-  client may hide the address the shim prints.
+- When it ends, a call through the client can hang, and the client
+  shows no sign-in address. To sign in again:
+    1. Stop the client, so its shim stops too. Two shims cannot share the
+       port.
+    2. Do steps 2 to 5 again, with the shim run by hand.
+    3. Start the client again.
 
 Treat `~/.mcp-auth` like a password. Anyone who can read it can use your
 login until it ends. A call through the shim runs under your login, so
@@ -250,10 +265,18 @@ Then wait more than 10 minutes and run **`meho_status`** again. In login
 mode it must still work, with no new sign-in. With a static token it
 fails after 5 minutes.
 
-A `401` with an `invalid_token` / `token_expired` detail on a static token
-means the token has expired: re-run the mint step and restart the client.
-In login mode it means the login has ended (see above): sign in again. The full set of token-rejection causes is on the
-[troubleshooting page](troubleshooting.md).
+What a `401` answer means:
+
+- `token_expired` with a static token: the token has ended. Re-run the
+  mint step and restart the client.
+- `token_expired` in login mode: the access token has ended. The shim
+  renews it by itself, so this alone does not mean the login has ended.
+  Sign in again only when the renewal is refused, or calls hang (see
+  [How long the login lasts](#a-machine-without-a-browser-for-example-an-agent-on-a-jump-host)
+  above).
+- `invalid_token`: this is not about time. For example, MEHO could not
+  check the key that signed the token. A new sign-in does not fix it.
+  Follow [Token issues but every call 401s](troubleshooting.md#token-issues-but-every-call-401s).
 
 ## The cleaner long-term answer
 

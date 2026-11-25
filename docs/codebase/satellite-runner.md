@@ -1006,22 +1006,31 @@ while the enrollment waited) and the id of the offered key when the key can
 be read. It holds no code and no key. A code that matches no runner writes no
 audit row; the route writes a log line.
 
-**Request limits of the open route.** The route counts requests per source address
-(the address uvicorn resolves, so the client address behind a trusted proxy)
-on the shared Valkey, `meho:ratelimit:runner-enroll:<source>:<minute>`. Over
-`RUNNER_ENROLL_RATE_PER_MINUTE` (default 60, `0` turns it off) the route
-answers 429 `enrollment_rate_limited` with `Retry-After`. If Valkey cannot be
-reached, the request goes on. The limit comes before the body check. A code over
-256 characters gets 403 before any database read. A runner gets at most one
-refusal row per reason and minute (`auth/runner_enrollment_limits.py`); the next
-row carries `left_out_before`, the number of refusals the minute before left
-out. A body that fails the body check gets 422 without `input`, without the
-names of fields the sender added, and with only numbers in `ctx`. When its code
-matches a runner that is not revoked, one refusal row records it (status 422,
-reason `request_body_invalid`, or `code_expired` for an ended code with no key).
-The audit row `runner.principal.key_enrollment_started` is saved in the same
-commit as the claim of the key. When it cannot be written, Keycloak is not
-called, and the same code and key work on a retry.
+**Request limits of the open route.** The route counts requests per source
+address on the shared Valkey, `meho:ratelimit:runner-enroll:<source>:<minute>`.
+The source is `request.client.host`. Uvicorn sets it to the client address
+when the connecting proxy is trusted (`FORWARDED_ALLOW_IPS`). Behind a proxy
+that is not trusted, all callers share the proxy address and one limit. With
+no client address the source is `unknown`. Over `RUNNER_ENROLL_RATE_PER_MINUTE`
+(default 60, `0` turns it off and makes no Valkey call) the route answers 429
+`enrollment_rate_limited` with `Retry-After`. When Valkey cannot be reached it
+answers 503 `enrollment_limit_unavailable`, as event intake does; the runner's
+login treats it as a failure and enrolls again at its next start. The limit
+comes before the body check. A code over 256 characters gets 403 before any
+database read. A runner gets at most one refusal row per reason and minute
+(`auth/runner_enrollment_limits.py`). Each refusal that is left out is added to
+one counter of that runner and reason, and the next row that is written takes
+the count as `left_out_before`, however late it comes. A row that cannot be
+written gives its slot and count back. When Valkey cannot be reached there, the
+row is written anyway. A body that fails the body check gets 422 without
+`input`, without the names of fields the sender added, and with only numbers in
+`ctx`. When its code matches a runner that is not revoked, one refusal row
+records it (status 422, reason `request_body_invalid`, or `code_expired` for an
+ended code with no key). Keycloak is called only after an audit row
+`runner.principal.key_enrollment_started` is committed: with the claim of the
+key, and again in its own commit for each later attempt to store the key. When
+the row cannot be written, Keycloak is not called, and the same code and key
+work on a retry.
 
 **Revoke.** Revoke works the same for every runner, with a key or with a fixed
 token. `RunnerPrincipalService.revoke` turns the runner's Keycloak client off,

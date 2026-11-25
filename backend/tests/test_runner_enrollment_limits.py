@@ -26,12 +26,14 @@ from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, RunnerPrincipal
 from meho_backplane.main import app
+from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._runner_enroll_fakes import LIMITS, BrokenValkey, FakeValkey
 from ._vault_fakes import install_fake_vault
 from .test_runner_enrollment_api import (
     _ENROLL,
@@ -45,7 +47,6 @@ from .test_runner_enrollment_api import (
 )
 
 _KC = "meho_backplane.auth.runner_enrollment.KeycloakAdminClient.from_settings"
-_LIMITS = "meho_backplane.auth.runner_enrollment_limits"
 
 
 @pytest.fixture(autouse=True)
@@ -75,47 +76,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     yield TestClient(app)
 
 
-class _FakePipeline:
-    def __init__(self, store: dict[str, int]) -> None:
-        self._store = store
-        self._keys: list[str] = []
-
-    async def __aenter__(self) -> _FakePipeline:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-    def incr(self, name: str) -> None:
-        self._keys.append(name)
-
-    def expire(self, name: str, time: int) -> None:
-        return None
-
-    async def execute(self) -> list[Any]:
-        counts = []
-        for name in self._keys:
-            self._store[name] = self._store.get(name, 0) + 1
-            counts.append(self._store[name])
-        return [*counts, True]
-
-
-class _FakeValkey:
-    def __init__(self) -> None:
-        self.store: dict[str, int] = {}
-
-    def pipeline(self, transaction: bool = True) -> _FakePipeline:
-        return _FakePipeline(self.store)
-
-    async def get(self, name: str) -> str | None:
-        value = self.store.get(name)
-        return None if value is None else str(value)
-
-
 @pytest.fixture
-def valkey() -> Iterator[_FakeValkey]:
-    fake = _FakeValkey()
-    with patch(f"{_LIMITS}.get_broadcast_client", lambda: fake):
+def valkey() -> Iterator[FakeValkey]:
+    fake = FakeValkey()
+    with patch(f"{LIMITS}.get_broadcast_client", lambda: fake):
         yield fake
 
 
@@ -135,7 +99,7 @@ _STARTED = "runner.principal.key_enrollment_started"
 
 @pytest.mark.asyncio
 async def test_a_source_over_the_limit_gets_429_with_a_fixed_text(
-    client: TestClient, valkey: _FakeValkey, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, valkey: FakeValkey, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _set_limit(monkeypatch, 3)
     answers = [client.post(_ENROLL, json={"enrollment_code": "x"}) for _ in range(5)]
@@ -146,7 +110,7 @@ async def test_a_source_over_the_limit_gets_429_with_a_fixed_text(
 
 @pytest.mark.asyncio
 async def test_the_limit_comes_before_the_body_check_and_zero_turns_it_off(
-    client: TestClient, valkey: _FakeValkey, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, valkey: FakeValkey, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _set_limit(monkeypatch, 1)
     assert client.post(_ENROLL, content=b"{not json").status_code == 422
@@ -157,7 +121,7 @@ async def test_the_limit_comes_before_the_body_check_and_zero_turns_it_off(
 
 @pytest.mark.asyncio
 async def test_a_code_over_256_characters_gets_403_with_no_database_read(
-    client: TestClient, valkey: _FakeValkey
+    client: TestClient, valkey: FakeValkey
 ) -> None:
     def _no_session() -> Any:
         raise AssertionError("the database was read")
@@ -171,7 +135,7 @@ async def test_a_code_over_256_characters_gets_403_with_no_database_read(
 
 @pytest.mark.asyncio
 async def test_a_failed_audit_write_stops_before_keycloak_and_a_retry_works(
-    client: TestClient, valkey: _FakeValkey, tmp_path: Any
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
 ) -> None:
     name = "site-audit-fails"
     code = (await _register(client, name))["enrollment_code"]
@@ -199,8 +163,8 @@ async def test_a_failed_audit_write_stops_before_keycloak_and_a_retry_works(
 
 
 @pytest.mark.asyncio
-async def test_a_stored_key_has_one_started_row_also_after_keycloak_fails_and_repeats(
-    client: TestClient, valkey: _FakeValkey, tmp_path: Any
+async def test_each_attempt_to_store_the_key_has_a_started_row_and_a_repeat_adds_none(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
 ) -> None:
     name = "site-started-once"
     code = (await _register(client, name))["enrollment_code"]
@@ -215,7 +179,7 @@ async def test_a_stored_key_has_one_started_row_also_after_keycloak_fails_and_re
         kc.set_client_signed_jwt_key.side_effect = None
         assert client.post(_ENROLL, json=body).status_code == 200
         assert client.post(_ENROLL, json=body).status_code == 200
-    assert len(await _rows(_STARTED)) == 1
+    assert len(await _rows(_STARTED)) == 2
     assert (await _row(name)).key_enrolled_at is not None
 
 
@@ -243,7 +207,7 @@ _BODY_FORMS = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("form", sorted(_BODY_FORMS))
 async def test_a_body_that_fails_the_check_repeats_nothing_and_a_right_code_writes_one_row(
-    client: TestClient, valkey: _FakeValkey, tmp_path: Any, form: str
+    client: TestClient, valkey: FakeValkey, tmp_path: Any, form: str
 ) -> None:
     name = "site-body"
     code = (await _register(client, name))["enrollment_code"]
@@ -276,7 +240,7 @@ async def test_a_body_that_fails_the_check_repeats_nothing_and_a_right_code_writ
     [b"not json", b"[1, 2]", b'"text"', b'{"enrollment_code": 7}', b'{"enrollment_code": ["a"]}'],
 )
 async def test_a_body_of_the_wrong_shape_gets_422_and_no_row(
-    client: TestClient, valkey: _FakeValkey, content: bytes
+    client: TestClient, valkey: FakeValkey, content: bytes
 ) -> None:
     before = len(await _refused_rows())
     resp = client.post(_ENROLL, content=content, headers={"Content-Type": "application/json"})
@@ -286,7 +250,7 @@ async def test_a_body_of_the_wrong_shape_gets_422_and_no_row(
 
 @pytest.mark.asyncio
 async def test_a_long_code_with_another_body_error_gets_422_and_no_row(
-    client: TestClient, valkey: _FakeValkey
+    client: TestClient, valkey: FakeValkey
 ) -> None:
     before = len(await _refused_rows())
     resp = client.post(_ENROLL, json={"enrollment_code": "a" * 300})
@@ -297,7 +261,7 @@ async def test_a_long_code_with_another_body_error_gets_422_and_no_row(
 
 @pytest.mark.asyncio
 async def test_the_code_of_a_revoked_runner_writes_no_row_for_a_bad_body(
-    client: TestClient, valkey: _FakeValkey
+    client: TestClient, valkey: FakeValkey
 ) -> None:
     name = "site-body-revoked"
     code = (await _register(client, name))["enrollment_code"]
@@ -311,12 +275,12 @@ async def test_the_code_of_a_revoked_runner_writes_no_row_for_a_bad_body(
 
 @pytest.mark.asyncio
 async def test_a_runner_gets_one_refusal_row_per_reason_and_minute(
-    client: TestClient, valkey: _FakeValkey, tmp_path: Any
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
 ) -> None:
     name = "site-row-limit"
     code = (await _register(client, name))["enrollment_code"]
     bad = {"enrollment_code": code}
-    with patch(f"{_LIMITS}.time.time", return_value=1_700_000_030.0):
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
         for _ in range(4):
             assert client.post(_ENROLL, json=bad).status_code == 422
         mismatch = {**bad, "public_key": _jwk(tmp_path), "runner_name": "site-else"}
@@ -327,9 +291,212 @@ async def test_a_runner_gets_one_refusal_row_per_reason_and_minute(
         "request_body_invalid",
         "runner_name_mismatch",
     ]
-    with patch(f"{_LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
         assert client.post(_ENROLL, json=bad).status_code == 422
         assert client.post(_ENROLL, json=bad).status_code == 422
     rows = [r for r in await _refused_rows() if r.payload["reason"] == "request_body_invalid"]
     assert len(rows) == 2
     assert sorted(r.payload.get("left_out_before", 0) for r in rows) == [0, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_no_client_address_counts_under_unknown(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    sent: list[dict[str, Any]] = []
+    body = json.dumps({"enrollment_code": "x"}).encode()
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "method": "POST",
+        "path": _ENROLL,
+        "raw_path": _ENROLL.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "http_version": "1.1",
+        "headers": [(b"host", b"t"), (b"content-type", b"application/json")],
+        "client": None,
+        "server": ("t", 80),
+    }
+    await app(scope, receive, send)
+    assert sent[0]["status"] == 422
+    assert any(":runner-enroll:unknown:" in key for key in valkey.store)
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_counter_gives_503_with_a_fixed_text(client: TestClient) -> None:
+    with patch(f"{LIMITS}.get_broadcast_client", lambda: BrokenValkey()):
+        resp = client.post(_ENROLL, json={"enrollment_code": "x"})
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "enrollment_limit_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_with_the_limit_off_no_valkey_call_is_made(
+    client: TestClient, valkey: FakeValkey, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_limit(monkeypatch, 0)
+    assert client.post(_ENROLL, json={"enrollment_code": "x"}).status_code == 422
+    assert valkey.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_runner_login_stops_on_503_and_writes_no_record(tmp_path: Any) -> None:
+    import httpx
+
+    from meho_backplane.runner.login import (
+        LOGIN_FILE_NAME,
+        RunnerLoginError,
+        enroll_with_code,
+        load_or_create_private_key,
+    )
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "enrollment_limit_unavailable"})
+
+    key = load_or_create_private_key(str(tmp_path))
+    with pytest.raises(RunnerLoginError, match="HTTP 503"):
+        await enroll_with_code(
+            central_url="https://central.test",
+            code="c",
+            runner_id="site",
+            key=key,
+            key_dir=str(tmp_path),
+            transport=httpx.MockTransport(answer),
+        )
+    assert not (tmp_path / LOGIN_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_row_after_a_gap_carries_the_whole_count(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    code = (await _register(client, "site-gap"))["enrollment_code"]
+    bad = {"enrollment_code": code}
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
+        for _ in range(4):
+            client.post(_ENROLL, json=bad)
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60 * 7):
+        client.post(_ENROLL, json=bad)
+    counts = sorted(r.payload.get("left_out_before", 0) for r in await _refused_rows())
+    assert counts == [0, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refusal_write_gives_the_slot_and_the_count_back(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    code = (await _register(client, "site-give-back"))["enrollment_code"]
+    bad = {"enrollment_code": code}
+    broken = TestClient(app, raise_server_exceptions=False)
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0):
+        client.post(_ENROLL, json=bad)
+        client.post(_ENROLL, json=bad)
+        client.post(_ENROLL, json=bad)
+    with patch(f"{LIMITS}.time.time", return_value=1_700_000_030.0 + 60):
+        with patch(
+            "meho_backplane.auth.runner_enrollment.write_internal_audit_row",
+            side_effect=RuntimeError("audit write failed"),
+        ):
+            assert broken.post(_ENROLL, json=bad).status_code == 500
+        assert client.post(_ENROLL, json=bad).status_code == 422
+    counts = sorted(r.payload.get("left_out_before", 0) for r in await _refused_rows())
+    assert counts == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_row_is_written_when_the_counter_cannot_be_reached(
+    client: TestClient, valkey: FakeValkey
+) -> None:
+    code = (await _register(client, "site-no-counter"))["enrollment_code"]
+    bad = {"enrollment_code": code}
+    before = len(await _refused_rows())
+
+    async def _open(source: str) -> None:
+        return None
+
+    with (
+        patch("meho_backplane.api.v1.runner_enrollment.enforce_enroll_request_limit", _open),
+        patch(f"{LIMITS}.get_broadcast_client", lambda: BrokenValkey()),
+    ):
+        assert client.post(_ENROLL, json=bad).status_code == 422
+        assert client.post(_ENROLL, json=bad).status_code == 422
+    assert len(await _refused_rows()) == before + 2
+
+
+async def _claim_without_started_row(name: str, key_id: str) -> None:
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(RunnerPrincipal).where(RunnerPrincipal.name == name))
+        ).scalar_one()
+        row.enrolled_key_id = key_id
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_claim_with_no_started_row_gets_one_before_keycloak_is_called(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    name = "site-old-claim"
+    code = (await _register(client, name))["enrollment_code"]
+    jwk = _jwk(tmp_path)
+    await _claim_without_started_row(name, ec_key_id(jwk))
+    body = {"enrollment_code": code, "public_key": jwk, "runner_name": name}
+    factory, kc = _kc_mock()
+    broken = TestClient(app, raise_server_exceptions=False)
+    with patch(_KC, factory):
+        with patch(
+            "meho_backplane.auth.runner_enrollment._started_audit_row",
+            side_effect=RuntimeError("audit write failed"),
+        ):
+            assert broken.post(_ENROLL, json=body).status_code == 500
+        kc.set_client_signed_jwt_key.assert_not_awaited()
+        assert await _rows(_STARTED) == []
+        assert (await _row(name)).key_enrolled_at is None
+        assert client.post(_ENROLL, json=body).status_code == 200
+    kc.set_client_signed_jwt_key.assert_awaited_once()
+    assert len(await _rows(_STARTED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_started_write_on_a_retry_after_keycloak_failed_calls_no_keycloak(
+    client: TestClient, valkey: FakeValkey, tmp_path: Any
+) -> None:
+    from meho_backplane.auth.keycloak_admin import KeycloakAdminError
+
+    name = "site-retry-audit"
+    code = (await _register(client, name))["enrollment_code"]
+    body = {"enrollment_code": code, "public_key": _jwk(tmp_path), "runner_name": name}
+    factory, kc = _kc_mock()
+    kc.set_client_signed_jwt_key.side_effect = KeycloakAdminError("down")
+    broken = TestClient(app, raise_server_exceptions=False)
+    with patch(_KC, factory):
+        assert client.post(_ENROLL, json=body).status_code == 502
+        kc.set_client_signed_jwt_key.reset_mock()
+        with patch(
+            "meho_backplane.auth.runner_enrollment._started_audit_row",
+            side_effect=RuntimeError("audit write failed"),
+        ):
+            assert broken.post(_ENROLL, json=body).status_code == 500
+        kc.set_client_signed_jwt_key.assert_not_awaited()
+        kc.set_client_signed_jwt_key.side_effect = None
+        assert client.post(_ENROLL, json=body).status_code == 200
+    assert len(await _rows(_STARTED)) == 2
+
+
+@pytest.mark.asyncio
+async def test_another_route_keeps_the_input_of_its_validation_errors(
+    client: TestClient,
+) -> None:
+    resp = client.post("/api/v1/runner-principals", json={"made-up-extra": "made-up-value"})
+    assert resp.status_code in (401, 403, 422)
+    if resp.status_code == 422:
+        assert any("input" in e for e in resp.json()["detail"])

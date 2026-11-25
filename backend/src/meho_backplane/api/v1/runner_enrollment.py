@@ -37,6 +37,7 @@ from meho_backplane.auth.runner_enrollment import (
     enroll_runner_key,
 )
 from meho_backplane.auth.runner_enrollment_limits import (
+    ENROLL_LIMIT_UNAVAILABLE_DETAIL,
     ENROLL_RATE_LIMIT_DETAIL,
     EnrollRateLimitError,
     enforce_enroll_request_limit,
@@ -105,6 +106,12 @@ class _EnrollRoute(APIRoute):
                     detail=ENROLL_RATE_LIMIT_DETAIL,
                     headers={"Retry-After": str(exc.retry_after_seconds)},
                 ) from exc
+            except Exception as exc:
+                structlog.get_logger().warning("runner_enroll_limit_unavailable", exc_info=True)
+                raise HTTPException(
+                    status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=ENROLL_LIMIT_UNAVAILABLE_DETAIL,
+                ) from exc
             try:
                 return await handler(request)
             except RequestValidationError as exc:
@@ -172,7 +179,10 @@ class RunnerEnrollResponse(BaseModel):
 @router.post(
     "/enroll",
     response_model=RunnerEnrollResponse,
-    responses={429: {"description": "Too many requests from this source address."}},
+    responses={
+        429: {"description": "Too many requests from this source address."},
+        503: {"description": "The request counter or Keycloak cannot be reached."},
+    },
 )
 async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     """Register a runner's public key with its one-time code.
@@ -185,6 +195,8 @@ async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     bad key gets 422. A repeat of a used code with the key it enrolled gives
     the same answer again. A source address that sends more requests per minute
     than ``RUNNER_ENROLL_RATE_PER_MINUTE`` gets 429 ``enrollment_rate_limited``.
+    When the counter cannot be reached the route answers 503
+    ``enrollment_limit_unavailable``; the runner's next start tries again.
     A body that fails the body check gets 422 without any value the sender sent.
     """
     try:

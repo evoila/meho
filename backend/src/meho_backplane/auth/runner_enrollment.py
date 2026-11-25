@@ -39,7 +39,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
-from meho_backplane.auth.runner_enrollment_limits import take_refusal_slot
+from meho_backplane.auth.runner_enrollment_limits import give_back_refusal_slot, take_refusal_slot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
@@ -272,6 +272,17 @@ async def _claim_key(
     """
     row.enrolled_key_id = key_id
     row.updated_at = datetime.now(UTC)
+    return await _commit_started(session, row, code, key_id)
+
+
+async def _commit_started(
+    session: AsyncSession, row: RunnerPrincipal, code: str, key_id: str
+) -> RunnerPrincipal:
+    """Commit the row "enrollment started", then take the runner's lock again.
+
+    Keycloak is called only after this commit. When the row cannot be written,
+    nothing is saved and the runner can send the same code and key again.
+    """
     session.add(_started_audit_row(row, key_id))
     await session.commit()
     await take_runner_lock(session, row.id)
@@ -309,12 +320,23 @@ async def _audit_refusal(
 
     The row holds the runner's name, the answer's status, the reason and the
     id of the offered key. It never holds the code or the key. A runner gets
-    one row per reason and minute; the next row says how many the minute
-    before left out.
+    one row per reason and minute; the next row that is written says how many
+    refusals were left out since the row before. When the row cannot be written,
+    the slot and the count are given back.
     """
     left_out = await take_refusal_slot(row.id, reason)
     if left_out is None:
         return
+    try:
+        await _write_refusal(row, status_code, reason, public_jwk, left_out)
+    except BaseException:
+        await give_back_refusal_slot(row.id, reason, left_out)
+        raise
+
+
+async def _write_refusal(
+    row: RunnerPrincipal, status_code: int, reason: str, public_jwk: Any, left_out: int
+) -> None:
     payload: dict[str, Any] = {
         "runner": row.name,
         "reason": reason,
@@ -392,6 +414,10 @@ async def _enroll_matched(
         # same refusal as a wrong code, before the name is looked at.
         jwks, key_id = _claimed_key(row, public_jwk)
         _check_runner_name(row, runner_name)
+        if row.key_enrolled_at is None:
+            # A new attempt to store the key (the claim is older, or Keycloak
+            # failed before): it gets its own "started" row first.
+            row = await _commit_started(session, row, code, key_id)
     if row.enrolled_key_id != key_id:
         raise EnrollmentCodeInvalidError("code_used_by_another_key")
     repeated = row.key_enrolled_at is not None

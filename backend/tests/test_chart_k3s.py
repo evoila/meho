@@ -18,14 +18,15 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from tests.test_chart_image_registry import _CHART_DIR
-
-_VALUES_K3S = _CHART_DIR.parents[1] / "values-examples" / "values-k3s.yaml"
+_DEPLOY_DIR = Path(__file__).resolve().parents[2] / "deploy"
+_CHART_DIR = _DEPLOY_DIR / "charts" / "meho"
+_VALUES_K3S = _DEPLOY_DIR / "values-examples" / "values-k3s.yaml"
 _FROM_KUBE_SYSTEM = {
     "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}
 }
@@ -128,11 +129,10 @@ def test_values_k3s_turns_on_the_network_rules_of_keycloak_and_openbao() -> None
 
 
 def test_values_k3s_keeps_the_target_guard_on() -> None:
-    env = {
-        e["name"]: e
-        for e in _render()["Deployment/meho"]["spec"]["template"]["spec"]["containers"][0]["env"]
-    }
-    assert env.get("MEHO_TARGET_SSRF_ALLOWLIST", {}).get("value", "") == ""
+    # The chart writes the allowlist into the ConfigMap. Empty means MEHO
+    # refuses every private target address.
+    config = _render()["ConfigMap/meho-config"]["data"]
+    assert config["MEHO_TARGET_SSRF_ALLOWLIST"] == ""
 
 
 def test_values_k3s_names_the_console_secret_and_uses_the_default_storage_class() -> None:

@@ -161,6 +161,13 @@ Tenant rows and conventions change no approval or gate.
 - A person makes these two changes on the settings file page of the web
   console (`/ui/settings`). They have no REST route of their own. The
   403 reason and the preview warning name that page.
+- The person gives a reason (`loosening_refusal`), by the reason step of
+  turning approval off for an operation (`ui/reason.py`). A reason that is
+  empty or only blanks is no reason. Without one, the apply answers 403 with
+  a sentence that names the Reason field, and writes nothing, also not the
+  other parts of the file. The other direction needs no reason, and the page
+  asks for no fresh sign-in. A tenant admin makes these changes in their own
+  tenant, a platform admin in any tenant, both with a reason.
 
 - The apply locks the rows of the tenants in the file before it reads
   their policies, and holds the lock until its commit. A second import of
@@ -171,7 +178,7 @@ Tenant rows and conventions change no approval or gate.
   made, so the plan starts from the defaults. Right after the apply
   creates the row (or waits for another import that creates it), it locks
   the row, plans the file's policies again from what is stored, and runs
-  the console-only check again.
+  the console-only check and the reason check again.
 
 Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
 `tests/integration/test_settings_import_overlap_pg.py`.
@@ -435,16 +442,18 @@ nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 - `POST /ui/settings/preview`: runs `build_plan` and shows every mistake
   with its reason, the warnings (also next to the mistakes), a note for
   each change that only a person in the web console may make (the two
-  policies, and each target the file adds or changes), and every row of
-  the diff. Writes nothing. It calls `note_preview`, so it writes no
+  policies, with the note that they need a reason, and each target the file
+  adds or changes), and every row of the diff. The apply form has a Reason
+  field when the file makes one of the two policy changes. Writes nothing. It calls `note_preview`, so it writes no
   execution audit row.
 - `POST /ui/settings/apply`: runs `apply_import` and shows what really
   changed, the items in `failed`, and the revision id. The main message
-  says whether MEHO wrote all of the file, part of it, or nothing.
+  says whether MEHO wrote all of the file, part of it, or nothing. It shows
+  the reason. A reason longer than 1024 characters answers 422.
 
 The console operator has `web_session` true, so targets,
 `run_approval_target_kinds` turned on and `announce_gate_enabled` turned
-off apply here. The gate (`require_ui_settings_admin`) asks for a person
+off apply here, the two policy changes with a reason. The gate (`require_ui_settings_admin`) asks for a person
 first (403 `human_principal_required` for an agent, service or runner
 login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`).
 `build_plan` refuses a file that names another tenant for a
@@ -467,10 +476,13 @@ The row is the one the audit middleware would write: `legacy_request`, or
 `target_id` of a changed target, the `client` block of the login
 (`AUDIT_CLIENT_IDENTITY`) and the time since the request started. The
 middleware then writes no row of its own in either mode, and sends this
-id in the `Meho-Audit-Id` header. When the commit fails, MEHO rolls back,
-drops the revision id, the change summary and the failed count from the
-request's audit keys, and answers 500 with an error text: nothing is
-saved, and the middleware records the failed request. A refusal, a file
+id in the `Meho-Audit-Id` header. The row holds the reason under `reason`.
+When any step of the apply fails (a read, a write, the revision or the
+commit; a database error or any other error), MEHO rolls back and answers
+500 with an error text: nothing is saved. The middleware records the failed
+request in one row. That row names only the attempt: `op_id`,
+`settings_import`, `settings_file_sha256` and `settings_tenant_ids`, and no
+change of the file. A refusal, a file
 with mistakes and a file that changes nothing roll back. Tests: `tests/test_ui_settings_file.py`,
 `tests/test_ui_settings_file_js.py`.
 

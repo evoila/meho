@@ -9,10 +9,12 @@
   * else: the warnings, the changes that only a person in the web console
     may make (the two policies, and each target added or changed), every
     row of the diff, and the Apply form. The form sends the
-    same file bytes (``file_b64``) to ``/ui/settings/apply``.
+    same file bytes (``file_b64``) to ``/ui/settings/apply``, and the reason
+    when the file makes one of the two policy changes.
 
   Context (``_preview_context`` in ``ui/routes/settings.py``): ``mistakes``,
-  ``warnings``, ``console_only``, ``rows``, ``has_changes``, ``file_b64``.
+  ``warnings``, ``console_only``, ``reason_needed``, ``max_reason_chars``,
+  ``rows``, ``has_changes``, ``file_b64``.
 -#}
 <div class="card bg-base-100 border-base-300 border shadow-sm" data-settings-preview>
   <div class="card-body space-y-3">
@@ -57,9 +59,24 @@
           hx-target="#settings-result"
           hx-swap="innerHTML"
           hx-disabled-elt="find button[type=submit]"
-          class="flex justify-end"
+          class="flex flex-wrap items-end justify-end gap-3"
         >
           <input type="hidden" name="file_b64" value="{{ file_b64 }}" />
+          {% if reason_needed %}
+            <label class="form-control grow">
+              <span class="label-text">Reason</span>
+              <input
+                type="text"
+                name="reason"
+                maxlength="{{ max_reason_chars }}"
+                required
+                class="input input-bordered input-sm"
+                aria-label="Reason for the policy changes"
+                autocomplete="off"
+                data-settings-reason
+              />
+            </label>
+          {% endif %}
           <button type="submit" class="btn btn-sm btn-primary" data-action="settings-apply">
             Apply
           </button>

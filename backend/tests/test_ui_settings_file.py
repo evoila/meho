@@ -16,14 +16,17 @@
   or changes.
 * The result names a full, a partial and a failed apply.
 * The settings, the revision and the audit row of an apply commit
-  together; when the audit write fails, nothing is saved and the answer is
-  a 500 with an error text.
+  together; when any step of the apply fails, nothing is saved, the answer
+  is a 500 with an error text and the failure row names only the attempt.
+* Turning the gate off and turning target kinds on need a reason. It is in
+  the audit row of the apply. The other direction needs none.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import re
 import uuid
 from typing import Any
@@ -51,6 +54,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.instance_settings import service as settings_service
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.reason import MAX_REASON_CHARS
 from meho_backplane.ui.routes import settings as settings_routes
 from tests import test_ui_agent_grants
 from tests._oidc_jwt_helpers import mint_token
@@ -214,13 +218,14 @@ def _preview(client: Any, csrf: str, content: bytes) -> Any:
     )
 
 
-def _apply(client: Any, csrf: str, content: bytes) -> Any:
-    encoded = base64.b64encode(content).decode("ascii")
-    return client.post(
-        _APPLY,
-        files={"file_b64": (None, encoded)},
-        headers=_csrf_headers(csrf),
-    )
+_REASON = "Planned maintenance"
+
+
+def _apply(client: Any, csrf: str, content: bytes, reason: str | None = _REASON) -> Any:
+    files = {"file_b64": (None, base64.b64encode(content).decode("ascii"))}
+    if reason is not None:
+        files["reason"] = (None, reason)
+    return client.post(_APPLY, files=files, headers=_csrf_headers(csrf))
 
 
 def _apply_field(html: str) -> str:
@@ -246,7 +251,9 @@ def test_a_person_in_the_console_widens_both_policies_with_a_file() -> None:
 
         encoded = _apply_field(html)
         applied = client.post(
-            _APPLY, files={"file_b64": (None, encoded)}, headers=_csrf_headers(csrf)
+            _APPLY,
+            files={"file_b64": (None, encoded), "reason": (None, _REASON)},
+            headers=_csrf_headers(csrf),
         )
     finally:
         mock.stop()
@@ -677,3 +684,419 @@ def test_a_failed_audit_write_saves_nothing(
     ]
     assert changes == []
     assert "tenant_id" not in failure.payload
+
+
+_ATTEMPT_KEYS = {"op_id", "settings_import", "settings_file_sha256", "settings_tenant_ids"}
+#: What the audit middleware adds to every row of a request.
+_MIDDLEWARE_KEYS = {"op_class", "broadcast_detail_origin", "broadcast_detail_effective", "client"}
+
+
+def _assert_nothing_saved_and_only_the_attempt_recorded(applied: Any, text: str) -> None:
+    assert applied.status_code == 500, applied.text
+    assert "data-settings-refused" in applied.text
+    assert f"{text} Nothing is saved." in applied.text
+    assert "data-settings-result" not in applied.text
+    assert _state() == _UNCHANGED
+    (failure,) = _audit_rows("settings.import")
+    assert failure.status_code == 500
+    assert set(failure.payload) - _MIDDLEWARE_KEYS == _ATTEMPT_KEYS
+    assert failure.payload["settings_import"] is True
+    assert failure.payload["settings_file_sha256"] == hashlib.sha256(_LOOSEN).hexdigest()
+    assert failure.payload["settings_tenant_ids"] == [str(_TENANT_A)]
+
+
+_INTERNAL_ERROR = "MEHO could not apply this file because of an internal error."
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+@_CUTOVER
+def test_a_failed_revision_write_saves_nothing(
+    cutover: bool, request: pytest.FixtureRequest
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+
+    def _broken(*_args: Any) -> None:
+        raise OperationalError(
+            "INSERT INTO instance_settings_revision", {}, Exception("database is gone")
+        )
+
+    client, mock, csrf = _client()
+    event.listen(InstanceSettingsRevision, "before_insert", _broken)
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        event.remove(InstanceSettingsRevision, "before_insert", _broken)
+        mock.stop()
+
+    _assert_nothing_saved_and_only_the_attempt_recorded(applied, _INTERNAL_ERROR)
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+@_CUTOVER
+def test_a_commit_step_that_fails_without_a_database_error_saves_nothing(
+    cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+
+    async def _broken(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("no operator")
+
+    monkeypatch.setattr(settings_routes, "commit_with_request_audit_row", _broken)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        mock.stop()
+
+    _assert_nothing_saved_and_only_the_attempt_recorded(
+        applied, "MEHO could not write the audit record of this import."
+    )
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+@_CUTOVER
+def test_a_failed_read_at_the_start_of_the_apply_saves_nothing(
+    cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+
+    async def _broken(*_args: Any, **_kwargs: Any) -> None:
+        raise OperationalError("SELECT", {}, Exception("database is gone"))
+
+    monkeypatch.setattr(settings_service, "_load_state", _broken)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        mock.stop()
+
+    _assert_nothing_saved_and_only_the_attempt_recorded(applied, _INTERNAL_ERROR)
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+@pytest.mark.parametrize("broken", ["rollback", "attempted_tenant_ids"])
+def test_a_failed_cleanup_step_still_answers_with_the_error_text(
+    broken: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tenants()
+
+    async def _broken(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(settings_routes, "commit_with_request_audit_row", _broken)
+    if broken == "rollback":
+        monkeypatch.setattr(settings_routes.AsyncSession, "rollback", _broken)
+    else:
+        monkeypatch.setattr(settings_routes, "attempted_tenant_ids", _broken)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 500, applied.text
+    assert "data-settings-refused" in applied.text
+    assert _state() == _UNCHANGED
+    (failure,) = _audit_rows("settings.import")
+    assert set(failure.payload) - _MIDDLEWARE_KEYS <= _ATTEMPT_KEYS
+    assert "settings_file_sha256" in failure.payload
+
+
+def _set_policies(*, gate: bool, kinds: bool) -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            tenant = await session.get(Tenant, _TENANT_A)
+            assert tenant is not None
+            tenant.announce_gate_enabled = gate
+            tenant.run_approval_target_kinds_enabled = kinds
+
+    asyncio.run(_do())
+
+
+_RULE = {"slug": "rule-001", "title": "Rule", "body": "Nights only.", "kind": "reference"}
+
+#: File policies that loosen, with the paths that need the reason.
+_LOOSENING = [
+    pytest.param({"announce_gate_enabled": False}, [_GATE], id="gate-off"),
+    pytest.param(None, [_GATE], id="policies-null"),
+    pytest.param({"run_approval_target_kinds": True}, [_KINDS], id="target-kinds-on"),
+    pytest.param(
+        {"announce_gate_enabled": False, "run_approval_target_kinds": True},
+        [_KINDS, _GATE],
+        id="both",
+    ),
+]
+_NO_REASON = pytest.mark.parametrize(
+    "reason", [None, "", " \t\n "], ids=["none", "empty", "blanks"]
+)
+
+
+def _assert_refused_for_reason(applied: Any, paths: list[str]) -> None:
+    assert applied.status_code == 403, applied.text
+    assert "data-settings-refused" in applied.text
+    assert "needs a reason. Show the preview again and fill in the Reason field." in applied.text
+    for path in paths:
+        assert f"`{path}`" in applied.text
+    rows = _audit_rows("settings.import")
+    assert [row.status_code for row in rows] == [403]
+    assert not any(key.endswith(("_before", "_after", "_changed")) for key in rows[0].payload)
+    assert "reason" not in rows[0].payload
+
+
+@_NO_REASON
+@pytest.mark.parametrize(("policies", "paths"), _LOOSENING)
+def test_a_loosening_change_without_a_reason_is_refused_and_writes_nothing(
+    policies: dict[str, Any] | None, paths: list[str], reason: str | None
+) -> None:
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _file(policies, conventions=[_RULE]), reason)
+    finally:
+        mock.stop()
+
+    _assert_refused_for_reason(applied, paths)
+    assert _state() == _UNCHANGED
+
+
+@_CUTOVER
+@pytest.mark.parametrize(("policies", "paths"), _LOOSENING)
+def test_a_loosening_change_with_a_reason_is_written_with_the_reason(
+    policies: dict[str, Any] | None,
+    paths: list[str],
+    cutover: bool,
+    request: pytest.FixtureRequest,
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _file(policies), f"  {_REASON} \n")
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "MEHO applied the file." in applied.text
+    assert _state() == (_GATE not in paths, _KINDS in paths, 0, 1)
+    (row,) = _audit_rows("settings.import")
+    (revision,) = asyncio.run(_all(InstanceSettingsRevision))
+    assert row.status_code == 200
+    assert row.payload["reason"] == _REASON
+    assert revision.audit_id == row.id
+
+
+@_NO_REASON
+def test_the_other_direction_needs_no_reason(reason: str | None) -> None:
+    _seed_tenants()
+    _set_policies(gate=False, kinds=True)
+    content = _file({"announce_gate_enabled": True, "run_approval_target_kinds": False})
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, content, reason)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "MEHO applied the file." in applied.text
+    assert "data-settings-applied-reason" not in applied.text
+    assert _state() == (True, False, 0, 1)
+    (row,) = _audit_rows("settings.import")
+    assert "reason" not in row.payload
+
+
+def test_a_file_with_both_directions_needs_a_reason_as_a_whole() -> None:
+    _seed_tenants()
+    _set_policies(gate=False, kinds=False)
+    content = _file({"announce_gate_enabled": True, "run_approval_target_kinds": True})
+    client, mock, csrf = _client()
+    try:
+        refused = _apply(client, csrf, content, None)
+        _assert_refused_for_reason(refused, [_KINDS])
+        assert _GATE not in refused.text
+        assert _state() == (False, False, 0, 0)
+        applied = _apply(client, csrf, content)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert _state() == (True, True, 0, 1)
+
+
+def test_a_tenant_admin_needs_a_reason_in_their_own_tenant() -> None:
+    _seed_tenants()
+    content = _file({"announce_gate_enabled": False})
+    client, mock, csrf = _client(platform_admin=False)
+    try:
+        _assert_refused_for_reason(_apply(client, csrf, content, None), [_GATE])
+        assert _state() == _UNCHANGED
+        applied = _apply(client, csrf, content)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert _state() == (False, False, 0, 1)
+
+
+@pytest.mark.parametrize("reason", [None, _REASON], ids=["no-reason", "reason"])
+def test_a_reason_does_not_open_another_tenant_to_a_tenant_admin(reason: str | None) -> None:
+    _seed_tenants()
+    other = _file({"announce_gate_enabled": False}, tenant_id=_TENANT_B)
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, other, reason)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 403, applied.text
+    assert "a tenant_admin may import a file for their own tenant only" in applied.text
+    assert _state(_TENANT_B) == _UNCHANGED
+
+
+def test_a_platform_admin_needs_a_reason_for_another_tenant() -> None:
+    _seed_tenants()
+    other = _file({"announce_gate_enabled": False}, tenant_id=_TENANT_B)
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        _assert_refused_for_reason(_apply(client, csrf, other, None), [_GATE])
+        assert _state(_TENANT_B) == _UNCHANGED
+        applied = _apply(client, csrf, other)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert _state(_TENANT_B) == (False, False, 0, 1)
+    (row,) = [r for r in _audit_rows("settings.import") if r.status_code == 200]
+    assert row.payload["reason"] == _REASON
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+def test_a_new_tenant_planned_again_under_the_lock_needs_a_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row of a new tenant appears while the apply runs, with the gate on."""
+    _seed_tenants()
+    new_id = uuid.uuid4()
+
+    async def _create(tenant_id: uuid.UUID, session: Any) -> None:
+        session.add(Tenant(id=tenant_id, slug="tenant-new", name="New", announce_gate_enabled=True))
+        await session.flush()
+
+    monkeypatch.setattr(settings_service, "ensure_tenant", _create)
+    content = _file(
+        {"announce_gate_enabled": False, "mail_recipient_allowlist": "a@example.com"},
+        tenant_id=new_id,
+    )
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        _assert_refused_for_reason(_apply(client, csrf, content, None), [_GATE])
+        assert new_id not in {tenant.id for tenant in asyncio.run(_all(Tenant))}
+        assert asyncio.run(_all(InstanceSettingsRevision)) == []
+        applied = _apply(client, csrf, content)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert _state(new_id) == (False, False, 0, 1)
+
+
+def test_a_file_without_a_loosening_change_needs_no_reason() -> None:
+    _seed_tenants()
+    content = _file(_KEEP, conventions=[_RULE])
+    client, mock, csrf = _client()
+    try:
+        preview = _preview(client, csrf, content)
+        applied = _apply(client, csrf, content, None)
+    finally:
+        mock.stop()
+
+    assert 'data-action="settings-apply"' in preview.text
+    assert 'name="reason"' not in preview.text
+    assert "needs a reason" not in preview.text
+    assert applied.status_code == 200, applied.text
+    assert _state() == (True, False, 1, 1)
+
+
+@pytest.mark.parametrize(("policies", "paths"), _LOOSENING)
+def test_the_preview_shows_which_changes_need_a_reason(
+    policies: dict[str, Any] | None, paths: list[str]
+) -> None:
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        preview = _preview(client, csrf, _file(policies, conventions=[_RULE]))
+    finally:
+        mock.stop()
+
+    assert preview.status_code == 200, preview.text
+    notes = re.findall(
+        r"<div[^>]*data-settings-console-only>\s*<span>(.*?)</span>", preview.text, re.S
+    )
+    assert len(notes) == len(paths)
+    for path, note in zip(paths, notes, strict=True):
+        assert note.startswith(f"`{path}` ")
+        assert note.endswith("It needs a reason: fill in the Reason field.")
+    form = preview.text[preview.text.index("settings-apply-form") :]
+    assert 'name="reason"' in form
+    assert _state() == _UNCHANGED
+
+
+def test_the_result_shows_the_reason_escaped() -> None:
+    _seed_tenants()
+    tag = "b"
+    reason = f"<{tag}>window</{tag}>"
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN, reason)
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    assert "Reason: &lt;b&gt;window&lt;/b&gt;" in applied.text
+    assert reason not in applied.text
+    (row,) = _audit_rows("settings.import")
+    assert row.payload["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("length", "status_code"),
+    [(MAX_REASON_CHARS, 200), (MAX_REASON_CHARS + 1, 422)],
+    ids=["longest", "too-long"],
+)
+def test_the_reason_has_a_length_limit(length: int, status_code: int) -> None:
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _LOOSEN, f" {'x' * length} ")
+    finally:
+        mock.stop()
+
+    assert applied.status_code == status_code, applied.text
+    if status_code == 200:
+        assert _state() == (False, True, 0, 1)
+    else:
+        assert "The reason may have at most 1024 characters." in applied.text
+        assert _state() == _UNCHANGED
+
+
+def test_a_file_in_the_reason_field_is_no_reason() -> None:
+    _seed_tenants()
+    encoded = base64.b64encode(_LOOSEN).decode("ascii")
+    client, mock, csrf = _client()
+    try:
+        applied = client.post(
+            _APPLY,
+            files={"file_b64": (None, encoded), "reason": ("r.txt", b"text", "text/plain")},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    _assert_refused_for_reason(applied, [_KINDS, _GATE])
+    assert _state() == _UNCHANGED

@@ -26964,6 +26964,11 @@
                   "file_b64": {
                     "type": "string",
                     "description": "The same file bytes as base64 (the Apply form of the preview)."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "description": "Why you make the change. Needed when the file turns announce_gate_enabled off or run_approval_target_kinds on."
                   }
                 },
                 "type": "object"

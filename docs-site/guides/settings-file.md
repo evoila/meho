@@ -131,7 +131,8 @@ Two policies decide how far an approval reaches or whether a gate runs:
 - `announce_gate_enabled: false` turns the announce gate off.
 
 These two changes apply only for a person in the web console: apply the
-file on the **Settings file** page (`/ui/settings`). When you send such a
+file on the **Settings file** page (`/ui/settings`) and give a reason.
+When you send such a
 file with a token (the CLI, a script or an AI tool), MEHO answers `403`,
 names each policy, and saves
 nothing from the file, also not its other parts. This includes
@@ -140,7 +141,7 @@ nothing from the file, also not its other parts. This includes
 - The preview works with a token. It shows the change in `diff` and
   names it in `warnings`.
 - The other direction (`run_approval_target_kinds: false`,
-  `announce_gate_enabled: true`) applies with a token.
+  `announce_gate_enabled: true`) applies with a token. It needs no reason.
 - A value that is the same as the stored one is no change.
 - The other policies apply with a token.
 
@@ -264,7 +265,12 @@ token: targets, `run_approval_target_kinds: true` and
 3. Read the preview. A change that MEHO accepts only from a person in
    the web console has its own note: the two policies, and each target
    that the file adds or changes. Warnings show also next to mistakes.
-4. Click **Apply**. MEHO checks the file again and saves it. The answer
+4. When the file turns the announce gate off (also with `policies: null`)
+   or turns `run_approval_target_kinds` on, fill in the **Reason** field
+   (at most 1024 characters). MEHO keeps the reason in the audit row.
+   Without a reason, or with only blanks, MEHO refuses the file and saves
+   nothing from it. Other changes need no reason.
+5. Click **Apply**. MEHO checks the file again and saves it. The answer
    shows what really changed, and the id of the new entry in the
    history.
 
@@ -277,9 +283,9 @@ Who may use the page:
   `human_principal_required`, and any other role gets
   `insufficient_role`.
 
-MEHO saves the changes of an apply and its audit row together. When MEHO
-cannot write the audit row, it saves nothing, and the page shows an
-error, not the result. When MEHO refuses the file (for example a file
+MEHO saves the changes of an apply and its audit row together. When any
+step of the apply fails, MEHO saves nothing, and the page shows an error,
+not the result. The audit log then names only the attempt. When MEHO refuses the file (for example a file
 for another tenant), the page shows the reason, and the audit log keeps
 the refusal.
 

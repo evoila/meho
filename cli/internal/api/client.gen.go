@@ -14971,6 +14971,9 @@ type UiSettingsApplyUiSettingsApplyPostMultipartBody struct {
 
 	// FileB64 The same file bytes as base64 (the Apply form of the preview).
 	FileB64 *string `json:"file_b64,omitempty"`
+
+	// Reason Why you make the change. Needed when the file turns announce_gate_enabled off or run_approval_target_kinds on.
+	Reason *string `json:"reason,omitempty"`
 }
 
 // UiSettingsPreviewUiSettingsPreviewPostMultipartBody defines parameters for UiSettingsPreviewUiSettingsPreviewPost.

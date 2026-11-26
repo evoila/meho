@@ -41195,7 +41195,7 @@
             "type": "object",
             "nullable": true,
             "title": "Policy Rule",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
+            "description": "Only with POLICY_ENGINE_SHADOW or CUSTOM_POLICY on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
           },
           "approvers": {
             "items": {
@@ -41204,7 +41204,7 @@
             "type": "array",
             "nullable": true,
             "title": "Approvers",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
+            "description": "Only with POLICY_ENGINE_SHADOW or CUSTOM_POLICY on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
           },
           "proposed_effect": {
             "additionalProperties": true,

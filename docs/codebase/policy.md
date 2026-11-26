@@ -10,8 +10,9 @@ is **not** a section of the settings file
 ([settings.md](settings.md)): the settings import adds and updates but
 never deletes, and a policy import must be able to remove a right.
 
-Everything here is behind the switch `POLICY_CLASSIFICATION` (off by
-default). With the switch off, the import is refused with one sentence.
+Everything here is behind the switch `POLICY_CLASSIFICATION` or the
+switch `CUSTOM_POLICY` (both off by default). With both off, the import is
+refused with one sentence.
 Validate, diff, export and history still work: they only read.
 
 ## The switches

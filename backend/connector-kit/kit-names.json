@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.6",
+  "kit_version": "1.7",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -375,6 +375,8 @@
         "tags: list[str] | None = None",
         "safety_level: Literal['safe', 'caution', 'dangerous', 'destructive'] = 'safe'",
         "requires_approval: bool = False",
+        "hard_to_undo: Literal['deletes', 'stops', 'overwrites'] | None = None",
+        "changes_rights: bool = False",
         "llm_instructions: dict[str, Any] | None = None",
         "custom_description: str | None = None",
         "session: AsyncSession | None = None",

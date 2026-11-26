@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.6**.
+The kit version this page describes: **1.7**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -212,6 +212,16 @@ The inputs of `register_typed_operation`:
   `destructive`. Every operation that is not `safe` must set
   `requires_approval=True`: MEHO then waits until a person approves the
   call.
+- **What a call does that is hard to undo** (kit 1.7 or higher):
+  - `hard_to_undo` is `"deletes"`, `"stops"` or `"overwrites"` when a
+    call can delete, stop or overwrite something, and no later call of
+    your connector brings it back. Leave it out (`None`) otherwise. MEHO
+    refuses it on a `safe` operation, and refuses any other word.
+  - `changes_rights=True` when a call gives or takes rights, a login or
+    an access policy in the target system. The default is `False`.
+
+  MEHO stores both on the operation. Set them from what the call does,
+  not from its name.
 - **Texts for agents:** `summary`, `description`, `group_key`,
   `when_to_use` and `llm_instructions`. An agent picks your operation
   from these texts, so write them with care.
@@ -384,10 +394,17 @@ The steps are in
 
 The kit version has two numbers:
 
-- the **first** number goes up when a name is removed or its inputs
-  change. Your package may break. Read the notes and change your code;
-- the **second** number goes up when names are only added, or a name is
-  marked as old. Your package keeps working.
+- the **first** number goes up when a name is removed, or its inputs
+  change in a way that can break a package: a new input that can be given
+  by its place, a new input with no default, a changed default, type or
+  meaning of an input that exists, a new input on a function with a `**`
+  input, or any other change of the name (for example its answer type).
+  Your package may break. Read the notes and change your code;
+- the **second** number goes up when names are only added, a name is
+  marked as old, or a function only gets new inputs that are given only by
+  name (after the `*` or after a `*args` input) and have a default. A
+  function with no such input before may get the `*` together with the
+  new inputs. Your package keeps working.
 
 When the kit changed, the MEHO release notes
 ([CHANGELOG](https://github.com/evoila/meho/blob/main/CHANGELOG.md)) have

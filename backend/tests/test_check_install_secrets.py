@@ -27,13 +27,14 @@ _spec.loader.exec_module(cis)
 
 # The header name is split, so a secret scanner does not read the test as a leak.
 _AUTH = "Authorization" + ":"
+_VALUE = "stand-in" + "-value"
 
 # Each command of the old install guide and notes that held a secret.
 _BAD_COMMANDS = [
     "kubectl create secret generic meho-postgres -n meho \\\n"
     "  --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'",
     "kubectl create secret generic meho-postgres-app -n meho \\\n"
-    "  --from-literal=url='postgresql+asyncpg://meho_app:stand-in-value@<host>:5432/meho'",
+    "  --from-literal=url='postgresql+asyncpg://meho_app:" + _VALUE + "@<host>:5432/meho'",
     "kubectl create secret generic keycloak-db-admin \\\n"
     "  --from-literal=username=<admin-user> \\\n"
     "  --from-literal=password=<admin-password>",
@@ -54,7 +55,7 @@ _BAD_COMMANDS = [
     "some-tool --client-secret=stand-in-value",
     "some-tool --password=stand-in-value",
     "some-tool --from-literal=api-key=stand-in-value",
-    "some-tool --from-literal=url=postgresql://user:stand-in-value@host/db",
+    "some-tool --from-literal=url=postgresql://user:" + _VALUE + "@host/db",
 ]
 
 # The new forms: a secret comes from a file or from standard input.

@@ -2265,6 +2265,26 @@ shape (deterministic file-level matrix + fan-in):
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
   `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
   render tests really run there and fail, not skip, if helm is missing.
+  In the same way, every shard installs node 22 (step "Install Node", the
+  same pinned `actions/setup-node` as `plugin-test.yml`) and sets
+  `MEHO_REQUIRE_NODE=1`, so the console script tests (they run the
+  JavaScript in node) fail, not skip, if node is missing.
+- **Skip limit check.** A skipped test shows as green. So after pytest,
+  each unit shard and each integration shard runs the step "Check the
+  skipped tests of this shard":
+  `uv run python tests/_skip_limit_check.py --lane unit pytest-unit-shard.xml`
+  (`--lane integration pytest-integration-shard.xml` in the integration
+  shards). It counts the skipped tests (xfail too) per test file in the
+  shard's JUnit file. `backend/tests/_skip_limits.json` holds one allowed
+  number per test file and lane. A file that is not in it may skip 0
+  tests. The step fails when a file skips more than its number. A pull
+  request that adds a skip raises the number in the same pull request.
+  A file that skips fewer tests gives only a notice to lower the number,
+  because some k3s skips depend on how fast pods start. The step also
+  fails when the JUnit file or the count file is missing or broken, and
+  when the count file names a test file that is not in the repo. The
+  count is per test file, not per shard, so it holds for any shard split
+  and for the short runs (one connector, test map).
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
@@ -2450,7 +2470,8 @@ runs one short job instead.
   `python-outside-backend` runs exactly these test files. The list lives in
   `backend/tests/_outside_backend_tests.py`; the job reads it with
   `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
-  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+  runner with Helm and node installed, `MEHO_REQUIRE_HELM=1` and
+  `MEHO_REQUIRE_NODE=1`.
 - **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
   scans the unit test files (everything under `backend/tests/` except
   `integration/` and `migrations/`). A file reads outside `backend/` when it

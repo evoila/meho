@@ -1021,6 +1021,17 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Install Node
+        # The console script tests (tests/test_ui_*_js.py, test_ui_pwa.py,
+        # test_web_push_service_worker.py and others) run the JavaScript in
+        # node. MEHO_REQUIRE_NODE=1 in the pytest step makes them FAIL, not
+        # skip, when node is missing. Same pinned action and node version as
+        # plugin-test.yml. No package cache: the repo root has no package.json.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
       - name: Name the PHP package cache
         # The key holds the OS release and the CPU type, because the cached
         # package files fit only that. Bump the -v1 at the end to drop a
@@ -1268,6 +1279,8 @@ jobs:
           # Same for the linux.script.run locale test and the Install the
           # GBK locale data step above.
           MEHO_REQUIRE_GBK_LOCALE: "1"
+          # Same for the console script tests and the Install Node step above.
+          MEHO_REQUIRE_NODE: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the
@@ -1428,6 +1441,15 @@ jobs:
             exit 1
           fi
 
+      - name: Check the skipped tests of this shard
+        # A skipped test shows as green. This step fails when a test file
+        # skipped more tests than tests/_skip_limits.json allows for it (0
+        # when it is not listed). A file that skipped fewer gives a notice
+        # to lower its number. The count is per test file, so it holds for
+        # any split and for the short runs. See tests/_skip_limit_check.py.
+        shell: bash
+        run: uv run python tests/_skip_limit_check.py --lane unit pytest-unit-shard.xml
+
       - name: Upload per-test times (input for the shard split)
         # #4809: tests/_unit_shard_split.py balances the shards with the
         # seconds in tests/_unit_shard_durations.json. Refresh that file
@@ -1553,10 +1575,20 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Install Node
+        # tests/test_ci_repo_secrets.py runs a script in node. Same pin as
+        # the unit shards; MEHO_REQUIRE_NODE=1 below makes those tests fail,
+        # not skip, when node is missing.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
       - name: Pytest (tests that read files outside backend)
         shell: bash
         env:
           MEHO_REQUIRE_HELM: "1"
+          MEHO_REQUIRE_NODE: "1"
         run: |
           set -euo pipefail
           mapfile -t FILES < <(uv run python tests/_outside_backend_tests.py)
@@ -3036,6 +3068,13 @@ jobs:
           if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
             kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
           fi
+
+      - name: Check the skipped tests of this shard
+        # Same check as in python-unit-shard, with the integration numbers
+        # of tests/_skip_limits.json. Some k3s skips depend on how fast pods
+        # start, so a file that skipped fewer tests gives only a notice.
+        shell: bash
+        run: uv run python tests/_skip_limit_check.py --lane integration pytest-integration-shard.xml
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these

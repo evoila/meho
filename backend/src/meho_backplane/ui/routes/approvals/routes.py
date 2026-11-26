@@ -1159,8 +1159,8 @@ async def _decide(
             error_hint=WEB_APPROVAL_HINT if approve_refused else None,
         )
 
-    # Approve starts the parked op in the background (the committed approval
-    # is the authorization) and answers within a second, however long the
+    # Approve starts the parked op in the background (the approval is not
+    # asked for again) and answers within a second, however long the
     # op runs (#5110). Reject runs nothing. The card asks again until the
     # run ends.
     run: dict[str, object] | None = None

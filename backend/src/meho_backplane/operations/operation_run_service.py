@@ -240,7 +240,7 @@ class OperationRunService:
         promptly with the handle instead of blocking for the resumed op's
         full duration. The resumed dispatch runs through the shared
         :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`
-        (same policy bypass, same exactly-one-resumer claim, same audit) so
+        (same approved-run checks, same exactly-one-resumer claim, same audit) so
         the async path preserves every guarantee the inline path has.
 
         *request* is a (detached) row; ``expire_on_commit=False`` on the

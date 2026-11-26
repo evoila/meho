@@ -1123,11 +1123,19 @@ model, or resume endpoint):
    or per-tenant override may surface the credential on the feed. See
    `docs/codebase/broadcast.md`.
 
-The `_approved=True` re-dispatch gate-bypass (the resume authorization)
-is unchanged in mechanism but now matters for humans too: with humans
-routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
-the call instead of executing it, so the bypass is what lets the
-approved op run.
+**An approved request is checked again when it runs.** The
+`_approved=True` re-dispatch does not ask for the approval again.
+This matters for humans too: with humans routed to `NEEDS_APPROVAL`, the
+full gate on resume would make the call wait again instead of running it.
+The run still checks what can change while the call waits
+(`operations/approved_run_rights.py`): the grants of an agent that asked,
+a revoked agent login (also the acting agent of a hosted agent run), a
+blocked login, and the risk level. An approved step of a multi-step
+operation gets the same checks before it clears. When a person runs an
+approved call from an approvals surface, the call runs as that person.
+MEHO does not read the role of the login that asked again then, because
+it has no newer token of that login. A role lowered while the request
+waits counts at a re-run. To stop a login at once, block it.
 
 ## The approval groups and how a person approves (#3325)
 
@@ -2506,6 +2514,9 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
+| The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -2532,11 +2543,21 @@ old `rerun_count`, so its claim does not match and it must read the
 request again. While the re-run runs, `result_state` reads `started`.
 
 **Who runs it.** The run uses the requester's identity, like the agent's
-own resume after approval. The approval is the authorization
-(`dispatch(..., _approved=True)`), through the same
-`_dispatch_resume_with_bound_context` the approve paths use. So the work
-reference, the session link and the result-handle owner are bound the same
-way.
+own resume after approval (`dispatch(..., _approved=True)`), through the
+same `_dispatch_resume_with_bound_context` the approve paths use. So the
+work reference, the session link and the result-handle owner are bound the
+same way. A request made inside a hosted agent run binds that acting agent
+again. The approval is not asked for again. The re-run checks what the
+first run checks (the grants of an agent that asked, a revoked agent
+login, a blocked login and the risk level), and also the caller's role
+and grants from the caller's token now: it needs the `operator` role, the
+same role as the call route (else 403 `insufficient_role`), and a call
+that a new call of the caller would refuse is refused
+(`operations/approved_run_rights.py`, see `agent-permission-model.md`).
+This is checked before the claim, so a refused re-run does not change the
+request. A refused request stays approved and can run again later, when
+the rights allow it. The dispatcher checks the same rules again when the
+run starts.
 
 **Result.** The new result replaces `resume_result`, so `/result`,
 `result_state` and `resume_outcome` show the latest attempt. When the run
@@ -2550,7 +2571,13 @@ parent: the request row), in the same transaction as the claim:
 first re-run is attempt 2. The run's own row also carries
 `approval_rerun_attempt` next to `approval_request_id`. A refused re-run
 writes an `approval.rerun` row with `result_status` `refused`, the reason
-in `refusal`, and `status_code` `409` or `422`.
+code in `refusal`, and `status_code` `403`, `409` or `422`. A refusal of
+the rights check also carries the full text in `reason`. A re-run refused
+to a caller who did not make the request (`insufficient_role` or
+`not_request_owner`) writes a row with the caller as `operator_sub` and
+`principal_sub`, the request id, and `requester_sub` set to `null`. It
+has no other field of the request, so no audit view shows the caller as
+the requester.
 
 **Response.** `RerunResponseBody`: `approval_request_id`, `attempt`,
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.
@@ -4088,7 +4115,9 @@ shown). At approve time `_load_pending_for_approval` re-verifies it
 raises `PreviewBindingMissingError` → HTTP 422 on every approve surface
 (REST `/approve`, `/decide`, the console). This extends the existing
 `params_hash` swap-defence to the preview binding. The resume path
-(`dispatch(..., _approved=True)`) skips the policy gate. Right before the
+(`dispatch(..., _approved=True)`) does not ask for the approval again. It
+checks the risk level again: a raise to `destructive` refuses the run, so
+a `destructive` run never starts with no preview. Right before the
 run, every resume path builds the preview again and compares its hash
 (`refuse_resume_if_preview_changed`, see
 [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
@@ -5434,7 +5463,9 @@ result row, or a self-approval), so every reader finds the requester in
 `requester_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
 (the audit REST API, `meho audit query` / `show` / `replay`, the MCP audit
 tools and the session replay) and the console's audit row drawer
-(`ui/routes/audit/routes.py:_build_drawer_context`).
+(`ui/routes/audit/routes.py:_build_drawer_context`). A row with a
+`requester_sub` key is never read as the older form, also when its value
+is `null`.
 
 ### Session-replay lineage (#2086)
 
@@ -6202,4 +6233,4 @@ repository, no operation made from an API file at run time.
 - `backend/src/meho_backplane/api/v1/approvals.py::get_approval_result` — `GET /api/v1/approvals/{id}/result` (#3209).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): reads the stored row until it is decided + re-dispatch on approval.
-- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).
+- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the re-dispatch entry point of the agent's own wait; the dispatcher checks the agent's rights again).

@@ -660,6 +660,7 @@ async def _redispatch_approved(
     from meho_backplane.auth.principal_block import checking_logins_for_steps
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
+    from meho_backplane.operations.approved_run_rights import bind_approved_run
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     parent_token = parent_audit_id_var.set(request.request_audit_id)
@@ -667,6 +668,8 @@ async def _redispatch_approved(
         with (
             # Each step of the run also checks the person who asked.
             checking_logins_for_steps(request.principal_sub, request.tenant_id),
+            # The rights of who asked are checked again for the run.
+            bind_approved_run(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

@@ -3992,6 +3992,15 @@ async def test_park_without_builder_uses_identifier_default(
             "safety_level": "safe",
             "preview_populated": False,
             "preview_reason": "connector_did_not_populate",
+            "permission_preflight": {
+                "requester": {
+                    "sub": "op-test",
+                    "principal_kind": "agent",
+                    "client_id": None,
+                    "tenant_role": "operator",
+                    "act": None,
+                }
+            },
         }
         assert "preview" not in row.proposed_effect
 
@@ -4045,6 +4054,15 @@ async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
             "safety_level": "dangerous",
             "preview_populated": False,
             "preview_failed": True,
+            "permission_preflight": {
+                "requester": {
+                    "sub": "op-test",
+                    "principal_kind": "agent",
+                    "client_id": None,
+                    "tenant_role": "operator",
+                    "act": None,
+                }
+            },
         }
 
 

@@ -24,7 +24,7 @@ An approved call runs in one of two ways:
 So the result is the same whichever path runs the call. The agent login's
 grant name and role come from the record the park stores on the approval
 card (:func:`requester_record`). A card with no record (a request made
-while the switch was ``off``) cannot be checked. When the operation has
+before MEHO stored it) cannot be checked. When the operation has
 steps to check, the run is refused, and the agent must ask again. A call
 with no steps to check runs as before.
 
@@ -63,11 +63,12 @@ __all__ = ["approved_step_refusal", "requester_record"]
 def requester_record(operator: Operator) -> dict[str, Any] | None:
     """The requester record a park stores for an agent's call, else ``None``.
 
-    Only when an agent makes the call and ``AGENT_GRANT_REQUIRED`` is not
-    ``off``. An approvals surface rebuilds the agent from it to check the
-    steps again (:func:`approved_step_refusal`).
+    Only when an agent makes the call, whatever ``AGENT_GRANT_REQUIRED`` is.
+    An approvals surface rebuilds the agent from it to check the steps again
+    (:func:`approved_step_refusal`) and to check the agent's rights for the
+    call (:mod:`~meho_backplane.operations.approved_run_rights`).
     """
-    if get_settings().agent_grant_required == "off" or not agent_acts(operator):
+    if not agent_acts(operator):
         return None
     return requester_subject(operator)
 

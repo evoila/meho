@@ -2037,9 +2037,9 @@ async def call_operation_with_approval(
     :func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`
     after the broadcast feed reported ``approval.approved`` for an in-flight
     agent run's pending request. Same body as :func:`call_operation` but
-    threads ``_approved=True`` into the dispatcher, which skips the policy
-    gate — the durable approval-decision row is the authorization the gate
-    bypass relies on.
+    threads ``_approved=True`` into the dispatcher, which does not ask for
+    the approval again. It still checks the agent's rights as for a new call
+    made now (:mod:`~meho_backplane.operations.approved_run_rights`).
 
     Not part of the public MCP / REST surface: only the agent layer calls
     this. The operator surfaces (REST ``/approve`` + ``/decide``, MCP by-id

@@ -101,11 +101,12 @@ from meho_backplane.auth.approval_sign_in import (
     fresh_sign_in_required,
 )
 from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
-from meho_backplane.auth.operator import Operator, is_human_principal
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import (
     require_approvals_access,
     require_fresh_approval_sign_in,
     require_human_principal,
+    require_role,
 )
 from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
@@ -174,6 +175,7 @@ from meho_backplane.operations.approval_rerun import (
     RerunNeedsNewApprovalError,
     RerunNotAllowedError,
     RerunParamsRequiredError,
+    RerunRightsRefusedError,
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
@@ -226,6 +228,9 @@ _require_human = Depends(require_human_principal)
 #: come from a fresh approval sign-in, else ``401`` with the RFC 9470
 #: challenge. Reject keeps the human gate alone.
 _require_fresh_sign_in = Depends(require_fresh_approval_sign_in)
+
+#: The re-run needs the role of a new call (``POST /api/v1/operations/call``).
+_require_operator = Depends(require_role(TenantRole.OPERATOR))
 
 #: Decision ``reason`` length bound, the same value the console form uses.
 _MAX_REASON_LENGTH = MAX_REASON_LENGTH
@@ -1745,7 +1750,7 @@ class RerunResponseBody(BaseModel):
 async def rerun_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: RerunRequestBody,
-    operator: Operator = Depends(verify_jwt_and_bind),
+    operator: Operator = _require_operator,
 ) -> RerunResponseBody:
     """Run an approved request again after its run failed (#5417).
 
@@ -1755,13 +1760,18 @@ async def rerun_approval_request(
     changed: same params, same target, same preview, same work reference
     (the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not
     passed, and MEHO was not updated since the request was made. Otherwise
-    the re-run is refused and the requester asks again. Each re-run, and each
-    refused re-run, writes an ``approval.rerun`` audit row.
+    the re-run is refused and the requester asks again. The caller's role
+    and grants are checked as for a new call made now: the route needs the
+    ``operator`` role, and a call that a new call would refuse is refused.
+    Each re-run, and each refused re-run, writes an ``approval.rerun``
+    audit row.
 
     HTTP status codes:
 
     * 200 — the request ran again. ``dispatch_status`` is the run's status.
-    * 403 — the caller did not make the request.
+    * 403 — the caller did not make the request, the caller's role is too
+      low (``insufficient_role``), or a new call of the caller made now
+      would be refused (``approval_rerun_refused``).
     * 404 — request not found (or belongs to another tenant).
     * 409 — the last run did not fail, another re-run is running, or
       something changed and a new approval is needed.
@@ -1795,6 +1805,11 @@ async def rerun_approval_request(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_rerun_needs_new_approval: {exc}",
+        ) from exc
+    except RerunRightsRefusedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"approval_rerun_refused: {exc}",
         ) from exc
     except RerunParamsRequiredError as exc:
         raise HTTPException(

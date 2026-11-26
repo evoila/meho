@@ -178,6 +178,17 @@ async def _resume(request_id: uuid.UUID, operator: Operator, actor: str | None =
             return await resume_dispatch_after_approval(operator=operator, request=request)
 
 
+async def _drop_the_record(request_id: uuid.UUID) -> None:
+    """Take the agent's record off the card, as on a card MEHO made without it."""
+    async with get_sessionmaker()() as session:
+        request = await session.get(ApprovalRequest, request_id)
+        assert request is not None
+        effect = dict(request.proposed_effect or {})
+        effect.pop("permission_preflight", None)
+        request.proposed_effect = effect
+        await session.commit()
+
+
 async def _request(request_id: uuid.UUID) -> ApprovalRequest:
     async with get_sessionmaker()() as session:
         request = await session.get(ApprovalRequest, request_id)
@@ -237,11 +248,12 @@ async def test_agent_login_call_run_by_a_reviewer_runs_when_the_grants_did_not_c
 async def test_agent_call_with_no_record_on_the_card_is_refused_when_on(
     monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
 ) -> None:
-    """Made while the switch was ``off``: the agent's grants cannot be checked."""
+    """A card without the agent's record: the agent's grants cannot be checked."""
     await _register(stub_embedding_service)
     await _grant(_OP, "needs-approval")
     await _grant(_WRITE_STEP, "auto-execute")
     request_id = await _park(_operator())
+    await _drop_the_record(request_id)
     _switch(monkeypatch, "on")
 
     result = await _resume(request_id, _reviewer())
@@ -260,8 +272,7 @@ async def test_single_step_call_with_no_record_on_the_card_runs_when_on(
     await _register_single(stub_embedding_service)
     await _grant(_SINGLE_OP, "needs-approval")
     request_id = await _park(_operator(), op_id=_SINGLE_OP)
-    preflight = ((await _request(request_id)).proposed_effect or {}).get("permission_preflight")
-    assert (preflight or {}).get("requester") is None
+    await _drop_the_record(request_id)
     _switch(monkeypatch, "on")
 
     result = await _resume(request_id, _reviewer())
@@ -334,7 +345,9 @@ async def test_off_changes_nothing(
 
     assert result.status == "ok", result.error
     assert len(_MULTI_RUNS) == 1
-    assert "permission_preflight" not in ((await _request(request_id)).proposed_effect or {})
+    # The card keeps the agent's record, so its rights for the call are checked again.
+    preflight = (await _request(request_id)).proposed_effect["permission_preflight"]
+    assert preflight["requester"]["principal_kind"] == "agent"
 
 
 @pytest.mark.parametrize("resumer", ["agent", "reviewer"])

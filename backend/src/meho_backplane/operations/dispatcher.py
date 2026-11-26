@@ -496,6 +496,7 @@ from meho_backplane.operations._vendor_text import (
     redact_error_result,
     withhold_vendor_text,
 )
+from meho_backplane.operations.approved_run_rights import approved_run_refusal
 from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.audit_row_precheck import audit_row_problem
 from meho_backplane.operations.composite import (
@@ -4590,9 +4591,9 @@ async def _dispatch_now(
             )
 
     # --- Step 4: policy gate ---------------------------------------------
-    # Skipped on the approval-queue resume path (``_approved``): a human
-    # operator already approved this exact call, so re-running the gate
-    # would only re-deny or re-queue it. The approval is the authorization.
+    # On the approval-queue resume path (``_approved``) a person already
+    # approved this exact call, so the gate does not ask for it again. The
+    # rights of who asked are checked again in the ``else`` branch below.
     # #130: scope the policy-gate verdict to this dispatch so both audit
     # writers (the dispatch-row writer and the approval-queue writer) can
     # stamp ``audit_log.policy_decision`` off ``policy_decision_var`` without
@@ -4829,12 +4830,10 @@ async def _dispatch_now(
             # under that reviewer; check the role again here as a backstop.
             # The requester's own run (an agent's resume, a hosted agent
             # run, or a re-run of a failed call by the requester, also a
-            # service login) keeps the approval as the authorization.
-            role_denial = (
-                None
-                if _requester_runs_approved_call(operator)
-                else role_floor_denial(op_id, operator.tenant_role)
-            )
+            # service login) gets the role check of a new call in
+            # ``approved_run_refusal`` below.
+            requester_runs = _requester_runs_approved_call(operator)
+            role_denial = None if requester_runs else role_floor_denial(op_id, operator.tenant_role)
             if role_denial is not None:
                 duration_ms = _elapsed_ms(started)
                 denied = result_denied(
@@ -4852,6 +4851,29 @@ async def _dispatch_now(
                     error_extras=_error_extras_for_audit(denied),
                 )
                 return with_audit_receipt(denied, receipt)
+            # The rights of who asked are checked again, as for a new call
+            # of the same login made now (:mod:`.approved_run_rights`).
+            rights_refusal = await approved_run_refusal(
+                operator=operator,
+                requester_runs=requester_runs,
+                descriptor=descriptor,
+                connector_id=connector_id,
+                target=target,
+                params=params,
+                preview_hash=preview_hash,
+            )
+            if rights_refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                duration_ms = _elapsed_ms(started)
+                return await _audit_denied_and_return(
+                    result_denied(op_id, rights_refusal.reason, duration_ms),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=duration_ms,
+                )
             # #6298, #6314: an agent's grants may have changed while the
             # call waited. Check its steps again before the first one runs,
             # also when a person runs the call from an approvals surface,

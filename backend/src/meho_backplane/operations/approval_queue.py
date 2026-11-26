@@ -2790,6 +2790,9 @@ async def approve_request(
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
+        # Read when the risk level of the call goes up before it runs again
+        # (:mod:`~meho_backplane.operations.approved_run_rights`).
+        "approver_may_approve_high_risk": may_approve_high_risk(operator),
         **grant_audit_fields(request, operator),
         **_behind_audit_fields(operator.sub, request),
     }
@@ -3300,11 +3303,12 @@ async def resume_dispatch_after_approval(
     (no original target) keep ``target_id IS NULL`` → ``None`` and
     dispatch normally.
 
-    The re-dispatch bypasses the policy gate (``_approved=True``): the
-    committed approval decision is the authorization. Without the bypass
-    the re-dispatch would re-queue (a human/service principal now routes
+    The re-dispatch does not ask for the approval again (``_approved=True``):
+    without that, it would wait again (a human/service principal routes
     ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
-    re-hits ``needs-approval``), so the approved op would never execute.
+    gets ``needs-approval`` again), so the approved op would never execute.
+    The rights of who asked are still checked as for a new call made now
+    (:mod:`~meho_backplane.operations.approved_run_rights`).
 
     Exactly-one-resumer claim (#2293): every operator surface routes
     through here, and for a run-bound request the in-process agent waiter
@@ -4065,6 +4069,7 @@ async def _dispatch_resume_with_bound_context(
     the values the requester asked for; the dispatcher stamps the choice on
     the audit row of the run.
     """
+    from meho_backplane.operations.approved_run_rights import bind_approved_run
     from meho_backplane.operations.dispatcher import dispatch
     from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 
@@ -4087,6 +4092,7 @@ async def _dispatch_resume_with_bound_context(
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
+            bind_approved_run(request),
             restored_connector_limit(request.allowed_connectors),
             # Each step of the run also checks the person who asked.
             checking_logins_for_steps(request.principal_sub, request.tenant_id),

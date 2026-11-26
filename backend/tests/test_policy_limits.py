@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``limits`` part of the policy file, and the four keys kept for later versions.
+"""The ``limits`` part of the policy file, and the six other reserved keys.
 
 * The parser: ``limits.personal_agent_up_to`` takes ``safe``, ``caution`` or
   ``dangerous``; ``destructive`` and other keys are mistakes. ``agents``,
-  ``approvers``, ``role_bindings`` and ``risk_levels`` are refused with "not
-  in this version".
-* The checks: a tenant's file with ``limits`` is refused; the install's file
-  with ``limits`` is refused while the ``CUSTOM_POLICY`` switch is off.
-* The import: an install file with a limit is stored, exported and imported
-  again with "No change."; the diff shows the limit.
+  ``approvers``, ``role_bindings``, ``risk_levels``, ``custom_roles`` and
+  ``baseline`` are refused with one sentence, whatever their value.
+* The checks: a tenant's file that holds the key ``limits`` is refused; the
+  install's file that holds it is refused while the switch is off.
+* The import with the switch on: an install file with a limit is stored,
+  exported and imported again with "No change."; the diff shows the limit.
 * The reader :func:`~meho_backplane.policy.limits.personal_agent_limit`:
-  ``safe`` without a limit, the stored level with one.
+  ``safe`` with the switch off, without a limit, or with a stored value
+  that is not a mapping; the stored level with the switch on.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
 from meho_backplane.policy.document import (
-    RESERVED_KEYS,
     document_of,
     file_sha256,
     parse_policy_file,
@@ -42,7 +42,7 @@ from meho_backplane.policy.service import (
 from meho_backplane.policy.validate import check_document
 from meho_backplane.settings import get_settings
 
-_SWITCH_OFF = "`limits` needs the CUSTOM_POLICY switch, and it is off on this MEHO."
+_NOT_READ = "This version of MEHO does not read `{}` in a policy file; remove it."
 
 
 @pytest.fixture(autouse=True)
@@ -93,15 +93,22 @@ def test_a_wrong_limit_is_one_sentence_with_the_path(text: str, sentence: str) -
     assert parse_policy_file(text.encode()).mistakes == [sentence]
 
 
-@pytest.mark.parametrize("key", RESERVED_KEYS)
-@pytest.mark.parametrize("value", ["[]", "{}", "null"])
-def test_a_key_of_a_later_version_is_refused(key: str, value: str) -> None:
+@pytest.mark.parametrize(
+    "key", ["agents", "approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
+)
+@pytest.mark.parametrize(
+    "value", ["{example-name: example-value-7}", "[example-value-7]", "example-value-7", "null"]
+)
+def test_a_reserved_key_is_refused_by_the_parser(key: str, value: str) -> None:
     mistakes = parse_policy_file(f"policy: v1\n{key}: {value}\n".encode()).mistakes
-    assert mistakes == [f"`{key}` is not in this version of MEHO; remove it."]
+    assert mistakes == [_NOT_READ.format(key)]
 
 
-def test_an_empty_limits_part_stores_nothing() -> None:
-    assert "limits" not in _document("policy: v1\nlimits: {}\n")
+@pytest.mark.parametrize(
+    "form", ["limits: {}", "limits: null", "limits:", "limits: {personal_agent_up_to: null}"]
+)
+def test_the_stored_form_keeps_the_key_limits_without_a_value(form: str) -> None:
+    assert _document(f"policy: v1\n{form}\n")["limits"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +137,7 @@ def test_limits_need_the_switch() -> None:
     on = check_document(
         document, scope="install", install_document=document, ops=[], custom_policy=True
     )
-    assert off == [_SWITCH_OFF]
+    assert off == [_NOT_READ.format("limits")]
     assert on == []
 
 
@@ -151,12 +158,36 @@ def test_limits_need_the_switch() -> None:
     ],
 )
 def test_the_reader_says_safe_without_a_limit(document: Any, level: str) -> None:
-    assert personal_agent_limit(document) == level
+    assert personal_agent_limit(document, custom_policy=True) == level
+
+
+def test_with_the_switch_off_the_reader_says_safe() -> None:
+    document = {"limits": {"personal_agent_up_to": "dangerous"}}
+    assert personal_agent_limit(document) == "safe"
+    assert personal_agent_limit(document, custom_policy=False) == "safe"
+
+
+@pytest.mark.parametrize("stored", [["example"], "example", 7])
+@pytest.mark.parametrize("custom_policy", [True, False])
+def test_a_stored_document_that_is_not_a_mapping_is_no_limit(
+    stored: Any, custom_policy: bool
+) -> None:
+    assert personal_agent_limit(stored, custom_policy=custom_policy) == "safe"
+    assert limits_diff(stored, {}, custom_policy=custom_policy) == {}
+
+
+def test_with_the_switch_off_the_diff_has_no_limits() -> None:
+    stored = {"limits": {"personal_agent_up_to": "dangerous"}}
+    assert limits_diff(stored, {}) == {}
+    assert limits_diff(stored, {"limits": {"personal_agent_up_to": "safe"}}) == {}
 
 
 def test_a_stored_limit_that_is_not_a_map_is_no_limit_in_the_diff() -> None:
-    assert limits_diff({"limits": ["caution"]}, {}) == {}
-    assert limits_diff({"limits": ["caution"]}, {"limits": {"personal_agent_up_to": "safe"}}) == {
+    on = {"custom_policy": True}
+    assert limits_diff({"limits": ["caution"]}, {}, **on) == {}
+    assert limits_diff(
+        {"limits": ["caution"]}, {"limits": {"personal_agent_up_to": "safe"}}, **on
+    ) == {
         "limits": {
             "added": [{"key": "personal_agent_up_to", "value": "safe"}],
             "changed": [],
@@ -212,10 +243,10 @@ async def test_an_install_limit_is_imported_exported_and_no_change_again() -> No
     assert answer["summary"]["limits_added"] == 1
     stored = await _stored_install()
     assert stored is not None
-    assert personal_agent_limit(stored) == "dangerous"
+    assert personal_agent_limit(stored, custom_policy=True) == "dangerous"
 
     async with get_sessionmaker()() as session:
-        text = await export_policy(session, scope="install", tenant_id=None)
+        text = await export_policy(session, scope="install", tenant_id=None, custom_policy=True)
         plan = await build_plan(
             session, scope="install", tenant_id=None, content=text.encode(), custom_policy=True
         )
@@ -244,7 +275,7 @@ async def test_a_lower_limit_is_read_at_once() -> None:
         "removed": [],
     }
     await _apply_install(_install_file("caution"))
-    assert personal_agent_limit(await _stored_install()) == "caution"
+    assert personal_agent_limit(await _stored_install(), custom_policy=True) == "caution"
 
 
 @pytest.mark.asyncio
@@ -253,7 +284,7 @@ async def test_with_the_switch_off_the_import_refuses_limits() -> None:
         plan = await build_plan(
             session, scope="install", tenant_id=None, content=_install_file("caution").encode()
         )
-    assert plan.mistakes == [_SWITCH_OFF]
+    assert plan.mistakes == [_NOT_READ.format("limits")]
     assert plan.diff is None
     assert await _stored_install() is None
 
@@ -275,7 +306,11 @@ async def test_a_removed_limit_shows_in_the_diff() -> None:
     await _apply_install(_install_file("caution"))
     async with get_sessionmaker()() as session:
         plan = await build_plan(
-            session, scope="install", tenant_id=None, content=b"policy: v1\nclassifications: []\n"
+            session,
+            scope="install",
+            tenant_id=None,
+            content=b"policy: v1\nclassifications: []\n",
+            custom_policy=True,
         )
     assert plan.mistakes == []
     assert plan.diff is not None

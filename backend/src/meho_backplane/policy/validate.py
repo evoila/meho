@@ -28,9 +28,10 @@ is refused by
 :func:`meho_backplane.policy.routing_floor.tenant_floor_mistakes`. The ``bindings`` are checked by
 :func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
 install's file, no runner, no agent or service with a kind that may
-approve, and no unknown category. The ``limits`` part is checked by
-:func:`~meho_backplane.policy.limits.limits_mistakes`: only in the install's
-file, and only with the ``CUSTOM_POLICY`` switch on.
+approve, and no unknown category. The key ``limits`` is checked by
+:func:`~meho_backplane.policy.limits.limits_mistakes`: a file that holds it
+is refused, whatever its value, unless it is the install's file and the
+caller passes ``custom_policy=True``.
 """
 
 from __future__ import annotations

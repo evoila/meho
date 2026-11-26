@@ -10,15 +10,23 @@ The platform admin sets it in the install's policy file only::
 
 ``personal_agent_up_to`` is the highest risk level that a tenant's rule for
 personal agents may let run at once. Without the part, the limit is
-``safe``: that is what MEHO does today. ``destructive`` is never a limit:
-a ``destructive`` operation always waits.
+``safe``. ``destructive`` is never a limit: a ``destructive`` operation
+always waits.
 
-The part needs the ``CUSTOM_POLICY`` switch. The caller says whether the
-switch is on; this module never reads a setting. With the switch off, a
-file with ``limits`` is refused.
+The caller says whether the ``CUSTOM_POLICY`` switch is on
+(``custom_policy``, default off); this module never reads a setting.
 
-A limit only bounds what a tenant's rule may let run at once. It never
-lets an operation run that a fixed rule in the code makes wait.
+* With the switch on, the install's file may hold ``limits``. The diff, the
+  export and :func:`personal_agent_limit` show and use the stored part.
+* With the switch off, a file that holds the key ``limits`` is refused,
+  whatever its value. A stored ``limits`` part is ignored: the export
+  writes no ``limits`` part, the diff has no ``limits`` section, an
+  approved import keeps the stored part as it is, and
+  :func:`personal_agent_limit` answers ``safe``.
+* A tenant's file that holds the key ``limits`` is refused, with the switch
+  on or off.
+
+No call decision reads the part in this version of MEHO.
 """
 
 from __future__ import annotations
@@ -36,13 +44,14 @@ __all__ = [
     "PolicyLimits",
     "limits_diff",
     "limits_mistakes",
+    "not_read_mistake",
     "personal_agent_limit",
 ]
 
 #: The risk levels a limit can have, lowest first. ``destructive`` always waits.
 LIMIT_LEVELS: Final[tuple[str, ...]] = ("safe", "caution", "dangerous")
 
-#: The limit when the install's file has no ``limits`` part: today's answer.
+#: The limit when the install's file has no ``limits`` part.
 DEFAULT_PERSONAL_AGENT_LIMIT: Final[str] = "safe"
 
 
@@ -64,9 +73,18 @@ class PolicyLimits(BaseModel):
         return value
 
 
+def not_read_mistake(key: str) -> str:
+    """The refusal of the reserved top-level *key* in a policy file."""
+    return f"This version of MEHO does not read `{key}` in a policy file; remove it."
+
+
 def limits_mistakes(document: Mapping[str, Any], *, scope: Scope, custom_policy: bool) -> list[str]:
-    """The mistakes of the ``limits`` part of *document*, a valid file's stored form."""
-    if not document.get("limits"):
+    """The mistakes of the ``limits`` part of *document*, a valid file's stored form.
+
+    The check reads whether the file has the key ``limits``, not whether
+    the part has a value: ``limits: {}`` and ``limits: null`` count.
+    """
+    if "limits" not in document:
         return []
     if scope == "tenant":
         return [
@@ -74,18 +92,22 @@ def limits_mistakes(document: Mapping[str, Any], *, scope: Scope, custom_policy:
             "the outer limit; a tenant's file stays inside it."
         ]
     if not custom_policy:
-        return ["`limits` needs the CUSTOM_POLICY switch, and it is off on this MEHO."]
+        return [not_read_mistake("limits")]
     return []
 
 
-def limits_diff(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+def limits_diff(before: Any, after: Any, *, custom_policy: bool = False) -> dict[str, Any]:
     """The ``limits`` part of the import diff: added, changed and removed, one item per key.
 
-    It is ``{}`` when neither side has a limit, so the diff of a policy
-    without limits stays as it was.
+    It is ``{}`` with the switch off, and when neither side has a limit, so
+    the diff of a policy without limits has no ``limits`` section. A side
+    that is not a mapping, or a stored value that is not a mapping, counts
+    as no limit.
     """
-    old = _mapping(before.get("limits"))
-    new = _mapping(after.get("limits"))
+    if not custom_policy:
+        return {}
+    old = _mapping(_mapping(before).get("limits"))
+    new = _mapping(_mapping(after).get("limits"))
     if not old and not new:
         return {}
     out: dict[str, list[dict[str, Any]]] = {"added": [], "changed": [], "removed": []}
@@ -104,12 +126,15 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def personal_agent_limit(install_document: Mapping[str, Any] | None) -> str:
+def personal_agent_limit(install_document: Any, *, custom_policy: bool = False) -> str:
     """The highest level a tenant's personal agent rule may let run at once.
 
-    *install_document* is the install's stored policy. Without a
-    ``limits`` part, or with a value that is not a limit level, the answer
-    is ``safe``, the lowest level.
+    *install_document* is the install's stored policy. With the switch off,
+    the answer is ``safe``. Without a ``limits`` part, or with a stored
+    value that is not a mapping or not a limit level, the answer is
+    ``safe``, the lowest level.
     """
-    level = _mapping((install_document or {}).get("limits")).get("personal_agent_up_to")
+    if not custom_policy:
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    level = _mapping(_mapping(install_document).get("limits")).get("personal_agent_up_to")
     return level if level in LIMIT_LEVELS else DEFAULT_PERSONAL_AGENT_LIMIT

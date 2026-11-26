@@ -15,8 +15,8 @@ A row is one operation of one connector. A change is one of:
   lowered_level  the risk level is lower (destructive > dangerous > caution > safe)
   lost_approval  "needs approval" went from true to false
   lost_never     no grant could cover the call before, and one can now
-  left_credential  the class was credential_read, credential_write or
-                 credential_mint, and is now another class
+  left_credential  the class was credential_read, credential_write,
+                 credential_mint or credential_use, and is now another class
   removed        the base has the row, the head does not
 A new row passes, and so does a change toward more approval or a higher level.
 
@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 LEVELS = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
-CREDENTIAL_CLASSES = {"credential_read", "credential_write", "credential_mint"}
+CREDENTIAL_CLASSES = {"credential_read", "credential_write", "credential_mint", "credential_use"}
 # The first character of a YAML value that the judge does not read.
 _UNSUPPORTED_START = set("|>&*!%@`[]{},?")
 # The plain values that YAML reads as null.

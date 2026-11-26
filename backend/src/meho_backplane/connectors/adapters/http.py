@@ -928,8 +928,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
 
         The address of a followed hop is the vendor's choice. So an error of
         the hop carries the request MEHO sent, and the answer carries its
-        address for the trace.
+        address for the trace. The hop request carries that address too, so
+        the trace names it also when a later read of a streamed body fails.
         """
+        request.extensions[flight_recorder_capture.FIRST_REQUEST_URL_EXTENSION] = first_request.url
         try:
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
         except httpx.TransportError as exc:

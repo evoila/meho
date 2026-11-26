@@ -96,8 +96,8 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The key of :attr:`httpx.Response.extensions` that holds the first request
-#: address when the HTTP client followed a redirect.
+#: The key of :attr:`httpx.Response.extensions` and :attr:`httpx.Request.extensions`
+#: that holds the first request address when the HTTP client followed a redirect.
 FIRST_REQUEST_URL_EXTENSION = "meho_first_request_url"
 
 # --- F3 caps (fixed invariants, not tunable knobs) --------------------------
@@ -406,14 +406,16 @@ def record_vendor_call_error(start: SpanStart | None, *, method: str, exc: BaseE
     timed-out call is not a silent gap in the trace. It carries no header or
     body, so no vendor byte reaches the span. The URL is read from the
     exception inside this guarded function: ``httpx`` raises ``RuntimeError``
-    when no request is attached. Any error is logged and swallowed.
+    when no request is attached. After a followed redirect the URL is the
+    address MEHO asked for. Any error is logged and swallowed.
     """
     scope = _active_capture_var.get()
     if start is None or scope is None:
         return
     try:
         try:
-            url = safe_url(exc.request.url)  # type: ignore[attr-defined]
+            request = exc.request  # type: ignore[attr-defined]
+            url = safe_url(request.extensions.get(FIRST_REQUEST_URL_EXTENSION) or request.url)
         except Exception:
             url = "?"
         op = _op_context_var.get()

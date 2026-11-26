@@ -36,11 +36,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
+import meho_backplane.flight_recorder.agent_read as agent_read_mod
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.log_host import UNREADABLE_LOCATION_MESSAGE
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, DispatchTrace, DispatchTraceSpan, Tenant
@@ -99,8 +101,17 @@ class _Server:
     hits: list[str] = field(default_factory=list)
 
 
-async def _start_server(routes: dict[str, dict[str, str]]) -> _Server:
-    """A local HTTP/1.1 server; each route (path with query) answers a 302 with its headers."""
+async def _start_server(
+    routes: dict[str, dict[str, str]],
+    *,
+    status: str = "302 Found",
+    short_body: frozenset[str] = frozenset(),
+) -> _Server:
+    """A local HTTP/1.1 server; each route (path with query) answers *status* with its headers.
+
+    A path in *short_body* answers a 200 whose body ends before its
+    ``Content-Length``.
+    """
     state = _Server(server=None, port=0)  # type: ignore[arg-type]
 
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -110,9 +121,14 @@ async def _start_server(routes: dict[str, dict[str, str]]) -> _Server:
             while (await reader.readline()) not in (b"\r\n", b"\n", b""):
                 pass
             state.hits.append(path)
+            if path in short_body:
+                head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                writer.write(f'{head}Content-Length: 100\r\n\r\n{{"a":'.encode("latin-1"))
+                await writer.drain()
+                return
             headers = routes.get(path)
-            status = "302 Found" if headers is not None else "404 Not Found"
-            head = f"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n"
+            line = status if headers is not None else "404 Not Found"
+            head = f"HTTP/1.1 {line}\r\nContent-Length: 0\r\nConnection: close\r\n"
             head += "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
             writer.write((head + "\r\n").encode("latin-1"))
             await writer.drain()
@@ -176,6 +192,33 @@ def _stub_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
         "meho_backplane.operations.typed_register.encode_endpoint_text",
         AsyncMock(return_value=[0.1] * 384),
     )
+
+
+class _MemoryValkey:
+    """An in-memory stand-in for the result-handle store's Valkey client."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+    def text(self) -> str:
+        return b"".join(self.values.values()).decode("utf-8", "replace")
+
+
+_AGENT_STORE = _MemoryValkey()
+
+
+@pytest.fixture(autouse=True)
+def _agent_trace_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent's copy of the trace goes to an in-memory store the tests read."""
+    _AGENT_STORE.values.clear()
+    store = ResultHandleStore(_AGENT_STORE)  # type: ignore[arg-type]
+    monkeypatch.setattr(agent_read_mod, "get_result_handle_store", lambda: store)
 
 
 @pytest.fixture
@@ -253,10 +296,11 @@ async def _run(
     session: AsyncSession,
     caplog: pytest.LogCaptureFixture,
     routes: dict[str, dict[str, str]],
+    **server_options: Any,
 ) -> tuple[Any, dict[str, str], list[dict[str, Any]]]:
     """Dispatch the operation; return the result, each place as text, and the log events."""
     await _register(session)
-    server = await _start_server(routes)
+    server = await _start_server(routes, **server_options)
     caplog.set_level(logging.DEBUG)
     try:
         with capture_logs() as events:
@@ -278,6 +322,7 @@ async def _run(
         "stored trace": trace_text,
         "log events": repr(events),
         "log records": caplog.text,
+        "agent copy of the trace": _AGENT_STORE.text(),
     }
     return result, places, events
 
@@ -414,3 +459,22 @@ async def test_followed_hop_answer_names_the_first_address_for_the_trace() -> No
         f"https://appliance.test.invalid{_START}"
     )
     assert FIRST_REQUEST_URL_EXTENSION not in direct.extensions
+
+
+@pytest.mark.asyncio
+async def test_followed_hop_whose_body_ends_early_names_only_the_first_address(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    hop_path, hop_query = _made_up(), _made_up()
+    hop = f"/{hop_path}?q={hop_query}"
+    routes = {_START: {"Location": hop}}
+
+    result, places, _events = await _run(
+        session, caplog, routes, status="307 Temporary Redirect", short_body=frozenset({hop})
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_timeout"
+    assert _AGENT_STORE.values, "the agent got no copy of the trace"
+    assert f'{_START}"' in places["stored trace"]
+    _assert_absent([hop_path, hop_query], places)

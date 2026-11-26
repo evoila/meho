@@ -797,7 +797,8 @@ config:
   # `policy.customPolicy` is rendered into `CUSTOM_POLICY`, the one switch
   # of the custom policy model. When `"true"`, the three switches above
   # count as on; each of them still works alone. When `"false"` (the
-  # default), MEHO behaves as before. See `docs/codebase/policy.md`.
+  # default), the three parts follow their own switches. See
+  # `docs/codebase/policy.md`.
   policy:
     classification: "false"
     engineShadow: "false"

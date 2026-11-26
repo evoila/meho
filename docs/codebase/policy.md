@@ -29,7 +29,7 @@ Three parts of the policy each have their own switch, off by default:
 one switch of the custom policy model
 ([decision record](../decisions/2026-11-25-custom-policy-model.md),
 decision 12). With it on, all three parts count as on. Each old switch
-still works alone. Nothing else reads `CUSTOM_POLICY` yet.
+still works alone. With it off, each part follows its own switch.
 
 One module decides whether a part is on:
 `backend/src/meho_backplane/policy/switches.py`. Code asks it (or the

@@ -1749,7 +1749,7 @@ class Settings(BaseModel):
         Off by default. The one switch of the custom policy model. When
         on, the three switches above count as on
         (:mod:`meho_backplane.policy.switches`); each of them still works
-        alone. Nothing else reads it yet. When off, MEHO behaves as before.
+        alone. When off, the three parts follow their own switches.
         Env ``CUSTOM_POLICY``; Helm ``config.policy.customPolicy``.
     """
 

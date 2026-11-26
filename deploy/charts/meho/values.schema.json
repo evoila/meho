@@ -582,7 +582,7 @@
             "customPolicy": {
               "type": "string",
               "enum": ["true", "false"],
-              "description": "The one switch of the custom policy model. When `\"true\"`, the three switches `classification`, `engineShadow` and `approverRouting` count as on; each of them still works alone. Rendered into `CUSTOM_POLICY`. Default `\"false\"`: MEHO behaves as before. See `docs/codebase/policy.md`."
+              "description": "The one switch of the custom policy model. When `\"true\"`, the three switches `classification`, `engineShadow` and `approverRouting` count as on; each of them still works alone. Rendered into `CUSTOM_POLICY`. Default `\"false\"`: the three parts follow their own switches. See `docs/codebase/policy.md`."
             }
           }
         },

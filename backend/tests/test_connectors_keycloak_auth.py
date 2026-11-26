@@ -425,6 +425,27 @@ async def test_fingerprint_surfaces_realm_metadata_and_version() -> None:
     assert fp.extras["login_theme"] == "meho"
     assert fp.extras["admin_realm"] == "master"
     assert fp.extras["managed_realm"] == "example"
+    assert "realm_name_differs" not in fp.extras
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name() -> None:
+    """The answered name differs from the managed realm: the extras say so."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
+        )
+        mock.get("/admin/realms/example").respond(200, json={"realm": "Example", "enabled": True})
+        mock.get("/admin/serverinfo").respond(404)
+        fp = await connector.fingerprint(_TARGET, operator=_make_operator())
+
+    assert fp.extras["realm"] == "Example"
+    assert fp.extras["managed_realm"] == "example"
+    assert "not the managed realm" in fp.extras["realm_name_differs"]
 
     await connector.aclose()
 

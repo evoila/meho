@@ -12,8 +12,10 @@ settings. The answered name must be exactly the managed realm
 (:func:`~meho_backplane.connectors.keycloak.realm_params.check_answered_realm`),
 else nothing more is sent.
 
-Every admin login can read the name: without the right to view the realm,
-Keycloak answers with a short form that has it.
+Every admin login with at least one ``realm-management`` role in the realm
+can read the name: without the right to view the realm, Keycloak answers with
+a short form that has it. When Keycloak refuses the read with 403,
+:class:`ManagedRealmReadRefusedError` says so and names that right.
 
 A passed check counts only inside one run of an operation
 (:meth:`ManagedRealmChecks.run`, opened by
@@ -35,7 +37,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
+import httpx
+
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
 from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
@@ -45,10 +50,24 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["CHECK_SECONDS", "ManagedRealmChecks"]
+__all__ = ["CHECK_SECONDS", "ManagedRealmChecks", "ManagedRealmReadRefusedError"]
 
 #: How long one passed check counts inside one run.
 CHECK_SECONDS: Final = 5.0
+
+_REFUSED_TEXT: Final = (
+    "Keycloak refused the read of the managed realm that MEHO makes before every "
+    "operation (HTTP 403). The MEHO login needs at least one realm-management role "
+    "in that realm, for example view-realm."
+)
+
+
+class ManagedRealmReadRefusedError(ConnectorUpstreamError):
+    """Keycloak answered 403 to the read of the managed realm."""
+
+    def __init__(self) -> None:
+        super().__init__(_REFUSED_TEXT, http_status=403, upstream_message=None)
+
 
 _Passed = dict[tuple[tuple[str, str], str], float]
 
@@ -113,14 +132,20 @@ class ManagedRealmChecks:
         """Check the realm, unless a check passed in this run in the last :data:`CHECK_SECONDS`.
 
         Raises :class:`ValueError` when Keycloak answers with another realm
-        name, with no name, or with something that is not an object.
+        name, with no name, or with something that is not an object. Raises
+        :class:`ManagedRealmReadRefusedError` when Keycloak answers 403.
         """
         managed = resolve_realm_config(target).managed_realm
         key = (target_cache_key(target), managed)
         passed = _RUN_CHECKS.get()
         if passed is not None and passed.get(key, 0.0) > time.monotonic():
             return
-        answer = await _read_realm(connector, target, operator, _realm_path(target))
+        try:
+            answer = await _read_realm(connector, target, operator, _realm_path(target))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 403:
+                raise
+            raise ManagedRealmReadRefusedError from exc
         check_answered_realm("keycloak", answer, target)
         if passed is not None:
             passed[key] = time.monotonic() + CHECK_SECONDS

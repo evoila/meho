@@ -39,8 +39,9 @@ work on another realm, register a second target that names it, with the
 same login (`--secret-ref`), admin realm and connection settings as the
 first. To
 create a new realm, use a target that names that realm as its managed
-realm. `keycloak.realm.delete` still needs its `realm` value: give the
-managed realm. In the other calls the `realm` value stays for now, and
+realm. A `keycloak.realm.create` call that names no realm needs a platform
+admin's approval. `keycloak.realm.delete` still needs its `realm` value:
+give the managed realm. In the other calls the `realm` value stays for now, and
 it will be removed: leave it out.
 
 ## What this surface is
@@ -396,7 +397,10 @@ direct-access-grant client).
   `secret/tenants/<tenant_id>/keycloak/admin`). The service-account client
   needs the `realm-management` roles to read the managed realm (at
   minimum `view-realm`, `view-clients`, `view-users` for the read
-  ops). See [credential split](#the-admin-vs-operator-credential-split-load-bearing).
+  ops). MEHO reads the managed realm before every operation. The MEHO
+  login needs at least one `realm-management` role in that realm (the
+  documented minimum `view-realm`, `view-clients`, `view-users` has it);
+  `keycloak.realm.delete` needs `view-realm` for the realm id. See [credential split](#the-admin-vs-operator-credential-split-load-bearing).
 - **A registered `keycloak` target** in the MEHO `targets` table (see
   below).
 - **An operator session.** `meho login <backplane-url>` writes the

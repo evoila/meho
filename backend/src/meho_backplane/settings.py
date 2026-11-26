@@ -2831,8 +2831,8 @@ class Settings(BaseModel):
     #: The realm in every Keycloak answer, behind a switch that is off by
     #: default. When on, each dict answer of a Keycloak operation starts with
     #: ``managed_realm``: the realm the call acted on
-    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
-    #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
+    #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: no
+    #: answer has the ``managed_realm`` field. Set via ``KEYCLOAK_ANSWER_REALM``.
     keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it

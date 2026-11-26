@@ -11,7 +11,7 @@
 * The handler refuses it too, for a call that is already approved.
 * With the switch ``KEYCLOAK_ANSWER_REALM`` on, each answer of every
   registered read, and of a write, has a ``managed_realm`` field. With it
-  off (the default), the answers are as before.
+  off (the default), no answer has the ``managed_realm`` field.
 * The approval card of a write shows the realm.
 """
 
@@ -434,6 +434,28 @@ async def test_create_of_the_managed_realm_works(operator: Operator) -> None:
     assert result.result[REALM_FIELD] == _REALM
 
 
+@pytest.mark.asyncio
+async def test_create_works_through_a_target_whose_probe_failed(operator: Operator) -> None:
+    """The realm does not exist yet, so the probe found nothing: the create still makes it."""
+    async with get_sessionmaker()() as session:
+        row = await resolve_target(session, operator.tenant_id, _TARGET_NAME)
+        row.fingerprint = {
+            "vendor": "keycloak",
+            "product": "keycloak",
+            "reachable": False,
+            "extras": {"error": "HTTPStatusError: 404"},
+        }
+        await session.commit()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        post_route = mock.post("/admin/realms").respond(201)
+        result = await _dispatch(operator, _CREATE, _fenced_params(_CREATE, _REALM), approved=True)
+
+    assert result.status == "ok", result.error
+    assert post_route.call_count == 1
+    assert _sent_body(post_route)["realm"] == _REALM
+
+
 _EVENTS_CONFIG = {
     "eventsEnabled": False,
     "eventsExpiration": 0,
@@ -672,7 +694,6 @@ async def test_with_the_switch_off_the_texts_an_agent_reads_give_no_new_advice(
     login = await _described(_CHECK_LOGIN)
     assert login.parameter_schema["examples"] == [
         {
-            "realm": "master",
             "username": "admin",
             "password_secret_ref": "keycloak/master/admin-old",
         }
@@ -681,7 +702,7 @@ async def test_with_the_switch_off_the_texts_an_agent_reads_give_no_new_advice(
         f"Realm to log in to. Default: the target's managed realm. {_REFUSED}"
     )
     assert login.llm_instructions["parameter_hints"]["realm"] == (
-        f"Realm of the user, for example 'master'. Default: managed realm. {_REFUSED}"
+        f"Realm of the user. Default: managed realm. {_REFUSED}"
     )
     create = await _described(_CREATE)
     assert "treated as an idempotent success" in create.description

@@ -315,3 +315,25 @@ async def test_a_passed_check_does_not_count_for_the_next_call(
             assert "did not answer with the realm" in str(exc)
         assert realm.call_count == reads + 1
         assert rest.call_count + secret.call_count + clients.call_count == sent
+
+
+@pytest.mark.parametrize("op_id", ["keycloak.user.list", "keycloak.group.create"])
+async def test_a_refused_realm_read_names_the_step_and_the_right(
+    operator: Operator,  # noqa: F811
+    op_id: str,
+) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(403, json={"error": "HTTP 403 Forbidden"})
+        rest = mock.route(url__regex=r".*").mock(return_value=httpx.Response(200, json=[]))
+        params = _WRITES.get(op_id, {})
+        result = await _dispatch(operator, op_id, params, approved=True)
+
+    assert result.status == "error", result
+    assert result.extras["http_status"] == 403
+    assert result.extras["error_code"] == "connector_error"
+    text = result.extras["exception_message"]
+    assert "read of the managed realm" in text
+    assert "at least one realm-management role" in text
+    assert _TARGET_NAME not in text
+    assert not rest.called

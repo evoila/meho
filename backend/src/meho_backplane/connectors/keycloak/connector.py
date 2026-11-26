@@ -1663,10 +1663,17 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
     authenticated. Tolerates a non-dict body defensively.
     """
     repr_dict = realm_repr if isinstance(realm_repr, dict) else {}
-    return {
+    extras: dict[str, Any] = {
         "realm": repr_dict.get("realm"),
         "enabled": repr_dict.get("enabled"),
         "ssl_required": repr_dict.get("sslRequired"),
         "login_theme": repr_dict.get("loginTheme"),
         **_realm_names(realms),
     }
+    answered = repr_dict.get("realm")
+    if answered != realms.managed_realm:
+        extras["realm_name_differs"] = (
+            "Keycloak answered with a realm name that is not the managed realm. "
+            "MEHO refuses operations on this target until the names match."
+        )
+    return extras

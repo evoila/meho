@@ -11,7 +11,7 @@ realm in the name of the target when the two differ.
 The field changes what an AI agent reads, so it is behind the switch
 ``KEYCLOAK_ANSWER_REALM``
 (:attr:`~meho_backplane.settings.Settings.keycloak_answer_realm`), off by
-default. Off: every answer is as before.
+default. Off: no answer has the ``managed_realm`` field.
 
 :func:`name_the_realm` wraps the operation handlers of the connector class.
 A handler is a coroutine method with the parameters ``(operator, target,
@@ -23,7 +23,7 @@ here: the handler refuses it before it returns.
 A long answer is reduced to a short summary and a link to the stored result.
 The summary keeps the field whole, also when the name is long
 (:mod:`~meho_backplane.operations.required_fields`). With the switch off the
-summary is as before.
+summary has no ``managed_realm`` field.
 
 The wrapper also opens one run of the realm check
 (:mod:`~meho_backplane.connectors.keycloak.managed_realm_check`), in both

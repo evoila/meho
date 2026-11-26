@@ -348,10 +348,10 @@ async def keycloak_realm_update(
     """Update a realm's top-level config (``PUT /admin/realms/{realm}``).
 
     Op-id: ``keycloak.realm.update``. Defaults to the target's managed
-    realm; ``realm`` overrides it. ``representation`` is the partial
-    RealmRepresentation. The handler reads the realm, puts the given fields
-    on top, and PUTs the full realm back, so fields the caller did not send
-    stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
+    realm. ``realm`` must be the managed realm; another realm is refused.
+    ``representation`` is the partial RealmRepresentation. The handler reads
+    the realm, puts the given fields on top, and PUTs the full realm back, so
+    fields the caller did not send stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
     value-free confirmation plus the read-back check. Both realm names must
     be plain names (:mod:`.realm_params`) and are percent-encoded as one
     path segment. A read that answers with another realm than the managed

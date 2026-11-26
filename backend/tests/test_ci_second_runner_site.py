@@ -346,7 +346,7 @@ def test_smoke_workflow_is_safe_by_construction() -> None:
         assert "env" not in step, "the runner prints a step's env block in the public log"
     args = job["steps"][-1]["run"].split()
     assert args[:4] == ["bash", "scripts/ci/second_site_smoke.sh", "--image", args[3]]
-    assert "https://github.com" in args
+    assert args[4] == "https://github.com"
 
 
 def test_smoke_pulls_one_of_the_unit_test_images() -> None:
@@ -437,7 +437,7 @@ def test_image_step_writes_only_public_names(tmp_path: Path) -> None:
         "MEHO_TEST_OPENBAO_IMAGE",
     }
     for value in written.values():
-        assert value.startswith("docker.io/"), value
+        assert value.split("/", 1)[0] == "docker.io", value
 
 
 def test_new_job_has_no_login_and_no_spec_shelf() -> None:

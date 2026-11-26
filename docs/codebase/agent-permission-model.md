@@ -468,40 +468,59 @@ itself. See [policy-evaluator.md](policy-evaluator.md).
 
 ## The kind of caller (`auth/caller_kind.py`)
 
-`caller_kind(operator, actor_sub)` names who is calling. It is a pure
-function: no database, no settings. Nothing decides on it yet. The guide
-page `docs-site/guides/who-is-calling.md` says what each kind may do today.
+`caller_kind(operator, actor_sub)` names who is calling. It reads no
+database and no settings. Nothing decides on it yet. The guide page
+`docs-site/guides/who-is-calling.md` says what each kind may do today.
 
-| Kind | Who |
+The checks run in this order; the first one that fits gives the kind.
+
+| Login | Kind |
 |---|---|
-| `person` | A person in the web console (`Operator.web_session`). Only the web console counts as a person. |
-| `personal_agent` | A person's token used by a tool: the command line, REST or MCP. Also a person's login with no mark at all, so MEHO never guesses more trust from a token. |
-| `service_agent` | An agent login, a service login, a hosted agent run (`actor_sub` set, also a run a person started in the web console) and a scheduled agent run (it uses the agent's own login). |
-| `runner` | A runner login. |
-| `system` | A login that MEHO's own code builds. |
+| A hosted agent run (`actor_sub` set), also one a person started in the web console | `service_agent` |
+| A login with `in_code_kind` set | that kind |
+| A person's login (`principal_kind` user) with a web console session (`web_session`) | `person` |
+| A person's login with a checked token (`token_checked`) and no web console session | `personal_agent` |
+| A person's login with neither | `system` |
+| A runner login | `runner` |
+| An agent or a service login, also a scheduled agent run (it uses the agent's own login) | `service_agent` |
 
-The order of the checks: a hosted agent run first, then `in_code_kind`,
-then the web console, then the kind of login.
+So the five kinds are: `person` (a person in the web console), `personal_agent`
+(a person's token used by a tool: the command line, REST or MCP),
+`service_agent`, `runner`, and `system` (a login that MEHO's own code builds).
 
 Two fields of `Operator` feed it:
 
-- `token_checked` — a person's token was checked. Only the REST bind
-  step (`middleware.verify_jwt_and_bind`) and the MCP bind step
-  (`mcp/auth.py::verify_mcp_jwt_and_bind`) set it. The shared token check
-  `verify_jwt_for_audience` does not, because it also serves the status
-  route and the scheduled agent run. A status call with a chosen tenant
-  runs the REST bind step, so it is marked.
+- `token_checked` — the token of this call was checked by the REST or
+  MCP token check, for every kind of login, also on the status route
+  (`GET /api/v1/health`), with or without a chosen tenant. Only the four
+  token checks set it: `auth/jwt.py::verify_jwt`,
+  `verify_jwt_allow_unchosen`, `verify_jwt_platform_admin_way_back` and
+  `mcp/auth.py::verify_mcp_jwt`. The shared step `verify_jwt_for_audience`
+  does not. The web console session, the scheduled agent run and every
+  login that code builds keep it false. The bind steps
+  (`middleware.verify_jwt_and_bind`, `verify_mcp_jwt_and_bind`) return the
+  same login they get.
 - `in_code_kind` — set by every place that builds an `Operator` itself,
   with no sign-in and no token check. Most of them are MEHO's own work
   (the check runner, the event intake, the findings investigator, the
   topology scheduler, the boot stamp, the expiry of requests, the
-  connectors' own logins) and give `system`. Some stand for someone else:
-  the web console readers and the web push recipient give `person`; the
-  rebuilt requester of a secondary target and the made-up login of
-  `meho policy explain` give the kind of the login they stand for; the
-  runner executor gives `runner`. A test
+  connectors' own logins and each connector's old `execute` shim) and give
+  `system`. Some stand for someone else: the web console readers and the
+  web push recipient give `person`; the rebuilt requester of a secondary
+  target and the made-up login of `meho policy explain` give the kind of
+  the login they stand for; the runner executor gives `runner`. A test
   (`tests/test_in_code_logins_have_a_kind.py`) scans the source and fails
-  when such a place has no kind.
+  when such a place has no kind. It also finds `Operator` under another
+  import name and the `model_validate*` and `model_construct` class
+  methods. `tests/test_caller_kind.py` builds every place the scan finds.
+- Five console steps check a person's token with the shared step and give
+  the login `in_code_kind="person"`, because the person is at the web
+  console and acts in that moment: the console sign-in, the approval
+  sign-in, the tenant choice, the reset of a session whose tenant is gone,
+  and the read of the approval sign-in that a console approve uses.
+- A runbook check step runs as a copy of the caller with no web console
+  session (`runbooks/run_service.py::check_step_caller`). MEHO runs the
+  step for the person, so a person's copy gets `personal_agent`.
 
 The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
 `person` is any human login, by web or by token, and `Asker.via` tells

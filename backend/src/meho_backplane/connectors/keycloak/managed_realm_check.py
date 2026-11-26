@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["CHECK_SECONDS", "ManagedRealmChecks"]
+__all__ = ["CHECK_SECONDS", "ManagedRealmChecks", "reading_realm_name"]
 
 #: How long one passed check counts inside one run.
 CHECK_SECONDS: Final = 5.0
@@ -56,6 +56,19 @@ _Passed = dict[tuple[tuple[str, str], str], float]
 _RUN_CHECKS: ContextVar[_Passed | None] = ContextVar("keycloak_realm_checks", default=None)
 
 
+#: ``True`` while the realm name check reads the realm.
+_READING_REALM_NAME: ContextVar[bool] = ContextVar("keycloak_reading_realm_name", default=False)
+
+
+def reading_realm_name() -> bool:
+    """True while the realm name check reads the realm.
+
+    The flight recorder stores no answer of that read: the realm it names is
+    not known to be the managed realm until the name is checked.
+    """
+    return _READING_REALM_NAME.get()
+
+
 def _realm_path(target: KeycloakTargetLike) -> str:
     return fill_path(_ADMIN_REALM_PATH, {"realm": resolve_realm_config(target).managed_realm})
 
@@ -64,7 +77,11 @@ async def _read_realm(
     connector: KeycloakConnector, target: KeycloakTargetLike, operator: Operator, path: str
 ) -> Any:
     """Keycloak's answer for the realm."""
-    return await connector._get_json(target, path, operator=operator)
+    token = _READING_REALM_NAME.set(True)
+    try:
+        return await connector._get_json(target, path, operator=operator)
+    finally:
+        _READING_REALM_NAME.reset(token)
 
 
 class ManagedRealmChecks:

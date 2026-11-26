@@ -504,6 +504,7 @@ async def _bind(
     browser flow is no longer *expected_flow*.
     """
     before = await connector._get_admin_json(target, realm_path, operator=operator)
+    check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
     if before.get("browserFlow") != expected_flow:
         raise KeycloakPasskeyFlowError(
             "realm_changed",
@@ -521,6 +522,7 @@ async def _bind(
         idempotent_conflict=False,
     )
     after = await connector._get_admin_json(target, realm_path, operator=operator)
+    check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, after, target)
     if after.get("browserFlow") != PASSKEY_FLOW_ALIAS:
         raise KeycloakPasskeyFlowError(
             "check_failed",

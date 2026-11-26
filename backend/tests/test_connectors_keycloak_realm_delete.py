@@ -41,6 +41,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -171,16 +172,28 @@ async def _target() -> Any:
         return await resolve_target(session, _TENANT_ID, _TARGET_NAME)
 
 
-async def _run(params: dict[str, Any]) -> dict[str, Any]:
-    """Run the op as an already-approved call (the handler path)."""
-    result = await dispatch(
-        operator=_operator(),
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP,
-        target=await _target(),
-        params=params,
-        _approved=True,
+async def _run(params: dict[str, Any], *, shown_id: str | None = _REALM_ID) -> dict[str, Any]:
+    """Run the op as an already-approved call (the handler path).
+
+    *shown_id* is the realm id on the preview bound to the call; ``None`` binds none.
+    """
+    preview = (
+        None
+        if shown_id is None
+        else {"blast_radius": {"object": {"id": shown_id, "kind": "keycloak_realm"}}}
     )
+    with patch(
+        "meho_backplane.connectors.keycloak.ops_write_realm_delete.grant_preview",
+        return_value=preview,
+    ):
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP,
+            target=await _target(),
+            params=params,
+            _approved=True,
+        )
     dumped: dict[str, Any] = result.model_dump(mode="json")
     return dumped
 
@@ -832,6 +845,21 @@ async def test_the_handler_sends_no_delete_for_a_realm_without_an_id(
         result = await _run({"realm": _REALM})
     assert result["status"] == "error", result
     assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError"
+    assert not del_route.called
+
+
+async def test_the_handler_sends_no_delete_when_no_card_or_preview_is_bound(
+    kc: KeycloakConnector,
+) -> None:
+    """With nothing bound to the call, the delete is refused and no DELETE is sent."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_realm_rep())
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        result = await _run({"realm": _REALM}, shown_id=None)
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakDeleteRefusedError"
+    assert "no_approved_id" in json.dumps(result)
     assert not del_route.called
 
 

@@ -78,7 +78,7 @@ There is a fifth kind in the code: a **runner**. A runner is a program that runs
    - **(b) Who must approve.** Example: every operation above `safe` on the NSX connector needs approval from the role `network_admin`.
 5. **The fixed rules.** No policy can lower these rules:
    - A credential read or write always waits for a person.
-   - A change of rights always waits for a person, except an Admin's own change of rights in the web console, after a fresh sign-in.
+   - A change of rights always waits for a person, except an Admin's own change of rights in the web console, after a fresh sign-in. This exception covers only MEHO's own rights: roles, grants and the policy inside MEHO. A change of rights in a target system follows the connector rule below: it waits by default, and a tenant admin can allow it for one connector.
    - A change of the policy itself always waits for a person.
    - An agent never approves.
    - A `destructive` operation always waits for approval.
@@ -88,7 +88,7 @@ There is a fifth kind in the code: a **runner**. A runner is a program that runs
    Added by the owner on 26 November 2026:
 
    - A change of rights in a target system waits for a person by default. A tenant admin can allow it for one connector on purpose. The audit row names the rule.
-   - With the switch on, three more rules hold. A standing grant does not cover an operation that deletes, stops or overwrites something for good. An install's own list of delete names only adds to the built-in list. A `dangerous` operation of a connector package that nobody has checked yet still waits when a personal agent calls it.
+   - With the switch on, three more rules hold. An ordinary standing grant does not cover an operation that deletes, stops or overwrites something for good. The delete grant of an install in sandbox mode keeps its own rules ([sandbox-mode.md](sandbox-mode.md)). An install's own list of delete names only adds to the built-in list. A `dangerous` operation of a connector package that nobody has checked yet still waits when a personal agent calls it.
 
 6. **Two layers.**
    - The platform admin sets the baseline and the outer limit.
@@ -225,7 +225,7 @@ This record does not change it.
   - Today a step of a multi-step operation at the `destructive` level is refused, not held for approval.
   - So each saved setting is checked before it is carried over.
 - **The two edits of today in the policy pages.** When the model is complete, the risk-level raise and "approval off" move into the policy pages, with a carry-over. That is its own step.
-- **The list of delete names is a setting** (`SERVICE_GRANT_DELETE_SHAPED_PATTERNS`). Whether an install may change what counts as a delete is not decided here.
+- **The list of delete names is a setting** (`SERVICE_GRANT_DELETE_SHAPED_PATTERNS`). Whether an install may change what counts as a delete is not decided here. For installs with the switch `CUSTOM_POLICY` on, the owner settled it: the install's list only adds to the built-in list (decision 5, the rules added on 26 November 2026).
 - Whether runners get one of the three names.
 - Whether agent grants move into the policy.
 

@@ -27,7 +27,7 @@ from sqlalchemy import ColumnElement, select, true, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped
 
-from meho_backplane.auth.keycloak_admin import KeycloakAdminClient, KeycloakAdminError
+from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
 from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -61,9 +61,16 @@ def is_agent_name(text: str | None) -> bool:
 
 
 def stored_sentence(sub: str) -> str:
-    """What the admin reads when the block of *sub* is stored."""
+    """What the admin reads when the block of *sub* is stored.
+
+    Each MEHO process keeps the block list for ``BLOCK_CACHE_SECONDS``, so
+    the block reaches every process within that time.
+    """
     login = "agent" if is_agent_name(sub) else "login"
-    return f"The block is stored. It holds from the next request of this {login}."
+    return (
+        f"The block is stored. MEHO refuses this {login} "
+        "within a few seconds on every MEHO process."
+    )
 
 
 def _in_reach(operator: Operator, tenant_column: Mapped[uuid.UUID]) -> ColumnElement[bool]:
@@ -131,14 +138,18 @@ async def agent_names(session: AsyncSession, operator: Operator, subs: set[str])
 async def agent_login_id(agent: AgentPrincipal) -> str | None:
     """The login id behind *agent* (its service-account user in Keycloak), or ``None``.
 
-    ``None`` when Keycloak cannot be read. The block is stored all the same;
-    the checks that know only a login id then refuse an agent login whose
-    name MEHO does not know (:func:`~meho_backplane.auth.principal_block.is_principal_blocked`).
+    MEHO takes the login id only from a clear answer: Keycloak answers 200
+    and the answer's ``id`` is a text that is not empty. Every other answer,
+    and every error while the answer is read, counts as "Keycloak cannot be
+    read" and gives ``None``. The block is stored all the same; the checks
+    that know only a login id then refuse a machine login whose agent name
+    MEHO does not know (:func:`~meho_backplane.auth.principal_block.is_principal_blocked`).
     """
     try:
         async with KeycloakAdminClient.from_settings() as keycloak:
             return await keycloak.get_service_account_user_id(agent.keycloak_internal_id)
-    except KeycloakAdminError:
+    except Exception:
+        # Any failure, also a body that is not JSON, means "cannot be read".
         _log.warning(
             "principal_block_agent_login_id_unread",
             agent=agent.keycloak_client_id,

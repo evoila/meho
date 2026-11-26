@@ -25,9 +25,10 @@ A check that knows only a login id finds a block of an agent name by:
   time and stores with the block (``principal_block.login_sub``);
 * each login id that MEHO saw with that agent name
   (``machine_login.client_id``);
-* when Keycloak could not be read at block time: a login that may be an
-  agent and whose agent name MEHO does not know is refused while such a
-  block is in scope.
+* while a block of an agent name is in scope: a machine login (any login
+  that is not a person) whose agent name MEHO does not know is refused. A
+  machine login whose agent name MEHO knows is refused when that name is
+  blocked. This holds also when the block has a stored login id.
 
 Scope of a block:
 
@@ -200,13 +201,12 @@ class BlockedPerson:
 class _Entries:
     """The block list as one process keeps it.
 
-    ``blocked`` holds every blocked ``(login, scope)``. ``unlinked_scopes``
-    holds the scope of each block of an agent name whose login id MEHO
-    could not read at block time.
+    ``blocked`` holds every blocked ``(login, scope)``. ``agent_scopes``
+    holds the scope of each block of an agent name.
     """
 
     blocked: frozenset[tuple[str, str]]
-    unlinked_scopes: frozenset[str] = frozenset()
+    agent_scopes: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -245,16 +245,16 @@ async def _load_entries(sessionmaker: async_sessionmaker[AsyncSession]) -> _Entr
         .join(PrincipalBlock, PrincipalBlock.sub == MachineLogin.client_id)
         .where(by_agent_name)
     )
-    unlinked = select(PrincipalBlock.scope).where(by_agent_name, PrincipalBlock.login_sub.is_(None))
+    agent_scopes = select(PrincipalBlock.scope).where(by_agent_name)
     async with sessionmaker() as session:
         rows: list[tuple[str | None, str]] = [
             (sub, scope)
             for sub, scope in (await session.execute(union(blocks, linked, seen))).all()
         ]
-        scopes = (await session.execute(unlinked)).scalars().all()
+        scopes = (await session.execute(agent_scopes)).scalars().all()
     return _Entries(
         blocked=frozenset((str(sub), str(scope)) for sub, scope in rows),
-        unlinked_scopes=frozenset(str(scope) for scope in scopes),
+        agent_scopes=frozenset(str(scope) for scope in scopes),
     )
 
 
@@ -293,23 +293,48 @@ def login_name(operator: Operator) -> str | None:
 
 
 def may_be_agent(principal_kind: str | None) -> bool:
-    """True when a login of *principal_kind* may be an agent (``None`` = not recorded)."""
-    return principal_kind in (None, PrincipalKind.AGENT.value)
+    """True when a login of *principal_kind* is a machine login (``None`` = not recorded).
+
+    The same rule as the token check (:func:`login_name`): every login that
+    is not a person may carry an agent name. An agent token without the
+    ``principal_kind`` claim can be recorded as a service.
+    """
+    return principal_kind != PrincipalKind.USER.value
 
 
-async def _agent_name_known(sub: str, tenant_id: uuid.UUID | None) -> bool:
-    """True when MEHO saw *sub* with a client id, so the list read already matched its name."""
-    query = select(MachineLogin.sub).where(
+async def _known_client_ids(sub: str, tenant_id: uuid.UUID | None) -> list[str]:
+    """The client ids MEHO keeps for the login id *sub* (``machine_login.client_id``)."""
+    query = select(MachineLogin.client_id).where(
         MachineLogin.sub == sub, MachineLogin.client_id.is_not(None)
     )
     if tenant_id is not None:
         query = query.where(MachineLogin.tenant_id == tenant_id)
     try:
         async with get_sessionmaker()() as session:
-            return (await session.execute(query.limit(1))).first() is not None
+            return [str(c) for c in (await session.execute(query)).scalars()]
     except Exception as exc:
         _log.warning("principal_block_read_failed", exc_info=True)
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+
+
+async def _unknown_machine_login_blocked(
+    entries: _Entries, sub: str, tenant_id: uuid.UUID | None, scopes: list[str]
+) -> bool:
+    """The check of a machine login by its login id alone, while an agent block is in scope.
+
+    MEHO reads the client id it keeps for *sub*. The login is refused when
+    there is none, and when one is an agent name that is blocked in the
+    same list copy *entries*.
+    """
+    client_ids = await _known_client_ids(sub, tenant_id)
+    if not client_ids:
+        return True
+    return any(
+        (name, scope) in entries.blocked
+        for name in client_ids
+        if is_agent_name(name)
+        for scope in scopes
+    )
 
 
 async def is_principal_blocked(
@@ -324,11 +349,12 @@ async def is_principal_blocked(
 
     Pass :func:`login_name` as *client_id* when the token is at hand. A
     *client_id* that does not start with ``agent:`` is not compared. Set
-    *maybe_agent* when the login may be an agent and its agent name is not
-    at hand: then a block of an agent name whose login id MEHO could not
-    read counts, unless MEHO knows the agent name of *sub*. The list copy
-    may be *max_age* seconds old at most (default
-    :data:`BLOCK_CACHE_SECONDS`).
+    *maybe_agent* when the login is a machine login and its agent name is
+    not at hand (:func:`may_be_agent`): then, while a block of an agent
+    name is in scope, the login is refused unless MEHO keeps a client id
+    for *sub* that is not a blocked agent name
+    (:func:`_unknown_machine_login_blocked`). The list copy may be
+    *max_age* seconds old at most (default :data:`BLOCK_CACHE_SECONDS`).
 
     Raises :class:`PrincipalBlockUnavailableError` when the list cannot be read.
     """
@@ -338,8 +364,8 @@ async def is_principal_blocked(
     logins = [sub] if name is None else [sub, name]
     if any((login, scope) in entries.blocked for login in logins for scope in scopes):
         return True
-    if client_id is None and maybe_agent and entries.unlinked_scopes.intersection(scopes):
-        return not await _agent_name_known(sub, tenant_id)
+    if client_id is None and maybe_agent and entries.agent_scopes.intersection(scopes):
+        return await _unknown_machine_login_blocked(entries, sub, tenant_id, scopes)
     return False
 
 

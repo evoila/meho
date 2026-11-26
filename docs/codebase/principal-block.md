@@ -21,8 +21,11 @@ What a block names (`auth/principal_block_agents.py`):
   block and never compares the text with agent names, in any tenant. The
   block stops only the login with that id. A token's client id that does
   not start with `agent:` is never compared with the block list.
-- The 201 answer says in one sentence that the block is stored and holds
-  from the next request of the login (`message`).
+- The 201 answer (`message`) says: "The block is stored. MEHO refuses
+  this login within a few seconds on every MEHO process." (with "this
+  agent" for a block of an agent name). Each process keeps the block list
+  for `BLOCK_CACHE_SECONDS`, so the block reaches every process within
+  that time.
 - The block answer and the list name the agent (`agent`) for a block of
   an agent name, and for a block of a login id that MEHO saw as an agent.
 

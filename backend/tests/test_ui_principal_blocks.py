@@ -665,7 +665,9 @@ def test_page_offers_the_agents_to_pick_and_a_picked_agent_is_blocked_and_unbloc
         refused = rest.get("/api/v1/connectors", headers=agent)
         listed = client.get(_PAGE)
         confirm = client.post(_UNBLOCK, data={"sub": _AGENT}, headers=_csrf_headers(csrf))
-        unblocked = client.post(_UNBLOCK, data=_confirmed(_AGENT), headers=_csrf_headers(csrf))
+        unblocked = client.post(
+            _UNBLOCK, data=_confirmed(_AGENT, _shown(confirm)), headers=_csrf_headers(csrf)
+        )
         read_again = rest.get("/api/v1/connectors", headers=agent)
         ran = _safe_call(rest, agent)
     finally:

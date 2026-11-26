@@ -3528,16 +3528,19 @@ async def refuse_resume_if_asker_blocked(
     """Refuse an approved run when the login that asked is blocked.
 
     Returns ``None`` when the asker (``request.principal_sub``) is not
-    blocked, so the caller runs the request. An asker that may be an agent
-    also counts as blocked by a block of an agent name whose login id MEHO
-    could not read, unless MEHO knows the asker's agent name
+    blocked, so the caller runs the request. An asker that is a machine
+    login also counts as blocked while a block of an agent name is in
+    scope, unless MEHO keeps a client id for the asker that is not a
+    blocked agent name
     (:func:`~meho_backplane.auth.principal_block.is_principal_blocked`).
-    Otherwise the operation never runs and the vendor gets no call. The
-    refusal is recorded like the release refusal
-    (:func:`refuse_resume_if_release_changed`): the claim is taken, so the
-    request never runs later, the stored run input is deleted, one audit
-    row records it, and the refusal is the stored run result. A block-list
-    read that fails refuses the run the same way.
+    Otherwise the operation does not run now and the vendor gets no call.
+    The refusal is recorded like the release refusal
+    (:func:`refuse_resume_if_release_changed`): the claim is taken, the
+    stored run input is deleted, one audit row records it, and the refusal
+    is the stored run result. The approval stays: the stored result is a
+    failed run, so the asker can run the same call again without a new
+    approval (``POST /api/v1/approvals/{id}/rerun``) once nothing refuses
+    it. A block-list read that fails refuses the run the same way.
 
     Shared by both resume paths: the operator surfaces
     (:func:`resume_dispatch_after_approval`) and the in-process agent

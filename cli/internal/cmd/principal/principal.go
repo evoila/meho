@@ -61,8 +61,8 @@ func newBlockCmd() *cobra.Command {
 			"agent: names an agent: copy it from the agent list (agent:<name>). It " +
 			"stops every token of that agent. MEHO refuses an agent name that names " +
 			"no agent in your reach, and stores no block. Every other <sub> is a " +
-			"login id: MEHO stores its block, and it holds from the next request " +
-			"of that login. The reason is kept in the audit log and in the block " +
+			"login id: MEHO stores its block. MEHO refuses the login or agent " +
+			"within a few seconds on every MEHO process. The reason is kept in the audit log and in the block " +
 			"list. The blocked login sees no reason.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,

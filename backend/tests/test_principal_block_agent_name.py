@@ -12,7 +12,8 @@ What these tests check:
   reach is refused with a plain sentence, and no block is stored.
 * Every other text is a login id, and MEHO stores its block: also when it
   is the short name of an agent, in any tenant. The answer says in one
-  sentence that the block holds from the next request of the login.
+  sentence that MEHO refuses the login within a few seconds on every
+  MEHO process.
 * A block of a login id stops only the login with that id: a service
   login whose client id is that text is not refused.
 * Another process sees the block and the unblock within the refresh time
@@ -73,7 +74,9 @@ _AGENT_SUB = "5b1c9d1e-0000-4000-8000-00000000a6e1"
 _ROUTE = "/api/v1/principals/blocked"
 _READ_ROUTE = "/api/v1/connectors"
 _BLOCK_MODULE = "meho_backplane.auth.principal_block"
-_LOGIN_STORED = "The block is stored. It holds from the next request of this login."
+_LOGIN_STORED = (
+    "The block is stored. MEHO refuses this login within a few seconds on every MEHO process."
+)
 
 
 @pytest.fixture(autouse=True)

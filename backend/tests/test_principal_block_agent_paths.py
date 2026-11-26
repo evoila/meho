@@ -38,7 +38,7 @@ from httpx import ASGITransport
 from sqlalchemy import delete, select, update
 
 from meho_backplane.agent.principal_block_gate import PrincipalBlockedRunError, _stop_if_blocked
-from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     block_principal,
@@ -47,7 +47,7 @@ from meho_backplane.auth.principal_block import (
 )
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, MachineLogin, PrincipalBlock
+from meho_backplane.db.models import ApprovalRequest, AuditLog, MachineLogin, PrincipalBlock
 from meho_backplane.main import app
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
@@ -57,6 +57,7 @@ from ._oidc_jwt_helpers import (
     AUDIENCE,
     ISSUER,
     make_rsa_keypair,
+    mint_token,
     mock_discovery_and_jwks,
     public_jwks,
 )
@@ -95,13 +96,16 @@ class _World:
 
     def keycloak(self, *, readable: bool) -> None:
         """The Keycloak stand-in: the login id behind the agent, or an error."""
-        self.router.post(p.KEYCLOAK_TOKEN).mock(
-            return_value=httpx.Response(200, json={"access_token": "made-up-admin-token"})
-        )
-        answer = (
+        self.keycloak_answers(
             httpx.Response(200, json={"id": p.AGENT_SUB})
             if readable
             else httpx.Response(500, json={"error": "unavailable"})
+        )
+
+    def keycloak_answers(self, answer: httpx.Response) -> None:
+        """The Keycloak stand-in answers *answer* to the read of the agent's login id."""
+        self.router.post(p.KEYCLOAK_TOKEN).mock(
+            return_value=httpx.Response(200, json={"access_token": "made-up-admin-token"})
         )
         url = f"{p.KEYCLOAK_ADMIN}/clients/{p.AGENT_INTERNAL_ID}/service-account-user"
         self.router.get(url).mock(return_value=answer)
@@ -328,7 +332,16 @@ async def test_person_whose_token_carries_the_agent_name_is_not_refused(world: _
     w = world
     w.keycloak(readable=True)
     assert (await p.block(w.ac, w.person())).status_code == 201
-    person = p.person_token(w.key, "some-person", azp=p.AGENT)
+    person = mint_token(
+        w.key,
+        sub="some-person",
+        tenant_id=str(p.TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        principal_kind=PrincipalKind.USER.value,
+        extra_claims={"preferred_username": f"service-account-{p.AGENT}"},
+    )
+    operator = await verify_jwt(authorization=f"Bearer {person}")
+    assert (operator.principal_kind, operator.client_id) == (PrincipalKind.USER, p.AGENT)
 
     answer = await w.ac.get(p.READ_ROUTE, headers=p.auth(person))
 
@@ -344,3 +357,169 @@ async def test_block_text_is_kept_by_its_agent_tenant() -> None:
     assert await is_principal_blocked(p.AGENT_SUB, p.TENANT_A, client_id=p.AGENT)
     assert not await is_principal_blocked(p.AGENT_SUB, p.TENANT_B, client_id=p.AGENT)
     assert not await is_principal_blocked(str(uuid.uuid4()), p.TENANT_A)
+
+
+async def _request_status(request_id: str) -> str:
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, uuid.UUID(request_id))
+    assert row is not None
+    return str(row.status)
+
+
+async def _block_rows() -> list[tuple[str, str | None, str]]:
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(PrincipalBlock))).scalars().all()
+    return [(r.sub, r.login_sub, r.reason) for r in rows]
+
+
+def _assert_refused_and_kept(approved: httpx.Response) -> None:
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["dispatch_status"] == "denied", approved.text
+    assert "principal_blocked" in str(approved.json()["dispatch_error"])
+    assert p.ran == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(200, json={"id": None}),
+        httpx.Response(200, content=b""),
+        httpx.Response(200, json={"id": ""}),
+        httpx.Response(200, json=["not", "an", "object"]),
+    ],
+    ids=["id-null", "empty-body", "id-empty", "not-an-object"],
+)
+async def test_unclear_keycloak_answer_stores_the_block_without_a_login_id(
+    world: _World, answer: httpx.Response
+) -> None:
+    w = world
+    w.keycloak_answers(answer)
+    request_id = await _ask_for_update(w)
+    await _set_agent_row("no-client-id")
+
+    blocked = await p.block(w.ac, w.person())
+
+    assert blocked.status_code == 201, blocked.text
+    assert await _block_rows() == [(p.AGENT, None, "stop it")]
+    _assert_refused_and_kept(await _approve(w, request_id, {"name": "one"}))
+
+
+async def test_second_block_of_the_name_keeps_the_login_id_when_keycloak_fails(
+    world: _World,
+) -> None:
+    w = world
+    w.keycloak(readable=True)
+    assert (await p.block(w.ac, w.person())).status_code == 201
+    w.keycloak(readable=False)
+
+    again = await w.ac.post(
+        p.BLOCK_ROUTE, json={"sub": p.AGENT, "reason": "new reason"}, headers=p.auth(w.person())
+    )
+
+    assert again.status_code == 201, again.text
+    assert await _block_rows() == [(p.AGENT, p.AGENT_SUB, "new reason")]
+    reset_block_cache()
+    assert await is_principal_blocked(p.AGENT_SUB, p.TENANT_A)
+
+
+async def test_link_written_after_the_list_read_does_not_let_the_next_approve_run(
+    world: _World,
+) -> None:
+    w = world
+    w.keycloak(readable=False)
+    first = await _ask_for_update(w)
+    second = await _ask_for_update(w)
+    await _set_agent_row("no-client-id")
+    assert (await p.block(w.ac, w.person())).status_code == 201
+    _assert_refused_and_kept(await _approve(w, first, {"name": "one"}))
+
+    # Another MEHO process writes the link when it refuses the agent's token by name.
+    async with get_sessionmaker()() as session:
+        await session.execute(update(MachineLogin).values(client_id=p.AGENT))
+        await session.commit()
+
+    _assert_refused_and_kept(await _approve(w, second, {"name": "one"}))
+
+
+async def test_approved_call_of_an_agent_token_without_a_kind_claim_does_not_run(
+    world: _World,
+) -> None:
+    w = world
+    w.keycloak(readable=False)
+    token = mint_token(
+        w.key,
+        sub=p.AGENT_SUB,
+        name=None,
+        email=None,
+        tenant_id=str(p.TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        extra_claims={"azp": p.AGENT, "jti": str(uuid.uuid4())},
+    )
+    asked = await p.call(w.ac, token, p.UPDATE_OP)
+    assert asked.json()["status"] == "awaiting_approval", asked.text
+    request_id = str(asked.json()["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as session:
+        kinds = (await session.execute(select(ApprovalRequest.principal_kind))).scalars().all()
+    assert kinds == [PrincipalKind.SERVICE.value]
+    await _set_agent_row("no-client-id")
+    assert (await p.block(w.ac, w.person())).status_code == 201
+
+    _assert_refused_and_kept(await _approve(w, request_id, {"name": "one"}))
+    assert await _request_status(request_id) == "approved"
+
+
+_SERVICE_SUB = "5b1f7a20-0000-4000-8000-00000000b6e3"
+
+
+@pytest.mark.parametrize("then", ["unblock", "block-gets-login-id"])
+async def test_refused_approved_call_of_another_service_keeps_its_approval(
+    world: _World, then: str
+) -> None:
+    w = world
+    w.keycloak(readable=False)
+    service = mint_token(
+        w.key,
+        sub=_SERVICE_SUB,
+        name=None,
+        email=None,
+        tenant_id=str(p.TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        principal_kind=PrincipalKind.SERVICE.value,
+        extra_claims={"azp": "sample-service", "jti": str(uuid.uuid4())},
+    )
+    asked = await p.call(w.ac, service, p.UPDATE_OP)
+    assert asked.json()["status"] == "awaiting_approval", asked.text
+    request_id = str(asked.json()["extras"]["approval_request_id"])
+    await _set_agent_row("no-client-id")
+    assert (await p.block(w.ac, w.person())).status_code == 201
+
+    _assert_refused_and_kept(await _approve(w, request_id, {"name": "one"}))
+    assert await _request_status(request_id) == "approved"
+
+    if then == "unblock":
+        removed = await w.ac.delete(f"{p.BLOCK_ROUTE}/{p.AGENT}", headers=p.auth(w.person()))
+        assert removed.status_code == 200, removed.text
+    else:
+        w.keycloak(readable=True)
+        assert (await p.block(w.ac, w.person())).status_code == 201
+    rerun = await w.ac.post(
+        f"/api/v1/approvals/{request_id}/rerun", json={}, headers=p.auth(service)
+    )
+
+    assert rerun.status_code == 200, rerun.text
+    assert rerun.json()["dispatch_status"] == "ok", rerun.text
+    assert p.ran == [(p.UPDATE_OP, {"name": "one"})]
+
+
+async def test_stored_login_id_of_another_login_does_not_end_the_refusal(
+    world: _World,
+) -> None:
+    w = world
+    w.keycloak_answers(httpx.Response(200, json={"id": "another-login-id"}))
+    request_id = await _ask_for_update(w)
+    await _set_agent_row("no-client-id")
+    assert (await p.block(w.ac, w.person())).status_code == 201
+    assert await _block_rows() == [(p.AGENT, "another-login-id", "stop it")]
+
+    _assert_refused_and_kept(await _approve(w, request_id, {"name": "one"}))
+    assert await _request_status(request_id) == "approved"

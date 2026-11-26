@@ -19,7 +19,7 @@
     <span class="text-sm font-medium">Login id</span>
     <input type="text" name="sub" value="{{ values.get('sub', '') }}" maxlength="255" class="input w-full font-mono{% if errors.get('sub') %} input-error{% endif %}" />
     {% if errors.get('sub') %}<span class="block text-error text-xs" role="alert" data-error-for="sub">{{ errors['sub'] }}</span>{% endif %}
-    <span class="block text-xs text-subtle">Or type the exact login id (the <span class="font-mono">sub</span>) of a login. MEHO stores the block, and it holds from the next request of this login.</span>
+    <span class="block text-xs text-subtle">Or type the exact login id (the <span class="font-mono">sub</span>) of a login. The block is stored. MEHO refuses this login within a few seconds on every MEHO process.</span>
   </label>
   <label class="block space-y-1">
     <span class="text-sm font-medium">Reason</span>

@@ -838,7 +838,11 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   whatever MEHO process takes its batch and however often the batch is sent:
   in one transaction it adds a row (tenant, runner, result id) to
   `runner_refused_results` (migration `0190`) and counts only the rows it
-  added, after the commit. The clean-up job of the runner results removes
+  added, after the commit. Only a result id of 1 to 64 lowercase letters,
+  digits and underscores (the form the runner makes, the same form as in a
+  set-aside notice) gets a row and is counted. A refused result with another
+  id gets no row and is not counted; the answer is the same as for any
+  refused result. The clean-up job of the runner results removes
   these rows after `RUNNER_CHECK_RESULTS_RETENTION_DAYS`, like the stored
   results. A result
   without `produced_at` is stored and not counted (`no_time`): without it
@@ -890,18 +894,27 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   (`wire.SET_ASIDE_NOTICES_MAX`); the rest go out on the next tick. When that
   post fails, the next tick sends it again. When MEHO answers it
   `NOTICE_DROP_AFTER_TRIES` (3) times in a row with a client error that a
-  retry does not change, the runner drops those notices and logs one
+  retry does not change, and those refusals span at least
+  `SET_ASIDE_MIN_SPAN` (5 minutes, the same minimum time as for a batch),
+  the runner drops those notices and logs one
   `runner_set_aside_notices_dropped` warning with the status, the code and
   the number; the count still goes with the next notice. A 5xx answer (also
   the 503 `set_aside_not_saved`), no connection, a time-out, a rate limit and
-  a login to renew keep the notices. A saved or dropped notice gets
-  `notice_done` true in its set-aside file. At the start of a tick without
+  a login to renew keep the notices, and so does a refusal that comes before
+  the minimum time. A saved or dropped notice gets
+  `notice_done` true in its set-aside file. When the runner cannot write
+  that mark (a full disk, a folder that cannot be written), it logs one
+  `runner_set_aside_mark_failed` warning with the file name and goes on
+  with its tick: it fetches the assignment and runs its due checks. The
+  notice may then go out again on a later tick; MEHO writes nothing twice
+  for it. At the start of a tick without
   waiting notices, the runner reads the files without that mark
   (`ResultSpool.waiting_notices`), so it sends the notices of batches it set
-  aside before a restart, and never sends a saved notice again. The first
-  post after a start carries `set_aside_total` and `set_aside_last_at` also
-  without a notice, so the stored count is right again after a restart or
-  after an operator emptied the folder.
+  aside before a restart, and never sends a saved notice again. After a
+  start, the runner sends `set_aside_total` and `set_aside_last_at` in its
+  first notice post, also without a notice. That post goes out in the first
+  tick, after any saved batches of the spool. So the stored count is right
+  again after a restart or after an operator emptied the folder.
   `runner_checks.record_set_aside` shows each such check
   as `unknown` with the reason `result_refused`, the status and the code,
   and stores the count and the time on the runner's assignment row

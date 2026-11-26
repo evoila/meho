@@ -89,8 +89,9 @@ async def set_sensor_status(
         try:
             await _mark_if_runner_stale(tenant_id, sensor_id, now)
         except Exception:
-            # The resume is saved: answer with it. The next result or sweep
-            # of the runner sets the state again.
+            # The resume is saved: answer with it. The check keeps its state
+            # until the runner's next result. The stale sweep does not mark a
+            # runner again that already has the stale mark (gateway/deadman.py).
             structlog.get_logger(__name__).warning(
                 "sensor_resume_stale_mark_failed", sensor_id=str(sensor_id), exc_info=True
             )

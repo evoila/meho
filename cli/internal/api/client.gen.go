@@ -10486,7 +10486,10 @@ type RunnerResult_Result struct {
 // “set_aside“ names the results of batches the runner set aside since its
 // last notice. “set_aside_total“ and “set_aside_last_at“ say how many
 // batches are in the runner's set-aside folder and when the newest one was
-// set aside. All three stay empty on a batch without a notice. MEHO reads at
+// set aside. All three stay empty on a batch without a notice, with one
+// exception: after a start, the runner's first notice post sets
+// “set_aside_total“ and “set_aside_last_at“ also when it carries no
+// notice, so MEHO has the count of the folder again. MEHO reads at
 // most the first 1,000 entries of “set_aside“ and skips the rest before it
 // checks any entry. Then it checks the entries one by one and skips each
 // entry that is not a valid notice; the other entries are kept. It keeps a

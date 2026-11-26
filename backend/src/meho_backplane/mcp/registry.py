@@ -373,6 +373,28 @@ def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[
     return {"enum": kept}
 
 
+def _with_enum_rule(
+    schema: dict[str, Any], members: list[Any], *, accept_null: bool
+) -> dict[str, Any]:
+    """Return *schema* with its ``enum`` *members* replaced by the rule without ``null``.
+
+    *schema* is a node whose other keywords are already rewritten, so the
+    rule is added once, after them, and does not depend on the order of the
+    keys. A keyword that the rule sets (for example ``allOf``) keeps its place.
+    """
+    rule_for = _enum_rule_still_accepting_null if accept_null else _enum_rule_without_null
+    rule = rule_for(schema, members)
+    out: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "enum":
+            out.update(rule)
+        elif key not in rule:
+            out[key] = value
+        else:
+            out[key] = rule[key]
+    return out
+
+
 def _without_null_enum_members(
     node: Any, *, names_are_keys: bool = False, accept_null: bool = False
 ) -> Any:
@@ -393,13 +415,12 @@ def _without_null_enum_members(
     """
     if isinstance(node, dict):
         changed = False
+        null_enum: list[Any] | None = None
         out: dict[str, Any] = {}
         for key, value in node.items():
             if not names_are_keys and key == "enum" and isinstance(value, list) and None in value:
-                rule_for = (
-                    _enum_rule_still_accepting_null if accept_null else _enum_rule_without_null
-                )
-                out.update(rule_for(node, value))
+                null_enum = value
+                out[key] = value
                 changed = True
                 continue
             if not names_are_keys and key in _LITERAL_KEYWORDS:
@@ -412,6 +433,8 @@ def _without_null_enum_members(
             )
             changed = changed or new_value is not value
             out[key] = new_value
+        if null_enum is not None:
+            out = _with_enum_rule(out, null_enum, accept_null=accept_null)
         return out if changed else node
     if isinstance(node, list):
         items = [_without_null_enum_members(item, accept_null=accept_null) for item in node]

@@ -160,6 +160,43 @@ def test_the_rewrite_keeps_an_anyof_the_schema_already_has() -> None:
         jsonschema.validate("c", sent)
 
 
+_ENUM_ANYOF_ALLOF = {
+    "enum": ["a", None],
+    "anyOf": [{"type": "string"}, {"type": "null"}],
+    "allOf": [{"enum": ["a", "b", None]}],
+}
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("enum", "anyOf", "allOf"), ("allOf", "anyOf", "enum"), ("anyOf", "enum", "allOf")],
+)
+def test_the_rewrite_does_not_depend_on_the_order_of_the_keys(order: tuple[str, ...]) -> None:
+    """``enum``, ``anyOf`` and ``allOf`` together: the sent schema accepts the same values."""
+    schema = {key: _ENUM_ANYOF_ALLOF[key] for key in order}
+    sent = _wire_safe_output_schema(schema)
+    assert set(sent) == {"anyOf", "allOf"}
+    assert not _null_enum_paths(sent)
+    assert sent["anyOf"] == schema["anyOf"]
+    for good in ("a", None):
+        jsonschema.validate(good, schema)
+        jsonschema.validate(good, sent)
+    for bad in ("b", "c", 1):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, schema)
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, sent)
+
+
+@pytest.mark.parametrize("order", [("enum", "const"), ("const", "enum")])
+def test_the_input_rewrite_does_not_depend_on_the_order_of_the_keys(
+    order: tuple[str, ...],
+) -> None:
+    values: dict[str, Any] = {"enum": [None], "const": None}
+    schema = {key: values[key] for key in order}
+    assert _without_null_enum_members(schema) == {"const": None}
+
+
 def test_the_rewrite_leaves_an_enum_without_null_alone() -> None:
     schema = {"type": "string", "enum": ["a", "b"]}
     assert _wire_safe_output_schema(schema) is schema

@@ -1,0 +1,5 @@
+## Note
+A person or a service login with the Reader role who tries a change gets one plain sentence next to the code `insufficient_role`, on every way in: "You have the Reader role. A Reader cannot ask for changes, so MEHO did not store or run this call. Ask an admin for the Operator role if you need to make changes." MEHO stores no approval request and runs nothing. REST and the web console answer `403` with `{"detail": "insufficient_role", "message": "<the sentence>"}`; MCP answers with the error message `insufficient_role: <the sentence>`. A re-run of an approved request by a caller whose role is now Reader is refused the same way. A preview and the pages that only read keep their answer. See https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md.
+
+## Action
+Scripts that check a refused change of a Reader read the code `insufficient_role` (in `detail` on REST and in the console, at the start of the MCP error message). Give the Operator role to anyone who needs to make changes. No schema action.

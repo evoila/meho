@@ -215,6 +215,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
+    require_ui_operator_read,
 )
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
@@ -286,6 +287,7 @@ _MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
 #: The ``operator`` role floor of the preview + call POSTs (the same floor
 #: as REST ``/api/v1/operations/call`` and the MCP ``call_operation`` tool).
 _require_operator = Depends(require_ui_operator)
+_require_operator_read = Depends(require_ui_operator_read)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -460,7 +462,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/preview", response_class=HTMLResponse)
     async def operations_preview(
         request: Request,
-        session: UISessionContext = _require_operator,
+        session: UISessionContext = _require_operator_read,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),

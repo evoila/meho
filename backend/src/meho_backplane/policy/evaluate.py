@@ -48,6 +48,7 @@ from meho_backplane.policy.floors import (
     FloorHit,
     call_floors,
     grant_may_clear,
+    reader_change_floor,
     run_approval_may_clear,
 )
 
@@ -140,7 +141,8 @@ class Asked:
     credential), ``credential_waits`` (such a call waits for a person),
     ``per_call_approval``, ``delete_shaped``, ``classified_always_wait``,
     ``sandbox_delete_grant`` (in sandbox mode a delete grant may still clear
-    the call) and ``rights_change`` (the operation is a change of rights).
+    the call), ``rights_change`` (the operation is a change of rights) and
+    ``asks_for_change`` (the call would not run at once as a plain read).
     ``target`` is the target id, or ``None``.
     """
 
@@ -480,8 +482,14 @@ def _waits_because(asker: Asker, asked: Asked, verdict: Verdict) -> str | None:
 
 
 def evaluate(asker: Asker, asked: Asked, found: Lookups) -> Decision:
-    """Return run, wait or deny for *asker* calling *asked*, and the rule that decided."""
-    if asker.acting_agent is not None:
+    """Return run, wait or deny for *asker* calling *asked*, and the rule that decided.
+
+    A Reader who asks for a change is denied first, as in the policy gate.
+    """
+    reader_denial = reader_change_floor(asker, asked)
+    if reader_denial is not None:
+        steps = _Steps(Verdict.DENY, _floor_rule(reader_denial))
+    elif asker.acting_agent is not None:
         steps = _hosted_run(asker, asked, found)
     else:
         steps = _for_caller(asker, asked, found, found.agent_grant)

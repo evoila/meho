@@ -96,6 +96,7 @@ from meho_backplane.operations.approved_run_rights import (
 )
 from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
+from meho_backplane.operations.role_floors import reader_change_refusal
 from meho_backplane.operations.uncertain_outcome import (
     LOGIN_ENDED_ADVICE,
     UNCERTAIN_OUTCOME,
@@ -607,7 +608,8 @@ async def _check_caller(
             RerunRoleTooLowError(request.id),
             code="insufficient_role",
             status=_FORBIDDEN_STATUS_CODE,
-            reason=f"a re-run needs the operator role; your role is {operator.tenant_role.value}",
+            reason=reader_change_refusal(operator.tenant_role, is_change=True)
+            or f"a re-run needs the operator role; your role is {operator.tenant_role.value}",
         )
 
 

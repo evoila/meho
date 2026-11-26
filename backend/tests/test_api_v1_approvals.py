@@ -56,6 +56,7 @@ from httpx import ASGITransport
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -662,7 +663,7 @@ def test_approve_only_principal_denied_call_operation_dispatch(client: TestClien
             headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
         )
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role"}
+    assert response.json() == {"detail": "insufficient_role", "message": READER_CHANGE_SENTENCE}
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,8 @@ router = APIRouter(prefix="/api/v1/operations", tags=["operations"])
 #: :mod:`meho_backplane.api.v1.targets` and
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
+#: For the ``POST`` routes that only read (a preview, a result read).
+_require_operator_read = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
@@ -523,7 +525,7 @@ class ResultQueryBody(BaseModel):
 @router.post("/result-query")
 async def post_result_query(
     body: ResultQueryBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_read,
 ) -> dict[str, Any]:
     """Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.
 
@@ -656,7 +658,7 @@ async def _run_result_query_body(
 @router.post("/preview", response_model_exclude_unset=True)
 async def post_preview(
     body: PreviewOperationBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_read,
 ) -> PreviewOperationResponse:
     """Resolve an op + params to the literal would-be HTTP request, without sending.
 

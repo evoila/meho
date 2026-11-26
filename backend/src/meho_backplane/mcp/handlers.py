@@ -92,7 +92,7 @@ from meho_backplane.audit_cutover import (
     open_classified_record_scope,
     wrapper_row_class,
 )
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import compute_effective_broadcast_detail
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.connectors.result_handle_store import (
@@ -492,9 +492,7 @@ async def handle_tools_call(
                 actual=operator.tenant_role,
             )
             status_code = 403
-            raise McpInvalidParamsError(
-                f"forbidden: {name!r} requires a higher role",
-            )
+            raise McpInvalidParamsError(_role_refusal_message(name, defn, operator))
 
         # Capability gate (G4.5-T1): the tool's required_capability gates
         # invocation too, not just listing. all_tools_for already hides a
@@ -926,6 +924,29 @@ def _decision_status(status_code: int, *, handler_rejected: bool) -> int:
     row.
     """
     return 400 if handler_rejected else status_code
+
+
+#: Tool classes that only read. Any other class asks for a change.
+_READ_TOOL_CLASSES: Final[frozenset[str]] = frozenset({"read", "audit_query"})
+
+
+def _role_refusal_message(name: str, defn: ToolDefinition, operator: Operator) -> str:
+    """The error text when *operator*'s role is below the tool's role.
+
+    A Reader who calls a tool that asks for a change (``call_operation``,
+    a write tool) gets the code and the plain sentence of
+    :func:`~meho_backplane.operations.role_floors.reader_change_refusal`.
+    """
+    from meho_backplane.operations.role_floors import READER_CHANGE_CODE, reader_change_refusal
+
+    sentence = reader_change_refusal(
+        operator.tenant_role,
+        is_change=defn.required_role is TenantRole.OPERATOR
+        and defn.op_class not in _READ_TOOL_CLASSES,
+    )
+    if sentence is not None:
+        return f"{READER_CHANGE_CODE}: {sentence}"
+    return f"forbidden: {name!r} requires a higher role"
 
 
 def _operator_meets_required_role(

@@ -88,8 +88,11 @@ ingested op whose row stores `credential_read`, set by a connector floor
 `awaiting_approval`. The op runs only after someone approves it. See
 [approvals.md](approvals.md).
 
-An agent with the `read_only` role never runs anything at once: its best
-result is "waits for approval" (see step 5 below).
+A login with the Reader role (`read_only`) cannot ask for a change at all.
+MEHO refuses such a call at once, stores no approval request and runs
+nothing (see "A Reader cannot ask for a change" below). An agent with the
+`read_only` role also runs no read at once: its best result for a read is
+"waits for approval" (see step 5 below).
 
 **An agent acts with operator rights, at most.** MEHO registers a new agent
 with `tenant_role=operator`. An agent registered earlier still has
@@ -379,7 +382,8 @@ claim for audit parent-linkage (#3446), is never matched against this table).
    under the group rules.
 
 5. **Apply role ceiling.** `READ_ONLY` principals are capped at `needs-approval`;
-   `OPERATOR` and `TENANT_ADMIN` are uncapped.
+   `OPERATOR` and `TENANT_ADMIN` are uncapped. A `READ_ONLY` call that asks
+   for a change never reaches this step: the policy gate refuses it first.
 
 6. **Return `(verdict, reason)`** where `reason` is a short string naming the
    verdict source, any ceilings applied, and the matched pattern(s). Callers log
@@ -418,6 +422,73 @@ instead and stores nothing:
 
 See [approvals.md](approvals.md) for the queue, the approve and reject
 verbs, and the resume path.
+
+### A Reader cannot ask for a change (`operations/role_floors.py`)
+
+A caller with the Reader role (`read_only`) who asks for a change is
+refused at once. MEHO stores no approval request, and nothing runs. The
+rule holds for every kind of login with the Reader role: a person in the
+web console, a person's token (MCP, the command line, REST), a service
+login, an agent login, and a hosted agent run that a Reader started.
+
+"A change" is every call that would not run at once as a plain read
+(`asks_for_change`):
+
+- a call at any risk level above `safe`: a write, a delete, a multi-step
+  operation;
+- an operation that always waits for approval (`requires_approval`, or a
+  classification that makes it always wait);
+- a credential write or mint;
+- a change of rights.
+
+A `safe` read, also a credential read, is not a change. What a Reader can
+read stays the same. A preview is not a change either: who may preview
+stays as it is.
+
+The answer has the code `insufficient_role` and this sentence, the same
+on every way in:
+
+> You have the Reader role. A Reader cannot ask for changes, so MEHO did
+> not store or run this call. Ask an admin for the Operator role if you
+> need to make changes.
+
+Where MEHO checks it:
+
+- **The policy gate.** `policy_gate` (`_validate.py`) checks the rule
+  first, before every other rule except a revoked agent login
+  (`reader_change_denial`). So a new call, the preview verdict and
+  `meho policy explain` give the same answer. The audit row says `denied`,
+  and its `reason_code` is `insufficient_role`. The policy evaluator has
+  the same rule (`policy/floors.py`, `reader_change_floor`, with the mark
+  `asks_for_change`).
+- **The requester's own run of an approved request.** In the approved-run
+  branch of `dispatch` (an agent's own wait, a hosted agent run, a re-run
+  by the requester), a requester whose role is now Reader is refused with
+  the same code and sentence, and the operation does not run. The REST
+  re-run route (`POST /api/v1/approvals/{id}/rerun`) refuses such a caller
+  before it takes the run.
+- **The three doors.** They keep their checks and take the code and the
+  sentence from `reader_change_refusal`:
+  - REST `require_role(TenantRole.OPERATOR)`: on a route that does not
+    only read (any method but `GET`, `HEAD`, `OPTIONS`), the body is
+    `{"detail": "insufficient_role", "message": "<the sentence>"}`
+    (`auth/role_refusal.py`). A `POST` route that only reads (the
+    preview, a result read) declares `reads_only=True` and keeps the plain
+    `{"detail": "insufficient_role"}`.
+  - MCP: a tool that needs `operator` and is not a read (`call_operation`,
+    the write tools) answers with the error message
+    `insufficient_role: <the sentence>`. A read tool keeps
+    `forbidden: '<tool>' requires a higher role`.
+  - The console `require_ui_operator`: on a route that does not only read,
+    the answer is `403` with the same body as REST. A `POST` form that only
+    reads (the preview, the knowledge search, the retrieval pages) uses
+    `require_ui_operator_read` and keeps `403 operator_required`.
+
+A walk test (`tests/test_reader_change_refused.py`,
+`tests/test_reader_change_refused_console.py`) calls every REST route and
+console route that does not only read, and every MCP tool, as a Reader. It
+fails when one of them stores an approval request, runs an operation, or
+answers from the `operator` door without the code and the sentence.
 
 ### Per-op role floor (`operations/role_floors.py`)
 
@@ -465,7 +536,9 @@ again. On the first run (an approvals surface, or the agent's own wait in
 
 A re-run of a failed approved call (`POST /api/v1/approvals/{id}/rerun`,
 `operations/approval_rerun.py`) checks these and also the caller's role
-and grants from the caller's token now. It needs the `operator` role. A
+and grants from the caller's token now. It needs the `operator` role: a
+caller whose role is now Reader gets `insufficient_role` and the plain
+sentence, and the call does not run. A
 re-run of a request made inside a hosted agent run binds that acting
 agent again, so it is checked with the stricter of the requester's and
 the agent's rights. The approver is read as recorded at the decision.

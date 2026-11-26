@@ -939,6 +939,16 @@ gate asks this list before it reads a standing grant or a run approval.
 Each rule and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
+## A Reader's change is refused, not stored
+
+A caller with the Reader role (`read_only`) who asks for a change gets one
+plain sentence next to the code `insufficient_role`. MEHO stores nothing and
+runs nothing. The same check covers a new call and the requester's own run
+of an approved request, also a re-run: a requester whose role became Reader
+after the approval is refused, and the operation does not run. A preview is
+not a change. The rule, the sentence and the places MEHO checks it:
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
+
 ## A credential call always waits for a person
 
 A call that reads, writes or makes a credential (the classes
@@ -1156,6 +1166,11 @@ request field, header or command-line flag can set it.
 | MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
 | MEHO-Operators (also MEHO-SA-Operators, read as Operators) | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
 | MEHO-Readers (also MEHO-Approvers, read as Readers) | (they cannot run changes) | no | no |
+
+A Reader cannot ask for a change at all. MEHO refuses the call at once with
+`insufficient_role` and a plain sentence, and stores no approval request, so
+a Reader's change never waits for approval. See
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
 
 MEHO reads the old group MEHO-SA-Operators as Operators and MEHO-Approvers as
 Readers. The default groups set no `approver` flag and no self-approval flag
@@ -2514,7 +2529,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
-| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`); a Reader also gets the plain sentence in `message` |
 | A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
 | The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 

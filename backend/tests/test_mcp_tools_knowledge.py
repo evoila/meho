@@ -44,6 +44,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START
 from tests._kb_embedding_stub import fake_embedding_service
@@ -860,7 +861,7 @@ async def test_tools_call_add_to_knowledge_read_only_reviewer_can_overwrite(
     blocked = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reader body"})
     error = blocked["error"]
     assert isinstance(error, dict)
-    assert "requires a higher role" in error["message"]
+    assert error["message"] == f"insufficient_role: {READER_CHANGE_SENTENCE}"
 
     async def _verify_reviewer() -> Operator:
         return reviewer
@@ -888,7 +889,7 @@ async def test_tools_call_add_to_knowledge_read_only_reviewer_can_overwrite(
     refused = _add_to_knowledge(client, {"slug": "team-runbook", "body": "agent body"})
     refused_error = refused["error"]
     assert isinstance(refused_error, dict)
-    assert "requires a higher role" in refused_error["message"]
+    assert refused_error["message"] == f"insufficient_role: {READER_CHANGE_SENTENCE}"
 
 
 @pytest.mark.parametrize(

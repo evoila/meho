@@ -516,6 +516,7 @@ from meho_backplane.operations.composite_steps import (
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
+    INSUFFICIENT_ROLE,
     POLICY_DENIED,
     ROLE_INSUFFICIENT,
 )
@@ -546,7 +547,7 @@ from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_REASON,
     take_console_run_sign_in,
 )
-from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.role_floors import reader_change_denial, role_floor_denial
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import (
     CREDENTIAL_CARD_LINE,
@@ -4835,13 +4836,19 @@ async def _dispatch_now(
             # run, or a re-run of a failed call by the requester) gets the
             # checks of a new call of its own login in
             # ``approved_run_refusal`` below.
+            # A requester whose role is now Reader may not ask for the
+            # change again: its own run is refused with the Reader sentence.
             requester_runs = _requester_runs_approved_call(operator)
-            role_denial = None if requester_runs else role_floor_denial(op_id, operator.tenant_role)
+            role_denial, role_code = (
+                (reader_change_denial(operator, descriptor, params), INSUFFICIENT_ROLE)
+                if requester_runs
+                else (role_floor_denial(op_id, operator.tenant_role), ROLE_INSUFFICIENT)
+            )
             if role_denial is not None:
+                if requester_runs:
+                    policy_decision_var.set(PermissionVerdict.DENY.value)
                 duration_ms = _elapsed_ms(started)
-                denied = result_denied(
-                    op_id, role_denial, duration_ms, reason_code=ROLE_INSUFFICIENT
-                )
+                denied = result_denied(op_id, role_denial, duration_ms, reason_code=role_code)
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,

@@ -802,7 +802,8 @@ async def require_ui_operator(
         minimum=TenantRole.OPERATOR,
         detail="operator_required",
         log_prefix="ui_operator_gate",
-        is_change=request.method.upper() not in _READ_METHODS,
+        # A re-check inside a stream may pass a request without a method: a read.
+        is_change=str(request.scope.get("method", "GET")).upper() not in _READ_METHODS,
     )
 
 

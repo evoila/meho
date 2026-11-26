@@ -68,7 +68,7 @@ substrate.
 (part of the user id or of the name; case does not matter), `op_id`
 (glob, e.g. `vault.*`), `op_class` (`read` / `write` /
 `credential_read` / `credential_write` / `credential_mint` /
-`audit_query` / `approval` / `checks` / `other`), `result_status`,
+`credential_use` / `audit_query` / `approval` / `checks` / `other`), `result_status`,
 `since` / `until` (ISO-8601 **or** shorthand: `30m`, `24h`, `7d`, `2w`),
 `audit_id`, `parent_audit_id`, `agent_session_id`, `work_ref`, `limit` (default 100, max
 1000), and `cursor`. Calling it with **no** filters returns the most

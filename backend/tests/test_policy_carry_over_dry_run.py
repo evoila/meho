@@ -1,17 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The dry run of the "always wait" carry-over (``GET /api/v1/policy/carry-over/dry-run``).
+"""What the dry run of the "always wait" carry-over lists.
 
-* It lists each saved "always wait" of the scope: overrides with approval
-  on and policy file entries with ``always_wait: true``, with the source,
-  the scope, the operations it makes wait and the warnings (a step of a
-  multi-step operation, sandbox mode, the preview).
-* A tenant admin sees the tenant's settings, a platform admin also the
-  install's. Another role is refused. Each read writes an audit row.
-* It writes nothing: no policy row, override or approval request changes.
-* An override with approval on keeps waiting, with ``CUSTOM_POLICY`` on
-  and off.
+``GET /api/v1/policy/carry-over/dry-run`` lists each saved "always wait"
+of the scope: overrides with approval on and policy file entries with
+``always_wait: true``. For each one it shows the source, the scope, the
+operations it matches and the warnings: what changes if MEHO reads the
+setting as ``destructive`` (a step of a multi-step operation, sandbox
+mode, the preview).
+
+* A policy file entry is matched against the operations a call of the
+  tenant can use, and against every declared step, also one with no
+  stored row.
+* A step is matched by connector and op id, and names every multi-step
+  operation that runs it, at every level.
+* A tenant's answer holds nothing of another tenant.
+
+Who may run it, that it writes only its audit row, and that an override
+keeps waiting: ``test_policy_carry_over_dry_run_access.py``.
 
 Drives the production ``meho_backplane.main:app`` with real tokens. DB is
 the autouse per-test SQLite + ``alembic upgrade head``.
@@ -19,52 +26,48 @@ the autouse per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-import respx
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import (
-    ApprovalRequest,
-    AuditLog,
-    OperationPolicyOverride,
-    TenantPolicy,
-)
+from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
 from meho_backplane.main import app
-from meho_backplane.operations import governed_subops
-from meho_backplane.operations.governed_subops import GovernedSubopSurface
-from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.carry_over import DRY_RUN_MESSAGE
 from meho_backplane.sandbox_mode import set_sandbox_mode_active
 from meho_backplane.settings import get_settings
 
-from ._oidc_jwt_helpers import (
-    DEFAULT_TENANT_ID,
-    make_rsa_keypair,
-    mint_token,
-    mock_discovery_and_jwks,
-    public_jwks,
+from ._carry_over_helpers import (
+    CONNECTOR,
+    NO_OPERATION,
+    OTHER_TENANT,
+    PREVIEW,
+    SANDBOX,
+    TENANT,
+    add_steps,
+    call,
+    dry_run,
+    op,
+    override,
+    policy,
+    register,
+    setup,
+    step_text,
+    tenant_row,
 )
+from ._oidc_jwt_helpers import make_rsa_keypair
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _isolated_jwks_cache,  # noqa: F401
     _settings_env,  # noqa: F401
 )
+from ._time_limits import check_time_limit
 from ._vault_fakes import install_fake_vault
-
-_TENANT = uuid.UUID(DEFAULT_TENANT_ID)
-_OTHER_TENANT = uuid.uuid4()
-_CONNECTOR = "cowapi-1.x"
-_ROUTE = "/api/v1/policy/carry-over/dry-run"
-_AUDIT_OP = "policy.carry_over.dry_run"
-_PREVIEW = "As `destructive`, a call needs a matching preview first. A call without one is refused."
 
 
 @pytest.fixture
@@ -90,133 +93,23 @@ def sandbox() -> Iterator[None]:
 
 
 @pytest.fixture
+def classification_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def a_step(monkeypatch: pytest.MonkeyPatch) -> None:
     """``cowapi.vm.update`` is a step of one multi-step operation."""
-    monkeypatch.setitem(
-        governed_subops._REGISTRY,
-        "cowapi.composite.rebuild",
-        GovernedSubopSurface(connector_id=_CONNECTOR, sub_op_ids=("cowapi.vm.update",)),
-    )
+    add_steps(monkeypatch, "cowapi.composite.rebuild", CONNECTOR, "cowapi.vm.update")
 
 
-async def _handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
-    return {}
-
-
-async def _register(embedding: AsyncMock, op_id: str, group: str, level: Any) -> None:
-    await register_typed_operation(
-        product="cowapi",
-        version="1.x",
-        impl_id="cowapi",
-        op_id=op_id,
-        handler=_handler,
-        summary="Fixture operation.",
-        description="Fixture operation.",
-        parameter_schema={"type": "object", "properties": {}},
-        group_key=group,
-        when_to_use="Fixture group.",
-        safety_level=level,
-        embedding_service=embedding,
-    )
-
-
-async def _override(op_id: str, tenant_id: uuid.UUID | None, *, approval: bool | None) -> None:
-    async with get_sessionmaker()() as session:
-        session.add(
-            OperationPolicyOverride(
-                tenant_id=tenant_id,
-                product="cowapi",
-                version="1.x",
-                impl_id="cowapi",
-                op_id=op_id,
-                requires_approval=approval,
-                category=None if approval is not None else "compute",
-                set_by_sub="admin-a",
-            )
-        )
-        await session.commit()
-
-
-async def _policy(tenant_id: uuid.UUID | None, classifications: list[dict[str, Any]]) -> None:
-    async with get_sessionmaker()() as session:
-        session.add(
-            TenantPolicy(
-                tenant_id=tenant_id,
-                document={"classifications": classifications},
-                set_by_sub="admin-a",
-            )
-        )
-        await session.commit()
-
-
-async def _setup(embedding: AsyncMock) -> None:
-    """Three operations, overrides and policy files in three scopes."""
-    await _register(embedding, "cowapi.vm.list", "compute", "safe")
-    await _register(embedding, "cowapi.vm.update", "compute", "caution")
-    await _register(embedding, "cowapi.disk.list", "storage", "safe")
-    await _override("cowapi.vm.update", _TENANT, approval=True)
-    await _override("cowapi.disk.list", _TENANT, approval=None)
-    await _override("cowapi.vm.list", None, approval=True)
-    await _override("cowapi.disk.list", _OTHER_TENANT, approval=True)
-    await _policy(
-        _TENANT,
-        [
-            {"match": {"connector": "cowapi-*", "group": "compute"}, "always_wait": True},
-            {"match": {"op": "cowapi.vm.list"}, "always_wait": False},
-            {"match": {"op": "nothing.*"}, "always_wait": True},
-            {"match": {"op": "cowapi.disk.list"}, "category": "storage"},
-        ],
-    )
-    await _policy(None, [{"match": {"group": "storage"}, "always_wait": True}])
-    await _policy(_OTHER_TENANT, [{"match": {"op": "cowapi.*"}, "always_wait": True}])
-
-
-def _token(key: Any, *, sub: str = "admin-a", **claims: Any) -> str:
-    claims.setdefault("tenant_role", TenantRole.TENANT_ADMIN.value)
-    return mint_token(key, sub=sub, tenant_id=str(_TENANT), **claims)
-
-
-def _auth(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _dry_run(client: TestClient, key: Any, scope: str | None = None, **claims: Any) -> Any:
-    params = {"scope": scope} if scope else None
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        return client.get(_ROUTE, params=params, headers=_auth(_token(key, **claims)))
-
-
-def _op(op_id: str, *step_of: str) -> dict[str, Any]:
-    return {"connector_id": _CONNECTOR, "op_id": op_id, "step_of": list(step_of)}
-
-
-async def _audit_rows() -> list[AuditLog]:
-    async with get_sessionmaker()() as session:
-        stmt = select(AuditLog).where(AuditLog.path == _ROUTE).order_by(AuditLog.occurred_at)
-        return list((await session.execute(stmt)).scalars())
-
-
-async def _snapshot() -> list[tuple[Any, ...]]:
-    async with get_sessionmaker()() as session:
-        overrides = (await session.execute(select(OperationPolicyOverride))).scalars()
-        policies = (await session.execute(select(TenantPolicy))).scalars()
-        requests = (await session.execute(select(ApprovalRequest))).scalars()
-        return sorted(
-            [
-                *(
-                    ("override", o.id, o.requires_approval, o.safety_level, o.set_at)
-                    for o in overrides
-                ),
-                *(("policy", p.id, repr(p.document), p.set_at) for p in policies),
-                *(("request", r.id, r.status) for r in requests),
-            ],
-            key=repr,
-        )
+def _admin_key(name: str) -> object:
+    return make_rsa_keypair(f"kid-co-{name}")
 
 
 # ---------------------------------------------------------------------------
-# What the dry run lists
+# The list
 # ---------------------------------------------------------------------------
 
 
@@ -225,8 +118,8 @@ async def _snapshot() -> list[tuple[Any, ...]]:
 async def test_the_dry_run_lists_each_saved_always_wait_of_the_tenant(
     client: TestClient, embedding: AsyncMock
 ) -> None:
-    await _setup(embedding)
-    resp = _dry_run(client, make_rsa_keypair("kid-co-list"))
+    await setup(embedding)
+    resp = dry_run(client, _admin_key("list"))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert (body["scope"], body["sandbox_mode"], body["message"]) == (
@@ -234,171 +127,275 @@ async def test_the_dry_run_lists_each_saved_always_wait_of_the_tenant(
         True,
         DRY_RUN_MESSAGE,
     )
-    override, group_entry, no_match = body["settings"]
+    the_override, group_entry, no_match = body["settings"]
 
-    assert override["source"] == "override" and override["scope"] == "tenant"
-    assert override["ref"] == "tenant:override"
-    assert override["match"] == {"connector": _CONNECTOR, "op": "cowapi.vm.update"}
-    assert override["operations"] == [_op("cowapi.vm.update", "cowapi.composite.rebuild")]
-    step, in_sandbox, preview = override["warnings"]
-    assert "step of `cowapi.composite.rebuild`" in step and "refused" in step
-    assert "sandbox mode" in in_sandbox
-    assert preview == _PREVIEW
+    assert the_override["source"] == "override" and the_override["scope"] == "tenant"
+    assert the_override["ref"] == "tenant:override"
+    assert the_override["match"] == {"connector": CONNECTOR, "op": "cowapi.vm.update"}
+    assert the_override["operations"] == [op("cowapi.vm.update", "cowapi.composite.rebuild")]
+    assert the_override["warnings"] == [
+        step_text("cowapi.vm.update", "cowapi.composite.rebuild"),
+        SANDBOX,
+        PREVIEW,
+    ]
 
     # The group entry: vm.list has a more specific `always_wait: false`.
     assert group_entry["source"] == "policy_file" and group_entry["scope"] == "tenant"
     assert group_entry["ref"] == "tenant:classifications[0]"
     assert group_entry["match"] == {"connector": "cowapi-*", "group": "compute"}
-    assert group_entry["operations"] == [_op("cowapi.vm.update", "cowapi.composite.rebuild")]
+    assert group_entry["operations"] == [op("cowapi.vm.update", "cowapi.composite.rebuild")]
     assert len(group_entry["warnings"]) == 3
 
     assert no_match["ref"] == "tenant:classifications[2]"
     assert no_match["operations"] == []
-    assert no_match["warnings"][0] == "Today this entry makes no operation wait."
-    assert no_match["warnings"][-1] == _PREVIEW
+    assert no_match["warnings"] == [NO_OPERATION, SANDBOX, PREVIEW]
 
 
 @pytest.mark.asyncio
 async def test_outside_sandbox_mode_and_without_steps_only_the_preview_warns(
     client: TestClient, embedding: AsyncMock
 ) -> None:
-    await _setup(embedding)
-    body = _dry_run(client, make_rsa_keypair("kid-co-plain")).json()
+    await setup(embedding)
+    body = dry_run(client, _admin_key("plain")).json()
     assert body["sandbox_mode"] is False
-    override = body["settings"][0]
-    assert override["operations"] == [_op("cowapi.vm.update")]
-    assert override["warnings"] == [_PREVIEW]
+    the_override = body["settings"][0]
+    assert the_override["operations"] == [op("cowapi.vm.update")]
+    assert the_override["warnings"] == [PREVIEW]
 
 
 @pytest.mark.asyncio
 async def test_a_tenant_without_saved_settings_gets_an_empty_list(client: TestClient) -> None:
-    body = _dry_run(client, make_rsa_keypair("kid-co-empty")).json()
+    body = dry_run(client, _admin_key("empty")).json()
     assert body["settings"] == []
     assert body["message"] == DRY_RUN_MESSAGE
 
 
 @pytest.mark.asyncio
 async def test_a_stored_policy_that_is_not_valid_is_409(client: TestClient) -> None:
-    await _policy(_TENANT, [{"match": "everything", "always_wait": True}])
-    resp = _dry_run(client, make_rsa_keypair("kid-co-bad"))
+    await policy(TENANT, [{"match": "everything", "always_wait": True}])
+    resp = dry_run(client, _admin_key("bad"))
     assert resp.status_code == 409
     assert "Import a fixed policy file." in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
-# Who may read it (whole path: token, gate, audit row)
+# Steps of multi-step operations
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_who_may_read_it_is_the_rule_of_the_export(
+@pytest.mark.usefixtures("classification_on")
+async def test_a_step_with_no_stored_row_is_listed_under_a_matching_entry(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_steps(monkeypatch, "cowapi.composite.rebuild", CONNECTOR, "cowapi.hidden.step")
+    await policy(
+        TENANT,
+        [
+            {"match": {"op": "cowapi.hidden.*"}, "always_wait": True},
+            # A group entry needs a stored row; the step has none.
+            {"match": {"group": "hidden"}, "always_wait": True},
+        ],
+    )
+    by_op, by_group = dry_run(client, _admin_key("hidden")).json()["settings"]
+
+    assert by_op["operations"] == [op("cowapi.hidden.step", "cowapi.composite.rebuild")]
+    assert by_op["warnings"] == [
+        step_text("cowapi.hidden.step", "cowapi.composite.rebuild"),
+        PREVIEW,
+    ]
+    assert NO_OPERATION not in by_op["warnings"]
+    assert by_group["operations"] == []
+    assert by_group["warnings"] == [NO_OPERATION, PREVIEW]
+
+
+@pytest.mark.asyncio
+async def test_a_step_is_matched_by_its_connector_too(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await register(embedding, "POST:/items", "compute", "caution")
+    await register(embedding, "POST:/items", "compute", "caution", product="bullapi")
+    add_steps(monkeypatch, "bullapi.composite.sync", "bullapi-1.x", "POST:/items")
+    await override("POST:/items", TENANT, approval=True)
+    await override("POST:/items", TENANT, approval=True, product="bullapi")
+
+    bull, cow = dry_run(client, _admin_key("two")).json()["settings"]
+
+    assert cow["operations"] == [op("POST:/items")]
+    assert cow["warnings"] == [PREVIEW]
+    assert bull["operations"] == [
+        op("POST:/items", "bullapi.composite.sync", connector="bullapi-1.x")
+    ]
+    assert bull["warnings"] == [step_text("POST:/items", "bullapi.composite.sync"), PREVIEW]
+
+
+@pytest.mark.asyncio
+async def test_a_step_names_every_multi_step_operation_at_every_level(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    add_steps(monkeypatch, "cowapi.composite.outer", CONNECTOR, "cowapi.composite.inner")
+    add_steps(monkeypatch, "cowapi.composite.inner", CONNECTOR, "cowapi.vm.update")
+    # A list that loops back.
+    add_steps(monkeypatch, "cowapi.loop.a", CONNECTOR, "cowapi.loop.b")
+    add_steps(monkeypatch, "cowapi.loop.b", CONNECTOR, "cowapi.loop.a")
+    await override("cowapi.vm.update", TENANT, approval=True)
+    await override("cowapi.loop.a", TENANT, approval=True)
+
+    loop, update = dry_run(client, _admin_key("nested")).json()["settings"]
+
+    both = ("cowapi.composite.inner", "cowapi.composite.outer")
+    assert update["operations"] == [op("cowapi.vm.update", *both)]
+    assert update["warnings"] == [step_text("cowapi.vm.update", *both), PREVIEW]
+    assert loop["operations"] == [op("cowapi.loop.a", "cowapi.loop.b")]
+    assert loop["warnings"] == [step_text("cowapi.loop.a", "cowapi.loop.b"), PREVIEW]
+
+
+# ---------------------------------------------------------------------------
+# The operations of a tenant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on")
+async def test_with_a_tenant_copy_only_its_own_operations_count(
     client: TestClient, embedding: AsyncMock
 ) -> None:
-    await _setup(embedding)
-    key = make_rsa_keypair("kid-co-who")
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    await tenant_row("cowapi.vm.list", TENANT)
+    await policy(TENANT, [{"match": {"group": "compute"}, "always_wait": True}])
+    key = _admin_key("copy")
 
-    tenant = _dry_run(client, key).json()
-    refs = {(s["scope"], s["ref"], s["match"].get("op")) for s in tenant["settings"]}
-    assert all(scope == "tenant" for scope, _, _ in refs)
-    assert ("tenant", "tenant:override", "cowapi.disk.list") not in refs
+    (entry,) = dry_run(client, key).json()["settings"]
+    assert entry["operations"] == []
+    assert entry["warnings"] == [NO_OPERATION, PREVIEW]
 
-    assert _dry_run(client, key, "install").status_code == 403
-    operator = _dry_run(client, key, tenant_role=TenantRole.OPERATOR.value)
-    assert operator.status_code == 403
-    assert operator.json()["detail"] == "insufficient_role"
-    machine = _dry_run(client, key, "install", platform_admin=True, principal_kind="service")
-    assert machine.status_code == 403
-
-    install = _dry_run(client, key, "install", sub="root-a", platform_admin=True).json()
-    assert [(s["source"], s["scope"], s["ref"], s["match"]) for s in install["settings"]] == [
-        (
-            "override",
-            "install",
-            "install:override",
-            {"connector": _CONNECTOR, "op": "cowapi.vm.list"},
-        ),
-        ("policy_file", "install", "install:classifications[0]", {"group": "storage"}),
-    ]
-    assert install["settings"][1]["operations"] == [_op("cowapi.disk.list")]
-
-    rows = await _audit_rows()
-    assert [(row.operator_sub, row.status_code) for row in rows] == [
-        ("admin-a", 200),
-        ("admin-a", 403),
-        ("admin-a", 403),
-        ("admin-a", 403),
-        ("root-a", 200),
-    ]
-    assert {row.method for row in rows} == {"GET"}
-    # The role gate refuses the operator before the route names the read.
-    assert [row.payload.get("op_id") for row in rows if row.status_code == 200] == [
-        _AUDIT_OP,
-        _AUDIT_OP,
-    ]
-
-
-def test_the_dry_run_needs_a_token(client: TestClient) -> None:
-    assert client.get(_ROUTE).status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# It writes nothing, and an override with approval on keeps waiting
-# ---------------------------------------------------------------------------
+    listed = call(client, key, "cowapi.vm.list")
+    assert listed["status"] == "ok", listed
+    missing = call(client, key, "cowapi.vm.update")
+    assert missing["status"] == "error" and missing["error"].startswith("unknown_op"), missing
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("sandbox", "a_step")
-async def test_the_dry_run_changes_no_row(client: TestClient, embedding: AsyncMock) -> None:
-    await _setup(embedding)
-    before = await _snapshot()
-    key = make_rsa_keypair("kid-co-nowrite")
-    assert _dry_run(client, key).status_code == 200
-    assert _dry_run(client, key, "install", platform_admin=True).status_code == 200
-    assert await _snapshot() == before
-
-
-def _call(client: TestClient, key: Any) -> dict[str, Any]:
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        resp = client.post(
-            "/api/v1/operations/call",
-            json={"connector_id": _CONNECTOR, "op_id": "cowapi.vm.update", "params": {}},
-            headers=_auth(_token(key, sub="op-a", tenant_role=TenantRole.OPERATOR.value)),
-        )
-    assert resp.status_code == 200, resp.text
-    body: dict[str, Any] = resp.json()
-    return body
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("custom_policy", ["false", "true"])
-async def test_an_override_with_approval_on_keeps_waiting(
-    client: TestClient,
-    embedding: AsyncMock,
-    monkeypatch: pytest.MonkeyPatch,
-    custom_policy: str,
+async def test_a_tenant_answer_holds_nothing_of_another_tenant(
+    client: TestClient, embedding: AsyncMock
 ) -> None:
-    monkeypatch.setenv("CUSTOM_POLICY", custom_policy)
-    get_settings.cache_clear()
-    await _register(embedding, "cowapi.vm.update", "compute", "caution")
-    await _override("cowapi.vm.update", _TENANT, approval=True)
-    key = make_rsa_keypair("kid-co-wait")
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    await tenant_row("POST:/b-only", OTHER_TENANT)
+    await override("cowapi.vm.update", TENANT, approval=True)
+    await override("POST:/b-only", OTHER_TENANT, approval=True)
+    await policy(TENANT, [{"match": {"op": "*"}, "always_wait": True}])
+    await policy(OTHER_TENANT, [{"match": {"op": "POST:*"}, "always_wait": True}])
+    key = _admin_key("tenants")
 
-    first = _call(client, key)
-    assert _dry_run(client, key).status_code == 200
-    second = _call(client, key)
+    a = dry_run(client, key).json()["settings"]
+    b = dry_run(client, key, tenant=OTHER_TENANT, sub="admin-b").json()["settings"]
 
-    assert first["status"] == second["status"] == "awaiting_approval"
+    assert [(s["source"], s["match"].get("op")) for s in a] == [
+        ("override", "cowapi.vm.update"),
+        ("policy_file", "*"),
+    ]
+    assert a[1]["operations"] == [op("cowapi.vm.list"), op("cowapi.vm.update")]
+    # Tenant B has its own copy of the connector: only its own row counts.
+    assert [(s["source"], s["match"].get("op")) for s in b] == [
+        ("override", "POST:/b-only"),
+        ("policy_file", "POST:*"),
+    ]
+    assert b[1]["operations"] == [op("POST:/b-only")]
+
+
+# ---------------------------------------------------------------------------
+# Each operation once, also for a broad entry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sandbox")
+async def test_an_operation_stored_in_two_groups_is_listed_once(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await tenant_row("cowapi.vm.list", OTHER_TENANT)
+    await policy(None, [{"match": {"connector": "cowapi-*"}, "always_wait": True}])
+
+    body = dry_run(client, _admin_key("twice"), "install", sub="root-a", platform_admin=True)
+    (entry,) = body.json()["settings"]
+    assert entry["operations"] == [op("cowapi.vm.list")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow_runner_tolerant
+async def test_one_entry_that_matches_3000_operations_answers_in_time(
+    client: TestClient,
+) -> None:
     async with get_sessionmaker()() as session:
-        requests = list((await session.execute(select(ApprovalRequest))).scalars())
-        calls = [
-            row
-            for row in (await session.execute(select(AuditLog))).scalars()
-            if (row.payload or {}).get("op_id") == "cowapi.vm.update"
-        ]
-    assert [r.op_id for r in requests] == ["cowapi.vm.update", "cowapi.vm.update"]
-    assert {r.status for r in requests} == {"pending"}
-    assert len(calls) == 2
-    assert {row.operator_sub for row in calls} == {"op-a"}
-    assert {(row.path, row.status_code) for row in calls} == {("approval.request", 202)}
-    assert {row.payload["approval_request_id"] for row in calls} == {str(r.id) for r in requests}
+        session.add_all(
+            EndpointDescriptor(
+                tenant_id=None,
+                product="cowapi",
+                version="1.x",
+                impl_id="cowapi",
+                op_id=f"cowapi.bulk.op{n:04d}",
+                source_kind="typed",
+                safety_level="safe",
+                requires_approval=False,
+                parameter_schema={"type": "object", "properties": {}},
+            )
+            for n in range(3000)
+        )
+        await session.commit()
+    await policy(TENANT, [{"match": {"op": "cowapi.bulk.*"}, "always_wait": True}])
+
+    started = time.monotonic()
+    resp = dry_run(client, _admin_key("bulk"))
+    elapsed = time.monotonic() - started
+
+    assert resp.status_code == 200
+    (entry,) = resp.json()["settings"]
+    assert len(entry["operations"]) == 3000
+    check_time_limit(elapsed, 10.0, f"the dry run took {elapsed:.1f} s for 3,000 operations")
+
+
+# ---------------------------------------------------------------------------
+# The texts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sandbox")
+async def test_no_warning_says_that_no_grant_covers_an_override(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    await override("cowapi.vm.update", TENANT, approval=True)
+    async with get_sessionmaker()() as session:
+        session.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=TENANT,
+                principal_sub="svc-a",
+                op_id="cowapi.vm.update",
+                connector_id=CONNECTOR,
+                target_id=None,
+                reason="fixture grant",
+                created_by_sub="admin-a",
+            )
+        )
+        await session.commit()
+    key = _admin_key("grant")
+
+    assert call(client, key, "cowapi.vm.update", sub="svc-a", principal_kind="service")[
+        "status"
+    ] == ("ok")
+    (setting,) = dry_run(client, key).json()["settings"]
+    assert setting["warnings"] == [SANDBOX, PREVIEW]
+    assert not any("no grant" in w.lower() for w in setting["warnings"])
+
+
+def test_an_operator_token_is_refused(client: TestClient) -> None:
+    key = _admin_key("operator")
+    resp = dry_run(client, key, tenant_role=TenantRole.OPERATOR.value)
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "insufficient_role"

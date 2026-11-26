@@ -12,23 +12,26 @@ approval on every call. Two places hold it:
   (:class:`TenantPolicy`), for a connector, an operation group or an
   operation, matched by pattern.
 
-With the ``CUSTOM_POLICY`` switch on, MEHO will read each such setting as
-a raise to ``destructive`` (the carry-over). :func:`carry_over_dry_run`
-lists every saved setting of one scope and what the carry-over means for
-it. It only reads: it changes no row and no answer of the gate, so it
-reads no switch.
+The carry-over reads such a setting as a raise to ``destructive``.
+:func:`carry_over_dry_run` lists every saved setting of one scope and
+shows what changes for each setting if MEHO reads it as ``destructive``.
+It only reads: it changes no row and no answer of the gate, so it reads
+no switch.
 
 Per setting it says:
 
 * where the setting comes from (``override`` or ``policy_file``) and its
   scope (``tenant`` or ``install``);
-* the operations it makes wait today, and for each one the multi-step
-  operations that use it as a step
-  (:mod:`~meho_backplane.operations.governed_subops`). A ``destructive``
-  step of a multi-step operation is refused, not held for approval;
-* whether the install is in sandbox mode. There a delete grant may cover
-  a ``destructive`` operation for a service login;
-* that a ``destructive`` call needs a matching preview first.
+* the operations it matches, and for each one every multi-step operation
+  that runs it as a step, at every level
+  (:mod:`~meho_backplane.operations.governed_subops`). A policy file
+  entry is matched against the operations a call of the scope can use,
+  and against every declared step, also one with no stored row. As
+  ``destructive``, a step of a multi-step operation is refused, not held
+  for approval;
+* whether the install is in sandbox mode. As ``destructive``, an
+  operation there can be covered for a service login by a delete grant;
+* that, as ``destructive``, a call needs a matching preview first.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, aliased
 
@@ -48,6 +51,7 @@ from meho_backplane.db.models import (
     OperationPolicyOverride,
     TenantPolicy,
 )
+from meho_backplane.operations._lookup import parse_connector_id, visible_scope_clause
 from meho_backplane.operations.governed_subops import registered_governed_subop_surfaces
 from meho_backplane.policy.classification import (
     ClassificationEntry,
@@ -73,25 +77,30 @@ _PREVIEW_TEXT: Final[str] = (
     "As `destructive`, a call needs a matching preview first. A call without one is refused."
 )
 _SANDBOX_TEXT: Final[str] = (
-    "This install is in sandbox mode. There a delete grant can cover a `destructive` "
-    "operation for a service login. Today no grant covers an operation that always waits."
+    "As `destructive`, a delete grant can cover the operation for a service login, "
+    "because this install is in sandbox mode."
 )
-_NO_OPERATION_TEXT: Final[str] = "Today this entry makes no operation wait."
+_NO_OPERATION_TEXT: Final[str] = (
+    "As `destructive`, this entry changes no operation: it matches none."
+)
+
+#: A step of a multi-step operation: the connector id and the op id.
+_StepKey = tuple[str, str]
 
 
 def _step_text(op_id: str, composites: Sequence[str]) -> str:
     return (
-        f"`{op_id}` is a step of {', '.join(f'`{c}`' for c in composites)}. "
-        "A `destructive` step of a multi-step operation is refused, not held for "
-        "approval, so such a run stops at this step."
+        "As `destructive`, a step of a multi-step operation is refused, not held for "
+        f"approval. `{op_id}` is a step of {', '.join(f'`{c}`' for c in composites)}, "
+        "so such a run stops at this step."
     )
 
 
 class CarryOverOperation(BaseModel):
-    """One operation a saved setting makes wait today.
+    """One operation a saved setting matches.
 
-    ``step_of`` lists the multi-step operations that use it as a step
-    (empty when none does).
+    ``step_of`` lists every multi-step operation that runs it as a step,
+    at every level, each once (empty when none does).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -108,7 +117,7 @@ class CarryOverSetting(BaseModel):
     ``policy_file`` (an entry with ``always_wait: true``). ``ref`` names
     the place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.
     ``match`` is what the setting matches (``connector``, ``group``,
-    ``op``). ``warnings`` say what changes with the carry-over.
+    ``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -139,10 +148,12 @@ def _scope_filter(
 
 
 async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> list[OpCoordinates]:
-    """The operations a setting of *scope* can match, each once.
+    """The stored operations a setting of *scope* can match, each once.
 
-    A tenant's settings reach the built-in operations and the tenant's
-    own. The install's settings reach every operation.
+    A tenant's settings reach the operations a call of the tenant can use
+    (:func:`visible_scope_clause`): when the tenant has its own copy of a
+    connector, only its own rows count. The install's settings reach
+    every operation.
     """
     group = aliased(OperationGroup)
     stmt = select(
@@ -153,7 +164,13 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
     ).outerjoin(group, EndpointDescriptor.group_id == group.id)
     if scope == "tenant":
         stmt = stmt.where(
-            or_(EndpointDescriptor.tenant_id.is_(None), EndpointDescriptor.tenant_id == tenant_id)
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=EndpointDescriptor.product,
+                version=EndpointDescriptor.version,
+                impl_id=EndpointDescriptor.impl_id,
+            )
         )
     found = {
         OpCoordinates(f"{impl_id}-{version}", group_key, op_id)
@@ -162,13 +179,38 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
     return sorted(found, key=lambda c: (c.connector_id, c.op_id, c.group_key or ""))
 
 
-def _steps_by_op() -> dict[str, list[str]]:
-    """Map each step's op id to the multi-step operations that use it, sorted."""
-    steps: dict[str, list[str]] = {}
-    for composite, surface in registered_governed_subop_surfaces().items():
-        for step in surface.sub_op_ids:
-            steps.setdefault(step, []).append(composite)
-    return {step: sorted(composites) for step, composites in steps.items()}
+def _step_connector(connector_id: str) -> str:
+    """The connector id the step gate gives a step of a multi-step operation on *connector_id*."""
+    _product, version, impl_id = parse_connector_id(connector_id)
+    return f"{impl_id}-{version}"
+
+
+def _steps_by_op() -> dict[_StepKey, list[str]]:
+    """Map each step to every multi-step operation that runs it, at every level, sorted.
+
+    A step is keyed by the connector of the list it is on and its op id.
+    A step that is itself a multi-step operation has its own list, which
+    is walked too. Each list is walked once per multi-step operation, so
+    a list that loops back ends; a multi-step operation is never named
+    as a step of itself.
+    """
+    surfaces = registered_governed_subop_surfaces()
+    runs: dict[_StepKey, set[str]] = {}
+    for composite in surfaces:
+        seen = {composite}
+        pending = [composite]
+        while pending:
+            surface = surfaces.get(pending.pop(0))
+            if surface is None:
+                continue
+            connector_id = _step_connector(surface.connector_id)
+            for step in surface.sub_op_ids:
+                if step != composite:
+                    runs.setdefault((connector_id, step), set()).add(composite)
+                if step not in seen:
+                    seen.add(step)
+                    pending.append(step)
+    return {key: sorted(composites) for key, composites in runs.items()}
 
 
 def _waiting_entries(
@@ -187,11 +229,11 @@ def _waiting_entries(
     return [e for e in setting if e.rank == best and e.always_wait]
 
 
-def _operation(coords: OpCoordinates, steps: Mapping[str, list[str]]) -> CarryOverOperation:
+def _operation(coords: OpCoordinates, steps: Mapping[_StepKey, list[str]]) -> CarryOverOperation:
     return CarryOverOperation(
         connector_id=coords.connector_id,
         op_id=coords.op_id,
-        step_of=list(steps.get(coords.op_id, [])),
+        step_of=list(steps.get((coords.connector_id, coords.op_id), [])),
     )
 
 
@@ -207,7 +249,7 @@ async def _override_settings(
     session: AsyncSession,
     scope: Scope,
     tenant_id: UUID,
-    steps: Mapping[str, list[str]],
+    steps: Mapping[_StepKey, list[str]],
     *,
     sandbox: bool,
 ) -> list[CarryOverSetting]:
@@ -259,7 +301,7 @@ async def _file_settings(
     session: AsyncSession,
     scope: Scope,
     tenant_id: UUID,
-    steps: Mapping[str, list[str]],
+    steps: Mapping[_StepKey, list[str]],
     *,
     sandbox: bool,
 ) -> list[CarryOverSetting]:
@@ -267,13 +309,21 @@ async def _file_settings(
     waits = [e for e in entries if e.always_wait]
     if not waits:
         return []
+    stored = await _operations(session, scope, tenant_id)
+    known = {(c.connector_id, c.op_id) for c in stored}
+    # A declared step with no stored row: the step gate still matches
+    # connector and operation entries to it, only group entries need a row.
+    step_only = [OpCoordinates(c, None, op) for c, op in steps if (c, op) not in known]
+    candidates = sorted([*stored, *step_only], key=lambda c: (c.connector_id, c.op_id))
     reached: dict[str, list[CarryOverOperation]] = {e.ref: [] for e in waits}
-    for coords in await _operations(session, scope, tenant_id):
-        operation = _operation(coords, steps)
+    listed: dict[str, set[_StepKey]] = {e.ref: set() for e in waits}
+    for coords in candidates:
+        key = (coords.connector_id, coords.op_id)
         for entry in _waiting_entries(entries, coords):
             # One operation can have two stored rows with different groups.
-            if operation not in reached[entry.ref]:
-                reached[entry.ref].append(operation)
+            if key not in listed[entry.ref]:
+                listed[entry.ref].add(key)
+                reached[entry.ref].append(_operation(coords, steps))
     settings: list[CarryOverSetting] = []
     for entry in waits:
         operations = reached[entry.ref]

@@ -19,8 +19,9 @@ see ``docs/codebase/policy.md``. The work is in
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
 * ``GET /api/v1/policy/carry-over/dry-run`` -- every saved "always wait"
-  and what reading it as ``destructive`` will mean for it
-  (:mod:`meho_backplane.policy.carry_over`). Writes nothing.
+  and what changes for each one if MEHO reads it as ``destructive``
+  (:mod:`meho_backplane.policy.carry_over`). Writes only its audit row.
+  An agent login gets 403; every other caller gets the export's answer.
 * ``POST /api/v1/policy/explain`` -- why a call runs, waits or is denied,
   and who may approve it (:mod:`meho_backplane.policy.explain`). Runs
   nothing and writes nothing. Asking for yourself (``me``) needs the
@@ -52,7 +53,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
 from meho_backplane.db.engine import get_session
@@ -342,12 +343,18 @@ async def carry_over(
     session: Annotated[AsyncSession, Depends(get_session)],
     scope: Annotated[PolicyScope, Query()] = "tenant",
 ) -> CarryOverDryRun:
-    """Every saved "always wait" of *scope*, and what reading it as ``destructive`` will mean.
+    """Every saved "always wait" of *scope*, and what changes if MEHO reads it as ``destructive``.
 
-    Who may read it is the rule of the export. Writes nothing and reads no
-    switch: the answer is the same with ``CUSTOM_POLICY`` on or off.
+    An agent login gets 403, also one with the platform admin mark. Every
+    other caller gets the export's answer. Writes only its audit row and
+    reads no switch.
     """
     _bind_audit("policy.carry_over.dry_run", "read")
+    if operator.principal_kind is PrincipalKind.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An agent login cannot run the dry run. A person or a service login can.",
+        )
     _check_scope(operator, scope)
     try:
         return await carry_over_dry_run(session, scope=scope, tenant_id=operator.tenant_id)

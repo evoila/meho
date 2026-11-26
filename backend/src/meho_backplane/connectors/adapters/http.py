@@ -793,13 +793,13 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
-def _refusal_reason(request: httpx.URL, location: httpx.URL | None) -> str:
-    """Return one fixed word for why MEHO does not follow a redirect to *location*."""
+def _refusal_reason(source: httpx.URL, location: httpx.URL | None) -> str:
+    """Return one fixed word for why MEHO does not follow a redirect from *source* to *location*."""
     if location is None:
         return "unreadable address"
-    if request.host != location.host:
+    if source.host != location.host:
         return "other host"
-    if request.scheme != location.scheme:
+    if source.scheme != location.scheme:
         return "other scheme"
     return "other port"
 
@@ -867,10 +867,9 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     ) -> httpx.Request:
         # httpx builds the next request inside ``send`` and raises (closing the
         # answer) when it cannot read the Location address. Log the fixed mark
-        # for that address, then raise the same error to the caller.
-        # httpx's error text can quote a part of the address, so MEHO raises
-        # the same error class with one fixed text. It is raised outside the
-        # ``except`` so it does not carry httpx's error as its context.
+        # for that address. httpx's error text can quote a part of the
+        # address, so raise the same error class with one fixed text, outside
+        # the ``except``, so it does not carry httpx's error as its context.
         try:
             return super()._build_redirect_request(request, response)
         except UNREADABLE_LOCATION_ERRORS as exc:

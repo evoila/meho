@@ -17,7 +17,14 @@ import stat
 import subprocess
 import unittest
 
-from harness import HOST_LOCK, LINUX_SERVER, LOCK_HELD_LINE, InstallTestCase, held_lock
+from harness import (
+    HOST_LOCK,
+    LINUX_SERVER,
+    LOCK_HELD_LINE,
+    InstallTestCase,
+    chmod_that_skips_the_lock_folder,
+    held_lock,
+)
 from test_core_install import CHART_DIR, INSTALL_RECORD, PLACE_VALUES, place_values
 from update_harness import INSTALLER, NEW_VERSION, run_update_lib
 
@@ -147,9 +154,7 @@ class InstallTargetNetworksTests(InstallTestCase):
         return options
 
     def test_the_list_goes_to_the_record_and_the_values(self) -> None:
-        result = self.machine.run(
-            "--target-networks", "10.20.0.0/16, 10.30.0.5:443,10.40.0.0/24"
-        )
+        result = self.machine.run("--target-networks", "10.20.0.0/16, 10.30.0.5:443,10.40.0.0/24")
 
         self.assert_succeeds(result)
         self.assertEqual(LIST, self.record_options()["target_networks"])
@@ -260,6 +265,38 @@ class HostLockTests(InstallTestCase):
 
         self.run_with_umask_022()
 
+        self.assert_only_root_may_open_the_lock()
+
+    def test_a_new_lock_folder_is_private_from_the_start(self) -> None:
+        # mkdir itself gives the folder mode 0700, so no other account can
+        # add a file to it before chmod runs. This chmod leaves the folder
+        # alone, and with umask 000 a plain mkdir would give 0777.
+        chmod_that_skips_the_lock_folder(self.machine.tools)
+        old = os.umask(0)
+        try:
+            self.assert_succeeds(self.machine.run("--target-networks", LIST))
+        finally:
+            os.umask(old)
+
+        lock = self.machine.host_path(HOST_LOCK)
+        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+
+    def test_a_link_in_the_lock_folder_is_not_followed(self) -> None:
+        # A link left in the folder from before would lead open and chmod to
+        # another file. The run removes it and makes its own lock file.
+        lock = self.machine.host_path(HOST_LOCK)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        other = self.machine.host_path("/etc/another-file")
+        other.write_text("not the lock\n")
+        other.chmod(0o644)
+        lock.symlink_to(other)
+
+        self.run_with_umask_022()
+
+        self.assertFalse(lock.is_symlink())
+        self.assertTrue(lock.is_file())
+        self.assertEqual(0o644, stat.S_IMODE(other.stat().st_mode))
+        self.assertEqual("not the lock\n", other.read_text())
         self.assert_only_root_may_open_the_lock()
 
     def test_the_lock_ends_with_the_run(self) -> None:

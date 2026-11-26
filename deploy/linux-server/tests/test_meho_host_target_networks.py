@@ -17,7 +17,13 @@ import unittest
 from typing import Any
 
 from cluster_harness import ClusterTestCase
-from harness import HOST_LOCK, LOCK_HELD_LINE, TENANT_ID, held_lock
+from harness import (
+    HOST_LOCK,
+    LOCK_HELD_LINE,
+    TENANT_ID,
+    chmod_that_skips_the_lock_folder,
+    held_lock,
+)
 from test_core_install import place_values
 from test_target_networks import LIST, target_block
 
@@ -330,6 +336,37 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
 
         self.assertEqual(0, result.returncode, self.output(result))
         self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+        self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
+
+    def test_a_new_lock_folder_is_private_from_the_start(self) -> None:
+        # mkdir itself gives the folder mode 0700; this chmod leaves the
+        # folder alone, and with umask 000 a plain mkdir would give 0777.
+        chmod_that_skips_the_lock_folder(self.host.tools)
+        old = os.umask(0)
+        try:
+            result = self.run_command(LIST)
+        finally:
+            os.umask(old)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        lock = self.host.host_path(HOST_LOCK)
+        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+
+    def test_a_link_in_the_lock_folder_is_not_followed(self) -> None:
+        lock = self.host.host_path(HOST_LOCK)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        other = self.host.host_path("/etc/another-file")
+        other.write_text("not the lock\n")
+        other.chmod(0o644)
+        lock.symlink_to(other)
+
+        result = self.run_command(LIST)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertFalse(lock.is_symlink())
+        self.assertTrue(lock.is_file())
+        self.assertEqual(0o644, stat.S_IMODE(other.stat().st_mode))
+        self.assertEqual("not the lock\n", other.read_text())
         self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
 
     def test_the_lock_comes_before_the_record_is_read(self) -> None:

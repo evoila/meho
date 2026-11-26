@@ -696,7 +696,10 @@ reads or changes anything. `flock` holds the lock on the open file
 descriptor, so it ends with the process, also after a crash. `flock` takes
 the lock on a file that is open only for reading too, so the folder
 `/run/meho` is 0700 and the file 0600: another local account cannot hold
-the lock and block every update. The other
+the lock and block every update. `mkdir -m 0700` makes a new folder
+private at once, so nobody can add a file to it before `chmod` runs, and
+a link left in the folder from before is removed, because `open` and
+`chmod` would follow it to another file. The other
 `meho-host` commands that change the machine do not take it yet (#6870).
 Helm owns `meho-config`, and its next upgrade (an update) renders the same
 list from `install.json`, so the patched value stays. Helm 3 compares the

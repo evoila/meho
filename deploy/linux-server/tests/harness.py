@@ -86,6 +86,23 @@ LOCK_HELD_LINE = (
 )
 
 
+def chmod_that_skips_the_lock_folder(tools: Path) -> None:
+    """Put a chmod on PATH that leaves the lock folder alone, so a test sees
+    the mode that mkdir gave the folder. Every other call runs the real chmod."""
+    real = shutil.which("chmod")
+    if real is None:
+        raise RuntimeError("the tests need 'chmod' on PATH")
+    target = tools / "chmod"
+    target.unlink()
+    lines = [
+        "#!/bin/sh",
+        f'case "$*" in *"{Path(HOST_LOCK).parent}") exit 0 ;; esac',
+        f'exec "{real}" "$@"',
+    ]
+    target.write_text("\n".join(lines) + "\n")
+    target.chmod(0o755)
+
+
 @contextlib.contextmanager
 def held_lock(lock: Path) -> Iterator[None]:
     """Hold the lock file, as another run of install.sh or meho-host does
@@ -94,6 +111,7 @@ def held_lock(lock: Path) -> Iterator[None]:
     with lock.open("a") as file:
         fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
+
 
 REAL_TOOLS = (
     "bash",

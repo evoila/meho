@@ -35,6 +35,8 @@ structured ``extras`` payload.
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -49,7 +51,7 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import (
     ConnectorAuthError,
     session_establish_auth_error,
@@ -72,6 +74,9 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
     _UPSTREAM_MESSAGE_CAP,
+    RESTAGE_KV_PUT_DATA_ARG,
+    _auth_restage_remediation,
+    _shell_arg,
     is_auth_failed_status,
     result_connector_auth_failed,
 )
@@ -580,6 +585,518 @@ def test_result_connector_auth_failed_shape_401() -> None:
     # The httpx (dispatch) path has no connector-composed establish message.
     assert extras["raw_message"] is None
     assert extras["upstream_message"] == "session token invalid or expired"
+
+
+_DATA_ARG_RE = re.compile(r"--data\s+(\S+?)`")
+
+
+@pytest.mark.parametrize(
+    ("target_name", "secret_ref"),
+    [
+        ("vrli-lab", "tenants/tid/vrli-lab"),
+        ("vrli-lab", None),
+        (None, None),
+    ],
+)
+def test_restage_hint_reads_the_credential_from_a_file(
+    target_name: str | None, secret_ref: str | None
+) -> None:
+    """The restage hint names only the ``--data @<file>`` form and no value."""
+    text = _auth_restage_remediation(target_name, secret_ref)
+
+    # The only --data form is the shared constant the Go test checks
+    # against the CLI's loadJSONFlag.
+    assert _DATA_ARG_RE.findall(text) == [RESTAGE_KV_PUT_DATA_ARG]
+    assert RESTAGE_KV_PUT_DATA_ARG.startswith("@")
+    assert "<field>=<value>" not in text
+    assert "--data '" not in text
+    assert "--data {" not in text
+    assert "only you can read" in text
+    assert "delete the file" in text
+    assert "Never put the password on the command line" in text
+    assert "docs-site/guides/targets-and-secrets.md" in text
+    assert "Store the credential through MEHO" in text
+
+
+def test_restage_hint_uses_the_known_secret_ref_as_path() -> None:
+    """A known secret_ref is the path under the ``secret`` mount."""
+    text = _auth_restage_remediation("vrli-lab", "tenants/tid/vrli-lab")
+
+    assert "`meho vault kv put secret tenants/tid/vrli-lab --data @<file>`" in text
+    assert "meho targets describe" not in text
+
+
+def test_restage_hint_without_secret_ref_says_where_to_read_it() -> None:
+    """Without a secret_ref the path is a placeholder and the hint names the lookup."""
+    text = _auth_restage_remediation("vrli-lab", None)
+
+    assert "`meho vault kv put secret <path> --data @<file>`" in text
+    assert "`meho targets describe vrli-lab` shows its secret_ref." in text
+    assert "set one with `meho targets update vrli-lab --secret-ref <ref>`" in text
+
+    unnamed = _auth_restage_remediation(None, None)
+    assert "`meho targets describe <target>` shows its secret_ref." in unnamed
+    assert "`meho targets update <target> --secret-ref <ref>`" in unnamed
+
+
+# ---------------------------------------------------------------------------
+# The restage hint as a reader gets it: the result of the real dispatch
+# ---------------------------------------------------------------------------
+
+_CALLERS = [
+    pytest.param(PrincipalKind.USER, id="person"),
+    pytest.param(PrincipalKind.AGENT, id="agent"),
+]
+
+
+async def _restage_hint_via_dispatch(
+    *,
+    session: AsyncSession,
+    embedding: list[float],
+    caller: PrincipalKind,
+    target_name: str = "vrli-lab",
+    secret_ref: str | None,
+) -> tuple[str, str]:
+    """Run the real ``dispatch`` against a 401 target; return ``(error, remediation)``.
+
+    The text is read from the dispatch result, after MEHO's own hide step,
+    as a person or an agent gets it.
+    """
+    register_connector_v2(
+        product="vcfops", version="9", impl_id="vcfops-rest", cls=_Http401Connector
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest",
+        op_id="GET:/api/v2/events",
+        embedding=embedding,
+    )
+    target = _FakeTarget(name=target_name, host="vrli.example.test")
+    target.secret_ref = secret_ref
+    result = await dispatch(
+        operator=Operator(
+            sub="op-restage-hint",
+            name="Restage Hint Caller",
+            email=None,
+            raw_jwt="<test-raw-jwt>",
+            tenant_id=_TENANT,
+            tenant_role=TenantRole.OPERATOR,
+            principal_kind=caller,
+        ),
+        connector_id="vcfops-rest-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.error is not None
+    remediation = result.extras["remediation"]
+    assert isinstance(remediation, str)
+    assert remediation in result.error
+    return result.error, remediation
+
+
+_VAULT_COMMAND = "`meho vault kv put secret tenants/tid/vrli-lab --data @<file>`"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store", "command"),
+    [
+        pytest.param("tenants/tid/vrli-lab", "vault", _VAULT_COMMAND, id="no-scheme-vault"),
+        pytest.param("vault:tenants/tid/vrli-lab", "vault", _VAULT_COMMAND, id="vault-scheme"),
+        pytest.param(
+            "vault:tenants/tid/vrli-lab", "gsm", _VAULT_COMMAND, id="vault-scheme-gsm-default"
+        ),
+        pytest.param(
+            " vault:tenants/tid/vrli-lab", "gsm", _VAULT_COMMAND, id="vault-scheme-leading-space"
+        ),
+        pytest.param(
+            "  tenants/tid/vrli-lab \t", "vault", _VAULT_COMMAND, id="no-scheme-spaces-around"
+        ),
+        pytest.param(
+            None, "vault", "`meho vault kv put secret <path> --data @<file>`", id="no-ref"
+        ),
+    ],
+)
+async def test_dispatch_restage_hint_gives_the_vault_command_for_a_vault_ref(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str | None,
+    default_store: str,
+    command: str,
+) -> None:
+    """A Vault ref gives the Vault path with no ``vault:`` prefix; no ref names the lookup."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    assert command in remediation
+    assert command in error
+    assert _DATA_ARG_RE.findall(remediation) == [RESTAGE_KV_PUT_DATA_ARG]
+    assert "kv put secret vault:" not in remediation
+    if secret_ref is None:
+        assert "`meho targets describe vrli-lab` shows its secret_ref." in remediation
+    else:
+        assert "meho targets describe" not in remediation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store", "store"),
+    [
+        pytest.param("gsm:proj-x/vrli", "vault", "gsm", id="gsm-scheme"),
+        pytest.param("gsm:proj-x/vrli#password", "vault", "gsm", id="gsm-scheme-field"),
+        pytest.param("proj-x/vrli", "gsm", "gsm", id="no-scheme-gsm-default"),
+        pytest.param("proj-x/vrli#password", "gsm", "gsm", id="no-scheme-gsm-default-field"),
+        pytest.param(" gsm:proj-x/vrli", "vault", "gsm", id="gsm-scheme-leading-space"),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/latest", "vault", "gsm", id="gsm-scheme-latest-version"
+        ),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/stable", "vault", "gsm", id="gsm-scheme-version-alias"
+        ),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/latest #password",
+            "vault",
+            "gsm",
+            id="gsm-scheme-latest-space-before-field",
+        ),
+        pytest.param(
+            "proj-x/vrli/versions/stable#password",
+            "gsm",
+            "gsm",
+            id="no-scheme-gsm-default-version-alias-field",
+        ),
+    ],
+)
+async def test_dispatch_restage_hint_names_no_vault_command_for_another_store(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str,
+    default_store: str,
+    store: str,
+) -> None:
+    """A ref of another store names that store and that ref, and no Vault command."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert "meho vault kv put" not in text
+        assert "--data" not in text
+        assert f"(secret_ref {secret_ref.strip()!r})" in text
+        assert f"Store the corrected credential in the {store!r} store at that ref" in text
+        assert "pins one version" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store"),
+    [
+        pytest.param("gsm:proj-x/vrli/versions/5", "vault", id="gsm-scheme"),
+        pytest.param("gsm:proj-x/vrli/versions/5#password", "vault", id="gsm-scheme-field"),
+        pytest.param("proj-x/vrli/versions/3", "gsm", id="no-scheme-gsm-default"),
+        pytest.param(" gsm:proj-x/vrli/versions/2 ", "vault", id="gsm-scheme-spaces-around"),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/7 #password", "vault", id="gsm-scheme-space-before-field"
+        ),
+    ],
+)
+async def test_dispatch_restage_hint_pinned_gsm_version_says_to_point_the_ref_at_a_new_version(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str,
+    default_store: str,
+) -> None:
+    """A GSM ref that pins one version: add a new version, then set the ref to it."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert f"(secret_ref {secret_ref.strip()!r})" in text
+        assert "pins one version of the secret, so MEHO reads only that version" in text
+        assert "Add the corrected credential as a new version of that secret" in text
+        assert "`meho targets update vrli-lab --secret-ref <ref>`, then retry." in text
+        assert "store at that ref" not in text
+        assert "meho vault kv put" not in text
+
+
+_GSM_DEFAULT_RULE = (
+    "(a `vault:` ref; on this install a ref with no `<kind>:` prefix is in the 'gsm' store)"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store", "no_prefix_rule"),
+    [
+        pytest.param(
+            None,
+            "gsm",
+            _GSM_DEFAULT_RULE,
+            id="no-ref-gsm-default",
+        ),
+        pytest.param(
+            "   ",
+            "gsm",
+            _GSM_DEFAULT_RULE,
+            id="blank-ref-gsm-default",
+        ),
+        pytest.param(
+            None,
+            "vault",
+            "(a `vault:` ref, or a ref with no `<kind>:` prefix on this install)",
+            id="no-ref-vault-default",
+        ),
+    ],
+)
+async def test_dispatch_restage_hint_without_a_ref_says_how_to_set_one_and_each_store(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str | None,
+    default_store: str,
+    no_prefix_rule: str,
+) -> None:
+    """No ref: the hint names the lookup, how to set a ref, and the steps per store."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert "(secret_ref" not in text
+        assert "backplane-side Vault copy" not in text
+        assert "while the stored copy lagged" in text
+        assert "`meho targets describe vrli-lab` shows its secret_ref." in text
+        assert (
+            "When it shows none, set one with `meho targets update vrli-lab --secret-ref <ref>`."
+        ) in text
+        assert f"For a Vault ref {no_prefix_rule}, restage it through MEHO" in text
+        assert "`meho vault kv put secret <path> --data @<file>`, where <path> is the ref" in text
+        assert (
+            "For a ref of another store, store the corrected credential in that store at that ref"
+        ) in text
+        assert _DATA_ARG_RE.findall(text) == [RESTAGE_KV_PUT_DATA_ARG]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+async def test_dispatch_restage_hint_vault_ref_with_a_field_part_is_shown_on_its_own_line(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+) -> None:
+    """A Vault path that ends in ``#<field>`` is shown on its own line, with no command."""
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref="vault:tenants/tid/vrli-lab#password",
+    )
+
+    for text in (error, remediation):
+        assert "\ntenants/tid/vrli-lab#password\n" in text
+        assert "`meho vault kv put secret <path> --data @<file>`" in text
+        assert "kv put secret tenants/" not in text
+        assert "kv put secret vault:" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize("secret_ref", ["tenants/tid/vrli-lab", None])
+async def test_dispatch_restage_hint_json_example_is_valid_json(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+    secret_ref: str | None,
+) -> None:
+    """The JSON example the reader gets is valid JSON with an empty value for each field."""
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert "[REDACTED:" not in text
+        examples = re.findall(r"for example (\{[^{}]*\})", text)
+        assert len(examples) == 1
+        assert json.loads(examples[0]) == {"username": "", "password": ""}
+        assert "with each value filled in" in text
+        assert "--data @<file>`" in text
+
+
+#: Stored values with characters a shell reads in its own way. Each one must
+#: never stand in a ready-to-paste command of the hint.
+_UNSAFE_VALUES = [
+    pytest.param("a b", id="space"),
+    pytest.param("a'b", id="single-quote"),
+    pytest.param('a"b', id="double-quote"),
+    pytest.param("a;touch m1", id="semicolon"),
+    pytest.param("a$b", id="dollar"),
+    pytest.param("a$(touch m2)", id="command-substitution"),
+    pytest.param("a`touch m3`", id="backtick"),
+    pytest.param("a|touch m4", id="pipe"),
+    pytest.param("a&touch m5", id="ampersand"),
+    pytest.param("a>m9", id="redirect"),
+    pytest.param("a*", id="glob"),
+    pytest.param("a#c", id="hash"),
+    pytest.param("a\\b", id="backslash"),
+    pytest.param("-rf", id="leading-dash"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize("name", _UNSAFE_VALUES)
+async def test_dispatch_restage_hint_shows_an_unsafe_target_name_on_its_own_line(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+    name: str,
+) -> None:
+    """A target name outside the safe set gets no ready-to-paste lookup command."""
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        target_name=name,
+        secret_ref=None,
+    )
+
+    for text in (error, remediation):
+        assert f"\n{name}\n" in text
+        assert f"meho targets describe {name}" not in text
+        assert "`meho targets describe <target>` with that name shows its secret_ref." in text
+        assert "`meho targets update <target> --secret-ref <ref>`" in text
+        assert f"targets update {name}" not in text
+        assert "`meho vault kv put secret <path> --data @<file>`" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    "name", [pytest.param("a'b", id="single-quote"), pytest.param("a;b", id="semicolon")]
+)
+async def test_dispatch_restage_hint_pinned_gsm_version_shows_an_unsafe_target_name_on_its_own_line(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+    name: str,
+) -> None:
+    """A pinned GSM version with a target name outside the safe set shows the name alone."""
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        target_name=name,
+        secret_ref="gsm:proj-x/vrli/versions/5",
+    )
+
+    for text in (error, remediation):
+        assert f"\n{name}\n" in text
+        assert "The target name holds characters a shell reads in its own way" in text
+        assert (
+            "`meho targets update <target> --secret-ref <ref>` with that name, then retry." in text
+        )
+        assert f"targets update {name}" not in text
+        assert "pins one version of the secret" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize("part", [*_UNSAFE_VALUES, pytest.param("a\nb", id="line-break")])
+async def test_dispatch_restage_hint_shows_an_unsafe_vault_path_on_its_own_line(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+    part: str,
+) -> None:
+    """A Vault path outside the safe set gets no ready-to-paste ``kv put`` command."""
+    # A leading "-" matters only at the start of the path.
+    path = part if part.startswith("-") else f"tenants/tid/{part}"
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=path,
+    )
+
+    for text in (error, remediation):
+        assert f"\n{path}\n" in text
+        assert "`meho vault kv put secret <path> --data @<file>`" in text
+        assert f"kv put secret {path}" not in text
+        assert "kv put secret tenants/" not in text
+
+
+def test_restage_hint_uses_the_default_store_when_settings_cannot_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The error text never raises: unreadable settings give the default store, Vault."""
+
+    def _no_settings() -> None:
+        raise KeyError("DATABASE_URL")
+
+    monkeypatch.setattr("meho_backplane.operations._errors.get_settings", _no_settings)
+
+    text = _auth_restage_remediation("vrli-lab", "tenants/tid/vrli-lab")
+
+    assert _VAULT_COMMAND in text
+
+
+@pytest.mark.parametrize("value", ["vrli-lab", "tenants/tid/vrli-lab", "secret", "a.b_c-1/D", "x9"])
+def test_shell_arg_keeps_a_safe_value_as_one_word(value: str) -> None:
+    """A value in the safe set is one shell word, unchanged."""
+    assert _shell_arg(value) == value
+
+
+@pytest.mark.parametrize(
+    "value", [*_UNSAFE_VALUES, pytest.param("a\nb", id="line-break"), pytest.param("", id="empty")]
+)
+def test_shell_arg_refuses_a_value_outside_the_safe_set(value: str) -> None:
+    """A value outside the safe set, or one that starts with ``-``, is no command word."""
+    assert _shell_arg(value) is None
 
 
 def test_result_connector_auth_failed_after_relogin_cause_and_no_restage() -> None:

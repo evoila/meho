@@ -72,6 +72,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     clear_jwks_cache()
     reset_block_cache()
+    _SIGN_IN_TIMES.clear()
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
@@ -100,6 +101,10 @@ async def _client() -> AsyncIterator[tuple[httpx.AsyncClient, Any]]:
             yield ac, key
 
 
+#: The ``auth_time`` of each sign-in of the running test, so one *sid* is one sign-in.
+_SIGN_IN_TIMES: dict[str, int] = {}
+
+
 def _sign_in(key: Any, sid: str, *, sub: str = _PERSON) -> str:
     """A token of one sign-in: the same *sid* is the same sign-in."""
     return mint_token(
@@ -108,11 +113,12 @@ def _sign_in(key: Any, sid: str, *, sub: str = _PERSON) -> str:
         tenant_id=str(_TENANT),
         tenant_role=TenantRole.TENANT_ADMIN.value,
         fresh_sign_in=True,
-        extra_claims={"platform_admin": True, "sid": sid, "auth_time": _AUTH_TIME},
+        extra_claims={
+            "platform_admin": True,
+            "sid": sid,
+            "auth_time": _SIGN_IN_TIMES.setdefault(sid, int(time.time())),
+        },
     )
-
-
-_AUTH_TIME = int(time.time())
 
 
 async def _seed_block(sub: str = _PERSON) -> None:

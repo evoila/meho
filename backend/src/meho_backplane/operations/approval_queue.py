@@ -102,10 +102,10 @@ from meho_backplane.auth.client_identity import (
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
-from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.principal_block import checking_logins_for_steps
 from meho_backplane.auth.secret_read_as import current_secret_read_as
+from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -2595,20 +2595,15 @@ async def _check_sign_in_use(
             max_age_seconds=max_age,
         )
         raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
-    await take_approval_lock(session, "approval-sign-in", key)
-    since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
-    rows = await session.execute(
-        select(AuditLog.payload).where(
-            AuditLog.operator_sub == operator.sub,
-            AuditLog.path == "approval.decision",
-            AuditLog.occurred_at >= since,
-        )
+    await take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
+    uses = await earlier_sign_in_uses(
+        session, sub=operator.sub, sign_in_key=key, auth_time=approval_auth.auth_time
     )
-    for (payload,) in rows:
-        earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
-        if not isinstance(earlier, dict) or earlier.get("sign_in_key") != key:
-            continue
-        if destructive or earlier.get("single_use") is True:
+    for use in uses:
+        # A destructive approve needs a sign-in no other step used (an approve
+        # or the removal of the person's own block). Any other approve is
+        # refused only after a sign-in that a destructive approve used up.
+        if destructive or use.single_use:
             _log().warning(
                 "approval_sign_in_reused",
                 approval_request_id=str(request.id),

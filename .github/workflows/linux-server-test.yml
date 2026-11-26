@@ -62,6 +62,8 @@ on:
       - 'scripts/tests/test_ci_tool_scripts.py'
       - 'scripts/acceptance/custom-policy-check.sh'
       - 'scripts/tests/test_custom_policy_check.py'
+      - 'scripts/tests/test_custom_policy_check_live.py'
+      - 'scripts/tests/custom_policy_check_fixture.py'
   workflow_dispatch:
 
 permissions:
@@ -139,8 +141,9 @@ jobs:
           shellcheck "${scripts[@]}"
 
       - name: Check the custom policy check script, and run its test
-        # The test runs the script in its dry mode against recorded answers.
-        # The script needs jq. The test skips without it, so install it first.
+        # The tests run the script in its dry mode against recorded answers,
+        # and live against stand-in curl and meho programs. The script needs
+        # jq. The tests skip without it, so install it first.
         run: |
           set -euo pipefail
           shellcheck scripts/acceptance/custom-policy-check.sh
@@ -148,7 +151,7 @@ jobs:
             sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
             sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq
           fi
-          python -m unittest discover -s scripts/tests -p 'test_custom_policy_check.py' -v
+          python -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py' -v
 
       - name: Check that the test fixture is the upstream local-path manifest
         run: |

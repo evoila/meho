@@ -24,7 +24,7 @@ import respx
 import yaml
 from fastapi import Depends
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from meho_backplane.api.v1 import instance_settings as settings_api
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -33,6 +33,7 @@ from meho_backplane.db.models import InstanceSettingsRevision, Tenant, TenantCon
 from meho_backplane.instance_settings.console_only import console_only_changes
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
@@ -248,6 +249,36 @@ async def test_token_import_that_narrows_applies(client: TestClient) -> None:
     tenant = await _tenant()
     assert tenant.run_approval_target_kinds_enabled is False
     assert tenant.announce_gate_enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapper_rows_retired", [False, True], ids=["audit-rows", "cutover"])
+async def test_failed_revision_insert_keeps_the_stored_policies(
+    monkeypatch: pytest.MonkeyPatch, wrapper_rows_retired: bool
+) -> None:
+    """The policies are written in a savepoint; a failed revision insert rolls them back too."""
+    if wrapper_rows_retired:
+        monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+        monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+        get_settings.cache_clear()
+    install_fake_vault(monkeypatch)
+    await _seed(kinds=True, gate=False)
+
+    def _refuse(*_args: Any) -> None:
+        raise RuntimeError("revision insert refused")
+
+    event.listen(InstanceSettingsRevision, "before_insert", _refuse)
+    try:
+        content = _file({"run_approval_target_kinds": False, "announce_gate_enabled": True})
+        resp = _post(TestClient(app, raise_server_exceptions=False), content)
+    finally:
+        event.remove(InstanceSettingsRevision, "before_insert", _refuse)
+
+    assert resp.status_code == 500, resp.text
+    tenant = await _tenant()
+    assert tenant.run_approval_target_kinds_enabled is True
+    assert tenant.announce_gate_enabled is False
+    assert await _rows(InstanceSettingsRevision) == []
 
 
 @pytest.mark.asyncio

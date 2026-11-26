@@ -12,11 +12,12 @@ reads the secret store and never returns a value of any secret.
 
 Errors: 404 with a plain message when no connector serves the product.
 
-``test_operation`` is ``null`` for a class while its declared test read is not
-``safe`` and enabled in the database for the caller: the stored row has
-another risk level or is turned off, or an override of the install or the
-caller's tenant raises its risk level or makes it wait for approval. Then the
-console offers no test read for that class.
+The route answers ``test_operation: null`` for a class while the stored row
+of its test read has a risk level other than ``safe`` or is turned off, or
+while an override of the install or of the caller's tenant raises its risk
+level or makes it wait for approval. Then the console offers no test read for
+that class. Otherwise the route names the test read the connector declares;
+whether the caller may run it is decided when it is called.
 
 The caller sees the connector classes installed with MEHO, and a class made
 by an import only when the caller may see that connector: the import is
@@ -84,8 +85,12 @@ class CredentialWayModel(BaseModel):
 class TargetFormClass(BaseModel):
     """What one connector class declares. ``None`` means "not declared".
 
-    ``test_operation`` is also ``None`` while the declared test read is not
-    ``safe`` and enabled in the database for the caller.
+    ``test_operation`` is also ``None`` while the stored row of the test read
+    has a risk level other than ``safe`` or is turned off, or while an
+    override of the install or of the caller's tenant raises its risk level
+    or makes it wait for approval. Otherwise it names the test read the
+    connector declares; whether the caller may run it is decided when it is
+    called.
     """
 
     impl_id: str

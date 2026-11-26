@@ -46493,7 +46493,7 @@
           "test_operation"
         ],
         "title": "TargetFormClass",
-        "description": "What one connector class declares. ``None`` means \"not declared\".\n\n``test_operation`` is also ``None`` while the declared test read is not\n``safe`` and enabled in the database for the caller."
+        "description": "What one connector class declares. ``None`` means \"not declared\".\n\n``test_operation`` is also ``None`` while the stored row of the test read\nhas a risk level other than ``safe`` or is turned off, or while an\noverride of the install or of the caller's tenant raises its risk level\nor makes it wait for approval. Otherwise it names the test read the\nconnector declares; whether the caller may run it is decided when it is\ncalled."
       },
       "TargetFormResponse": {
         "properties": {

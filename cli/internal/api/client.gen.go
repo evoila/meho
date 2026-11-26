@@ -12120,8 +12120,12 @@ type TargetFieldModel_Default struct {
 
 // TargetFormClass What one connector class declares. “None“ means "not declared".
 //
-// “test_operation“ is also “None“ while the declared test read is not
-// “safe“ and enabled in the database for the caller.
+// “test_operation“ is also “None“ while the stored row of the test read
+// has a risk level other than “safe“ or is turned off, or while an
+// override of the install or of the caller's tenant raises its risk level
+// or makes it wait for approval. Otherwise it names the test read the
+// connector declares; whether the caller may run it is decided when it is
+// called.
 type TargetFormClass struct {
 	CredentialWays        *[]CredentialWayModel `json:"credential_ways"`
 	DefaultPort           *int                  `json:"default_port"`

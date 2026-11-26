@@ -173,7 +173,11 @@ operations you register, not `execute`.
   checks them at start. The console reads them from
   `GET /api/v1/connectors/target-form?product=<product>`. A connector that
   declares nothing passes the start check, and the route shows the four as
-  `null`. Build the entries with
+  `null`. The test read is an operation that a registrar of the
+  connector itself writes at start (a typed or multi-step operation). A
+  read from an imported API spec cannot be declared: a class that declares
+  one stops the start with a message that names the class. Build the
+  entries with
   `kit.TargetField`, `kit.CredentialWay` and `kit.CredentialField`
   (kit 1.6 or higher).
 - **Caches.** Key a cache you keep across calls, for example a login

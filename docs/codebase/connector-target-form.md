@@ -15,6 +15,11 @@ the target form and the credential form.
 | `credential_ways` | The ways to log in and the fields of the secret for each. `None` means not declared. An empty tuple means "declared: no credential needed". |
 | `test_operation` | The op id of one `safe` read that needs no input beyond the target. `None` means not declared. |
 
+The test read is an operation that a registrar of the connector itself
+writes at start (a typed or multi-step operation). A read from an imported
+API spec cannot be declared: a class that declares one stops the start with
+a message that names the class.
+
 A class that sets none of them passes the start check, and the route
 answers `null` for all four.
 
@@ -55,7 +60,10 @@ map.
 3. For a class with a `test_operation` it checks the facts of the code. A
    registrar of the same product, version and implementation must write the
    operation in this start, and the registrar's own definition must give it
-   risk level `safe`. While the registrars run, `operation_catalog_write`
+   risk level `safe`. Its built-in row must still exist after the retire
+   step of the same start. With the test-only registrar snapshot
+   (`test_amortize_typed_op_registrars`), a missing row is allowed. While
+   the registrars run, `operation_catalog_write`
    collects the risk level each one gives (`collect_code_safety_levels`). A
    call with no input (`{}`) must pass the same parameter check a real call
    runs: the schema as calls see it (with its `oneOf` and `anyOf` rules),
@@ -81,12 +89,13 @@ see that connector (`connector_triples_visible_to` in
 `operations/_lookup.py`): the import is built in, or it belongs to the
 caller's tenant. A connector that another tenant imported answers 404.
 
-`test_operation` is `null` for a class while its test read is not `safe`
-and enabled in the database for the caller: the stored row has another risk
-level or is turned off, or an override of the install or of the caller's
-tenant raises its risk level or makes it wait for approval
-(`ready_test_operations`). Then the console offers no test read for that
-class. The answer holds names and labels only. It never reads the secret
+The route answers `test_operation: null` for a class while the stored row
+of its test read has a risk level other than `safe` or is turned off, or
+while an override of the install or of the caller's tenant raises its risk
+level or makes it wait for approval (`ready_test_operations`). Then the
+console offers no test read for that class. Otherwise the route names the
+test read the connector declares; whether the caller may run it is decided
+when it is called. The answer holds names and labels only. It never reads the secret
 store. The router is included before the `/{connector_id}` routes of the
 ingest router, so `target-form` is not read as a connector id.
 

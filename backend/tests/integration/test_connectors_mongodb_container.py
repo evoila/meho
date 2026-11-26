@@ -93,11 +93,15 @@ def _operator() -> Operator:
 
 
 #: The MongoDB images the module runs against. The connector's range is
-#: ``>=7,<9``; CI covers 7 and 8. ``MEHO_TEST_MONGODB_IMAGE`` runs one image.
+#: ``>=7,<9``; CI covers 7 and 8, each from
+#: its own ``MEHO_TEST_MONGODB_<major>_IMAGE``. ``MEHO_TEST_MONGODB_IMAGE`` runs one image.
 _MONGO_IMAGES = (
     [os.environ["MEHO_TEST_MONGODB_IMAGE"]]
     if os.environ.get("MEHO_TEST_MONGODB_IMAGE")
-    else ["mongo:7", "mongo:8"]
+    else [
+        os.environ.get("MEHO_TEST_MONGODB_7_IMAGE", "mongo:7"),
+        os.environ.get("MEHO_TEST_MONGODB_8_IMAGE", "mongo:8"),
+    ]
 )
 
 

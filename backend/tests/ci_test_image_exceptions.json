@@ -1,0 +1,40 @@
+{
+  "images_in_tests": [],
+  "variables_not_set": [
+    {
+      "variable": "MEHO_TEST_POSTGRES_IMAGE",
+      "reason": "It runs one PostgreSQL image by hand. CI sets one variable for each major version (MEHO_TEST_POSTGRES_16_IMAGE and so on)."
+    },
+    {
+      "variable": "MEHO_TEST_MONGODB_IMAGE",
+      "reason": "It runs one MongoDB image by hand. CI sets one variable for each major version (MEHO_TEST_MONGODB_7_IMAGE and so on)."
+    }
+  ],
+  "workflow_jobs": [
+    {
+      "workflow": "ci.yml",
+      "job": "redaction-compare",
+      "reason": "On pull requests it runs on a GitHub-hosted runner, which cannot reach the image proxy. It runs one pinned Python image by digest with docker run."
+    },
+    {
+      "workflow": "chart.yml",
+      "job": "helm-test",
+      "reason": "GitHub-hosted runner, so no image proxy. kind pulls its node image, and the job pulls the Valkey and pgvector images before it loads them into kind."
+    },
+    {
+      "workflow": "chart.yml",
+      "job": "helm-test-byo",
+      "reason": "GitHub-hosted runner, so no image proxy. kind pulls its node image, and the job pulls the images it loads into kind."
+    },
+    {
+      "workflow": "chart.yml",
+      "job": "rollback-drill",
+      "reason": "GitHub-hosted runner, so no image proxy. kind pulls its node image, and the job pulls the previous release from the organisation's own registry."
+    },
+    {
+      "workflow": "chart.yml",
+      "job": "upgrade-from-release",
+      "reason": "GitHub-hosted runner, so no image proxy. kind pulls its node image, and the job pulls the previous release from the organisation's own registry."
+    }
+  ]
+}

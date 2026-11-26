@@ -110,11 +110,16 @@ _READER_PASSWORD = "reader-test-password"
 
 
 #: The PostgreSQL images the module runs against. The connector's range is
-#: ``>=15,<19``; CI covers 16, 17 and 18. ``MEHO_TEST_POSTGRES_IMAGE`` runs one image.
+#: ``>=15,<19``; CI covers 16, 17 and 18, each
+#: from its own ``MEHO_TEST_POSTGRES_<major>_IMAGE``. ``MEHO_TEST_POSTGRES_IMAGE`` runs one image.
 _PG_IMAGES = (
     [os.environ["MEHO_TEST_POSTGRES_IMAGE"]]
     if os.environ.get("MEHO_TEST_POSTGRES_IMAGE")
-    else ["postgres:16-alpine", "postgres:17-alpine", "postgres:18-alpine"]
+    else [
+        os.environ.get("MEHO_TEST_POSTGRES_16_IMAGE", "postgres:16-alpine"),
+        os.environ.get("MEHO_TEST_POSTGRES_17_IMAGE", "postgres:17-alpine"),
+        os.environ.get("MEHO_TEST_POSTGRES_18_IMAGE", "postgres:18-alpine"),
+    ]
 )
 
 

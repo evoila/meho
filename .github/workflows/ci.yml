@@ -2868,7 +2868,10 @@ jobs:
         # the live Keycloak test skips (tests/integration/
         # test_auth_keycloak_client_credentials.py). The k3s image uses the
         # tag of the fixture's own default, so the proxy serves the exact
-        # tag the tests ask for.
+        # tag the tests ask for. Every other image a test pulls or builds
+        # from is named here too (docs/codebase/devops.md, "Test images come
+        # through the image proxy"); backend/tests/test_ci_test_images.py
+        # pins it.
         env:
           CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
           SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
@@ -2881,6 +2884,20 @@ jobs:
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           MEHO_TEST_K3S_IMAGE: PROXY/rancher/k3s:v1.32.5-k3s1
           MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          MEHO_TEST_CORE_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.8.1
+          MEHO_TEST_CORE_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          MEHO_TEST_DEBIAN_BOOKWORM_IMAGE: PROXY/library/debian:bookworm-slim
+          MEHO_TEST_DEBIAN_TRIXIE_IMAGE: PROXY/library/debian:trixie-slim
+          MEHO_TEST_MONGODB_7_IMAGE: PROXY/library/mongo:7
+          MEHO_TEST_MONGODB_8_IMAGE: PROXY/library/mongo:8
+          MEHO_TEST_POSTGRES_16_IMAGE: PROXY/library/postgres:16-alpine
+          MEHO_TEST_POSTGRES_17_IMAGE: PROXY/library/postgres:17-alpine
+          MEHO_TEST_POSTGRES_18_IMAGE: PROXY/library/postgres:18-alpine
+          MEHO_TEST_HARBOR_DB_IMAGE: PROXY/goharbor/harbor-db:v2.11.0
+          MEHO_TEST_HARBOR_CORE_IMAGE: PROXY/goharbor/harbor-core:v2.11.0
+          MEHO_TEST_HARBOR_REDIS_IMAGE: PROXY/library/redis:7-alpine
+          MEHO_TEST_LDAP_IMAGE: PROXY/osixia/openldap:1.5.0
+          MEHO_TEST_BUSYBOX_IMAGE: PROXY/rancher/mirrored-library-busybox:1.36.1
           IMAGES
 
       - name: Start memory sampling

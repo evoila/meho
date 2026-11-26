@@ -343,7 +343,7 @@ def test_ci_test_images_fall_back_to_docker_hub_in_another_repository(
     assert result.returncode == 0, result.stdout + result.stderr
     assert masks == []
     for key, image in exported.items():
-        if key == "MEHO_TEST_KEYCLOAK_IMAGE":
+        if key in {"MEHO_TEST_KEYCLOAK_IMAGE", "MEHO_TEST_CORE_KEYCLOAK_IMAGE"}:
             # No public fallback: an empty image makes the Keycloak test skip.
             assert image == ""
         else:

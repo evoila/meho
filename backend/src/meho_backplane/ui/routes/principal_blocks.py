@@ -23,9 +23,10 @@ login. A platform admin removes a block on their own login with
 `meho principal unblock <sub> --reason <text>`, run in the tenant of that
 block, with a fresh sign-in. It removes only the block of that tenant. A
 block in every tenant stays until another platform admin removes it. A
-tenant admin cannot remove a block on their own login. Another tenant admin of that tenant removes a block of that tenant, and a platform
-admin removes any block, on this page or with `meho principal unblock`. Only a
-platform admin removes a block in every tenant. Each block and unblock writes one audit
+tenant admin cannot remove a block on their own login. Another tenant admin of
+that tenant removes a block of that tenant, and a platform admin removes any
+block, on this page or with `meho principal unblock`. Only a platform admin
+removes a block in every tenant. Each block and unblock writes one audit
 row named ``principal.block`` or ``principal.unblock``. The row names the
 console route of the form, not the REST route; the request record of the
 form keeps its own ``http.post:`` name.

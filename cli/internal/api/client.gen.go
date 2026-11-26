@@ -61059,13 +61059,7 @@ type BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON201      *BlockCreated
-	JSON422      *struct {
-		union json.RawMessage
-	}
-}
-type BlockPrincipalRouteApiV1PrincipalsBlockedPost4220 struct {
-	// Detail unknown_login or cannot_block_self, a colon, and a plain sentence for the admin.
-	Detail string `json:"detail"`
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -79362,9 +79356,7 @@ func ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp *http.Respon
 		response.JSON201 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest struct {
-			union json.RawMessage
-		}
+		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

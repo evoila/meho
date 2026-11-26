@@ -228,8 +228,10 @@ REST routes (`/api/v1/principals/blocked`):
 - `GET`: the list. A platform admin sees every block, a tenant admin sees
   the blocks of their tenant.
 - `POST` with `{"sub", "reason"}`: block. `sub` is a login id or an agent
-  name. A second block in the same scope updates the reason. 422
-  `unknown_login` for an agent name MEHO does not know.
+  name. A second block in the same scope updates the reason. An agent
+  name MEHO does not know gets 422 in the shape of the published field
+  errors: `detail` is a list with one error of type `unknown_login`
+  whose `msg` is the plain sentence.
 - `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
   every block of the login, but on their own login only the block of the
   current tenant. A tenant admin removes the block of their tenant. 404

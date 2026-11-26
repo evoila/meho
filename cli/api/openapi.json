@@ -10981,30 +10981,11 @@
             }
           },
           "422": {
-            "description": "The block is refused (detail is a sentence: unknown_login or cannot_block_self), or the body is not valid (detail is a list of field errors).",
+            "description": "Validation Error",
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "description": "A 422 answer of ``POST /api/v1/principals/blocked`` with a plain sentence.",
-                      "properties": {
-                        "detail": {
-                          "description": "unknown_login or cannot_block_self, a colon, and a plain sentence for the admin.",
-                          "title": "Detail",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "detail"
-                      ],
-                      "title": "BlockRefused",
-                      "type": "object"
-                    },
-                    {
-                      "$ref": "#/components/schemas/HTTPValidationError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }

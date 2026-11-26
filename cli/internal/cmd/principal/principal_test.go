@@ -71,4 +71,8 @@ func TestDecodeDetailString(t *testing.T) {
 	if got := decodeDetailString("plain"); got != "plain" {
 		t.Errorf("got %q", got)
 	}
+	list := `{"detail":[{"type":"unknown_login","loc":["body","sub"],"msg":"MEHO knows no agent with the login name agent:nobody."}]}`
+	if got := decodeDetailString(list); got != "unknown_login: MEHO knows no agent with the login name agent:nobody." {
+		t.Errorf("got %q", got)
+	}
 }

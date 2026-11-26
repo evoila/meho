@@ -19,7 +19,8 @@ What these tests check:
   of the block list.
 * The block answer and the list name the agent, also for a block of the
   agent's login id.
-* The 422 answers of the block route match the published schema.
+* The ``unknown_login`` answer matches the published 422 schema: a list of
+  field errors whose ``msg`` is the plain sentence.
 * MEHO keeps the client id of a machine login (``machine_login.client_id``).
 """
 
@@ -383,10 +384,14 @@ async def test_block_of_an_unknown_agent_name_is_refused_with_a_plain_sentence(
     refused = await _block(ac, _person_token(key, "admin-person"), text)
 
     assert refused.status_code == 422
-    assert refused.json()["detail"] == (
-        f"unknown_login: MEHO knows no agent with the login name {text}. "
-        "Copy the login name from the agent list."
-    )
+    assert refused.json()["detail"] == [
+        {
+            "type": "unknown_login",
+            "loc": ["body", "sub"],
+            "msg": f"MEHO knows no agent with the login name {text}. "
+            "Copy the login name from the agent list.",
+        }
+    ]
     assert await _block_rows() == []
 
 
@@ -503,7 +508,7 @@ def _schema_of_422() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_both_422_answers_of_the_block_route_match_the_published_schema(
+async def test_unknown_login_answer_matches_the_published_422_schema(
     _client: tuple[httpx.AsyncClient, Any],
 ) -> None:
     ac, key = _client
@@ -516,8 +521,8 @@ async def test_both_422_answers_of_the_block_route_match_the_published_schema(
 
     assert unknown.status_code == 422
     assert not_valid.status_code == 422
-    assert isinstance(unknown.json()["detail"], str)
-    assert isinstance(not_valid.json()["detail"], list)
+    assert unknown.json()["detail"][0]["type"] == "unknown_login"
+    assert schema["$ref"] == "#/components/schemas/HTTPValidationError"
     jsonschema.validate(unknown.json(), schema)
     jsonschema.validate(not_valid.json(), schema)
 

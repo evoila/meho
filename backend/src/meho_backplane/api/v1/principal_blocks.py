@@ -18,9 +18,11 @@ Routes (REST and CLI only; there is no MCP tool):
   A platform admin blocks in every tenant. A tenant admin blocks in their
   own tenant only. Nobody blocks their own login (422). A text that
   starts with ``agent:`` must name an agent registered in the admin's
-  reach, else 422 ``unknown_login`` with a plain sentence, and no block
-  is stored. Every other text is a login id, and MEHO stores its block.
-  The answer says in one sentence that the block is stored
+  reach, else 422 with no block stored: ``detail`` is a list of field
+  errors, as for a body that is not valid, with one error of type
+  ``unknown_login`` whose ``msg`` is a plain sentence. Every other text
+  is a login id, and MEHO stores its block. The answer says in one
+  sentence that the block is stored
   (``message``). The answer and the list name the agent (``agent``) for
   an agent's login.
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
@@ -201,39 +203,6 @@ class BlockCreated(BlockRead):
     message: str = Field(description="One sentence that says the block is stored.")
 
 
-class BlockRefused(BaseModel):
-    """A 422 answer of ``POST /api/v1/principals/blocked`` with a plain sentence."""
-
-    detail: str = Field(
-        description=(
-            "unknown_login or cannot_block_self, a colon, and a plain sentence for the admin."
-        )
-    )
-
-
-#: Both shapes of a 422 answer of the block route: a refusal with a plain
-#: sentence, or the list of field errors of a body that is not valid.
-_BLOCK_422: Final[dict[int | str, dict[str, Any]]] = {
-    422: {
-        "description": (
-            "The block is refused (detail is a sentence: unknown_login or "
-            "cannot_block_self), or the body is not valid (detail is a list "
-            "of field errors)."
-        ),
-        "content": {
-            "application/json": {
-                "schema": {
-                    "anyOf": [
-                        BlockRefused.model_json_schema(),
-                        {"$ref": "#/components/schemas/HTTPValidationError"},
-                    ]
-                }
-            }
-        },
-    }
-}
-
-
 class BlockListResponse(BaseModel):
     """Response of ``GET /api/v1/principals/blocked``."""
 
@@ -273,12 +242,7 @@ async def list_blocked_principals(
     return BlockListResponse(blocked=[_read(p) for p in await list_blocked(operator)])
 
 
-@router.post(
-    "",
-    response_model=BlockCreated,
-    status_code=http_status.HTTP_201_CREATED,
-    responses=_BLOCK_422,
-)
+@router.post("", response_model=BlockCreated, status_code=http_status.HTTP_201_CREATED)
 async def block_principal_route(
     body: BlockCreate,
     operator: Operator = Depends(_require_person_admin),
@@ -295,7 +259,7 @@ async def block_principal_route(
     except UnknownLoginError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"unknown_login: {exc}",
+            detail=[{"type": "unknown_login", "loc": ["body", "sub"], "msg": str(exc)}],
         ) from exc
     return BlockCreated(**_read(person).model_dump(), message=stored_sentence(person.sub))
 

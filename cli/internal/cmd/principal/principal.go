@@ -367,6 +367,21 @@ func decodeDetailString(body string) string {
 		if err := json.Unmarshal(envelope.Detail, &detail); err == nil && detail != "" {
 			return detail
 		}
+		var errs []struct {
+			Type string `json:"type"`
+			Msg  string `json:"msg"`
+		}
+		if err := json.Unmarshal(envelope.Detail, &errs); err == nil && len(errs) > 0 {
+			parts := make([]string, 0, len(errs))
+			for _, e := range errs {
+				if e.Type != "" && e.Msg != "" {
+					parts = append(parts, e.Type+": "+e.Msg)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "; ")
+			}
+		}
 	}
 	return body
 }

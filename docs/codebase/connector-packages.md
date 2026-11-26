@@ -827,6 +827,11 @@ For every other class the kit promises only the name.
    `uv run python -m scripts.write_connector_kit_names`, then `uv lock`.
    The command writes the list file again, raises the right number of the
    kit version, and writes the version into the kit's `pyproject.toml`.
+   The first number goes up when a name is removed or its inputs change.
+   The second number goes up when names are only added, a name is marked
+   as old, or a function only gets new inputs that are given by name and
+   have a default: a call that leaves them out works as before.
+   `scripts/release/check_connector_kit_release.py` uses the same rule.
 4. **The owner.** `.github/CODEOWNERS` names the kit owner for
    `backend/connector-kit/`, so the pull request asks the kit owner to
    review the changed list file. It is a required review only when the

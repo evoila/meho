@@ -13,8 +13,9 @@ This command builds the list from the code, compares it with the file, and:
 
 * raises the **first** number of the kit version when a name is removed or
   its inputs change (a package may break);
-* raises the **second** number when names are only added, or a name is
-  marked as old;
+* raises the **second** number when names are only added, a name is
+  marked as old, or a function only gets new inputs that are given by name
+  and have a default (no package that leaves them out breaks);
 * refuses to remove a name that the file does not mark as old. An old name
   stays for one kit version, then it may go.
 
@@ -180,6 +181,8 @@ class Changes:
     added: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
+    #: Functions that only got new inputs given by name, with a default.
+    extended: list[str] = field(default_factory=list)
     marked_old: list[str] = field(default_factory=list)
     #: Removed names that the file did not mark as old.
     refused: list[str] = field(default_factory=list)
@@ -189,13 +192,39 @@ class Changes:
         """The number of the kit version that must go up, or ``None``."""
         if self.removed or self.changed:
             return "first"
-        if self.added or self.marked_old:
+        if self.added or self.extended or self.marked_old:
             return "second"
         return None
 
 
 def _without_old(entry: Entry) -> Entry:
     return {key: value for key, value in entry.items() if key != "old"}
+
+
+def only_optional_named_inputs_added(old: Entry, new: Entry) -> bool:
+    """True when *new* is *old* plus inputs given only by name, each with a default.
+
+    Such an input breaks no package: a call that leaves it out works as
+    before. So it raises only the second number of the kit version.
+    """
+    if {k: v for k, v in old.items() if k != "inputs"} != {
+        k: v for k, v in new.items() if k != "inputs"
+    }:
+        return False
+    old_inputs, new_inputs = old.get("inputs"), new.get("inputs")
+    if old_inputs is None or new_inputs is None or "*" not in old_inputs:
+        return False
+    added = [text for text in new_inputs if text not in old_inputs]
+    kept = [text for text in new_inputs if text in old_inputs]
+    star = new_inputs.index("*")
+    return (
+        bool(added)
+        and kept == old_inputs
+        and all(
+            new_inputs.index(text) > star and " = " in text and not text.startswith("*")
+            for text in added
+        )
+    )
 
 
 def compare(old: dict[str, Entry], new: dict[str, Entry]) -> Changes:
@@ -206,7 +235,10 @@ def compare(old: dict[str, Entry], new: dict[str, Entry]) -> Changes:
     changes.refused = [name for name in changes.removed if "old" not in old[name]]
     for name in sorted(set(old) & set(new)):
         if _without_old(old[name]) != _without_old(new[name]):
-            changes.changed.append(name)
+            if only_optional_named_inputs_added(_without_old(old[name]), _without_old(new[name])):
+                changes.extended.append(name)
+            else:
+                changes.changed.append(name)
         elif old[name].get("old") != new[name].get("old"):
             changes.marked_old.append(name)
     return changes
@@ -231,6 +263,9 @@ def describe_changes(changes: Changes, old: dict[str, Entry], new: dict[str, Ent
         lines.append(f"    in the code: {json.dumps(_without_old(new[name]), sort_keys=True)}")
     for name in changes.added:
         lines.append(f"- added: {name}")
+    for name in changes.extended:
+        new_inputs = [text for text in new[name]["inputs"] if text not in old[name]["inputs"]]
+        lines.append(f"- new optional inputs of {name}: {', '.join(new_inputs)}")
     for name in changes.marked_old:
         lines.append(f"- marked as old: {name} ({new[name].get('old', 'no longer old')})")
     return "\n".join(lines)

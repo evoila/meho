@@ -15,7 +15,8 @@ When the kit changed, it checks:
 
 * the kit version went up far enough: the first number when a name was
   removed or changed, at least the second number when names were only
-  added or marked as old;
+  added or marked as old, or a function only got new inputs that are given
+  by name and have a default;
 * every removed name was marked as old at the last release tag;
 * the release's section of ``CHANGELOG.md`` has a ``### Connector kit``
   section that names the new kit version.
@@ -64,6 +65,32 @@ def _without_old(entry: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in entry.items() if key != "old"}
 
 
+def _only_optional_named_inputs_added(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """True when *new* is *old* plus inputs given only by name, each with a default.
+
+    The same rule as ``only_optional_named_inputs_added`` in
+    ``backend/scripts/write_connector_kit_names.py``.
+    """
+    if {k: v for k, v in old.items() if k != "inputs"} != {
+        k: v for k, v in new.items() if k != "inputs"
+    }:
+        return False
+    old_inputs, new_inputs = old.get("inputs"), new.get("inputs")
+    if old_inputs is None or new_inputs is None or "*" not in old_inputs:
+        return False
+    added = [text for text in new_inputs if text not in old_inputs]
+    kept = [text for text in new_inputs if text in old_inputs]
+    star = new_inputs.index("*")
+    return (
+        bool(added)
+        and kept == old_inputs
+        and all(
+            new_inputs.index(text) > star and " = " in text and not text.startswith("*")
+            for text in added
+        )
+    )
+
+
 def kit_problems(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
     """Problems with the kit version and the removed names. Empty when fine."""
     if old is None:
@@ -73,7 +100,13 @@ def kit_problems(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
     removed = sorted(set(old_names) - set(new_names))
     added = sorted(set(new_names) - set(old_names))
     common = sorted(set(old_names) & set(new_names))
-    changed = [n for n in common if _without_old(old_names[n]) != _without_old(new_names[n])]
+    differ = [n for n in common if _without_old(old_names[n]) != _without_old(new_names[n])]
+    extended = [
+        n
+        for n in differ
+        if _only_optional_named_inputs_added(_without_old(old_names[n]), _without_old(new_names[n]))
+    ]
+    changed = [n for n in differ if n not in extended]
     marked = [n for n in common if old_names[n].get("old") != new_names[n].get("old")]
     problems: list[str] = []
     refused = [name for name in removed if "old" not in old_names[name]]
@@ -91,9 +124,10 @@ def kit_problems(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
                 f"first number of the kit version must go up. It is {new['kit_version']}, and "
                 f"it was {old['kit_version']} at the last release. Run `{COMMAND}`."
             )
-    elif (added or marked) and new_version <= old_version:
+    elif (added or extended or marked) and new_version <= old_version:
         problems.append(
-            f"Kit names were added or marked as old ({', '.join(added + marked)}), so the "
+            "Kit names were added, got new optional inputs, or were marked as old "
+            f"({', '.join(added + extended + marked)}), so the "
             f"kit version must go up. It is {new['kit_version']}, as at the last release. "
             f"Run `{COMMAND}`."
         )

@@ -113,6 +113,22 @@ def _list_after(value: str, limit: int = 10) -> int:
     return min(len(value), limit)
 
 
+def _named_before(value: str, *, size: int = 1) -> int:
+    return len(value) * size
+
+
+def _named_with_default(value: str, *, size: int = 1, limit: int = 10) -> int:
+    return min(len(value) * size, limit)
+
+
+def _named_without_default(value: str, *, size: int = 1, limit: int) -> int:
+    return min(len(value) * size, limit)
+
+
+def _positional_with_default(value: str, limit: int = 10, *, size: int = 1) -> int:
+    return min(len(value) * size, limit)
+
+
 def _names(**functions: Any) -> dict[str, Entry]:
     return {name: describe(function) for name, function in functions.items()}
 
@@ -136,6 +152,21 @@ def test_an_added_name_asks_for_the_second_number() -> None:
     assert "second number" in message
 
 
+def test_a_new_optional_named_input_asks_for_the_second_number() -> None:
+    message = check_message(_names(a=_named_before), _names(a=_named_with_default))
+    assert message is not None
+    assert "new optional inputs of a: limit: int = 10" in message
+    assert "second number" in message
+
+
+@pytest.mark.parametrize("after", [_named_without_default, _positional_with_default])
+def test_a_new_input_that_a_call_may_need_asks_for_the_first_number(after: Any) -> None:
+    message = check_message(_names(a=_named_before), _names(a=after))
+    assert message is not None
+    assert "changed: a" in message
+    assert "first number" in message
+
+
 @pytest.fixture
 def kit_files(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
     names_file = tmp_path / "kit-names.json"
@@ -157,6 +188,17 @@ def test_command_raises_the_second_number_for_an_added_name(
     exit_code = write(new, *kit_files)
     assert exit_code == 0
     assert _written(*kit_files) == ("1.4", "1.4", new)
+
+
+def test_command_raises_the_second_number_for_a_new_optional_named_input(
+    kit_files: tuple[Path, Path],
+) -> None:
+    names_file, pyproject = kit_files
+    names_file.write_text(json.dumps({"kit_version": "1.3", "names": _names(a=_named_before)}))
+    new = _names(a=_named_with_default)
+    exit_code = write(new, names_file, pyproject)
+    assert exit_code == 0
+    assert _written(names_file, pyproject) == ("1.4", "1.4", new)
 
 
 def test_command_raises_the_first_number_for_a_changed_name(
@@ -483,6 +525,43 @@ async def test_connector_without_execute_registers_and_runs_a_typed_operation() 
 
     assert result.status == "ok", result
     assert result.result == {"widgets": ["kitdemo-target"], "limit": 5}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_a_kit_package_sets_hard_to_undo_and_changes_rights_on_its_op() -> None:
+    from sqlalchemy import select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor
+
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await kit.register_typed_operation(
+        product="kitdemo",
+        version="1.x",
+        impl_id="kitdemo",
+        op_id="kitdemo.widget.reset",
+        handler=_list_widgets,
+        summary="Reset a widget.",
+        description="Resets one widget of a made-up product to its first state.",
+        parameter_schema={"type": "object", "properties": {}},
+        when_to_use=None,
+        safety_level="dangerous",
+        requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
+        embedding_service=embedding,
+    )
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "kitdemo.widget.reset")
+            )
+        ).scalar_one()
+    assert (row.hard_to_undo, row.changes_rights) == ("overwrites", True)
 
 
 @pytest.mark.asyncio

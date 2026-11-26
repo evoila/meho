@@ -29,6 +29,17 @@ _SCRIPT = _repo_root() / "scripts" / "release" / "check_connector_kit_release.py
 
 _ENTRY = {"kind": "function", "inputs": ["value: str"], "returns": "str"}
 _CHANGED = {"kind": "function", "inputs": ["value: str", "*", "limit: int"], "returns": "str"}
+_NAMED = {"kind": "function", "inputs": ["value: str", "*", "size: int = 1"], "returns": "str"}
+_NAMED_PLUS_DEFAULT = {
+    "kind": "function",
+    "inputs": ["value: str", "*", "size: int = 1", "limit: int = 10"],
+    "returns": "str",
+}
+_NAMED_PLUS_REQUIRED = {
+    "kind": "function",
+    "inputs": ["value: str", "*", "size: int = 1", "limit: int"],
+    "returns": "str",
+}
 
 
 def _names(version: str, **entries: dict[str, Any]) -> dict[str, Any]:
@@ -116,6 +127,38 @@ def test_changed_name_needs_the_first_number(tmp_path: Path) -> None:
         _names("1.0", a=_ENTRY),
         _names("1.1", a=_CHANGED),
         "- Kit version 1.1 changes `a`.",
+    )
+    assert result.returncode == 1
+    assert "first number" in result.stderr
+
+
+def test_new_optional_named_input_needs_only_the_second_number(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.1", a=_NAMED_PLUS_DEFAULT),
+        "- Kit version 1.1 gives `a` the input `limit`.",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_new_optional_named_input_still_needs_a_new_version(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.0", a=_NAMED_PLUS_DEFAULT),
+        "- Kit version 1.0 gives `a` the input `limit`.",
+    )
+    assert result.returncode == 1
+    assert "must go up" in result.stderr
+
+
+def test_new_named_input_without_a_default_needs_the_first_number(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.1", a=_NAMED_PLUS_REQUIRED),
+        "- Kit version 1.1 gives `a` the input `limit`.",
     )
     assert result.returncode == 1
     assert "first number" in result.stderr

@@ -1113,11 +1113,12 @@ model, or resume endpoint):
    or per-tenant override may surface the credential on the feed. See
    `docs/codebase/broadcast.md`.
 
-The `_approved=True` re-dispatch gate-bypass (the resume authorization)
-is unchanged in mechanism but now matters for humans too: with humans
-routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
-the call instead of executing it, so the bypass is what lets the
-approved op run.
+The `_approved=True` re-dispatch does not ask for the approval again.
+This matters for humans too: with humans routed to `NEEDS_APPROVAL`, the
+full gate on resume would make the call wait again instead of running it.
+The run still checks what can change while the call waits
+(`operations/approved_run_rights.py`): the grants of an agent that asked,
+a revoked agent login, a blocked login, and the risk level.
 
 ## The approval groups and how a person approves (#3325)
 
@@ -2496,8 +2497,9 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
-| A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on`, a role that meets the operation's floor (`approved_run_rights.py`, same check as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
-| A new call that would wait for a person is still covered by the approval: the risk level did not go up past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
+| The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -2527,14 +2529,17 @@ request again. While the re-run runs, `result_state` reads `started`.
 own resume after approval (`dispatch(..., _approved=True)`), through the
 same `_dispatch_resume_with_bound_context` the approve paths use. So the
 work reference, the session link and the result-handle owner are bound the
-same way. The approval is not asked for again, but the caller's rights
-are: the route needs the `operator` role, the same role as the call route
-(else 403 `insufficient_role`), and the re-run passes the rights checks of
-a new call of the same caller made now (`operations/approved_run_rights.py`,
-see `agent-permission-model.md`). This is checked before the claim, so a
-refused re-run does not change the request. The approval stays open: when
-the rights come back, the requester may re-run it, because a new call
-would pass then too. The dispatcher checks the same rule again when the
+same way. A request made inside a hosted agent run binds that acting agent
+again. The approval is not asked for again. The re-run checks what the
+first run checks (the grants of an agent that asked, a revoked agent
+login, a blocked login and the risk level), and also the caller's role
+and grants from the caller's token now: it needs the `operator` role, the
+same role as the call route (else 403 `insufficient_role`), and a call
+that a new call of the caller would refuse is refused
+(`operations/approved_run_rights.py`, see `agent-permission-model.md`).
+This is checked before the claim, so a refused re-run does not change the
+request. A refused request stays approved and can run again later, when
+the rights allow it. The dispatcher checks the same rules again when the
 run starts.
 
 **Result.** The new result replaces `resume_result`, so `/result`,
@@ -4088,7 +4093,9 @@ shown). At approve time `_load_pending_for_approval` re-verifies it
 raises `PreviewBindingMissingError` → HTTP 422 on every approve surface
 (REST `/approve`, `/decide`, the console). This extends the existing
 `params_hash` swap-defence to the preview binding. The resume path
-(`dispatch(..., _approved=True)`) skips the policy gate. Right before the
+(`dispatch(..., _approved=True)`) does not ask for the approval again. It
+checks the risk level again: a raise to `destructive` refuses the run, so
+a `destructive` run never starts with no preview. Right before the
 run, every resume path builds the preview again and compares its hash
 (`refuse_resume_if_preview_changed`, see
 [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
@@ -6202,4 +6209,4 @@ repository, no operation made from an API file at run time.
 - `backend/src/meho_backplane/api/v1/approvals.py::get_approval_result` — `GET /api/v1/approvals/{id}/result` (#3209).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): reads the stored row until it is decided + re-dispatch on approval.
-- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).
+- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the re-dispatch entry point of the agent's own wait; the dispatcher checks the agent's rights again).

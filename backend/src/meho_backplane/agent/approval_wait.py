@@ -617,8 +617,8 @@ async def _resume_approved_or_already_resumed(
     if preview_refusal is not None:
         return preview_refusal.model_dump(mode="json")
 
-    # The re-dispatch threads ``_approved=True`` through the policy gate, so
-    # the durable approval-decision row is the authorization.
+    # The re-dispatch threads ``_approved=True``: the approval is not asked
+    # for again, and the agent's rights are checked again for the run.
     envelope = await _redispatch_approved(
         operator=operator,
         request=request,

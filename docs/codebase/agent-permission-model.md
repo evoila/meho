@@ -339,14 +339,17 @@ claim for audit parent-linkage (#3446), is never matched against this table).
        the call; both give the same answer.
 
      To rebuild the agent there, the park stores a requester record on
-     the approval card (`permission_preflight.requester`: sub, kind,
-     client id, role, actor) whenever an agent asks. A card with no record
-     (made before MEHO stored one) cannot be checked. When the operation has steps to check, the run
-     is refused with `policy_denied` and the agent must ask again. A
-     call with no steps to check runs as before. A refusal writes one `denied` audit row, the
-     approval request ends as a failed run with the reason, and the
-     person who runs it sees the reason in the answer. People and
-     service logins that asked are not checked again. With `observe`
+     the approval card whenever an agent asks (sub, kind, client id,
+     role, actor), under an internal key that no caller reads. While the
+     switch is not `off`, the card also shows it as
+     `permission_preflight.requester`. An agent's request whose card has
+     no readable record of the agent is refused when a person runs it
+     from an approvals surface. The agent must ask again. A refusal
+     writes one `denied` audit row, the approval request ends as a failed
+     run with the reason, and the person who runs it sees the reason in
+     the answer. This step check is for agents; the risk level is checked
+     for every requester (see "An approved request is checked again when
+     it runs" below). With `observe`
      nothing is refused again: the "would deny" lines were logged when
      the call was made. At resume the dispatcher only marks them as
      written (`agent_no_grant_already_logged`), so the step gate of the
@@ -439,34 +442,40 @@ an approvals surface, the dispatcher's approve-and-run path
 reviewer's run by the requester the resume helper binds
 (`secondary_target_policy.approved_requester_sub`).
 
-**An approved run checks the rights of who asked, as for a new call made
-now** (`operations/approved_run_rights.py`). Every run of an approved call
-does this: the first run after the approval (an approvals surface, or the
-agent's own resume in `agent/approval_wait.py`), and every re-run of a
-failed approved call (`POST /api/v1/approvals/{id}/rerun`,
-`operations/approval_rerun.py`). Only the approval is not asked for again.
-The dispatcher's approve-and-run path (`_approved=True`) runs `policy_gate`
-(`decide_only=True`, so no grant use is recorded) for the login that asked:
+**An approved request is checked again when it runs**
+(`operations/approved_run_rights.py`). The approval is not asked for
+again. On the first run (an approvals surface, or the agent's own wait in
+`agent/approval_wait.py`) MEHO checks:
 
-- a new call would be refused (a `deny` grant, no grant with the switch
-  `on`, a role below the operation's floor): the run is refused with a
-  `denied` audit row, and nothing runs;
-- a new call would wait for a person: the approval covers it, unless the
-  risk level of the operation went up. Up to `dangerous`, the person who
-  approved must be allowed to approve that level (the decision audit row
-  records `approver_may_approve_high_risk`). Up to `destructive`, a new
-  approval is always needed;
-- a new call would run at once: the run goes ahead.
+- the grants of an agent that asked, and of the acting agent of a hosted
+  agent run: a `deny` grant, or no grant with the switch `on`, refuses the
+  run (`policy_gate` with `decide_only=True`, so no grant use is recorded);
+- a revoked agent login (`DELETE /api/v1/agent-principals/{name}/revoke`):
+  a new call with a token that has not ended yet is refused too;
+- a blocked login;
+- the risk level, for every requester: MEHO compares the level stamped on
+  the card (`proposed_effect.safety_level`) with the operation's level
+  now. A raise to `destructive` refuses the run. A raise to `dangerous`
+  refuses it when the person who approved may not approve that level
+  (the decision audit row records `approver_may_approve_high_risk`; when
+  the key is there, its value decides). A card with no stamped level is
+  refused when the operation is `destructive` now.
+
+A re-run of a failed approved call (`POST /api/v1/approvals/{id}/rerun`,
+`operations/approval_rerun.py`) checks these and also the caller's role
+and grants from the caller's token now. It needs the `operator` role. A
+re-run of a request made inside a hosted agent run binds that acting
+agent again, so it is checked with the stricter of the requester's and
+the agent's rights. The approver is read as recorded at the decision.
 
 Who is checked: the caller, when it is the login that asked (the agent's
-own resume, a hosted agent run, the requester's re-run; its token is the
-current one, so a lower role counts). When a person runs the call from an
-approvals surface, MEHO checks the agent that asked, rebuilt from the
-requester record on the approval card (see "A resumed call is checked
-again" above). The re-run route needs the `operator` role, like the call
-route. A refusal does not use up the approval: the request ends as a
-failed run with the reason, and the requester may re-run it when a new
-call would pass again.
+own wait, a hosted agent run, the requester's re-run). When a person runs
+the call from an approvals surface, MEHO checks the agent that asked,
+rebuilt from the requester record on the approval card (see "A resumed
+call is checked again" above). The approved step of a multi-step
+operation is checked for the agent that asked in the same way, before it
+clears. A refused request stays approved and can run again later: the
+request ends as a failed run with the reason.
 
 `policy_gate` (`_validate.py`) opens its own DB session
 (`get_sessionmaker()`) and calls

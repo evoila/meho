@@ -1881,8 +1881,9 @@ async def _call_operation_impl(
 
     Two public wrappers thread different ``approved`` values into the same
     body: :func:`call_operation` (the default) calls the dispatcher's policy
-    gate; :func:`call_operation_with_approval` skips it because the durable
-    approval-decision row is the authorization (G11.1-T9 #1117 / G11.2-T4 #817).
+    gate; :func:`call_operation_with_approval` does not ask for the approval
+    again (G11.1-T9 #1117 / G11.2-T4 #817), and the dispatcher checks the
+    agent's rights again (:mod:`~meho_backplane.operations.approved_run_rights`).
     Both share the same target-resolution + fqdn-override + structlog-audit
     wiring so the audit row shapes stay symmetric.
 

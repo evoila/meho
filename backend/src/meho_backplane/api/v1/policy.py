@@ -353,7 +353,7 @@ async def carry_over(
     if operator.principal_kind is PrincipalKind.AGENT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="An agent login cannot run the dry run. A person or a service login can.",
+            detail="An agent login cannot run the dry run.",
         )
     _check_scope(operator, scope)
     try:

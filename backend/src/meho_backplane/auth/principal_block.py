@@ -371,9 +371,11 @@ def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
 async def _read_blocks(session: AsyncSession, sub: str) -> list[BlockedPerson]:
     """Every block of *sub*, sorted by scope, read from the table.
 
+    The rows stay locked until the transaction ends, so a block that is
+    set again in the meantime waits, and the delete removes the rows read.
     Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
     """
-    query = select(PrincipalBlock).where(PrincipalBlock.sub == sub)
+    query = select(PrincipalBlock).where(PrincipalBlock.sub == sub).with_for_update()
     try:
         rows = (await session.execute(query)).scalars().all()
     except Exception as exc:

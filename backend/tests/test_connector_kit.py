@@ -38,7 +38,7 @@ import tomllib
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 from unittest.mock import AsyncMock
 
 import meho_connector_kit as kit
@@ -49,7 +49,9 @@ from scripts.write_connector_kit_names import (
     Entry,
     build_names,
     check_message,
+    compare,
     describe,
+    describe_changes,
     read_names_file,
     read_pyproject_version,
     write,
@@ -165,6 +167,111 @@ def test_a_new_input_that_a_call_may_need_asks_for_the_first_number(after: Any) 
     assert message is not None
     assert "changed: a" in message
     assert "first number" in message
+
+
+# The cases of the rule for new inputs. Each pair is the function before
+# and after; the same cases run for the release check in
+# tests/test_ci_check_connector_kit_release.py.
+
+
+def _f_plain(value: str) -> str:
+    return value
+
+
+def _f_plain_plus_named(value: str, *, opt: int = 1) -> str:
+    return value * opt
+
+
+def _f_args(value: str, *items: str) -> str:
+    return value + "".join(items)
+
+
+def _f_args_plus_named(value: str, *items: str, opt: int = 1) -> str:
+    return (value + "".join(items)) * opt
+
+
+def _f_named(value: str, *, size: int = 1) -> str:
+    return value * size
+
+
+def _f_named_plus_default(value: str, *, size: int = 1, limit: int = 10) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_plus_required(value: str, *, size: int = 1, limit: int) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_plus_required_eq_in_type(value: str, *, size: int = 1, expr: Literal["a = b"]) -> str:
+    return value * size + expr
+
+
+def _f_named_plus_eq_in_default(value: str, *, size: int = 1, sep: str = " = ") -> str:
+    return sep.join([value] * size)
+
+
+def _f_named_plus_by_place(value: str, limit: int = 10, *, size: int = 1) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_new_default(value: str, *, size: int = 2) -> str:
+    return value * size
+
+
+def _f_named_new_type(value: str, *, size: float = 1) -> str:
+    return value * int(size)
+
+
+def _f_named_plus_default_new_return(value: str, *, size: int = 1, limit: int = 10) -> int:
+    return min(len(value) * size, limit)
+
+
+def _f_named_plus_default_old_input_changed(value: bytes, *, size: int = 1, limit: int = 10) -> str:
+    return (value.decode() * size)[:limit]
+
+
+def _f_kwargs(value: str, *, size: int = 1, **options: Any) -> str:
+    return value * size + str(options)
+
+
+def _f_kwargs_plus_named(value: str, *, size: int = 1, mode: int = 0, **options: Any) -> str:
+    return value * size + str(options) + str(mode)
+
+
+_RULE_CASES = [
+    pytest.param(_f_plain, _f_plain_plus_named, "second", id="no-star-before"),
+    pytest.param(_f_args, _f_args_plus_named, "second", id="named-after-args"),
+    pytest.param(_f_named, _f_named_plus_default, "second", id="named-with-default"),
+    pytest.param(_f_named, _f_named_plus_eq_in_default, "second", id="eq-in-default"),
+    pytest.param(_f_named, _f_named_plus_required_eq_in_type, "first", id="eq-in-type"),
+    pytest.param(_f_named, _f_named_plus_required, "first", id="named-without-default"),
+    pytest.param(_f_named, _f_named_plus_by_place, "first", id="by-place-with-default"),
+    pytest.param(_f_named, _f_named_new_default, "first", id="changed-default"),
+    pytest.param(_f_named, _f_named_new_type, "first", id="changed-type"),
+    pytest.param(_f_named, _f_named_plus_default_new_return, "first", id="plus-new-return"),
+    pytest.param(_f_named, _f_named_plus_default_old_input_changed, "first", id="plus-old-changed"),
+    pytest.param(_f_kwargs, _f_kwargs_plus_named, "first", id="next-to-kwargs"),
+    pytest.param(_f_named, _f_plain, "first", id="last-named-removed"),
+]
+
+
+@pytest.mark.parametrize(("before", "after", "level"), _RULE_CASES)
+def test_the_rule_for_new_inputs(before: Any, after: Any, level: str) -> None:
+    changes = compare(_names(f=before), _names(f=after))
+    assert changes.level == level
+    message = check_message(_names(f=before), _names(f=after))
+    assert message is not None
+    assert f"{level} number" in message
+
+
+def test_a_name_both_extended_and_marked_as_old_is_listed_in_both_groups() -> None:
+    old = _names(f=_f_named)
+    new = _names(f=_f_named_plus_default)
+    new["f"]["old"] = "Use g."
+    changes = compare(old, new)
+    assert (changes.extended, changes.marked_old, changes.changed) == (["f"], ["f"], [])
+    lines = describe_changes(changes, old, new).splitlines()
+    assert lines == ["- new optional inputs of f: limit: int = 10", "- marked as old: f (Use g.)"]
 
 
 @pytest.fixture

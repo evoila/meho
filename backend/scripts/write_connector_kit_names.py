@@ -11,11 +11,17 @@ lists every kit name with its inputs, and the kit version.
 
 This command builds the list from the code, compares it with the file, and:
 
-* raises the **first** number of the kit version when a name is removed or
-  its inputs change (a package may break);
+* raises the **first** number of the kit version when a name is removed,
+  or its inputs change in a way that can break a package: a new input that
+  can be given by its place, a new input with no default, a changed
+  default, type or meaning of an input that exists, a new input on a
+  function with a ``**`` input, or any other change of the name (for
+  example its answer type);
 * raises the **second** number when names are only added, a name is
-  marked as old, or a function only gets new inputs that are given by name
-  and have a default (no package that leaves them out breaks);
+  marked as old, or a function only gets new inputs that are given only by
+  name (after the ``*`` or after a ``*args`` input) and have a default. A
+  function with no such input before may get the ``*`` together with the
+  new inputs. A package that leaves them out keeps working;
 * refuses to remove a name that the file does not mark as old. An old name
   stays for one kit version, then it may go.
 
@@ -32,6 +38,7 @@ See ``docs/codebase/connector-packages.md``, "The connector kit".
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import re
@@ -49,6 +56,7 @@ COMMAND = "cd backend && uv run python -m scripts.write_connector_kit_names"
 
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 _PYPROJECT_VERSION = re.compile(r'^version = "([^"]*)"$', re.MULTILINE)
+_INPUT_NAME = re.compile(r"\*{0,2}([A-Za-z_]\w*)")
 
 type Entry = dict[str, Any]
 type Level = Literal["first", "second"]
@@ -201,30 +209,82 @@ def _without_old(entry: Entry) -> Entry:
     return {key: value for key, value in entry.items() if key != "old"}
 
 
+def _has_default(text: str) -> bool:
+    """True when the input text (``name: type = default``) has a default.
+
+    The default starts after the first `` = `` whose text before it is a whole
+    input that Python can parse. A `` = `` inside a type, for example
+    ``Literal['a = b']``, leaves a text before it that Python cannot parse.
+    """
+    start = text.find(" = ")
+    while start != -1:
+        try:
+            ast.parse(f"def _({text[:start]}): pass")
+        except SyntaxError:
+            start = text.find(" = ", start + 1)
+        else:
+            return True
+    return False
+
+
+def _parsed_inputs(inputs: list[str]) -> list[tuple[str, str, str]]:
+    """Each input as (name, text, how a call gives it), without the ``/`` and ``*`` marks.
+
+    How a call gives it: ``place`` (only by place), ``either``, ``*args``,
+    ``name`` (only by name: after a ``*`` or a ``*args`` input) or ``**``.
+    """
+    parsed: list[tuple[str, str, str]] = []
+    how = "place" if "/" in inputs else "either"
+    for text in inputs:
+        if text in ("/", "*"):
+            how = "either" if text == "/" else "name"
+            continue
+        match = _INPUT_NAME.match(text)
+        name = match.group(1) if match else text
+        if text.startswith("**"):
+            parsed.append((name, text, "**"))
+        elif text.startswith("*"):
+            parsed.append((name, text, "*args"))
+            how = "name"
+        else:
+            parsed.append((name, text, how))
+    return parsed
+
+
+def new_optional_named_inputs(old: Entry, new: Entry) -> list[str] | None:
+    """The new inputs when *new* is *old* plus inputs given only by name, each with a default.
+
+    ``None`` when the change can break a package: a new input given by its
+    place, a new input with no default, a changed input that exists, a new
+    input on a function with a ``**`` input, or any other change of the
+    entry. A function without a ``*`` before may get the ``*`` together with
+    the new inputs.
+    """
+    if {k: v for k, v in old.items() if k != "inputs"} != {
+        k: v for k, v in new.items() if k != "inputs"
+    }:
+        return None
+    old_inputs, new_inputs = old.get("inputs"), new.get("inputs")
+    if old_inputs is None or new_inputs is None:
+        return None
+    old_parsed, new_parsed = _parsed_inputs(old_inputs), _parsed_inputs(new_inputs)
+    old_names = {name for name, _, _ in old_parsed}
+    kept = [item for item in new_parsed if item[0] in old_names]
+    added = [item for item in new_parsed if item[0] not in old_names]
+    if not added or kept != old_parsed or any(how == "**" for _, _, how in old_parsed):
+        return None
+    if any(how != "name" or not _has_default(text) for _, text, how in added):
+        return None
+    return [text for _, text, _ in added]
+
+
 def only_optional_named_inputs_added(old: Entry, new: Entry) -> bool:
     """True when *new* is *old* plus inputs given only by name, each with a default.
 
     Such an input breaks no package: a call that leaves it out works as
     before. So it raises only the second number of the kit version.
     """
-    if {k: v for k, v in old.items() if k != "inputs"} != {
-        k: v for k, v in new.items() if k != "inputs"
-    }:
-        return False
-    old_inputs, new_inputs = old.get("inputs"), new.get("inputs")
-    if old_inputs is None or new_inputs is None or "*" not in old_inputs:
-        return False
-    added = [text for text in new_inputs if text not in old_inputs]
-    kept = [text for text in new_inputs if text in old_inputs]
-    star = new_inputs.index("*")
-    return (
-        bool(added)
-        and kept == old_inputs
-        and all(
-            new_inputs.index(text) > star and " = " in text and not text.startswith("*")
-            for text in added
-        )
-    )
+    return new_optional_named_inputs(old, new) is not None
 
 
 def compare(old: dict[str, Entry], new: dict[str, Entry]) -> Changes:
@@ -235,11 +295,13 @@ def compare(old: dict[str, Entry], new: dict[str, Entry]) -> Changes:
     changes.refused = [name for name in changes.removed if "old" not in old[name]]
     for name in sorted(set(old) & set(new)):
         if _without_old(old[name]) != _without_old(new[name]):
-            if only_optional_named_inputs_added(_without_old(old[name]), _without_old(new[name])):
-                changes.extended.append(name)
-            else:
+            if not only_optional_named_inputs_added(
+                _without_old(old[name]), _without_old(new[name])
+            ):
                 changes.changed.append(name)
-        elif old[name].get("old") != new[name].get("old"):
+                continue
+            changes.extended.append(name)
+        if old[name].get("old") != new[name].get("old"):
             changes.marked_old.append(name)
     return changes
 
@@ -264,8 +326,8 @@ def describe_changes(changes: Changes, old: dict[str, Entry], new: dict[str, Ent
     for name in changes.added:
         lines.append(f"- added: {name}")
     for name in changes.extended:
-        new_inputs = [text for text in new[name]["inputs"] if text not in old[name]["inputs"]]
-        lines.append(f"- new optional inputs of {name}: {', '.join(new_inputs)}")
+        new_inputs = new_optional_named_inputs(_without_old(old[name]), _without_old(new[name]))
+        lines.append(f"- new optional inputs of {name}: {', '.join(new_inputs or [])}")
     for name in changes.marked_old:
         lines.append(f"- marked as old: {name} ({new[name].get('old', 'no longer old')})")
     return "\n".join(lines)

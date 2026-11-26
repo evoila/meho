@@ -14,9 +14,15 @@ This script compares the file at the last release tag with the file now.
 When the kit changed, it checks:
 
 * the kit version went up far enough: the first number when a name was
-  removed or changed, at least the second number when names were only
-  added or marked as old, or a function only got new inputs that are given
-  by name and have a default;
+  removed, or its inputs changed in a way that can break a package (a new
+  input that can be given by its place, a new input with no default, a
+  changed default, type or meaning of an input that exists, a new input on
+  a function with a ``**`` input, or any other change of the name, for
+  example its answer type); at least the second number when names were only
+  added, marked as old, or a function only got new inputs that are given
+  only by name (after the ``*`` or after a ``*args`` input) and have a
+  default. A function with no such input before may get the ``*``
+  together with the new inputs;
 * every removed name was marked as old at the last release tag;
 * the release's section of ``CHANGELOG.md`` has a ``### Connector kit``
   section that names the new kit version.
@@ -39,6 +45,7 @@ use them.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -50,6 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NAMES_PATH = "backend/connector-kit/kit-names.json"
 SECTION = "### Connector kit"
 COMMAND = "cd backend && uv run python -m scripts.write_connector_kit_names"
+_INPUT_NAME = re.compile(r"\*{0,2}([A-Za-z_]\w*)")
 
 
 class InputError(Exception):
@@ -65,30 +73,84 @@ def _without_old(entry: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in entry.items() if key != "old"}
 
 
-def _only_optional_named_inputs_added(old: dict[str, Any], new: dict[str, Any]) -> bool:
-    """True when *new* is *old* plus inputs given only by name, each with a default.
+def _has_default(text: str) -> bool:
+    """True when the input text (``name: type = default``) has a default.
 
-    The same rule as ``only_optional_named_inputs_added`` in
-    ``backend/scripts/write_connector_kit_names.py``.
+    The default starts after the first `` = `` whose text before it is a whole
+    input that Python can parse. A `` = `` inside a type, for example
+    ``Literal['a = b']``, leaves a text before it that Python cannot parse.
+    """
+    start = text.find(" = ")
+    while start != -1:
+        try:
+            ast.parse(f"def _({text[:start]}): pass")
+        except SyntaxError:
+            start = text.find(" = ", start + 1)
+        else:
+            return True
+    return False
+
+
+def _parsed_inputs(inputs: list[str]) -> list[tuple[str, str, str]]:
+    """Each input as (name, text, how a call gives it), without the ``/`` and ``*`` marks.
+
+    How a call gives it: ``place`` (only by place), ``either``, ``*args``,
+    ``name`` (only by name: after a ``*`` or a ``*args`` input) or ``**``.
+    """
+    parsed: list[tuple[str, str, str]] = []
+    how = "place" if "/" in inputs else "either"
+    for text in inputs:
+        if text in ("/", "*"):
+            how = "either" if text == "/" else "name"
+            continue
+        match = _INPUT_NAME.match(text)
+        name = match.group(1) if match else text
+        if text.startswith("**"):
+            parsed.append((name, text, "**"))
+        elif text.startswith("*"):
+            parsed.append((name, text, "*args"))
+            how = "name"
+        else:
+            parsed.append((name, text, how))
+    return parsed
+
+
+def _new_optional_named_inputs(old: dict[str, Any], new: dict[str, Any]) -> list[str] | None:
+    """The new inputs when *new* is *old* plus inputs given only by name, each with a default.
+
+    ``None`` when the change can break a package: a new input given by its
+    place, a new input with no default, a changed input that exists, a new
+    input on a function with a ``**`` input, or any other change of the
+    entry. A function without a ``*`` before may get the ``*`` together with
+    the new inputs.
     """
     if {k: v for k, v in old.items() if k != "inputs"} != {
         k: v for k, v in new.items() if k != "inputs"
     }:
-        return False
+        return None
     old_inputs, new_inputs = old.get("inputs"), new.get("inputs")
-    if old_inputs is None or new_inputs is None or "*" not in old_inputs:
-        return False
-    added = [text for text in new_inputs if text not in old_inputs]
-    kept = [text for text in new_inputs if text in old_inputs]
-    star = new_inputs.index("*")
-    return (
-        bool(added)
-        and kept == old_inputs
-        and all(
-            new_inputs.index(text) > star and " = " in text and not text.startswith("*")
-            for text in added
-        )
-    )
+    if old_inputs is None or new_inputs is None:
+        return None
+    old_parsed, new_parsed = _parsed_inputs(old_inputs), _parsed_inputs(new_inputs)
+    old_names = {name for name, _, _ in old_parsed}
+    kept = [item for item in new_parsed if item[0] in old_names]
+    added = [item for item in new_parsed if item[0] not in old_names]
+    if not added or kept != old_parsed or any(how == "**" for _, _, how in old_parsed):
+        return None
+    if any(how != "name" or not _has_default(text) for _, text, how in added):
+        return None
+    return [text for _, text, _ in added]
+
+
+def _only_optional_named_inputs_added(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """True when *new* is *old* plus inputs given only by name, each with a default.
+
+    Such an input breaks no package: a call that leaves it out works as
+    before. So it raises only the second number of the kit version. The
+    same rule as ``only_optional_named_inputs_added`` in
+    ``backend/scripts/write_connector_kit_names.py``.
+    """
+    return _new_optional_named_inputs(old, new) is not None
 
 
 def kit_problems(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
@@ -127,7 +189,7 @@ def kit_problems(old: dict[str, Any] | None, new: dict[str, Any]) -> list[str]:
     elif (added or extended or marked) and new_version <= old_version:
         problems.append(
             "Kit names were added, got new optional inputs, or were marked as old "
-            f"({', '.join(added + extended + marked)}), so the "
+            f"({', '.join(dict.fromkeys(added + extended + marked))}), so the "
             f"kit version must go up. It is {new['kit_version']}, as at the last release. "
             f"Run `{COMMAND}`."
         )

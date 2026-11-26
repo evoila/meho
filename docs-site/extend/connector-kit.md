@@ -394,11 +394,17 @@ The steps are in
 
 The kit version has two numbers:
 
-- the **first** number goes up when a name is removed or its inputs
-  change. Your package may break. Read the notes and change your code;
+- the **first** number goes up when a name is removed, or its inputs
+  change in a way that can break a package: a new input that can be given
+  by its place, a new input with no default, a changed default, type or
+  meaning of an input that exists, a new input on a function with a `**`
+  input, or any other change of the name (for example its answer type).
+  Your package may break. Read the notes and change your code;
 - the **second** number goes up when names are only added, a name is
-  marked as old, or a function gets a new input that is given by name and
-  has a default. Your package keeps working.
+  marked as old, or a function only gets new inputs that are given only by
+  name (after the `*` or after a `*args` input) and have a default. A
+  function with no such input before may get the `*` together with the
+  new inputs. Your package keeps working.
 
 When the kit changed, the MEHO release notes
 ([CHANGELOG](https://github.com/evoila/meho/blob/main/CHANGELOG.md)) have

@@ -217,6 +217,9 @@ class DecryptedSession:
     ``tenant_chosen`` is ``False`` while a person with several tenants
     has not picked one yet; ``can_switch_tenant`` tells the sidebar to
     show the tenant switch.
+
+    ``display_name`` is the token's ``name`` claim at login, or
+    ``None`` when the token had none.
     """
 
     id: uuid.UUID
@@ -229,6 +232,7 @@ class DecryptedSession:
     last_seen_at: datetime
     tenant_chosen: bool = True
     can_switch_tenant: bool = False
+    display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +345,21 @@ def _decrypt(ciphertext: bytes) -> str:
     return _get_fernet().decrypt(ciphertext).decode("utf-8")
 
 
+def _clean_display_name(value: str | None) -> str | None:
+    """Return *value* stripped, or ``None`` when nothing is left."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _decrypt_display_name(row: WebSession) -> str | None:
+    """Decrypt the row's ``display_name``, or ``None`` when it has none."""
+    if row.display_name is None:
+        return None
+    return _decrypt(row.display_name)
+
+
 # ---------------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------------
@@ -356,6 +375,7 @@ async def create_session(
     lifetime: timedelta,
     tenant_chosen: bool = True,
     can_switch_tenant: bool = False,
+    display_name: str | None = None,
 ) -> DecryptedSession:
     """Insert a fresh ``web_session`` row and return its decrypted view.
 
@@ -399,6 +419,11 @@ async def create_session(
     can_switch_tenant
         ``True`` when the person has more than one tenant or is a
         platform admin; the sidebar then shows the tenant switch.
+    display_name
+        The verified access token's ``name`` claim, for the
+        console's user menu. Encrypted before insert with the same key
+        as the tokens. ``None`` or blank stores no name; the console
+        then shows a neutral label, never ``operator_sub``.
 
     Returns
     -------
@@ -419,6 +444,7 @@ async def create_session(
 
     now = datetime.now(UTC)
     expires_at = now + lifetime
+    name = _clean_display_name(display_name)
     row = WebSession(
         id=uuid.uuid4(),
         operator_sub=operator_sub,
@@ -431,6 +457,7 @@ async def create_session(
         revoked_at=None,
         tenant_chosen=tenant_chosen,
         can_switch_tenant=can_switch_tenant,
+        display_name=_encrypt(name) if name is not None else None,
     )
     session.add(row)
     await session.flush()
@@ -446,6 +473,7 @@ async def create_session(
         last_seen_at=row.last_seen_at,
         tenant_chosen=row.tenant_chosen,
         can_switch_tenant=row.can_switch_tenant,
+        display_name=name,
     )
 
 
@@ -520,6 +548,7 @@ async def load_session(
         last_seen_at=row.last_seen_at,
         tenant_chosen=row.tenant_chosen,
         can_switch_tenant=row.can_switch_tenant,
+        display_name=_decrypt_display_name(row),
     )
 
 
@@ -576,6 +605,7 @@ async def load_session_for_update(
         last_seen_at=row.last_seen_at,
         tenant_chosen=row.tenant_chosen,
         can_switch_tenant=row.can_switch_tenant,
+        display_name=_decrypt_display_name(row),
     )
 
 
@@ -928,6 +958,7 @@ async def _apply_rotation(
         last_seen_at=row.last_seen_at,
         tenant_chosen=row.tenant_chosen,
         can_switch_tenant=row.can_switch_tenant,
+        display_name=_decrypt_display_name(row),
     )
 
 

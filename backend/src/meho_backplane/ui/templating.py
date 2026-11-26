@@ -189,6 +189,29 @@ def visible_marks(text: str) -> str:
     return "".join(out)
 
 
+def person_initials(name: str | None) -> str | None:
+    """Return the avatar initials for a person's *name*, or ``None``.
+
+    The first letter or digit of the first and the last word, upper-cased
+    ("Ada King Lovelace" -> "AL", "Ada" -> "A"). Words with no letter or
+    digit are skipped. ``None`` when *name* is ``None`` or has no letter
+    or digit at all; the user menu then shows a person icon.
+
+    Only ever called with a display name. The initials are never
+    taken from the Keycloak ``sub``: letters of an identifier are the
+    identifier.
+    """
+    if name is None:
+        return None
+    firsts = [next((ch for ch in word if ch.isalnum()), "") for word in name.split()]
+    firsts = [ch for ch in firsts if ch]
+    if not firsts:
+        return None
+    if len(firsts) == 1:
+        return firsts[0].upper()
+    return (firsts[0] + firsts[-1]).upper()
+
+
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     """Surface the BFF session tenant + live readiness into every template.
 
@@ -201,7 +224,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     auto-selected at session-create time, so by the time any UI route
     renders a page the tenant is already known.
 
-    The context processor exposes two variables to every Jinja render:
+    The context processor exposes these variables to every Jinja render:
 
     * ``session_tenant`` -- a ``dict`` carrying ``id`` / ``slug`` /
       ``name`` / ``can_switch``, or ``None`` when the request hit a surface where the
@@ -210,6 +233,11 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
       definition not signed in there). ``base.html``'s header chip
       conditionally renders the tenant name when this dict is present
       and falls back to a neutral "Sign in" link otherwise.
+    * ``session_display_name`` / ``session_initials`` -- the signed-in
+      person's name from the login token and its avatar initials
+      (:func:`person_initials`), or ``None``. There is no
+      ``sub`` variable: the pages that name the signed-in person show a
+      neutral label when the name is missing, never the identifier.
     * ``ready`` -- the live backplane readiness verdict that colours
       ``base.html``'s sidebar-footer pill (green "ready" vs yellow
       "starting"). Every ``/ui/*`` surface used to hardcode
@@ -255,7 +283,8 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     if session_ctx is None:
         return {
             "session_tenant": None,
-            "session_operator_sub": None,
+            "session_display_name": None,
+            "session_initials": None,
             "ready": ready,
             "policy_menu": False,
             **sandbox,
@@ -271,13 +300,14 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
             # admin.
             "can_switch": session_ctx.can_switch_tenant,
         },
-        # The Keycloak ``sub`` of the signed-in operator, surfaced into the
-        # sidebar account chip (G10.11-T1 #1892) to replace the hardcoded
-        # "OP / Operator" literal. Cheap (a frozen-field read off the
-        # already-bound session context). The chip links to ``/ui/account``,
-        # where the **live** role (a fresh JWT verify) is shown -- the chip
-        # itself does not pay a per-render token verify just to label a role.
-        "session_operator_sub": session_ctx.operator_sub,
+        # The signed-in person's name from the login token, for
+        # the user menu and the other places that name the signed-in
+        # person. ``None`` when the token had no name: the pages then
+        # show a neutral label. The Keycloak ``sub`` is deliberately not
+        # exposed here -- a page that names a person must not fall back
+        # to an identifier.
+        "session_display_name": session_ctx.display_name,
+        "session_initials": person_initials(session_ctx.display_name),
         "ready": ready,
         # The "Policy" menu entry: only with the switch CUSTOM_POLICY on.
         # Read here, for a signed-in page, where the settings are loaded.

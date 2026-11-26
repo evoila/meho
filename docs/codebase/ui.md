@@ -210,10 +210,39 @@ upcoming T4 login flow writes to:
   `created_at`, `expires_at`, `access_token` (bytea, Fernet
   ciphertext), `refresh_token` (bytea, Fernet ciphertext),
   `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted),
-  and since migration `0133` (#5240) `tenant_chosen` and
-  `can_switch_tenant` (see "Current tenant, picker and switch").
+  since migration `0133` (#5240) `tenant_chosen` and
+  `can_switch_tenant` (see "Current tenant, picker and switch"),
+  since migration `0176` (#6282) `approval_token` (bytea, Fernet
+  ciphertext, nullable), and since migration `0191`
+  `display_name` (see "Person's name on the session" below).
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
+- **Person's name on the session** — `display_name` holds
+  the `name` claim of the access token the login callback verified
+  (`Operator.name`), for the console's user menu. What is stored and
+  why:
+  - **Encrypted like the tokens.** Fernet ciphertext under
+    `UI_SESSION_ENCRYPTION_KEY`, the same key and envelope as
+    `access_token`. The name is already inside `access_token` on the
+    same row, so the column shows nothing a leaked row did not: with
+    the key, the token already gave the name; without it, both are
+    ciphertext. A plain-text column would have let a database dump
+    without the key show names, so it is not plain text.
+  - **Only the `name` claim.** No fallback to `preferred_username`
+    or `email`: those are login identifiers, not names. `NULL` when
+    the token had no `name` claim.
+  - **Written at login only.** A token refresh keeps the stored
+    name. A person renamed in Keycloak sees the new name after the
+    next sign-in. Sessions from before migration `0191` have no name
+    until the person signs in again.
+  - **Kept as long as the tokens.** Nothing deletes `web_session`
+    rows today (`revoked_at` is a soft delete; the `expires_at` index
+    is for a future sweep). The name lives and goes with the tokens
+    it came from; that sweep will remove both.
+  - **Never the `sub` in its place.** With no name, pages that name
+    the signed-in person show a neutral label (the user menu: a
+    person icon and "Your account"), never the `sub` or letters
+    taken from it.
 - **ORM model** — [`WebSession` in
   `db/models.py`](../../backend/src/meho_backplane/db/models.py).
   Mirrors the column shape; no helper methods (write-once /
@@ -590,13 +619,19 @@ The id also stays in the attributes that address the DOM —
 pins both halves: the name reaches the rendered text, and
 `data-meho-tenant` still carries the UUID.
 
-The processor also exposes `session_operator_sub` (the signed-in
-operator's Keycloak `sub`, or `None` outside a session). The sidebar
-account chip (`base.html`) used to be the hardcoded literal
-"OP / Operator"; it now renders the real `sub` (a two-char avatar +
-the truncated `sub`) with an Account menu item linking to
-`/ui/account`, and a comment slot for a future tenant selector
-(G10.11-T1 #1892). The chip deliberately does **not** show the role
+The processor also exposes `session_display_name` (the signed-in
+person's name from the login token, see "Person's name on the
+session") and `session_initials` (its avatar initials, from
+`person_initials` in `ui/templating.py`), both `None` when there is no
+name or no session. The sidebar account chip (`base.html`) shows the
+name and its initials, with an Account menu item linking to
+`/ui/account` (G10.11-T1 #1892). It used to show the Keycloak `sub`;
+with no name it now shows a person icon and
+"Your account". The processor deliberately exposes no `sub`: a page
+that names the signed-in person must not fall back to an identifier.
+The dashboard greeting and the "My recent activity" panel follow the
+same rule; the account page shows the name and, in its own row
+labelled "Subject ID", the `sub`. The chip deliberately does **not** show the role
 -- labelling it would cost a fresh JWT verify on every page render;
 the live role is shown on `/ui/account` instead, where the route pays
 that verify once.

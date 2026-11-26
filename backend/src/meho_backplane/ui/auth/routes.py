@@ -628,6 +628,8 @@ async def _persist_session_from_tokens(
             lifetime=lifetime,
             tenant_chosen=operator.tenant_chosen,
             can_switch_tenant=can_switch_tenant(operator),
+            # The console's user menu shows this, never the sub.
+            display_name=operator.name,
         )
     # The push messages decide who may approve from these facts.
     await refresh_at_sign_in(operator)

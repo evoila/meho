@@ -215,6 +215,10 @@ class UISessionContext:
     #: The ``client`` block of the session's last token check
     #: (AUDIT_CLIENT_IDENTITY), or ``None``.
     client: dict[str, Any] | None = None
+    #: The person's name from the login token, or ``None`` when
+    #: the token had none. Pages show it for the signed-in person in
+    #: place of :attr:`operator_sub`.
+    display_name: str | None = None
 
 
 def _select_path(scope: Scope) -> str:
@@ -484,6 +488,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         tenant_chosen=revalidated.tenant_chosen,
         can_switch_tenant=revalidated.can_switch_tenant,
         client=session_client_block(revalidated.id),
+        display_name=revalidated.display_name,
     )
 
 

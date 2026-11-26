@@ -26,11 +26,12 @@ Per setting it says:
   that runs it as a step, at every level
   (:mod:`~meho_backplane.operations.governed_subops`). A policy file
   entry is matched against the operations a call of the scope can use,
-  and against every declared step, also one with no stored row. As
+  and against every declared step with the group the step gate finds
+  for it, also a step with no row a call can use. As
   ``destructive``, a step of a multi-step operation is refused, not held
   for approval;
-* whether the install is in sandbox mode. As ``destructive``, an
-  operation there can be covered for a service login by a delete grant;
+* whether the install is in sandbox mode. There a delete grant of a
+  service login can cover some ``destructive`` operations;
 * that, as ``destructive``, a call needs a matching preview first.
 """
 
@@ -51,7 +52,13 @@ from meho_backplane.db.models import (
     OperationPolicyOverride,
     TenantPolicy,
 )
-from meho_backplane.operations._lookup import parse_connector_id, visible_scope_clause
+from meho_backplane.operations._code_presence import code_missing_connectors
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    installed_owner_clause,
+    parse_connector_id,
+    visible_scope_clause,
+)
 from meho_backplane.operations.governed_subops import registered_governed_subop_surfaces
 from meho_backplane.policy.classification import (
     ClassificationEntry,
@@ -59,7 +66,7 @@ from meho_backplane.policy.classification import (
     Scope,
     entries_from_document,
 )
-from meho_backplane.policy.store import InvalidStoredPolicyError
+from meho_backplane.policy.store import InvalidStoredPolicyError, _stored_group_key
 from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
@@ -77,8 +84,8 @@ _PREVIEW_TEXT: Final[str] = (
     "As `destructive`, a call needs a matching preview first. A call without one is refused."
 )
 _SANDBOX_TEXT: Final[str] = (
-    "As `destructive`, a delete grant can cover the operation for a service login, "
-    "because this install is in sandbox mode."
+    "As `destructive`: this install is in sandbox mode. There a delete grant of a service "
+    "login can cover some `destructive` operations, but not every one."
 )
 _NO_OPERATION_TEXT: Final[str] = (
     "As `destructive`, this entry changes no operation: it matches none."
@@ -150,18 +157,25 @@ def _scope_filter(
 async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> list[OpCoordinates]:
     """The stored operations a setting of *scope* can match, each once.
 
-    A tenant's settings reach the operations a call of the tenant can use
-    (:func:`visible_scope_clause`): when the tenant has its own copy of a
-    connector, only its own rows count. The install's settings reach
-    every operation.
+    A tenant's settings reach the operations a call of the tenant can use,
+    with the checks of dispatch (:func:`~meho_backplane.operations._lookup.lookup_descriptor`):
+    the rows the tenant sees (:func:`visible_scope_clause`, so with its own
+    copy of a connector only its own rows count), turned on for the tenant
+    (:func:`enabled_for_tenant_clause`), of an installed package
+    (:func:`installed_owner_clause`), and of a connector whose code is in
+    this MEHO (:func:`code_missing_connectors`). The install's settings
+    reach every operation.
     """
     group = aliased(OperationGroup)
     stmt = select(
-        EndpointDescriptor.impl_id,
+        EndpointDescriptor.tenant_id,
+        EndpointDescriptor.product,
         EndpointDescriptor.version,
+        EndpointDescriptor.impl_id,
         group.group_key,
         EndpointDescriptor.op_id,
     ).outerjoin(group, EndpointDescriptor.group_id == group.id)
+    missing: set[tuple[UUID | None, str, str, str]] = set()
     if scope == "tenant":
         stmt = stmt.where(
             visible_scope_clause(
@@ -170,22 +184,22 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
                 product=EndpointDescriptor.product,
                 version=EndpointDescriptor.version,
                 impl_id=EndpointDescriptor.impl_id,
-            )
+            ),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+            installed_owner_clause(),
         )
+        missing = await code_missing_connectors(session, operator_tenant_id=tenant_id)
     found = {
         OpCoordinates(f"{impl_id}-{version}", group_key, op_id)
-        for impl_id, version, group_key, op_id in (await session.execute(stmt)).tuples()
+        for row_tenant, product, version, impl_id, group_key, op_id in (
+            await session.execute(stmt)
+        ).tuples()
+        if (row_tenant, product, version, impl_id) not in missing
     }
     return sorted(found, key=lambda c: (c.connector_id, c.op_id, c.group_key or ""))
 
 
-def _step_connector(connector_id: str) -> str:
-    """The connector id the step gate gives a step of a multi-step operation on *connector_id*."""
-    _product, version, impl_id = parse_connector_id(connector_id)
-    return f"{impl_id}-{version}"
-
-
-def _steps_by_op() -> dict[_StepKey, list[str]]:
+def _steps_by_op() -> tuple[dict[_StepKey, list[str]], dict[_StepKey, EndpointDescriptor]]:
     """Map each step to every multi-step operation that runs it, at every level, sorted.
 
     A step is keyed by the connector of the list it is on and its op id.
@@ -193,9 +207,13 @@ def _steps_by_op() -> dict[_StepKey, list[str]]:
     is walked too. Each list is walked once per multi-step operation, so
     a list that loops back ends; a multi-step operation is never named
     as a step of itself.
+
+    The second map holds, per step, the in-memory row the step gate builds
+    for it (never stored), to find its group the same way.
     """
     surfaces = registered_governed_subop_surfaces()
     runs: dict[_StepKey, set[str]] = {}
+    rows: dict[_StepKey, EndpointDescriptor] = {}
     for composite in surfaces:
         seen = {composite}
         pending = [composite]
@@ -203,14 +221,21 @@ def _steps_by_op() -> dict[_StepKey, list[str]]:
             surface = surfaces.get(pending.pop(0))
             if surface is None:
                 continue
-            connector_id = _step_connector(surface.connector_id)
+            product, version, impl_id = parse_connector_id(surface.connector_id)
+            connector_id = f"{impl_id}-{version}"
             for step in surface.sub_op_ids:
                 if step != composite:
                     runs.setdefault((connector_id, step), set()).add(composite)
+                    rows.setdefault(
+                        (connector_id, step),
+                        EndpointDescriptor(
+                            product=product, version=version, impl_id=impl_id, op_id=step
+                        ),
+                    )
                 if step not in seen:
                     seen.add(step)
                     pending.append(step)
-    return {key: sorted(composites) for key, composites in runs.items()}
+    return {key: sorted(composites) for key, composites in runs.items()}, rows
 
 
 def _waiting_entries(
@@ -302,6 +327,7 @@ async def _file_settings(
     scope: Scope,
     tenant_id: UUID,
     steps: Mapping[_StepKey, list[str]],
+    step_rows: Mapping[_StepKey, EndpointDescriptor],
     *,
     sandbox: bool,
 ) -> list[CarryOverSetting]:
@@ -310,11 +336,16 @@ async def _file_settings(
     if not waits:
         return []
     stored = await _operations(session, scope, tenant_id)
-    known = {(c.connector_id, c.op_id) for c in stored}
-    # A declared step with no stored row: the step gate still matches
-    # connector and operation entries to it, only group entries need a row.
-    step_only = [OpCoordinates(c, None, op) for c, op in steps if (c, op) not in known]
-    candidates = sorted([*stored, *step_only], key=lambda c: (c.connector_id, c.op_id))
+    # A declared step, with the group the step gate finds for it: the
+    # tenant's row first, then the built-in row, none without a row.
+    step_tenant = tenant_id if scope == "tenant" else None
+    as_steps = [
+        OpCoordinates(connector_id, await _stored_group_key(session, step_tenant, row), op_id)
+        for (connector_id, op_id), row in sorted(step_rows.items())
+    ]
+    candidates = sorted(
+        {*stored, *as_steps}, key=lambda c: (c.connector_id, c.op_id, c.group_key or "")
+    )
     reached: dict[str, list[CarryOverOperation]] = {e.ref: [] for e in waits}
     listed: dict[str, set[_StepKey]] = {e.ref: set() for e in waits}
     for coords in candidates:
@@ -365,9 +396,9 @@ async def carry_over_dry_run(
     when the stored policy document of *scope* is not valid.
     """
     sandbox = sandbox_mode_active()
-    steps = _steps_by_op()
+    steps, step_rows = _steps_by_op()
     settings = [
         *await _override_settings(session, scope, tenant_id, steps, sandbox=sandbox),
-        *await _file_settings(session, scope, tenant_id, steps, sandbox=sandbox),
+        *await _file_settings(session, scope, tenant_id, steps, step_rows, sandbox=sandbox),
     ]
     return CarryOverDryRun(scope=scope, sandbox_mode=sandbox, settings=settings)

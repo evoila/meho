@@ -48,8 +48,8 @@ CALL_ROUTE = "/api/v1/operations/call"
 AUDIT_OP = "policy.carry_over.dry_run"
 PREVIEW = "As `destructive`, a call needs a matching preview first. A call without one is refused."
 SANDBOX = (
-    "As `destructive`, a delete grant can cover the operation for a service login, "
-    "because this install is in sandbox mode."
+    "As `destructive`: this install is in sandbox mode. There a delete grant of a service "
+    "login can cover some `destructive` operations, but not every one."
 )
 NO_OPERATION = "As `destructive`, this entry changes no operation: it matches none."
 

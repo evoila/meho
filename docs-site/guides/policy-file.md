@@ -498,15 +498,17 @@ For each setting it shows:
   place (for example `tenant:classifications[2]`);
 - the operations it matches. A policy file entry is matched against the
   operations a call of the tenant can use, and against every step of a
-  multi-step operation, also a step with no stored row. A policy file
-  entry makes an operation wait only with `POLICY_CLASSIFICATION` on;
+  multi-step operation, with the group the step check finds for it, also
+  a step with no row a call can use. A policy file entry makes an
+  operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
   the dry run lists its matches with every switch;
 - a warning when an operation is a step of a multi-step operation, with
   every multi-step operation that runs it, at every level. As
   `destructive`, a step is refused, not held for approval, so such a run
   stops at that step;
-- a warning when the install is in sandbox mode. As `destructive`, a
-  delete grant can cover the operation there for a service login;
+- a warning when the install is in sandbox mode. There a delete grant of
+  a service login can cover some `destructive` operations, but not every
+  one;
 - that, as `destructive`, a call needs a matching preview first. A call
   without one is refused.
 

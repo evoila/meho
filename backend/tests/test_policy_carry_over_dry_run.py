@@ -11,8 +11,9 @@ setting as ``destructive`` (a step of a multi-step operation, sandbox
 mode, the preview).
 
 * A policy file entry is matched against the operations a call of the
-  tenant can use, and against every declared step, also one with no
-  stored row.
+  tenant can use (not a turned-off one), and against every declared step
+  with the group the step gate finds for it, also a step with no row a
+  call can use.
 * A step is matched by connector and op id, and names every multi-step
   operation that runs it, at every level.
 * A tenant's answer holds nothing of another tenant.
@@ -29,16 +30,25 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
+from meho_backplane import op_classes
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    ServicePrincipalGrant,
+    TenantOperationSetting,
+)
 from meho_backplane.main import app
 from meho_backplane.policy.carry_over import DRY_RUN_MESSAGE
+from meho_backplane.policy.store import classify_step
 from meho_backplane.sandbox_mode import set_sandbox_mode_active
 from meho_backplane.settings import get_settings
 
@@ -278,6 +288,78 @@ async def test_with_a_tenant_copy_only_its_own_operations_count(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on")
+async def test_a_step_gets_its_group_the_way_the_step_gate_finds_it(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    await tenant_row("cowapi.vm.list", TENANT)
+    add_steps(monkeypatch, "cowapi.composite.rebuild", CONNECTOR, "cowapi.vm.update")
+    await policy(TENANT, [{"match": {"group": "compute"}, "always_wait": True}])
+
+    (entry,) = dry_run(client, _admin_key("step-group")).json()["settings"]
+
+    assert entry["operations"] == [op("cowapi.vm.update", "cowapi.composite.rebuild")]
+    assert entry["warnings"] == [
+        step_text("cowapi.vm.update", "cowapi.composite.rebuild"),
+        PREVIEW,
+    ]
+    step = EndpointDescriptor(
+        product="cowapi", version="1.x", impl_id="cowapi", op_id="cowapi.vm.update"
+    )
+    async with get_sessionmaker()() as session:
+        classified = await classify_step(session, tenant_id=TENANT, step=step)
+    assert classified.always_wait is True
+
+
+async def _turn_off_built_in(op_id: str) -> None:
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(EndpointDescriptor)
+            .where(EndpointDescriptor.tenant_id.is_(None), EndpointDescriptor.op_id == op_id)
+            .values(is_enabled=False)
+        )
+        await session.commit()
+
+
+async def _turn_off_for_tenant(op_id: str) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantOperationSetting(
+                tenant_id=TENANT,
+                product="cowapi",
+                version="1.x",
+                impl_id="cowapi",
+                op_id=op_id,
+                enabled=False,
+                set_by_sub="admin-a",
+                set_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on")
+@pytest.mark.parametrize("turn_off", [_turn_off_built_in, _turn_off_for_tenant])
+async def test_a_turned_off_operation_is_not_listed_as_a_call(
+    client: TestClient, embedding: AsyncMock, turn_off: Any
+) -> None:
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await turn_off("cowapi.vm.list")
+    await policy(TENANT, [{"match": {"op": "cowapi.vm.list"}, "always_wait": True}])
+    key = _admin_key("off")
+
+    (entry,) = dry_run(client, key).json()["settings"]
+    assert entry["operations"] == []
+    assert entry["warnings"] == [NO_OPERATION, PREVIEW]
+
+    answer = call(client, key, "cowapi.vm.list")
+    assert answer["status"] == "error" and answer["error"].startswith("unknown_op"), answer
+
+
+@pytest.mark.asyncio
 async def test_a_tenant_answer_holds_nothing_of_another_tenant(
     client: TestClient, embedding: AsyncMock
 ) -> None:
@@ -392,6 +474,25 @@ async def test_no_warning_says_that_no_grant_covers_an_override(
     (setting,) = dry_run(client, key).json()["settings"]
     assert setting["warnings"] == [SANDBOX, PREVIEW]
     assert not any("no grant" in w.lower() for w in setting["warnings"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sandbox")
+async def test_the_sandbox_warning_promises_no_grant_for_a_credential_operation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(op_classes, "_CREDENTIAL_CAPABLE", {"cowapi.secret.rotate"})
+    assert op_classes.is_credential_capable("cowapi.secret.rotate")
+    await override("cowapi.secret.rotate", TENANT, approval=True)
+
+    (setting,) = dry_run(client, _admin_key("secret")).json()["settings"]
+
+    assert setting["warnings"] == [SANDBOX, PREVIEW]
+    assert SANDBOX == (
+        "As `destructive`: this install is in sandbox mode. There a delete grant of a service "
+        "login can cover some `destructive` operations, but not every one."
+    )
+    assert not any("cowapi.secret.rotate" in w or "the operation" in w for w in setting["warnings"])
 
 
 def test_an_operator_token_is_refused(client: TestClient) -> None:

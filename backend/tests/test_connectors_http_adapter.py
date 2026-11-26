@@ -2276,8 +2276,9 @@ async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) ->
         with capture_logs() as captured, pytest.raises(Exception) as error:
             await client.get("/guestFile")
 
-    assert isinstance(plain_error.value, type(error.value))
+    assert type(error.value) is type(plain_error.value)
     assert str(error.value) == UNREADABLE_LOCATION_MESSAGE
+    assert error.value.__context__ is None
     warning = next(
         e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
     )

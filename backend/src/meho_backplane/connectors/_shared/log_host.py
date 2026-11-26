@@ -51,14 +51,20 @@ def host_for_log(address: str | httpx.URL) -> str:
 
 
 def unreadable_location_error(exc: Exception, request: httpx.Request) -> Exception:
-    """Return an error of the class of ``exc`` with one fixed text.
+    """Return an error of the same class as ``exc``, with one fixed text.
 
-    ``exc`` is one of :data:`UNREADABLE_LOCATION_ERRORS`. The text httpx
-    gives it can quote a part of the ``Location`` address (for example the
-    port text), so the caller raises this error instead.
+    ``exc`` is one of :data:`UNREADABLE_LOCATION_ERRORS`. The caller raises
+    this error, with :data:`UNREADABLE_LOCATION_MESSAGE` as its text, in
+    place of ``exc``. A ``UnicodeEncodeError`` or ``UnicodeDecodeError``
+    also names the codec.
     """
+    cls = type(exc)
     if isinstance(exc, httpx.RemoteProtocolError):
-        return httpx.RemoteProtocolError(UNREADABLE_LOCATION_MESSAGE, request=request)
-    if isinstance(exc, httpx.InvalidURL):
-        return httpx.InvalidURL(UNREADABLE_LOCATION_MESSAGE)
-    return UnicodeError(UNREADABLE_LOCATION_MESSAGE)
+        return cls(UNREADABLE_LOCATION_MESSAGE, request=request)
+    if isinstance(exc, UnicodeEncodeError):
+        return cls(exc.encoding, "", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+    if isinstance(exc, UnicodeDecodeError):
+        return cls(exc.encoding, b"", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+    if isinstance(exc, UnicodeTranslateError):
+        return cls("", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+    return cls(UNREADABLE_LOCATION_MESSAGE)

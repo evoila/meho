@@ -355,6 +355,8 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
       a write on the exact path. MEHO's own rules on who may approve
       still hold: see
       [Who may approve](approvals-and-break-glass.md#who-may-approve).
+      The write also needs the approval hand-off key. See
+      [The approval hand-off key](../install/index.md#the-approval-hand-off-key).
 
     On the command line, use the approval id from step 3:
 

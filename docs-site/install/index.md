@@ -398,6 +398,33 @@ instead of the standard one.
 | **Keycloak** | A [Keycloak](https://www.keycloak.org/) where you have realm admin rights, to make MEHO's realm, clients and groups. See [Your own Keycloak](#your-own-keycloak). |
 | **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. See [Your own Vault or Google Secret Manager](#your-own-vault-or-google-secret-manager). |
 
+### The approval hand-off key
+
+MEHO needs a key for every credential write, for example
+`meho vault kv put`. The key is `APPROVAL_HANDOFF_ENCRYPTION_KEY`. MEHO
+uses it to keep the value safe while the write waits for a person to
+approve it. With no key, MEHO refuses the write at once, for a person
+and for an agent.
+
+- **A built-in part is on (the default install):** the install makes the
+  key in the Secret `<release>-core-approval-handoff`. You have nothing
+  to do.
+- **No built-in part is on:** make the key yourself.
+
+    1. Make a Fernet key:
+
+        ```bash
+        python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+        ```
+
+    2. Store it in a Kubernetes Secret in the namespace of the release.
+       The key name in the Secret is `approval_handoff_encryption_key`.
+    3. Set `approvalHandoff.enabled: true` and
+       `approvalHandoff.secretName: <your Secret>` in your values file.
+       Then install or upgrade.
+
+To check the state, call `GET /ready`. Read `features.approval_custody`.
+
 ### Your own PostgreSQL
 
 Set `corePostgres.enabled: false`. Do both steps below. The built-in

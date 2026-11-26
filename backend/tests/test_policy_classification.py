@@ -875,7 +875,8 @@ async def test_policy_classify_with_the_switch_off(
     assert rows == []
     with pytest.raises(ValueError, match="Classification is off"):
         await policy_classify(_admin(), None, {"match": {"op": "a"}, "category": "network"})
-    assert SWITCH_OFF_REFUSAL.endswith("POLICY_CLASSIFICATION setting.")
+    assert SWITCH_OFF_REFUSAL.endswith("still turns on its own part alone.")
+    assert "with the CUSTOM_POLICY setting." in SWITCH_OFF_REFUSAL
 
 
 @pytest.mark.asyncio

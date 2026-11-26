@@ -79,7 +79,8 @@ POLICY_APPLY_OP_ID: Final[str] = "policy.apply"
 #: What an import says while the switch is off.
 SWITCH_OFF_IMPORT: Final[str] = (
     "The policy file import is off on this MEHO. An admin turns it on with the "
-    "POLICY_CLASSIFICATION setting."
+    "CUSTOM_POLICY setting. Each older switch (POLICY_CLASSIFICATION, "
+    "POLICY_ENGINE_SHADOW, POLICY_APPROVER_ROUTING) still turns on its own part alone."
 )
 
 #: Why an install-wide import did not run.

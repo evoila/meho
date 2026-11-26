@@ -540,9 +540,11 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
 #: is on and the classification is off
 #: (:func:`meho_backplane.policy.routing.category_routing_warnings`).
 CATEGORY_WITHOUT_CLASSIFICATION: Final[str] = (
-    "POLICY_APPROVER_ROUTING is on and POLICY_CLASSIFICATION is off, so no change has "
-    "a category and a routing entry that matches on `category` fits nothing. Turn on "
-    "POLICY_CLASSIFICATION, or match on connector or risk."
+    "CUSTOM_POLICY and POLICY_CLASSIFICATION are off and POLICY_APPROVER_ROUTING is on, "
+    "so no change has a category and a routing entry that matches on `category` fits "
+    "nothing. Turn on CUSTOM_POLICY or POLICY_CLASSIFICATION, or match on connector or "
+    "risk. Each older switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, "
+    "POLICY_APPROVER_ROUTING) still turns on its own part alone."
 )
 
 

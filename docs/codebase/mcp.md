@@ -994,7 +994,7 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
 - **Category and labels, behind a switch (#6041).** While the switch
-  `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
+  `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
   also carry `category` (for example `network`) and `labels` (a map of
   free `key=value` text). They are the operation's classification for
   the caller's tenant, the same values dispatch uses
@@ -1718,8 +1718,8 @@ session (on top of the Role + Extra-gate columns).
 | `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
 | `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
 | `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
-| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
-| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` on, ask for its category or labels. |
 | `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
 | `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
 | `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |
@@ -2137,9 +2137,11 @@ Three switches take text away while they are off:
 | --- | --- | --- |
 | `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
 | `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
-| `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
+| `CUSTOM_POLICY` and `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
 
-With `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
+Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`, `POLICY_APPROVER_ROUTING`) still turns on its own part alone.
+
+With `CUSTOM_POLICY` or `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
 resolved has two more fields (#6045):
 
 * `policy_rule`: the rule the policy evaluator matched for this call,
@@ -2161,7 +2163,8 @@ and check `policy_rule` and `approvers` against `meho policy explain`.
 
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
 `preview_operation` follows two switches, so its listing is the registered
-one only when `TEAM_KNOWLEDGE_RECALL` and `POLICY_ENGINE_SHADOW` are both on.
+one only when `TEAM_KNOWLEDGE_RECALL` is on and `CUSTOM_POLICY` or
+`POLICY_ENGINE_SHADOW` is on.
 
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session

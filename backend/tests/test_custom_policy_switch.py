@@ -5,7 +5,7 @@
 
 * With every switch off, the three parts of the policy are off.
 * With only ``CUSTOM_POLICY`` on, all three are on.
-* With only one old switch on, only that part is on (as before).
+* With only one old switch on, only that part is on.
 * ``GET /ready`` shows ``features.policy.custom_policy``.
 * ``policy.apply``, ``policy.classify`` and ``policy.classify_preview``
   register with only ``CUSTOM_POLICY`` on, and not with every switch off.
@@ -144,7 +144,9 @@ def test_ready_shows_the_parts_on_with_custom_policy(monkeypatch: pytest.MonkeyP
 
 
 def test_category_note_stays_for_routing_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Routing on and classification off: the note and the warning, as before."""
+    """With only ``POLICY_APPROVER_ROUTING`` on, ``/ready`` shows the category note
+    and the import gives one warning.
+    """
     _turn_on(monkeypatch, "POLICY_APPROVER_ROUTING")
     assert build_features_block(get_settings())["policy"]["notes"] == [
         CATEGORY_WITHOUT_CLASSIFICATION

@@ -18,10 +18,12 @@ You keep the policy as one file, `policy: v1`. You can:
 
 !!! note "Off by default"
 
-    The policy file needs the setting `POLICY_CLASSIFICATION` (Helm
-    `config.policy.classification`) or the setting `CUSTOM_POLICY` (Helm
-    `config.policy.customPolicy`). `CUSTOM_POLICY` turns on all three
-    policy parts: the policy file, routing and the policy evaluator. While
+    The policy file needs the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`) or the setting `POLICY_CLASSIFICATION`
+    (Helm `config.policy.classification`). `CUSTOM_POLICY` turns on all
+    three policy parts: the policy file, routing and the policy evaluator.
+    Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`,
+    `POLICY_APPROVER_ROUTING`) still turns on its own part alone. While
     both are off, MEHO refuses an import with one sentence.
 
 The policy file is not part of the [settings file](settings-file.md). It
@@ -101,8 +103,8 @@ classifications:
 ## Who approves: routing
 
 The `routing` section says which login groups may approve a change that
-waits. It needs the setting `POLICY_APPROVER_ROUTING` (Helm
-`config.policy.approverRouting`) or `CUSTOM_POLICY`, both off by default.
+waits. It needs the setting `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING`
+(Helm `config.policy.approverRouting`), both off by default.
 Either setting turns on both parts: the bindings at sign-in (next section) and the routing at the
 click.
 
@@ -220,7 +222,7 @@ the operation one category in the install's file, reject the waiting
 request, and start the call again.
 
 MEHO also does not know the install's category of a waiting change that
-started to wait while `POLICY_CLASSIFICATION` and `CUSTOM_POLICY` were
+started to wait while `CUSTOM_POLICY` and `POLICY_CLASSIFICATION` were
 off, once you turn one of them on. The same rule holds: nobody may approve it if an install entry
 that matches on a category could fit it. Reject it and start the call
 again. While both stay off, an entry that matches on a category
@@ -307,12 +309,12 @@ bindings:
 
 !!! note "Off by default"
 
-    Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
-    `config.policy.approverRouting`) or `CUSTOM_POLICY` is on. You can
+    Bindings count only while the setting `CUSTOM_POLICY` or
+    `POLICY_APPROVER_ROUTING` (Helm `config.policy.approverRouting`) is on. You can
     import a file with `bindings` while both are off: the bindings take
     effect when one of them goes on. The policy commands, and so
-    the import of bindings, also need the setting `POLICY_CLASSIFICATION`
-    (Helm `config.policy.classification`) or `CUSTOM_POLICY`.
+    the import of bindings, also need the setting `CUSTOM_POLICY` or
+    `POLICY_CLASSIFICATION` (Helm `config.policy.classification`).
 
 ## Rules that no file can loosen
 
@@ -393,10 +395,10 @@ meho policy explain --request <request-id>
   call with `--me`. Only a tenant admin or a platform admin may ask for
   other groups.
 - `--file` asks with a policy file that is not imported. The file takes
-  the place of your stored policy. It needs `POLICY_CLASSIFICATION` or `CUSTOM_POLICY`.
+  the place of your stored policy. It needs `CUSTOM_POLICY` or `POLICY_CLASSIFICATION`.
 - `--request` shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while `POLICY_APPROVER_ROUTING` or `CUSTOM_POLICY` is on. With routing
+  while `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING` is on. With routing
   on, the install's routing as it is now narrows them, as at the approve
   click. With both off, explain
   shows today's groups, the same groups the approve check uses.
@@ -436,7 +438,7 @@ Good to know:
 - Who may approve is a list of **MEHO group kinds** (`MEHO-Operators`,
   `MEHO-Admins`, ...). These are not the names of the login groups of
   your install. Each login group is bound to one of these kinds.
-- explain works with `POLICY_ENGINE_SHADOW` and `CUSTOM_POLICY` off. It
+- explain works with `CUSTOM_POLICY` and `POLICY_ENGINE_SHADOW` off. It
   then shows today's
   answer only.
 - Only a tenant admin or a platform admin sees the entries of the policy
@@ -465,9 +467,8 @@ Not checked: idempotency_key, connector_resolution
 
 !!! note "The policy evaluator is off by default"
 
-    The lines about the policy evaluator need the setting
-    `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`) or
-    `CUSTOM_POLICY`. With either on, the evaluator works out its own answer next to today's checks, and
+    The lines about the policy evaluator need the setting `CUSTOM_POLICY`
+    or `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With either on, the evaluator works out its own answer next to today's checks, and
     explain lists every rule it matched, in order. Only the `always_wait`
     step carries a place in the policy file (for example
     `file:classifications[1]`). The other classification entries that

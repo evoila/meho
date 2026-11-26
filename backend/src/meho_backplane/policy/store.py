@@ -84,7 +84,8 @@ class InvalidStoredPolicyError(ValueError):
 #: What every surface says while the switch is off.
 SWITCH_OFF_REFUSAL: Final[str] = (
     "Classification is off on this MEHO. An admin turns it on with the "
-    "POLICY_CLASSIFICATION setting."
+    "CUSTOM_POLICY setting. Each older switch (POLICY_CLASSIFICATION, "
+    "POLICY_ENGINE_SHADOW, POLICY_APPROVER_ROUTING) still turns on its own part alone."
 )
 
 

@@ -759,7 +759,7 @@ class PreviewOperationResponse(BaseModel):
     policy_rule: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Only with POLICY_ENGINE_SHADOW or CUSTOM_POLICY on: the rule the policy "
+            "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy "
             "evaluator matched "
             "({source, rule_id, text, decided}). decided is false: today's checks "
             "decide. Null when the evaluator failed."
@@ -768,7 +768,7 @@ class PreviewOperationResponse(BaseModel):
     approvers: list[str] | None = Field(
         default=None,
         description=(
-            "Only with POLICY_ENGINE_SHADOW or CUSTOM_POLICY on: the login groups that "
+            "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that "
             "may approve "
             "the call when policy_verdict is needs-approval; empty otherwise."
         ),

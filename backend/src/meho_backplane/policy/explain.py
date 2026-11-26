@@ -119,8 +119,10 @@ __all__ = [
 
 #: The answer to ``file`` while the ``POLICY_CLASSIFICATION`` switch is off.
 FILE_NEEDS_CLASSIFICATION: Final[str] = (
-    "A policy file counts only while the POLICY_CLASSIFICATION switch is on. "
-    "It is off, so the file would change no answer."
+    "A policy file counts only while CUSTOM_POLICY or POLICY_CLASSIFICATION is on. "
+    "Both are off, so the file would change no answer. Each older switch "
+    "(POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, POLICY_APPROVER_ROUTING) still "
+    "turns on its own part alone."
 )
 
 #: The label of the entries of a file that is not imported.

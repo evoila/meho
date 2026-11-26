@@ -443,8 +443,15 @@ async def _apply_one(
     summaries = apply_summaries_var.get()
     if dry_run and summaries is not None:
         # Only the card of a person turns this on (ops_write_apply_summary).
-        summaries.append(
-            await summarize_applied_object(dyn, resource, doc, applied, field_manager=FIELD_MANAGER)
+        summaries.entries.append(
+            await summarize_applied_object(
+                dyn,
+                resource,
+                doc,
+                applied,
+                field_manager=FIELD_MANAGER,
+                read_live=summaries.read_live,
+            )
         )
     return {
         "api_version": api_version,

@@ -70,8 +70,12 @@ the start of what it runs, and its `cut` field says so.
 The card of a `k8s.apply` also has, for a person only, a short summary
 of each object (`object_summary`, built by `ops_write_apply_summary.py`):
 whether it is new or exists already, which other writers own fields of it,
-and its risky fields after the apply. It is information only; the apply
-waits for approval exactly as before. See `approvals.md`.
+and its risky fields after the apply, read only from the places that
+Kubernetes defines. MEHO reads the live object only when the login that
+asked has the role Operator or higher; for any other login the card says
+"not read". It changes no approval rule. When the dry run fails, the card
+still shows the manifest and the subject line, and names the document the
+dry run stopped at. See `approvals.md`.
 The stored request of a `k8s.apply` of a Secret, or of a manifest with a
 secret-looking value, keeps its manifest only in the encrypted one-time
 handoff of the run, as a credential write does. Such a call needs

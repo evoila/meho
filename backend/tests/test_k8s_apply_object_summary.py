@@ -6,6 +6,8 @@
 For each object of the manifest the card says whether it is new or exists
 already, who else owns fields of it, and which risky fields it holds after
 the apply. The summary is for a person only and changes no approval rule.
+The card never shows a Secret's value, and a failed dry run keeps the
+manifest and the subject line.
 
 The dry run and the read of the live object are stubbed with raw answers
 in the shape of the API server.
@@ -13,7 +15,9 @@ in the shape of the API server.
 
 from __future__ import annotations
 
+import base64
 import json
+import secrets
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +40,11 @@ from meho_backplane.operations._preview import (
 _SECRET_VALUE = "not-a-real" + "-value-s1"
 _ENV_VALUE = "not-a-real" + "-value-s2"
 _LIVE_VALUE = "not-a-real" + "-value-s3"
+
+
+def _made_up_name() -> str:
+    """A value made up at run time, in the shape of a Kubernetes name."""
+    return "ab" + secrets.token_hex(10) + "z"
 
 
 @dataclass
@@ -61,14 +70,14 @@ class _Response:
         return self._text
 
 
-def _operator() -> Operator:
+def _operator(role: TenantRole = TenantRole.OPERATOR) -> Operator:
     return Operator(
         sub="op-summary-test",
         name="Summary Test Operator",
         email=None,
         raw_jwt="op.summary.test.jwt",
         tenant_id=uuid.UUID("00000000-0000-0000-0000-00000000a0b1"),
-        tenant_role=TenantRole.OPERATOR,
+        tenant_role=role,
     )
 
 
@@ -91,10 +100,18 @@ async def _card(
     live: Callable[[str], _Response] | None = None,
     namespaced: bool = True,
     agent: bool = False,
+    role: TenantRole = TenantRole.OPERATOR,
 ) -> tuple[dict[str, Any], MagicMock]:
     """Run the real ``k8s.apply`` card builder against a stubbed cluster."""
     dyn = MagicMock()
-    dyn.resources.get = AsyncMock(return_value=_resource(namespaced=namespaced))
+
+    async def _discover(**kwargs: Any) -> Any:
+        if kwargs["kind"] == "List":
+            # The real client library has no resource for a List.
+            raise AttributeError("'NoneType' object has no attribute 'namespaced'")
+        return _resource(namespaced=namespaced)
+
+    dyn.resources.get = AsyncMock(side_effect=_discover)
 
     async def _apply(_resource: Any, **kwargs: Any) -> _Response:
         doc = kwargs["body"]
@@ -117,7 +134,7 @@ async def _card(
     ctx = PreviewContext(
         descriptor=_Descriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
         connector_instance=connector,
-        operator=_operator(),
+        operator=_operator(role),
         target=_Target(),
         params={"manifest": manifest, "dry_run": "none"},
         connector_id="kubernetes-1.x",
@@ -226,7 +243,7 @@ async def test_an_image_only_apply_names_what_the_workload_already_has(
     assert "runs as service account web-runner" in risks
     assert "hostNetwork is on" in risks
     assert "hostPath volume /var/run" in risks
-    assert "a container is privileged" in risks
+    assert "a container asks for full access to its host" in risks
     # The sent manifest holds none of these.
     assert "web-creds" not in _IMAGE_ONLY
     # One read of the live object, and no write other than the dry run.
@@ -253,6 +270,11 @@ kind: Deployment
 metadata: {name: look-alike, namespace: prod}
 spec: {}
 ---
+apiVersion: apps/v1
+kind: Widget
+metadata: {name: odd-kind, namespace: prod}
+spec: {}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: admins}
@@ -267,10 +289,17 @@ async def test_a_kind_is_read_together_with_its_group_and_a_cluster_kind_is_mark
 ) -> None:
     effect, _ = await _card(monkeypatch, _CUSTOM)
 
-    custom, binding = effect["preview"]["object_summary"]
+    custom, odd_kind, binding = effect["preview"]["object_summary"]
+    # A known kind in a group that is not a Kubernetes group.
     assert (custom["api_group"], custom["kind"], custom["built_in"]) == (
         "example.test",
         "Deployment",
+        False,
+    )
+    # A kind that is not a Kubernetes kind, in a Kubernetes group.
+    assert (odd_kind["api_group"], odd_kind["kind"], odd_kind["built_in"]) == (
+        "apps",
+        "Widget",
         False,
     )
     assert binding["built_in"] is True
@@ -405,8 +434,13 @@ async def test_a_failed_dry_run_says_the_summary_could_not_be_made(
     )
 
     assert effect["preview_unavailable"] is True
-    (entry,) = effect["object_summary"]
-    assert "could not be made" in entry["summary_unavailable"]
+    # The card says the summary could not be made from this mark; the
+    # stored request has no summary of its own.
+    assert "object_summary" not in effect
+    assert effect["subject"] == "Deployment/prod/web"
+    assert effect["manifest"][0]["kind"] == "Deployment"
+    # One document: no sentence about where the dry run stopped.
+    assert "dry_run_stop" not in effect
 
 
 @pytest.mark.asyncio
@@ -428,7 +462,8 @@ async def test_the_stored_request_an_agent_reads_has_no_summary(
         monkeypatch, _NEW_PAIR, dry_run=lambda _doc: _Response(403, {"message": "denied"})
     )
     assert "object_summary" in ok["preview"]
-    assert "object_summary" in failed
+    assert "object_summary" not in failed
+    assert failed["subject"] == "Deployment/prod/web, Service/prod/web"
 
     for effect in (ok, failed):
         shown = proposed_effect_for_agent(
@@ -454,8 +489,195 @@ async def test_a_second_document_that_fails_leaves_no_partial_summary(
     effect, _ = await _card(monkeypatch, _NEW_PAIR, dry_run=_dry_run)
 
     assert effect["preview_unavailable"] is True
-    assert [e.get("kind") for e in effect["object_summary"]] == [None]
+    assert "object_summary" not in json.dumps(effect)
+    assert effect["dry_run_stop"] == ("The dry run stopped at document 2 of 2 (Service/prod/web).")
+    assert [doc["kind"] for doc in effect["manifest"]] == ["Deployment", "Service"]
 
 
 def test_the_manifest_still_parses_as_the_tests_assume() -> None:
     assert len([doc for doc in yaml.safe_load_all(_NEW_PAIR) if doc]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_first_document_that_fails_says_the_later_ones_had_no_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect, dyn = await _card(
+        monkeypatch, _NEW_PAIR, dry_run=lambda _doc: _Response(404, {"message": "not found"})
+    )
+
+    assert effect["dry_run_stop"] == (
+        "The dry run stopped at document 1 of 2 (Deployment/prod/web)."
+        " The documents after it had no dry run."
+    )
+    assert dyn.server_side_apply.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_manifest_keeps_the_mark_and_no_other_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect, _ = await _card(monkeypatch, "a: [b")
+
+    assert effect["preview_unavailable"] is True
+    for key in ("manifest", "subject", "dry_run_stop", "run_commands", "object_summary"):
+        assert key not in effect
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_login_gets_a_card_with_no_live_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effect, dyn = await _card(
+        monkeypatch,
+        _IMAGE_ONLY,
+        dry_run=_after_state,
+        live=_live_deployment,
+        role=TenantRole.READ_ONLY,
+    )
+
+    dyn.get.assert_not_awaited()
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["state"] == "not_read"
+    assert entry["state_note"] == (
+        "The live object was not read: the login that asked has a role below Operator."
+    )
+    assert entry["other_writers"] is None
+    # The risky fields still come from the dry run.
+    assert "uses Secret web-creds" in entry["risky_fields"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])
+async def test_an_operator_or_admin_login_gets_the_live_read(
+    monkeypatch: pytest.MonkeyPatch, role: TenantRole
+) -> None:
+    effect, dyn = await _card(monkeypatch, _IMAGE_ONLY, live=_live_deployment, role=role)
+
+    assert dyn.get.await_count == 1
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["state"] == "exists"
+
+
+def _secret_template(values: list[str]) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "inner"},
+        "stringData": {
+            "secretName": values[0],
+            "serviceAccountName": values[1],
+            "other": values[2],
+        },
+    }
+
+
+def _no_value_on_the_card(effect: dict[str, Any], values: list[str]) -> None:
+    text = json.dumps(effect)
+    for value in values:
+        assert value not in text
+
+
+@pytest.mark.asyncio
+async def test_a_custom_kind_that_holds_a_secret_template_shows_no_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = [_made_up_name() for _ in range(3)]
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "example.test/v1",
+            "kind": "Widget",
+            "metadata": {"name": "w1", "namespace": "prod"},
+            "spec": {"template": _secret_template(values)},
+        }
+    )
+    effect, _ = await _card(monkeypatch, manifest)
+
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["risky_fields"] == []
+    _no_value_on_the_card(effect, values)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_template_one_level_deeper_shows_no_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = [_made_up_name() for _ in range(3)]
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "example.test/v1",
+            "kind": "Widget",
+            "metadata": {"name": "w1", "namespace": "prod"},
+            "spec": {"templates": [{"name": "t1", "template": _secret_template(values)}]},
+        }
+    )
+    effect, _ = await _card(monkeypatch, manifest)
+
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["risky_fields"] == []
+    _no_value_on_the_card(effect, values)
+
+
+@pytest.mark.asyncio
+async def test_a_list_that_holds_a_secret_shows_no_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    value = _made_up_name()
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "List",
+            "metadata": {"name": "bundle"},
+            "items": [
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": "inner", "namespace": "prod"},
+                    "stringData": {"secretName": value},
+                }
+            ],
+        }
+    )
+    effect, _ = await _card(monkeypatch, manifest)
+
+    assert effect["preview_unavailable"] is True
+    assert "object_summary" not in effect
+    _no_value_on_the_card(effect, [value])
+
+
+@pytest.mark.asyncio
+async def test_a_secret_object_is_named_and_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = [_made_up_name(), "/x/" + _made_up_name()]
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "creds", "namespace": "prod"},
+            "stringData": {"secretName": values[0], "hostPath": values[1]},
+        }
+    )
+    effect, _ = await _card(monkeypatch, manifest)
+
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["risky_fields"] == ["a Secret object (its values are not shown)"]
+    _no_value_on_the_card(effect, values)
+
+
+@pytest.mark.asyncio
+async def test_the_summary_passes_the_shared_redaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token-shaped part of a host path is hidden by the same step as the manifest."""
+    token = ".".join(
+        base64.urlsafe_b64encode(json.dumps(part).encode()).decode().rstrip("=")
+        for part in ({"alg": "none"}, {"sub": secrets.token_hex(4)})
+    ) + ("." + secrets.token_hex(8))
+
+    def _dry_run(doc: dict[str, Any]) -> _Response:
+        after = _body(doc)
+        after["spec"]["template"]["spec"]["volumes"] = [
+            {"name": "host", "hostPath": {"path": f"/x/{token}"}}
+        ]
+        return _Response(200, after)
+
+    effect, _ = await _card(monkeypatch, _IMAGE_ONLY, dry_run=_dry_run)
+
+    (entry,) = effect["preview"]["object_summary"]
+    assert entry["risky_fields"] == ["hostPath volume /x/[REDACTED:jwt]"]
+    assert token not in json.dumps(effect)

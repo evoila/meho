@@ -741,17 +741,41 @@
         </div>
       {% endif %}
 
+      {#- What a ``k8s.apply`` whose dry run failed still sends: the subject
+          line, the document the dry run stopped at, and the manifest with
+          secret values hidden as on a preview that worked. -#}
+      {% if effect.get("preview_unavailable") and (effect.get("manifest") or effect.get("subject")) %}
+        <div class="mt-3 rounded-box border border-base-300 p-3" aria-label="What the apply sends" data-testid="approval-failed-apply-manifest">
+          <h4 class="text-sm font-semibold">What the apply sends</h4>
+          {% if effect.get("subject") %}
+            <p class="mt-1 text-xs">Objects: <span class="font-mono [overflow-wrap:anywhere]">{{ effect.get("subject") }}</span></p>
+          {% endif %}
+          {% if effect.get("dry_run_stop") %}
+            <p class="mt-1 text-xs" data-testid="approval-dry-run-stop">{{ effect.get("dry_run_stop") }}</p>
+          {% endif %}
+          {% if effect.get("manifest") %}
+            <pre class="mt-1 whitespace-pre-wrap font-mono text-xs [overflow-wrap:anywhere]">{{ effect.get("manifest") | tojson(indent=2) }}</pre>
+          {% endif %}
+        </div>
+      {% endif %}
+
       {#- One short summary for each object of a ``k8s.apply``: new or
           existing, who else owns its fields, and its risky fields. Only a
-          person reads it; it is information and changes no rule. A preview
-          that worked holds the list in its own fields, a failed one holds it
-          at the top. -#}
+          person reads it; it is information and changes no rule. A failed
+          dry run has no summary: the card says so from the
+          ``preview_unavailable`` mark. -#}
       {% set preview_fields = effect.get("preview") %}
-      {% set object_summary = effect.get("object_summary") or (preview_fields.get("object_summary") if preview_fields is mapping else none) %}
-      {% if object_summary is sequence and object_summary is not string and object_summary | length %}
+      {% set object_summary = preview_fields.get("object_summary") if preview_fields is mapping else none %}
+      {% if request.op_id == "k8s.apply" and effect.get("preview_unavailable") %}
+        <div class="mt-3 rounded-box border border-base-300 p-3" aria-label="What each object is" data-testid="approval-object-summary">
+          <h4 class="text-sm font-semibold">What each object is</h4>
+          <p class="mt-1 text-xs text-muted">The summary of the objects could not be made, because the dry run failed.</p>
+        </div>
+      {% elif object_summary is sequence and object_summary is not string and object_summary | length %}
         <div class="mt-3 rounded-box border border-base-300 p-3" aria-label="What each object is" data-testid="approval-object-summary">
           <h4 class="text-sm font-semibold">What each object is</h4>
           <p class="text-xs text-muted">For your information. It does not change who must approve.</p>
+          <p class="text-xs text-muted" data-testid="approval-object-summary-time">This is what the cluster held when the request was made. The run does not check it again.</p>
           <ul class="mt-1 space-y-2 text-xs">
             {% for item in object_summary if item is mapping %}
               <li data-testid="approval-object-summary-item">
@@ -761,6 +785,8 @@
                     {{ badge("new", variant="info") }}
                   {% elif item.get("state") == "exists" %}
                     {{ badge("exists already", variant="warning") }}
+                  {% elif item.get("state") == "not_read" %}
+                    {{ badge("not read", variant="quiet") }}
                   {% else %}
                     {{ badge("not known if it exists", variant="warning") }}
                   {% endif %}

@@ -96,12 +96,14 @@ from meho_backplane.settings import parse_bool_env
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import ApplySummaries
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
     "BLAST_RADIUS_KEY",
     "INTERNAL_EFFECT_KEYS",
     "PERSON_ONLY_EFFECT_KEYS",
+    "PREVIEW_FAILURE_ECHO_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "SWITCHED_EFFECT_KEYS",
@@ -497,7 +499,7 @@ _AGENT_PREVIEW_FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = 
 
 #: ``op_id`` -> a function that gives the keys a failed preview of the op
 #: still shows a person (:func:`register_preview_failure_keys`).
-_PREVIEW_FAILURE_KEYS: dict[str, Callable[[PreviewContext], dict[str, Any]]] = {}
+_PREVIEW_FAILURE_KEYS: dict[str, Callable[[PreviewContext, Exception], dict[str, Any]]] = {}
 
 #: The keys a builder's result puts on a stored ``proposed_effect``.
 _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
@@ -551,16 +553,16 @@ def register_person_only_preview_keys(
 
 
 def register_preview_failure_keys(
-    op_id: str, build: Callable[[PreviewContext], dict[str, Any]]
+    op_id: str, build: Callable[[PreviewContext, Exception], dict[str, Any]]
 ) -> None:
-    """Add the keys *build* gives to the failed preview of *op_id*, for a person only.
+    """Add the keys *build* gives to the failed preview of *op_id*.
 
     When the builder of *op_id* raises, the stored request holds the
-    ``preview_unavailable`` marker. *build* adds what the card can still show
-    from the params alone. MEHO keeps only the keys of
-    :data:`PERSON_ONLY_EFFECT_KEYS`, so a caller that is not a person never
-    reads them. The agent's own preview gets none, and a *build* that raises
-    adds nothing.
+    ``preview_unavailable`` marker. *build* gets the context and the error,
+    and adds what the card can still show from the params alone. MEHO keeps
+    only the keys of :data:`PERSON_ONLY_EFFECT_KEYS`, which a caller that is
+    not a person never reads, and of :data:`PREVIEW_FAILURE_ECHO_KEYS`. The
+    agent's own preview gets none, and a *build* that raises adds nothing.
     """
     _PREVIEW_FAILURE_KEYS[op_id] = build
 
@@ -580,10 +582,15 @@ def register_agent_preview_filter(
 #: Top-level keys of a stored ``proposed_effect`` that only a person reads:
 #: the line of the approval card that says why a credential call waits, and
 #: what each container of a ``k8s.apply`` runs when its dry run failed
-#: (:func:`register_preview_failure_keys`), and the line that says its
-#: object summary could not be made.
-PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
-    {"credential_wait", "run_commands", "object_summary"}
+#: (:func:`register_preview_failure_keys`).
+PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
+
+#: Top-level keys that a failed preview still holds for every reader of the
+#: stored request, with the values hidden as on a preview that worked: the
+#: ``k8s.apply`` manifest, its subject line, and the document its dry run
+#: stopped at (:func:`register_preview_failure_keys`).
+PREVIEW_FAILURE_ECHO_KEYS: Final[frozenset[str]] = frozenset(
+    {"manifest", "subject", "dry_run_stop"}
 )
 
 #: Top-level keys of a stored ``proposed_effect`` that a caller reads only
@@ -856,7 +863,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
         # safety-relevant action. Never let a dry-run fault block it.
         marker = _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
         if not ctx.agent_preview:
-            marker.update(_preview_failure_keys(ctx, op_id=op_id, marker=marker))
+            marker.update(_preview_failure_keys(ctx, exc, op_id=op_id, marker=marker))
         return marker
 
     if preview is None:
@@ -897,18 +904,19 @@ def _preview_unavailable_marker(
 
 
 def _preview_failure_keys(
-    ctx: PreviewContext, *, op_id: str, marker: dict[str, Any]
+    ctx: PreviewContext, error: Exception, *, op_id: str, marker: dict[str, Any]
 ) -> dict[str, Any]:
-    """The person-only keys a failed preview of *op_id* still shows.
+    """The keys a failed preview of *op_id* still shows.
 
-    Only keys of :data:`PERSON_ONLY_EFFECT_KEYS` that the marker does not
-    hold yet. Empty when *op_id* registered none or its function raised.
+    Only keys of :data:`PERSON_ONLY_EFFECT_KEYS` and
+    :data:`PREVIEW_FAILURE_ECHO_KEYS` that the marker does not hold yet.
+    Empty when *op_id* registered none or its function raised.
     """
     build = _PREVIEW_FAILURE_KEYS.get(op_id)
     if build is None:
         return {}
     try:
-        keys = build(ctx)
+        keys = build(ctx, error)
     except Exception as exc:
         _log.warning(
             "proposed_effect_failure_keys_failed",
@@ -919,7 +927,7 @@ def _preview_failure_keys(
     return {
         key: value
         for key, value in keys.items()
-        if key in PERSON_ONLY_EFFECT_KEYS and key not in marker
+        if key in PERSON_ONLY_EFFECT_KEYS | PREVIEW_FAILURE_ECHO_KEYS and key not in marker
     }
 
 
@@ -1086,14 +1094,19 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     stores the ``preview_unavailable`` marker with the server's message in
     ``preview_error``, so the reviewer sees that the apply will be
     rejected instead of a clean-looking preview with no
-    ``resourceVersion`` and no ``uid`` (#3876). For a person, that marker
-    still names what each container runs (:func:`_k8s_apply_failure_keys`).
+    ``resourceVersion`` and no ``uid`` (#3876). That marker still holds the
+    manifest, the subject line and the document the dry run stopped at,
+    and for a person what each container runs (:func:`_k8s_apply_failure_keys`).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
 
+    from meho_backplane.auth.operator import TenantRole
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
-    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import apply_summaries_var
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+        ApplySummaries,
+        apply_summaries_var,
+    )
     from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_apply
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
@@ -1103,9 +1116,16 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     # the preview must never persist, even if the parked call itself was
     # a real apply (dry_run="none").
     preview_params = {**ctx.params, "dry_run": "server"}
-    # Only the card of a person gets the object summary (one extra read of
-    # each live object). The preview an agent reads has none.
-    summaries: list[dict[str, Any]] | None = None if ctx.agent_preview else []
+    # Only the card of a person gets the object summary. The live object is
+    # read only for a login whose role may run an apply; the preview an
+    # agent reads has no summary and makes no extra read.
+    summaries = (
+        None
+        if ctx.agent_preview
+        else ApplySummaries(
+            read_live=ctx.operator.tenant_role in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN)
+        )
+    )
     token = apply_summaries_var.set(summaries)
     try:
         result = await k8s_apply(
@@ -1114,15 +1134,24 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             ctx.operator,
             preview_params,
         )
+    except Exception as exc:
+        if summaries is not None:
+            setattr(exc, _APPLY_DOCUMENTS_DONE, len(summaries.entries))
+        raise
     finally:
         apply_summaries_var.reset(token)
     return {**result, **_k8s_apply_manifest_echo(ctx, result, summaries)}
 
 
+#: The attribute of a failed ``k8s.apply`` dry run's error that counts the
+#: documents whose dry run worked (set only for a person's card).
+_APPLY_DOCUMENTS_DONE = "k8s_apply_documents_done"
+
+
 def _k8s_apply_manifest_echo(
     ctx: PreviewContext,
     result: dict[str, Any],
-    summaries: list[dict[str, Any]] | None = None,
+    summaries: ApplySummaries | None = None,
 ) -> dict[str, Any]:
     """The ``subject`` and ``manifest`` keys the k8s.apply preview adds (#3877).
 
@@ -1141,10 +1170,7 @@ def _k8s_apply_manifest_echo(
     keys: an agent's own preview has none, and the stored request an agent
     reads leaves them out.
     """
-    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
-        OBJECT_SUMMARY_KEY,
-        SUMMARY_FAILED_TEXT,
-    )
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
         apply_manifest_echo,
@@ -1158,10 +1184,8 @@ def _k8s_apply_manifest_echo(
         run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
         if run_commands:
             echo[RUN_COMMANDS_KEY] = run_commands
-    if summaries is not None:
-        echo[OBJECT_SUMMARY_KEY] = _redact(summaries) or [
-            {"summary_unavailable": SUMMARY_FAILED_TEXT}
-        ]
+    if summaries is not None and summaries.entries:
+        echo[OBJECT_SUMMARY_KEY] = _redact(summaries.entries)
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject
@@ -1186,30 +1210,68 @@ def _k8s_apply_redactor(
     return _redact
 
 
-def _k8s_apply_failure_keys(ctx: PreviewContext) -> dict[str, Any]:
-    """``run_commands`` and ``object_summary`` for the card of a ``k8s.apply`` whose dry run failed.
+def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, Any]:
+    """What the card of a ``k8s.apply`` whose dry run failed still shows.
 
-    MEHO builds it from the manifest text, the same as on a preview that
-    worked (``ops_write_preview.apply_run_commands``). The card still says
-    that the preview is not available.
+    MEHO builds each key from the manifest text, with the same hiding as on
+    a preview that worked: ``manifest`` and ``subject``
+    (``ops_write_preview``), ``dry_run_stop`` for a manifest of more than
+    one document, and ``run_commands`` (for a person only). A key that
+    cannot be built is left out; the others stay. The card still says that
+    the preview is not available.
     """
-    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
-        OBJECT_SUMMARY_KEY,
-        SUMMARY_FAILED_TEXT,
-    )
+    from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
+        apply_manifest_echo,
         apply_run_commands,
+        apply_subject,
     )
 
-    keys: dict[str, Any] = {OBJECT_SUMMARY_KEY: [{"summary_unavailable": SUMMARY_FAILED_TEXT}]}
     manifest = ctx.params.get("manifest")
     if not isinstance(manifest, str):
-        return keys
-    run_commands = apply_run_commands(manifest, redact=_k8s_apply_redactor(ctx))
-    if run_commands:
-        keys[RUN_COMMANDS_KEY] = run_commands
+        return {}
+    redactor = _k8s_apply_redactor(ctx)
+    builders: dict[str, Callable[[], Any]] = {
+        "manifest": lambda: apply_manifest_echo(manifest, redact=redactor),
+        "subject": lambda: apply_subject([_identity(doc) for doc in _parse_manifest(manifest)]),
+        "dry_run_stop": lambda: _dry_run_stop(_parse_manifest(manifest), error),
+        RUN_COMMANDS_KEY: lambda: apply_run_commands(manifest, redact=redactor),
+    }
+    keys: dict[str, Any] = {}
+    for key, build in builders.items():
+        try:
+            value = build()
+        except Exception as exc:
+            _log.warning("k8s_apply_failure_key_failed", key=key, error=type(exc).__name__)
+            continue
+        if value:
+            keys[key] = value
     return keys
+
+
+def _identity(doc: dict[str, Any]) -> dict[str, Any]:
+    """``kind``, ``namespace`` and ``name`` of a manifest document."""
+    metadata = doc.get("metadata") or {}
+    return {
+        "kind": doc.get("kind"),
+        "namespace": metadata.get("namespace"),
+        "name": metadata.get("name"),
+    }
+
+
+def _dry_run_stop(docs: list[dict[str, Any]], error: Exception) -> str | None:
+    """Which document of a manifest of more than one document the dry run stopped at."""
+    done = getattr(error, _APPLY_DOCUMENTS_DONE, None)
+    if len(docs) < 2 or not isinstance(done, int) or not 0 <= done < len(docs):
+        return None
+    from meho_backplane.connectors.kubernetes.ops_write_preview import apply_subject
+
+    label = apply_subject([_identity(docs[done])])
+    sentence = f"The dry run stopped at document {done + 1} of {len(docs)} ({label})."
+    if done + 1 < len(docs):
+        sentence += " The documents after it had no dry run."
+    return sentence
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

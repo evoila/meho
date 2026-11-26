@@ -3688,33 +3688,74 @@ the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 For a person the `k8s.apply` preview also has `object_summary`: one short
 entry per object of the manifest, built by
 `connectors/kubernetes/ops_write_apply_summary.py`. It is information
-only. It changes no rule: every apply waits as before. Each entry has the
-API group (`core` for the old `v1` kinds), the kind, the namespace and the
-name, and:
+only. It changes no approval rule. Each entry has the API group (`core`
+for the old `v1` kinds), the kind, the namespace and the name, and:
 
 - `state`: `new` or `exists`, from one read of the live object. A read that
-  fails gives `unknown` and a `state_note`, never `new`.
+  the cluster refuses or that fails gives `unknown` and a `state_note`; the
+  card says "not known if it exists", never "new". MEHO reads the live
+  object only when the login that asked has the role Operator or higher.
+  For any other login there is no read: `state` is `not_read`, the card
+  shows the badge "not read" and the line "The live object was not read:
+  the login that asked has a role below Operator."
 - `other_writers`: the managers in the live object's `managedFields`,
-  without `meho`. `null` when the live object was not read.
+  without `meho`. `null` when the live object was not read or could not be
+  read.
 - `risky_fields`: found in the object as the dry run returns it, so they
-  include what the workload already has and the manifest does not send: a
-  Secret object or a reference to one, a service account, a role or role
-  binding, host access (`hostPath`, `hostNetwork`, `hostPID`, `hostIPC`,
-  `hostPort`, a privileged container), and a Service of type `NodePort` or
-  `LoadBalancer` or with external IPs. `null` when the dry run returned no
-  object.
-- `built_in`: `false` when the API group is not one of the Kubernetes
-  groups. The group is always read together with the kind. `cluster_wide`:
-  `true` for a kind that is not in a namespace.
+  include what the workload already has and the manifest does not send.
+  MEHO reads only the places that Kubernetes defines, from one list
+  (`_PLACES` in `ops_write_apply_summary.py`): the pod spec of a Pod, a
+  PodTemplate, a ReplicationController, a Deployment, a ReplicaSet, a
+  StatefulSet, a DaemonSet, a Job and a CronJob; the `secrets` and
+  `imagePullSecrets` of a ServiceAccount; the volume source of a
+  PersistentVolume; the `spec` of a Service; the `spec.tls` of an Ingress;
+  and the `roleRef` of a RoleBinding and a ClusterRoleBinding. In a pod
+  spec these are the service account, the image pull Secrets, each volume
+  that names a Secret (also a CSI, projected or other volume with a
+  `secretRef`), each `secretKeyRef` and `secretRef` of a container, and
+  host access: `hostPath`, `hostNetwork`, `hostPID`, `hostIPC`, `hostPort`,
+  and "a container asks for full access to its host" (the flag of its
+  `securityContext` that gives it that access). A Service of type `NodePort` or `LoadBalancer`
+  or with external IPs is named too. No free-form field is read: not the
+  `data` or `binaryData` of a ConfigMap, not the `spec` of a kind outside
+  the Kubernetes groups, not the labels or annotations of a pod template.
+  A Secret object is named ("a Secret object (its values are not shown)")
+  and never read. `null` when the dry run returned no object.
+- `built_in`: `true` only for a kind that Kubernetes itself defines in that
+  API group. The group and the kind are always read together.
+  `cluster_wide`: `true` for a kind that is not in a namespace.
 
-The entries hold names only, never a Secret value, an `env` value or a
-command line, and a name that does not look like a Kubernetes name is not
-shown. The live object is read only for its `managedFields`. When the dry
-run fails, the stored request has a top-level `object_summary` with one
-entry that says the summary could not be made. The console card shows the
-list in a "What each object is" block (`approvals/_modal.html`). An agent
-never reads `object_summary`: its own preview has no such key and makes no
-extra read, and the stored request it reads leaves it out.
+The entries show names, and a name shows only when it passes its check;
+else the card shows "(name not shown)". A role name that starts with
+`system:` shows when each part between the colons passes the same check.
+The kind of a `roleRef` shows only as `Role` or `ClusterRole`. On purpose
+the summary also shows the path of a `hostPath` volume, a host port number
+and the manager names of the other writers of the live object, because the
+person needs them to decide. A manager name shows only when it has
+letters, digits, `.`, `-`, `_` and `/`, at most 63 characters, and its
+`operation` only as `Apply` or `Update` (else "(not shown)"). The summary
+never shows a Secret value, an `env` value or a command line, and it runs
+through the same redaction as the manifest echo. MEHO reads the whole live
+object once, with the target's login, and uses only its `managedFields`.
+Nothing else of it is kept or shown. The console card shows the list in a
+"What each object is" block (`approvals/_modal.html`), with the sentence
+"This is what the cluster held when the request was made. The run does not
+check it again." An agent never reads `object_summary`: its own preview
+has no such key and makes no extra read, and the stored request it reads
+leaves it out.
+
+When the dry run of a `k8s.apply` fails, the stored request has the
+`preview_unavailable` marker and no `object_summary`. It still has, for
+every reader of the request, the `manifest` echo and the `subject` line,
+built from the manifest text with the same hiding as on a preview that
+worked (`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). For a
+manifest of more than one document, `dry_run_stop` names the document the
+dry run stopped at and says that the documents after it had no dry run.
+The console card shows these in a "What the apply sends" block, and from
+the `preview_unavailable` mark the sentence "The summary of the objects
+could not be made, because the dry run failed." A key that cannot be built
+(for example from a manifest that is not valid YAML) is left out; the mark
+and that sentence stay.
 
 ## Credential writes: what the approver sees (#4850)
 

@@ -6,8 +6,8 @@
 The migration adds ``hard_to_undo`` (with a CHECK on its three words) and
 ``changes_rights`` to ``endpoint_descriptor``. The tests check that
 ``upgrade`` adds them and keeps an old row and the table's indexes, that the
-CHECK refuses an unknown word, that ``downgrade`` drops them, and that the
-pair round-trips. SQLite is the test driver.
+CHECK refuses an unknown word, that ``changes_rights`` reads back true and
+false, that ``downgrade`` drops them, and that the pair round-trips. SQLite is the test driver.
 """
 
 from __future__ import annotations
@@ -127,6 +127,23 @@ def test_check_allows_the_three_words_and_refuses_any_other(
         _run(sync_url, _insert(f"example.widget.{word}", hard_to_undo=word))
     with pytest.raises(sa.exc.IntegrityError):
         _run(sync_url, _insert("example.widget.bad", hard_to_undo="removes"))
+
+
+def test_changes_rights_reads_back_true_and_false(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
+    cfg, sync_url = alembic_cfg
+    copy_migrated_db(cfg, _DOWN_REVISION)
+    command.upgrade(cfg, _REVISION)
+    _run(sync_url, _insert("example.widget.grant"))
+    _run(sync_url, _insert("example.widget.view"))
+    _run(sync_url, "UPDATE endpoint_descriptor SET changes_rights = 1 WHERE op_id LIKE '%grant'")
+    _run(sync_url, "UPDATE endpoint_descriptor SET changes_rights = 0 WHERE op_id LIKE '%view'")
+    rows = _run(sync_url, "SELECT op_id, changes_rights FROM endpoint_descriptor ORDER BY op_id")
+    assert [(op_id, bool(value)) for op_id, value in rows] == [
+        ("example.widget.grant", True),
+        ("example.widget.view", False),
+    ]
 
 
 def test_downgrade_drops_both_columns_and_the_check(

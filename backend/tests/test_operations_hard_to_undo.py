@@ -192,3 +192,59 @@ async def test_a_multi_step_op_carries_both_fields_and_refuses_a_safe_one(
             hard_to_undo="deletes",
             **common,
         )
+
+
+@pytest.mark.asyncio
+async def test_a_start_without_changes_rights_clears_a_stored_true(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    op_id = "undo-demo.widget.grant"
+    policy: dict[str, Any] = {"safety_level": "caution", "requires_approval": True}
+    await _register(session, embedding, op_id, **policy, changes_rights=True)
+    await _register(session, embedding, op_id, **policy)
+    row = await _row(session, op_id)
+    assert row is not None
+    assert row.changes_rights is False
+
+
+def _composite(op_id: str, **policy: Any) -> dict[str, Any]:
+    return {
+        "product": _PRODUCT,
+        "version": _VERSION,
+        "impl_id": _IMPL,
+        "op_id": op_id,
+        "handler": composite_dispatch_child_handler,
+        "summary": "Rebuild a widget.",
+        "description": "Rebuilds one widget in two steps.",
+        "parameter_schema": {"type": "object", "properties": {}},
+        "when_to_use": None,
+        **policy,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_multi_step_op_without_a_session_stores_both_fields(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    op_id = "undo-demo.composite.wipe"
+    await register_composite_operation(
+        **_composite(op_id, hard_to_undo="deletes", changes_rights=True),
+        embedding_service=embedding,
+    )
+    row = await _row(session, op_id)
+    assert row is not None
+    assert (row.source_kind, row.hard_to_undo, row.changes_rights) == ("composite", "deletes", True)
+
+
+@pytest.mark.asyncio
+async def test_a_multi_step_op_with_an_unknown_word_is_refused_and_writes_no_row(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    op_id = "undo-demo.composite.odd"
+    with pytest.raises(ValueError, match=r"undo-demo\.composite\.odd.*hard_to_undo must be one of"):
+        await register_composite_operation(
+            **_composite(op_id, hard_to_undo="removes"),
+            session=session,
+            embedding_service=embedding,
+        )
+    assert await _row(session, op_id) is None

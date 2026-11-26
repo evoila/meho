@@ -374,9 +374,8 @@ address can both be the vendor's choice (after a followed redirect on the
 same origin), so `extras.exception_message` holds only the status code and
 the host names, for example `Redirect response 302 from vc.example.com to
 other.example.com, not followed.` A 3xx without a `Location` header says
-`with no Location header.` `extras.redirect_host` holds the host name of the
-`Location` address (`null` without the header), or the fixed mark
-`<unparseable-location>`. `extras.http_status` and
+`with no Location header.` A host name that cannot be read is the fixed
+mark `<unparseable-location>`. `extras.http_status` and
 `extras.upstream_message` stay as for every other status. When httpx cannot
 read the `Location` address, the HTTP client raises the httpx error class
 with one fixed text, `MEHO could not read the address in the Location

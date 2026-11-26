@@ -1683,6 +1683,9 @@ def result_connector_error(
     #3567: ``extras.upstream_fault`` is set from the response body as above,
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
+
+    A 3xx answer gets the text of :func:`_redirect_status_message`, with
+    host names only.
     """
     msg = _sanitize_free_text(_redirect_status_message(exc) or str(exc))
     extras: dict[str, Any] = {
@@ -1690,9 +1693,6 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
-    if _is_redirect_status(exc):
-        location = exc.response.headers.get("Location")
-        extras["redirect_host"] = host_for_log(location) if location is not None else None
     if isinstance(exc, ConnectorOwnMessage) and not isinstance(
         exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
     ):

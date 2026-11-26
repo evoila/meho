@@ -307,7 +307,6 @@ async def test_refused_redirect_after_a_followed_hop_names_only_host_names(
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_error"
     assert result.extras["http_status"] == 302
-    assert result.extras["redirect_host"] == _OTHER_HOST
     assert result.extras["exception_message"] == (
         f"Redirect response 302 from 127.0.0.1 to {_OTHER_HOST}, not followed."
     )
@@ -336,7 +335,9 @@ async def test_refused_redirect_names_only_the_host_name(
     result, places, events = await _run(session, caplog, routes)
 
     assert result.extras["http_status"] == 302
-    assert result.extras["redirect_host"] == host
+    assert result.extras["exception_message"] == (
+        f"Redirect response 302 from 127.0.0.1 to {host}, not followed."
+    )
     assert _refusal_event(events)["reason"] == reason
     _assert_absent([path, query, fragment], places)
 
@@ -350,7 +351,9 @@ async def test_redirect_to_https_on_the_same_host_names_the_reason(
 
     result, places, events = await _run(session, caplog, routes)
 
-    assert result.extras["redirect_host"] == "127.0.0.1"
+    assert result.extras["exception_message"] == (
+        "Redirect response 302 from 127.0.0.1 to 127.0.0.1, not followed."
+    )
     assert _refusal_event(events)["reason"] == "other scheme"
     _assert_absent([path], places)
 
@@ -387,7 +390,6 @@ def test_redirect_without_location_names_only_the_host() -> None:
     assert result.extras["exception_message"] == (
         "Redirect response 304 from appliance.test.invalid, with no Location header."
     )
-    assert result.extras["redirect_host"] is None
     assert result.extras["http_status"] == 304
     _assert_absent([path, query], {"answer": result.model_dump_json()})
 

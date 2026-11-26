@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A blocked login sends nothing more through the Vault and secret paths.
+"""A blocked login gets the block refusal before the next Vault call or store request.
 
 Each test runs a call with two sends, blocks the login between them, and
 checks that the second send is not made and the block refusal is raised.

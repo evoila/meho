@@ -111,12 +111,15 @@ reads the login that the dispatcher noted for the running call
 `checking_logins_for_steps`. It reads a copy of the list that is at most 5
 seconds old, so it reads the database at most once in 5 seconds per process.
 
-Each call of the Vault and secret connectors passes this check right before
-it is sent. These calls run a blocking library in a worker thread, so they
-go through `to_thread_checked` (`auth/send_check.py`): it runs the check on
-the event loop, notes the send, and then starts the thread. The Vault login
-and the HTTP client that reaches another instance's store do the same. Outside
-an operation the check does nothing.
+Each Vault call that an operation of the Vault and secret connectors makes
+for the caller passes this check right before MEHO starts it. These calls
+run a blocking library in a worker thread, so they go through
+`to_thread_checked` (`auth/send_check.py`): it runs the check on the event
+loop, notes the send, and then starts the thread. The Vault login and the
+HTTP client that reaches another instance's store do the same. Outside an
+operation the check does nothing. Clean-up calls always run: the end of
+MEHO's own Vault login, and the revoke of a new token that MEHO could not
+store.
 
 Once a check of a run refused, every later check of the same run refuses
 too, also when the list can be read again. The operation answers with the

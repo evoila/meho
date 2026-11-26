@@ -649,10 +649,11 @@ async def client() -> AsyncIterator[tuple[httpx.AsyncClient, Any]]:
 
 
 def _headers(key: Any, *, sub: str = _REQUESTER_SUB) -> dict[str, str]:
+    """An agent token with the role the route needs, the role of a new call."""
     token = mint_token(
         key,
         sub=sub,
-        tenant_role=TenantRole.READ_ONLY.value,
+        tenant_role=TenantRole.OPERATOR.value,
         tenant_id=str(_TENANT_ID),
         principal_kind="agent",
     )

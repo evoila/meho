@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "AGENT_REQUESTER_RECORD_KEY",
     "BLAST_RADIUS_KEY",
     "INTERNAL_EFFECT_KEYS",
     "PERSON_ONLY_EFFECT_KEYS",
@@ -127,6 +128,7 @@ __all__ = [
     "register_preview_builder_switch",
     "register_preview_failure_keys",
     "register_preview_last_step",
+    "stored_requester_record",
     "without_internal_effect_keys",
     "without_person_only_effect_keys",
     "without_switched_object_field",
@@ -595,10 +597,35 @@ SWITCHED_OBJECT_FIELDS: Final[dict[str, tuple[str, str]]] = {
     "keycloak.realm.delete": ("id", "KEYCLOAK_ANSWER_REALM")
 }
 
+#: The key of the record of the agent that asked, which an approvals surface
+#: rebuilds the agent from to check its rights when the call runs
+#: (:mod:`~meho_backplane.operations.approved_run_rights`).
+AGENT_REQUESTER_RECORD_KEY: Final[str] = "agent_requester_record"
+
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
-#: checks and never returns to a caller: where a change of rights was asked
-#: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`).
-INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"asked_in_web_console"})
+#: checks: where a change of rights was asked
+#: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`),
+#: and the record of the agent that asked. The REST and MCP approval tools
+#: leave them out.
+INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
+    {"asked_in_web_console", AGENT_REQUESTER_RECORD_KEY}
+)
+
+
+def stored_requester_record(effect: Mapping[str, Any] | None) -> Any:
+    """The requester record of a card, as stored; ``None`` when it has none.
+
+    The internal record first, then the ``permission_preflight["requester"]``
+    record that a card shows when ``AGENT_GRANT_REQUIRED`` is not ``off``.
+    The caller checks the shape.
+    """
+    if not effect:
+        return None
+    record = effect.get(AGENT_REQUESTER_RECORD_KEY)
+    if record is not None:
+        return record
+    preflight = effect.get("permission_preflight")
+    return preflight.get("requester") if isinstance(preflight, Mapping) else None
 
 
 def without_internal_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:

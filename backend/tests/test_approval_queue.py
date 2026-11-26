@@ -1006,7 +1006,11 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
     assert reject_payload["reason"] == "why-reject"
     # Same key set up to the decision-specific value, plus the two
     # approval-only fields (#3328).
-    assert set(approve_payload) == set(reject_payload) | {"self_approved", "approval_rule"}
+    assert set(approve_payload) == set(reject_payload) | {
+        "self_approved",
+        "approval_rule",
+        "approver_may_approve_high_risk",
+    }
 
 
 @pytest.mark.asyncio

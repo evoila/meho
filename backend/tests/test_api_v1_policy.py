@@ -65,6 +65,7 @@ from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.fixed_rules import FIXED_RULES, POLICY_CHANGE_WAITS
 from meho_backplane.policy.service import NO_CHANGE, POLICY_CHANGED, build_plan
 from meho_backplane.settings import get_settings
 
@@ -162,18 +163,20 @@ def _admin(
     kind: PrincipalKind = PrincipalKind.USER,
     platform_admin: bool = False,
     web: bool = True,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    sign_in_age: int = 0,
 ) -> Operator:
     """An admin; ``web`` is a click in the web console, where a change of rights is approved."""
     return Operator(
         sub=sub,
         tenant_id=_TENANT,
-        tenant_role=TenantRole.TENANT_ADMIN,
+        tenant_role=role,
         principal_kind=kind,
         platform_admin=platform_admin,
         raw_jwt="header.payload.signature",
         web_session=web,
         acr="1",
-        auth_time=int(time.time()),
+        auth_time=int(time.time()) - sign_in_age,
     )
 
 
@@ -492,6 +495,49 @@ async def test_the_same_admin_import_with_a_token_waits(embedding: AsyncMock) ->
     assert await _stored() is None
     (request,) = await _requests()
     assert request.rights_change is True
+
+
+#: Two days: older than any fresh sign-in the web console accepts for a change of rights.
+_OLD_SIGN_IN_AGE = 2 * 24 * 3600
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch")
+@pytest.mark.parametrize(
+    ("caller", "status", "waits"),
+    [
+        pytest.param({}, "ok", False, id="console-admin-fresh-sign-in"),
+        pytest.param({"web": False}, "awaiting_approval", True, id="admin-with-a-token"),
+        pytest.param({"role": TenantRole.OPERATOR}, "denied", False, id="console-operator"),
+        pytest.param(
+            {"sign_in_age": _OLD_SIGN_IN_AGE},
+            "awaiting_approval",
+            True,
+            id="console-admin-old-sign-in",
+        ),
+    ],
+)
+async def test_a_policy_change_runs_at_once_only_for_a_console_admin_with_a_fresh_sign_in(
+    embedding: AsyncMock, caller: dict[str, Any], status: str, waits: bool
+) -> None:
+    """The two sides of the sentence of ``policy_change_waits``."""
+    assert FIXED_RULES[POLICY_CHANGE_WAITS] == (
+        "A change of the policy waits for a person, except an Admin's own change in the "
+        "web console after a fresh sign-in."
+    )
+    await _setup(embedding)
+
+    result = await dispatch(
+        operator=_admin("admin-a", **caller),
+        connector_id="policy-registry-1.x",
+        op_id=POLICY_APPLY_OP_ID,
+        target=None,
+        params=await _import_params(),
+    )
+
+    assert result.status == status, result
+    assert (await _stored() is not None) == (status == "ok")
+    assert len(await _requests()) == (1 if waits else 0)
 
 
 @pytest.mark.asyncio

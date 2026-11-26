@@ -26,6 +26,9 @@ What waits depends on how the call arrives:
   There a tenant admin may give a service principal a standing grant
   that also covers deletes.
 
+Which kind of caller you are, and its name, is on
+[Who is calling](../guides/who-is-calling.md).
+
 More rules:
 
 - An agent never approves. Approve and reject have no MCP tool.

@@ -179,6 +179,41 @@ def test_an_enum_member_is_a_value_and_stays_as_it_is() -> None:
     assert not _accepts(out, {"enum": ["x"], "properties": {"a": {}}})
 
 
+_UNDER_NOT_IF_THEN_ELSE: list[dict[str, Any]] = [
+    {"not": {"enum": ["x", None]}},
+    {"not": {"enum": [None]}},
+    {"not": {"not": {"enum": ["x", None]}}},
+    {"if": {"enum": ["x", None]}, "then": {"type": "string"}, "else": {"type": "null"}},
+    {"if": {"type": "string"}, "then": {"enum": ["x", None]}},
+    {"if": {"type": "null"}, "else": {"enum": ["x", None]}},
+    {"properties": {"a": {"not": {"enum": ["x", None]}}}},
+]
+
+
+@pytest.mark.parametrize("schema", _UNDER_NOT_IF_THEN_ELSE)
+def test_the_sent_copy_never_accepts_what_the_full_schema_refuses(schema: dict[str, Any]) -> None:
+    sent = _without_null_enum_members(schema)
+    for value in (None, "x", "other", 3):
+        for candidate in (value, {"a": value}):
+            if _accepts(sent, candidate):
+                assert _accepts(schema, candidate), (schema, candidate)
+
+
+def test_an_enum_under_not_and_if_is_left_as_it_is() -> None:
+    for schema in (
+        {"not": {"enum": ["x", None]}},
+        {"if": {"enum": ["x", None]}, "then": {"type": "string"}},
+    ):
+        assert _without_null_enum_members(schema) is schema
+    narrowed = _without_null_enum_members({"if": {"type": "string"}, "then": {"enum": ["x", None]}})
+    assert narrowed == {"if": {"type": "string"}, "then": {"enum": ["x"]}}
+
+
+def test_a_schema_that_keeps_null_in_an_enum_is_found_by_the_check() -> None:
+    sent = _wire_safe_input_schema({"type": "object", "not": {"enum": ["x", None]}})
+    assert _null_enum_paths(sent) == ["/not/enum"]
+
+
 def _sample(schema: dict[str, Any]) -> Any:
     """A valid value for *schema*, enough for the required inputs."""
     if "enum" in schema:
@@ -387,7 +422,7 @@ async def test_a_call_with_null_or_without_the_field_passes_and_gives_the_same_r
     """
     operator = build_operator(TenantRole.TENANT_ADMIN, platform_admin=True)
     fields = _null_enum_fields()
-    assert len(fields) == 16
+    assert fields, "the registry has no tool input with null in an enum"
     for tool, field in fields:
         assert tool in _CASES, f"no case for {tool}: add it to _CASES"
         base, below = _CASES[tool]

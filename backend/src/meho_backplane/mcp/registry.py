@@ -336,6 +336,12 @@ _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 #: a value is not a rule of the schema, so it stays as it is.
 _LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "enum", "examples", "example"})
 
+#: Keywords whose schema is read the other way round: ``not`` refuses what its
+#: schema accepts, and ``if`` picks the branch. Dropping ``null`` from an
+#: ``enum`` there would make the sent copy accept more than the server does.
+#: So the rewrite leaves these schemas as they are.
+_NEGATED_KEYWORDS: frozenset[str] = frozenset({"not", "if"})
+
 #: Keywords whose value maps a name to a schema. The names are free text (a
 #: property may be called ``default``), so they are never read as keywords.
 _SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
@@ -365,8 +371,10 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
     the values under ``default``, ``const`` and ``examples``. The members of an
     ``enum`` are values too, so an object among them stays as it is. An
     ``enum`` of only ``null`` becomes ``const: null``. An ``enum`` without
-    ``null``, also an empty one, stays. *node* is not mutated. A node with
-    nothing to change is returned as the same object.
+    ``null``, also an empty one, stays. The schema under ``not`` and ``if`` is
+    left as it is, because there the rewrite would change what the sent copy
+    accepts. *node* is not mutated. A node with nothing to change is returned
+    as the same object.
 
     *names_are_keys* is true for the value of ``properties`` and the like,
     where the keys are names, not keywords.
@@ -379,7 +387,7 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
                 out.update(_enum_rule_without_null(node, value))
                 changed = True
                 continue
-            if not names_are_keys and key in _LITERAL_KEYWORDS:
+            if not names_are_keys and (key in _LITERAL_KEYWORDS or key in _NEGATED_KEYWORDS):
                 out[key] = value
                 continue
             new_value = _without_null_enum_members(
@@ -396,15 +404,20 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
 
 
 def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return *schema* with any top-level combinator keyword removed.
+    """Return the copy of *schema* that ``tools/list`` sends.
 
-    ``None`` is also removed from every ``enum`` at every depth.
+    Two rewrites. The top-level ``oneOf``, ``allOf`` and ``anyOf`` go (see
+    :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why). A direct ``null`` member of
+    an ``enum`` goes at any depth, and an ``enum`` of only ``null`` becomes
+    ``const: null`` (see :func:`_without_null_enum_members`). Nested
+    combinators stay, and so does an ``enum`` under ``not`` or ``if``: the
+    restriction is top-level only, and a change there would let the sent copy
+    accept a value that the full schema refuses. A tool whose sent schema still
+    holds ``null`` in an ``enum`` is caught by the test of the registry.
 
-    See :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why. *schema* is not
-    mutated: when it carries no forbidden top-level key the same object is
-    returned (the common ~15-tool case, no needless copy); otherwise a
-    shallow copy minus those keys is returned. Nested combinators are
-    untouched — the Anthropic restriction is top-level only.
+    *schema* is not mutated. When there is nothing to change (no top-level
+    combinator and no ``null`` in an ``enum`` the rewrite touches), the same
+    object is returned. Otherwise a new object is returned.
     """
     if any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
         schema = {

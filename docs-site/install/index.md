@@ -400,11 +400,11 @@ instead of the standard one.
 
 ### The approval hand-off key
 
-MEHO needs a key for every credential write, for example
-`meho vault kv put`. The key is `APPROVAL_HANDOFF_ENCRYPTION_KEY`. MEHO
-uses it to keep the value safe while the write waits for a person to
-approve it. With no key, MEHO refuses the write at once, for a person
-and for an agent.
+MEHO needs a key for a credential write that waits for approval, for
+example `meho vault kv put`. The key is
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. MEHO uses it to keep the value safe
+while the write waits for a person to approve it. With no key, MEHO
+refuses such a write at once.
 
 - **A built-in part is on (the default install):** the install makes the
   key in the Secret `<release>-core-approval-handoff`. You have nothing

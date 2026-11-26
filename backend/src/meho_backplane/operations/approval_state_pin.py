@@ -143,14 +143,17 @@ async def state_changed_since_request(
     # the object check uses (both modules import from the approval queue).
     from meho_backplane.operations import approval_object_check
 
-    card = await approval_object_check.live_card(
+    built = await approval_object_check.live_card_checked(
         operator,
         connector_id=request.connector_id,
         op_id=request.op_id,
         target=target,
         params=params,
     )
-    readable, live = _card_state(_preview(card), key)
+    if built.refusal is not None:
+        _log.warning("approval_resume_state_refused", **log_fields)
+        return approval_object_check.card_refused_reason(built.refusal)
+    readable, live = _card_state(_preview(built.card), key)
     if not readable:
         _log.warning("approval_resume_state_unreadable", **log_fields)
         return REASON_STATE_UNREADABLE

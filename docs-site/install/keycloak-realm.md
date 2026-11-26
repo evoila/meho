@@ -1182,7 +1182,10 @@ person (the console's live stream and `GET /api/v1/feed`) ends within
 4 seconds.
 `<sub>` is the person's login id (the user id in Keycloak). To undo it,
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
-blocks.
+blocks. The console page `/ui/blocked-people` ("Blocked people" in the
+menu) does the same for a person with the tenant admin role: it lists the blocks, blocks a
+person with a reason, and unblocks a person after a confirm step. The
+page never removes a block on your own login; use the command for that.
 
 Who blocks whom:
 

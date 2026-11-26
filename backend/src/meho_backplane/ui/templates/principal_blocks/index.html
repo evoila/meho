@@ -36,10 +36,12 @@
               <td class="whitespace-nowrap text-xs">{{ person.blocked_at }}</td>
               <td class="text-right">
                 {% if person.sub == own_sub %}
-                  {% if person.scope == scope_all %}
-                    <span class="text-xs text-muted" data-own-login>Your own login, blocked in all tenants: another platform admin removes this block.</span>
+                  {% if not platform_admin %}
+                    <span class="text-xs text-muted" data-own-login>Your own login: the console never removes a block on the admin's own login. A tenant admin cannot remove a block on their own login. Another tenant admin of this tenant, or a platform admin, removes it, on this page or with <span class="font-mono">meho principal unblock</span>.</span>
+                  {% elif person.scope == scope_all %}
+                    <span class="text-xs text-muted" data-own-login>Your own login, blocked in all tenants: the console never removes a block on the admin's own login. A block in every tenant stays until another platform admin removes it.</span>
                   {% else %}
-                    <span class="text-xs text-muted" data-own-login>Your own login: in tenant <span class="font-mono">{{ person.scope }}</span>, run <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span> with a fresh sign-in. It removes only the block of that tenant.</span>
+                    <span class="text-xs text-muted" data-own-login>Your own login: the console never removes a block on the admin's own login. A platform admin removes a block on their own login with <span class="font-mono">meho principal unblock &lt;sub&gt; --reason &lt;text&gt;</span>, run in the tenant of that block (<span class="font-mono">{{ person.scope }}</span>), with a fresh sign-in. It removes only the block of that tenant.</span>
                   {% endif %}
                 {% else %}
                   <form method="post" action="/ui/blocked-people/unblock">

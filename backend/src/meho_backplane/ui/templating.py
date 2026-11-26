@@ -254,6 +254,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         return {
             "session_tenant": None,
             "session_operator_sub": None,
+            "session_is_tenant_admin": False,
             "ready": ready,
             **sandbox,
         }
@@ -275,6 +276,9 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         # where the **live** role (a fresh JWT verify) is shown -- the chip
         # itself does not pay a per-render token verify just to label a role.
         "session_operator_sub": session_ctx.operator_sub,
+        # Whether the person is a tenant admin here; the menu shows the
+        # admin-only entries from it. The pages keep their own 403.
+        "session_is_tenant_admin": session_ctx.is_tenant_admin,
         "ready": ready,
     }
 

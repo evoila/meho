@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.ui.auth import revalidation
 from meho_backplane.ui.auth import session_ref as session_ref_module
 from meho_backplane.ui.auth.session_store import DecryptedSession
@@ -49,11 +50,11 @@ class _FakeTokenCheck:
 
     async def __call__(
         self, decrypted: DecryptedSession, *, expected_audience: str
-    ) -> tuple[DecryptedSession, None]:
+    ) -> tuple[DecryptedSession, Any]:
         self.calls.append(decrypted.id)
         if decrypted.id == self.disabled:
             raise HTTPException(status_code=401, detail="session_expired")
-        return decrypted, None
+        return decrypted, SimpleNamespace(tenant_role=TenantRole.READ_ONLY)
 
 
 def _session(session_id: uuid.UUID | None = None) -> DecryptedSession:

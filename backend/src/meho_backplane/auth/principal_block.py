@@ -318,8 +318,17 @@ def _scope_of(operator: Operator) -> str:
     return BLOCK_SCOPE_ALL if operator.platform_admin else str(operator.tenant_id)
 
 
-async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedPerson:
+async def block_principal(
+    operator: Operator,
+    sub: str,
+    reason: str,
+    *,
+    route: tuple[str, str] = ("POST", "/api/v1/principals/blocked"),
+) -> BlockedPerson:
     """Block *sub*. The block row and its audit row commit together.
+
+    *route* is the method and path the audit row names. The default is the
+    REST route; the console page passes its own route.
 
     Blocking a login that is already blocked in the same scope updates
     the reason. Raises :class:`CannotBlockSelfError` for the admin's own login.
@@ -341,8 +350,8 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
             session,
             operator,
             op_id="principal.block",
-            method="POST",
-            path="/api/v1/principals/blocked",
+            method=route[0],
+            path=route[1],
             payload={"blocked_sub": sub, "scope": scope, "reason": reason},
         )
         await session.commit()
@@ -370,6 +379,7 @@ async def unblock_principal(
     *,
     reason: str | None = None,
     sign_in: dict[str, Any] | None = None,
+    route: tuple[str, str] | None = None,
 ) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
@@ -382,7 +392,8 @@ async def unblock_principal(
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
     is none, and :class:`PrincipalBlockUnavailableError` when the table
     cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given.
+    go into the audit row when they are given. *route* is the method and
+    path the audit row names; the default is the REST route.
     """
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
@@ -414,8 +425,8 @@ async def unblock_principal(
             session,
             operator,
             op_id="principal.unblock",
-            method="DELETE",
-            path=f"/api/v1/principals/blocked/{sub}",
+            method=route[0] if route else "DELETE",
+            path=route[1] if route else f"/api/v1/principals/blocked/{sub}",
             payload=payload,
         )
         await session.commit()

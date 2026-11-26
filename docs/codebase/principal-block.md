@@ -54,6 +54,14 @@ A platform admin's way back:
   the realm role).
 - When the block list or the table cannot be read, the unblock answers 503
   `principal_block_check_unavailable`, like every other route.
+- The console never removes a block on the admin's own login. A platform
+  admin removes a block on their own login with
+  `meho principal unblock <sub> --reason <text>`, run in the tenant of that
+  block, with a fresh sign-in. It removes only the block of that tenant. A
+  block in every tenant stays until another platform admin removes it. A
+  tenant admin cannot remove a block on their own login. Another tenant
+  admin of that tenant, or a platform admin, removes it, on this page or
+  with `meho principal unblock`.
 
 To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
@@ -211,21 +219,28 @@ button of a row opens a confirm page; only its form (`confirm=yes`)
 removes blocks. The confirm page names the login, its blocks and the
 scope: for a platform admin the button reads "Unblock in all tenants",
 and the page says that every block of the login goes, also the blocks of
-tenant admins. The page never unblocks the admin's own login (403
-`own_login`), and it shows no button on that row. The hint on that row
-names the tenant of the block. A platform admin removes a block on their
-own login with `meho principal unblock <sub> --reason <text>`, run in
-the tenant of that block, with a fresh sign-in. On their own login, MEHO
-removes only the block of the current tenant. A block in every tenant
-stays until another platform admin removes it. When MEHO cannot read the blocks, the page and
+tenant admins. The page shows no button on the admin's own login row, and
+the unblock form answers 403 `own_login` for it. The console never removes
+a block on the admin's own login. A platform admin removes a block on their
+own login with `meho principal unblock <sub> --reason <text>`, run in the
+tenant of that block, with a fresh sign-in. It removes only the block of
+that tenant. A block in every tenant stays until another platform admin
+removes it. A tenant admin cannot remove a block on their own login.
+Another tenant admin of that tenant, or a platform admin, removes it, on
+this page or with `meho principal unblock`. The own-login hint of the page
+says the rule for the role of the viewer. When MEHO cannot read the blocks, the page and
 both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)
 in hidden fields, so it works without JavaScript, and a form from a page
 of another tenant answers 409. A done form answers 303 back to the page. A refused block
 answers 422 and shows the page with the message next to its field. Each
 block and unblock writes one audit row (`principal.block` or
-`principal.unblock`); the request row of the form keeps its own
-`http.post:` name.
+`principal.unblock`). The row of a page action names the console route
+(`POST /ui/blocked-people`, `POST /ui/blocked-people/unblock`); the rows of
+REST calls name the REST method and path. The request row of the form keeps
+its own `http.post:` name. The menu entry "Blocked people" shows only for a
+person with `tenant_admin` (the session context holds it, set at login and
+at each token check); the page and both forms keep their own 403.
 
 ## Dependencies
 

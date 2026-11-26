@@ -87,6 +87,7 @@ import structlog
 from fastapi import HTTPException
 
 from meho_backplane.auth.client_identity import build_client_block
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
 from meho_backplane.ui.auth.session_ref import session_ref
@@ -100,6 +101,7 @@ __all__ = [
     "reset_read_revalidation_cache_for_testing",
     "revalidate_read_session",
     "session_client_block",
+    "session_is_tenant_admin",
 ]
 
 
@@ -123,11 +125,26 @@ _last_validated: dict[uuid.UUID, float] = {}
 #: its login client without a new token check.
 _client_blocks: dict[uuid.UUID, dict[str, Any]] = {}
 
+#: session id -> (tenant id, whether the last token check of the session
+#: in this process showed the ``tenant_admin`` role in that tenant). The
+#: console menu reads it to show the entries that only an admin can open.
+#: The tenant id is part of the entry, so a switch to another tenant
+#: never shows the role of the old one. Kept and dropped together with
+#: the anchor.
+_tenant_admins: dict[uuid.UUID, tuple[uuid.UUID, bool]] = {}
+
 
 def reset_read_revalidation_cache_for_testing() -> None:
     """Drop every revalidation anchor. Test-only."""
     _last_validated.clear()
     _client_blocks.clear()
+    _tenant_admins.clear()
+
+
+def session_is_tenant_admin(session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+    """Whether the last token check showed ``tenant_admin`` in *tenant_id*; ``False`` if unknown."""
+    known = _tenant_admins.get(session_id)
+    return known is not None and known[0] == tenant_id and known[1]
 
 
 def session_client_block(session_id: uuid.UUID) -> dict[str, Any] | None:
@@ -135,15 +152,24 @@ def session_client_block(session_id: uuid.UUID) -> dict[str, Any] | None:
     return _client_blocks.get(session_id)
 
 
-def mark_session_validated(session_id: uuid.UUID) -> None:
+def mark_session_validated(
+    session_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    tenant_admin: bool | None = None,
+) -> None:
     """Record that this process just proved the session's token valid.
 
     The session store calls this when it creates a row: the login
     callback creates rows only from a token it verified through the
     JWT chain, so the first reads after login render without a second
     check. Read-path revalidation records its own successes itself.
+    *tenant_admin* is the role the login token showed in *tenant_id*. Without them the menu
+    hides the admin entries until the next token check.
     """
     _mark_validated(session_id, time.monotonic())
+    if tenant_admin is not None and tenant_id is not None:
+        _tenant_admins[session_id] = (tenant_id, tenant_admin)
 
 
 def _mark_validated(session_id: uuid.UUID, now_mono: float) -> None:
@@ -155,12 +181,14 @@ def _mark_validated(session_id: uuid.UUID, now_mono: float) -> None:
     for sid in heapq.nsmallest(excess, _last_validated, key=_last_validated.__getitem__):
         del _last_validated[sid]
         _client_blocks.pop(sid, None)
+        _tenant_admins.pop(sid, None)
 
 
 def _forget(session_id: uuid.UUID) -> None:
     """Drop the anchor and the ``client`` block of a session."""
     _last_validated.pop(session_id, None)
     _client_blocks.pop(session_id, None)
+    _tenant_admins.pop(session_id, None)
 
 
 async def revalidate_read_session(
@@ -207,7 +235,10 @@ async def revalidate_read_session(
     # block (the first read after login) is checked once to build it.
     keep_client = settings.audit_client_identity
     has_block = decrypted.id in _client_blocks or not keep_client
-    if anchor is not None and now_mono - anchor < threshold and has_block:
+    # After a switch to another tenant the role of the old tenant is stale: check once.
+    role_known = _tenant_admins.get(decrypted.id)
+    has_role = role_known is None or role_known[0] == decrypted.tenant_id
+    if anchor is not None and now_mono - anchor < threshold and has_block and has_role:
         return decrypted
 
     log = structlog.get_logger(__name__)
@@ -230,6 +261,10 @@ async def revalidate_read_session(
         )
         return None
     _mark_validated(decrypted.id, now_mono)
+    _tenant_admins[decrypted.id] = (
+        decrypted.tenant_id,
+        operator.tenant_role is TenantRole.TENANT_ADMIN,
+    )
     if keep_client:
         _client_blocks[decrypted.id] = build_client_block(operator)
     return refreshed

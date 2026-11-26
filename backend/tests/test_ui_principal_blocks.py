@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,14 +19,20 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from meho_backplane.api.v1 import principal_blocks as rest_principal_blocks
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.auth.principal_block import PrincipalBlockUnavailableError, reset_block_cache
+from meho_backplane.auth.principal_block import (
+    PRINCIPAL_BLOCKED_MESSAGE,
+    PrincipalBlockUnavailableError,
+    reset_block_cache,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, PrincipalBlock
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
+from meho_backplane.ui.auth.revalidation import mark_session_validated
 from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.routes import build_router as build_ui_router
@@ -59,6 +67,7 @@ def _build_app() -> FastAPI:
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(UISessionMiddleware)
     app.include_router(build_ui_router())
+    app.include_router(rest_principal_blocks.router)
     return app
 
 
@@ -71,6 +80,7 @@ def _client(
     sub: str = _OP_A,
     keys: Any = None,
     extra_claims: dict[str, Any] | None = None,
+    fresh_sign_in: bool = False,
 ) -> Any:
     clear_jwks_cache()
     keypair, jwks = keys or _make_keypair_and_jwks()
@@ -82,8 +92,13 @@ def _client(
         platform_admin=platform_admin,
         principal_kind=principal_kind,
         extra_claims=extra_claims,
+        fresh_sign_in=fresh_sign_in,
     )
     session_id = _seed_session_sync(tenant_id=tenant, access_token=token, operator_sub=sub)
+    # What the login does: the session starts with the role of its token.
+    mark_session_validated(
+        session_id, tenant_id=tenant, tenant_admin=role is TenantRole.TENANT_ADMIN
+    )
     mock = respx.mock(assert_all_called=False)
     mock.start()
     mock_discovery_and_jwks(mock, jwks)
@@ -92,6 +107,7 @@ def _client(
     csrf = mint_csrf_token(str(session_id))
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
     client.session_id = session_id
+    client.token = token
     return client, mock, csrf
 
 
@@ -209,10 +225,29 @@ def test_tenant_admin_blocks_and_unblocks_in_their_own_tenant_with_one_audit_row
 
 
 def _request_rows(path: str) -> list[dict[str, Any]]:
+    """The request records of the middleware for *path* (not the block rows)."""
+
     async def _do() -> list[dict[str, Any]]:
         async with get_sessionmaker()() as session:
             rows = (await session.execute(select(AuditLog))).scalars().all()
-        return [r.payload for r in rows if r.method == "POST" and r.path == path]
+        return [
+            r.payload
+            for r in rows
+            if r.method == "POST"
+            and r.path == path
+            and not str(r.payload.get("op_id", "")).startswith("principal.")
+        ]
+
+    return asyncio.run(_do())
+
+
+def _routes_of(op_id: str) -> list[tuple[str, str]]:
+    """The ``(method, path)`` of each audit row of *op_id*."""
+
+    async def _do() -> list[tuple[str, str]]:
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(select(AuditLog))).scalars().all()
+        return [(r.method, r.path) for r in rows if r.payload.get("op_id") == op_id]
 
     return asyncio.run(_do())
 
@@ -233,6 +268,38 @@ def test_a_block_and_an_unblock_each_write_one_row_with_their_name_and_one_reque
     assert len(unblock_requests) == 2
     assert block_request.get("op_id") != "principal.block"
     assert all(r.get("op_id") != "principal.unblock" for r in unblock_requests)
+
+
+def test_a_page_action_names_the_console_route_in_its_audit_row() -> None:
+    _tenants()
+    client, mock, csrf = _client()
+    try:
+        client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r"}, headers=_csrf_headers(csrf))
+        client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    assert _routes_of("principal.block") == [("POST", _PAGE)]
+    assert _routes_of("principal.unblock") == [("POST", _UNBLOCK)]
+
+
+def test_the_audit_rows_of_rest_calls_name_the_rest_method_and_path() -> None:
+    _tenants()
+    client, mock, _csrf = _client()
+    headers = {"Authorization": f"Bearer {client.token}"}
+    try:
+        blocked = client.post(
+            "/api/v1/principals/blocked", json={"sub": _BLOCKED, "reason": "r"}, headers=headers
+        )
+        unblocked = client.delete(f"/api/v1/principals/blocked/{_BLOCKED}", headers=headers)
+    finally:
+        mock.stop()
+    assert blocked.status_code == 201, blocked.text
+    assert unblocked.status_code == 200, unblocked.text
+    # The request record of a REST call carries the same operation name.
+    assert set(_routes_of("principal.block")) == {("POST", "/api/v1/principals/blocked")}
+    assert set(_routes_of("principal.unblock")) == {
+        ("DELETE", f"/api/v1/principals/blocked/{_BLOCKED}")
+    }
 
 
 def test_a_session_context_in_the_request_body_does_not_change_the_admin_check() -> None:
@@ -374,7 +441,8 @@ def test_the_own_login_hint_names_the_tenant_of_the_block() -> None:
         mock.stop()
     assert page.status_code == 200, page.text
     hint = _own_login_hint(page.text)
-    assert f'in tenant <span class="font-mono">{_TENANT_B}</span>' in hint
+    assert f'(<span class="font-mono">{_TENANT_B}</span>)' in hint
+    assert "run in the tenant of that block" in hint
     assert "meho principal unblock" in hint
     assert "fresh sign-in" in hint
     assert "only the block of that tenant" in hint
@@ -393,10 +461,11 @@ def test_own_login_unblock_answers_403_naming_the_tenant_rule() -> None:
     assert refused.status_code == 403
     detail = refused.json()["detail"]
     assert detail.startswith("own_login:")
-    assert "in the tenant of the block" in detail
+    assert "run in the tenant of that block" in detail
     assert "fresh sign-in" in detail
-    assert "only the block of the current tenant" in detail
+    assert "It removes only the block of that tenant." in detail
     assert "A block in every tenant stays until another platform admin removes it." in detail
+    assert "A tenant admin cannot remove a block on their own login." in detail
     assert _block_rows() == [(_OP_A, str(_TENANT_B), "own block in b")]
     assert _audit_payloads("principal.unblock") == []
 
@@ -545,6 +614,11 @@ def test_a_bad_form_shows_the_error_next_to_its_field_and_writes_nothing(
         {"role": TenantRole.READ_ONLY},
         {"principal_kind": "service", "sub": "service:bot"},
         {"principal_kind": "agent", "sub": "agent:bot"},
+        {
+            "principal_kind": "runner",
+            "sub": "runner:bot",
+            "extra_claims": {"runner_id": "00000000-0000-0000-0000-0000000000f1"},
+        },
     ],
 )
 def test_page_and_both_forms_refuse_a_caller_who_is_not_a_person_admin(
@@ -576,3 +650,197 @@ def test_a_form_without_the_csrf_token_is_refused() -> None:
         mock.stop()
     assert response.status_code == 403
     assert _block_rows() == []
+
+
+def test_the_menu_entry_shows_only_for_a_tenant_admin() -> None:
+    _tenants()
+    seen: dict[str, bool] = {}
+    for name, role in (
+        ("admin", TenantRole.TENANT_ADMIN),
+        ("operator", TenantRole.OPERATOR),
+        ("reader", TenantRole.READ_ONLY),
+    ):
+        client, mock, _csrf = _client(role=role)
+        try:
+            first = client.get("/ui/account")
+            second = client.get("/ui/account")
+        finally:
+            mock.stop()
+        assert first.status_code == 200 and second.status_code == 200, first.text
+        seen[name] = _PAGE in first.text and _PAGE in second.text
+        assert (_PAGE in first.text) == (_PAGE in second.text)
+    assert seen == {"admin": True, "operator": False, "reader": False}
+
+
+def test_the_menu_entry_follows_the_role_after_a_tenant_switch() -> None:
+    _tenants()
+    both = {"meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Admins"]}
+    client, mock, _csrf = _client(extra_claims=both)
+    try:
+        in_a = client.get("/ui/account")
+        asyncio.run(
+            save_session_tenant(
+                client.session_id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
+            )
+        )
+        in_b = client.get("/ui/account")
+    finally:
+        mock.stop()
+    assert _PAGE in in_a.text and _PAGE in in_b.text
+
+
+def test_the_hint_of_a_block_in_every_tenant_names_who_removes_it() -> None:
+    # Another process blocks the admin in every tenant. The cached list does
+    # not show it yet, so the admin still opens the page, and the page reads
+    # the table.
+    _tenants()
+    client, mock, _csrf = _client(platform_admin=True)
+    try:
+        assert client.get(_PAGE).status_code == 200
+        _seed_blocks((_OP_A, "*", "blocked everywhere"))
+        page = client.get(_PAGE)
+        refused = client.get(_PAGE)
+    finally:
+        mock.stop()
+    assert page.status_code == 200, page.text
+    hint = _own_login_hint(page.text)
+    assert "blocked in all tenants" in hint
+    assert "A block in every tenant stays until another platform admin removes it." in hint
+    assert f'name="sub" value="{_OP_A}"' not in page.text
+    assert refused.status_code == 200
+
+
+def test_the_hint_of_a_tenant_admin_says_another_admin_removes_the_block() -> None:
+    _tenants()
+    client, mock, csrf = _client()
+    try:
+        assert client.get(_PAGE).status_code == 200
+        _seed_blocks((_OP_A, str(_TENANT_A), "own block in a"))
+        page = client.get(_PAGE)
+        refused = client.post(_UNBLOCK, data=_confirmed(_OP_A), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    hint = _own_login_hint(page.text)
+    assert "A tenant admin cannot remove a block on their own login." in hint
+    assert "Another tenant admin of this tenant, or a platform admin, removes it" in hint
+    assert "--reason" not in hint
+    assert refused.status_code == 403
+    assert "A tenant admin cannot remove a block on their own login." in refused.json()["detail"]
+
+
+# Each row: who asks, where the block on their own login is, what the console
+# answers, and what REST answers (an unblock of the own login, with a reason
+# and a fresh sign-in).
+_OWN_LOGIN_CASES = [
+    # A platform admin removes only the block of the current tenant.
+    (True, "none", 403, "own_login", 404, "principal_not_blocked"),
+    (True, "other", 403, "own_login", 404, "principal_not_blocked"),
+    (True, "own", 403, "blocked", 200, None),
+    (True, "all", 403, "blocked", 403, "principal_blocked"),
+    # A tenant admin never removes a block on their own login.
+    (False, "none", 403, "own_login", 404, "principal_not_blocked"),
+    (False, "other", 403, "own_login", 404, "principal_not_blocked"),
+    (False, "own", 403, "blocked", 403, "principal_blocked"),
+    (False, "all", 403, "blocked", 403, "principal_blocked"),
+]
+
+
+@pytest.mark.parametrize(
+    ("platform_admin", "where", "console_status", "console_text", "rest_status", "rest_detail"),
+    _OWN_LOGIN_CASES,
+)
+def test_an_own_login_unblock_answers_by_role_on_the_console_and_on_rest(
+    platform_admin: bool,
+    where: str,
+    console_status: int,
+    console_text: str,
+    rest_status: int,
+    rest_detail: str | None,
+) -> None:
+    _tenants()
+    scope = {"none": None, "other": str(_TENANT_B), "own": str(_TENANT_A), "all": "*"}[where]
+    if scope is not None:
+        _seed_blocks((_OP_A, scope, "block on the own login"))
+    client, mock, csrf = _client(platform_admin=platform_admin, fresh_sign_in=True)
+    headers = {"Authorization": f"Bearer {client.token}"}
+    try:
+        console = client.post(_UNBLOCK, data=_confirmed(_OP_A), headers=_csrf_headers(csrf))
+        rest = client.request(
+            "DELETE",
+            f"/api/v1/principals/blocked/{_OP_A}",
+            json={"reason": "the block was a mistake"},
+            headers=headers,
+        )
+    finally:
+        mock.stop()
+    assert console.status_code == console_status
+    if console_text == "own_login":
+        assert console.json()["detail"].startswith("own_login:")
+    else:
+        assert console.text == PRINCIPAL_BLOCKED_MESSAGE
+    assert rest.status_code == rest_status, rest.text
+    if rest_detail is not None:
+        assert rest.json()["detail"].startswith(rest_detail)
+    remaining = [row for row in _block_rows() if row[0] == _OP_A]
+    expected = [] if rest_status == 200 else [(_OP_A, scope, "block on the own login")]
+    assert remaining == ([] if scope is None else expected)
+    # The console never removed a block on the own login.
+    assert all(path != _UNBLOCK for _method, path in _routes_of("principal.unblock"))
+
+
+_ROOT = Path(__file__).resolve().parents[2]
+_RULE_SENTENCES = (
+    "The console never removes a block on the admin's own login.",
+    "A platform admin removes a block on their own login with "
+    "meho principal unblock <sub> --reason <text>, run in the tenant of that block, "
+    "with a fresh sign-in.",
+    "It removes only the block of that tenant.",
+    "A block in every tenant stays until another platform admin removes it.",
+    "A tenant admin cannot remove a block on their own login.",
+    "Another tenant admin of that tenant, or a platform admin, removes it, "
+    "on this page or with meho principal unblock.",
+)
+
+
+def _plain(text: str) -> str:
+    """The text on one line, without code marks, so a wrapped doc line still matches."""
+    return re.sub(r"\s+", " ", text.replace("`", "")).strip()
+
+
+def _doc_part(path: str, start: str, end: str) -> str:
+    text = (_ROOT / path).read_text(encoding="utf-8")
+    first = text.index(start)
+    return text[first : text.index(end, first)]
+
+
+def _missing_rule_sentences(text: str) -> list[str]:
+    plain = _plain(text)
+    return [sentence for sentence in _RULE_SENTENCES if sentence not in plain]
+
+
+def test_the_way_back_rule_is_the_same_in_the_five_places() -> None:
+    places = {
+        "the way-back part of principal-block.md": _doc_part(
+            "docs/codebase/principal-block.md",
+            "A platform admin's way back:",
+            "\nTo stop a platform admin",
+        ),
+        "the Console part of principal-block.md": _doc_part(
+            "docs/codebase/principal-block.md", "Console: the page", "\n## Dependencies"
+        ),
+        "the unblock line of ui.md": _doc_part(
+            "docs/codebase/ui.md",
+            "- `POST /ui/blocked-people/unblock`",
+            "\n\nEvery form is a plain",
+        ),
+        "the module docstring": ui_principal_blocks.__doc__ or "",
+        "the own_login text": ui_principal_blocks._OWN_LOGIN_UNBLOCK,
+    }
+    assert {name: _missing_rule_sentences(text) for name, text in places.items()} == {
+        name: [] for name in places
+    }
+
+
+def test_the_five_places_check_notices_a_changed_rule_sentence() -> None:
+    changed = ui_principal_blocks._OWN_LOGIN_UNBLOCK.replace("It removes only", "It removes all")
+    assert _missing_rule_sentences(changed) == [_RULE_SENTENCES[2]]

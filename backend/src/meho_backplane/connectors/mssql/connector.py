@@ -400,6 +400,7 @@ class MssqlConnector(Connector):
             raw_jwt="",
             tenant_id=UUID(int=0),
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
         connector_id = f"{self.impl_id}-{self.version}"
         return await dispatch(

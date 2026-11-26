@@ -168,7 +168,7 @@ the token stays valid.
 """
 
 from enum import StrEnum
-from typing import Final, NamedTuple
+from typing import Final, Literal, NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -177,6 +177,7 @@ __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
     "OLD_GROUPS",
     "RUN_STOP_RULE",
+    "CallerKind",
     "GroupGrant",
     "Operator",
     "PrincipalKind",
@@ -257,6 +258,14 @@ class PrincipalKind(StrEnum):
     SERVICE = "service"
     AGENT = "agent"
     RUNNER = "runner"
+
+
+#: The kind of caller, from
+#: :func:`~meho_backplane.auth.caller_kind.caller_kind`. ``person`` is a
+#: person in the web console; ``personal_agent`` a person's token used by a
+#: tool; ``service_agent`` an agent or service login and a hosted agent run;
+#: ``runner`` a runner login; ``system`` a login that MEHO's own code makes.
+CallerKind = Literal["person", "personal_agent", "service_agent", "runner", "system"]
 
 
 class RoleGroup(StrEnum):
@@ -491,6 +500,16 @@ class Operator(BaseModel):
     #: with ``?results=structured`` (#4716). Only the MCP route sets it, from
     #: the URL; see :mod:`meho_backplane.mcp.structured_results`.
     mcp_structured_results: bool = False
+    #: A person's token was checked for this call. Only the REST bind step
+    #: (:func:`~meho_backplane.middleware.verify_jwt_and_bind`) and the MCP
+    #: bind step (:func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind`)
+    #: set it. The shared token check does not: it also serves the status
+    #: route and the scheduled agent run.
+    token_checked: bool = False
+    #: The kind of caller of a login that MEHO's own code builds, with no
+    #: sign-in and no token check. Every such place sets it; a test scans
+    #: the source for them. ``None`` for a login from a token or a web session.
+    in_code_kind: CallerKind | None = None
 
     @property
     def may_self_approve(self) -> bool:

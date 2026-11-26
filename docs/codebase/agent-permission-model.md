@@ -466,6 +466,47 @@ evaluator reads the matching grant through `matched_grant` (the same row
 match as `resolve_verdict`, before any ceiling) and applies the ceilings
 itself. See [policy-evaluator.md](policy-evaluator.md).
 
+## The kind of caller (`auth/caller_kind.py`)
+
+`caller_kind(operator, actor_sub)` names who is calling. It is a pure
+function: no database, no settings. Nothing decides on it yet. The guide
+page `docs-site/guides/who-is-calling.md` says what each kind may do today.
+
+| Kind | Who |
+|---|---|
+| `person` | A person in the web console (`Operator.web_session`). Only the web console counts as a person. |
+| `personal_agent` | A person's token used by a tool: the command line, REST or MCP. Also a person's login with no mark at all, so MEHO never guesses more trust from a token. |
+| `service_agent` | An agent login, a service login, a hosted agent run (`actor_sub` set, also a run a person started in the web console) and a scheduled agent run (it uses the agent's own login). |
+| `runner` | A runner login. |
+| `system` | A login that MEHO's own code builds. |
+
+The order of the checks: a hosted agent run first, then `in_code_kind`,
+then the web console, then the kind of login.
+
+Two fields of `Operator` feed it:
+
+- `token_checked` — a person's token was checked. Only the REST bind
+  step (`middleware.verify_jwt_and_bind`) and the MCP bind step
+  (`mcp/auth.py::verify_mcp_jwt_and_bind`) set it. The shared token check
+  `verify_jwt_for_audience` does not, because it also serves the status
+  route and the scheduled agent run. A status call with a chosen tenant
+  runs the REST bind step, so it is marked.
+- `in_code_kind` — set by every place that builds an `Operator` itself,
+  with no sign-in and no token check. Most of them are MEHO's own work
+  (the check runner, the event intake, the findings investigator, the
+  topology scheduler, the boot stamp, the expiry of requests, the
+  connectors' own logins) and give `system`. Some stand for someone else:
+  the web console readers and the web push recipient give `person`; the
+  rebuilt requester of a secondary target and the made-up login of
+  `meho policy explain` give the kind of the login they stand for; the
+  runner executor gives `runner`. A test
+  (`tests/test_in_code_logins_have_a_kind.py`) scans the source and fails
+  when such a place has no kind.
+
+The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
+`person` is any human login, by web or by token, and `Asker.via` tells
+them apart. `tests/test_caller_kind.py` pins how the two line up.
+
 ## Who stands behind an agent's request
 
 A request an agent makes under its own login counts as a request of the
@@ -478,6 +519,7 @@ knows nobody behind the agent, only an admin may approve. See
 ## Dependencies
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`
+- `meho_backplane/auth/caller_kind.py` — `caller_kind`, `CallerKind`
 - `meho_backplane/db/engine.py` — `get_sessionmaker`
 - `meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`
 - `meho_backplane/operations/_errors.py` — `result_denied`,

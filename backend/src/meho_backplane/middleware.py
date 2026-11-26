@@ -590,7 +590,10 @@ async def verify_jwt_and_bind_platform_admin_way_back(
 
 
 async def _bind_operator(request: Request, operator: Operator) -> Operator:
-    """Bind the log context, apply the login cages and seed the tenant."""
+    """Bind the log context, apply the login cages and seed the tenant.
+
+    Returns *operator* with :attr:`~Operator.token_checked` set.
+    """
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
@@ -607,4 +610,6 @@ async def _bind_operator(request: Request, operator: Operator) -> Operator:
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
         await note_machine_login(session, operator)
-    return operator
+    # Only this step and the MCP bind step mark a checked token. The shared
+    # token check also serves the status route and the scheduled agent run.
+    return operator.model_copy(update={"token_checked": True})

@@ -274,7 +274,7 @@ async def verify_mcp_jwt_and_bind(
         # #5239: a session with no current tenant binds nothing, as the
         # REST status route does. The tenant fields hold a placeholder,
         # so no audit row, usage event or log line may name it.
-        return operator
+        return operator.model_copy(update={"token_checked": True})
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
@@ -284,4 +284,5 @@ async def verify_mcp_jwt_and_bind(
         # A machine login never counts as a person behind another login.
         async with get_sessionmaker()() as session, session.begin():
             await note_machine_login(session, operator)
-    return operator
+    # Only this step and the REST bind step mark a checked token.
+    return operator.model_copy(update={"token_checked": True})

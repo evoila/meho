@@ -3456,7 +3456,7 @@ tests and its <code>pyproject.toml</code>.</p>
 <p>Your package imports MEHO only through one module:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">meho_connector_kit</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">kit</span>
 </code></pre></div>
-<p>The kit version this page describes: <strong>1.6</strong>.</p>
+<p>The kit version this page describes: <strong>1.7</strong>.</p>
 <p>The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
 part that starts with an underscore is private by its name too.</p>
@@ -3768,15 +3768,24 @@ and must not touch the database.</p>
   <code>destructive</code>. Every operation that is not <code>safe</code> must set
   <code>requires_approval=True</code>: MEHO then waits until a person approves the
   call.</li>
-<li><strong>Texts for agents:</strong> <code>summary</code>, <code>description</code>, <code>group_key</code>,
+<li><strong>What a call does that is hard to undo</strong> (kit 1.7 or higher):</li>
+<li><code>hard_to_undo</code> is <code>"deletes"</code>, <code>"stops"</code> or <code>"overwrites"</code> when a
+    call can delete, stop or overwrite something, and no later call of
+    your connector brings it back. Leave it out (<code>None</code>) otherwise. MEHO
+    refuses it on a <code>safe</code> operation, and refuses any other word.</li>
+<li><code>changes_rights=True</code> when a call gives or takes rights, a login or
+    an access policy in the target system. The default is <code>False</code>.</li>
+</ul>
+<p>MEHO stores both on the operation. Set them from what the call does,
+  not from its name.
+- <strong>Texts for agents:</strong> <code>summary</code>, <code>description</code>, <code>group_key</code>,
   <code>when_to_use</code> and <code>llm_instructions</code>. An agent picks your operation
-  from these texts, so write them with care.</li>
-<li><code>embedding_service</code>: pass on the value MEHO hands to your function.</li>
-<li><strong>Tags:</strong> add the tag <code>no-trace-body</code> to an operation whose request
+  from these texts, so write them with care.
+- <code>embedding_service</code>: pass on the value MEHO hands to your function.
+- <strong>Tags:</strong> add the tag <code>no-trace-body</code> to an operation whose request
   body must not be kept in the trace (for example an operation that runs
   code with given inputs). It changes nothing else: not the risk level,
-  not the approval, and not the error text of the vendor.</li>
-</ul>
+  not the approval, and not the error text of the vendor.</p>
 <p><strong>An input that holds an address.</strong> Some operations connect to an
 address the caller gives: a URL, a host name, or a host and port. The
 connection can come from MEHO, or from the target for MEHO (for example a
@@ -3909,10 +3918,17 @@ The steps are in
 <h2 id="9-when-the-kit-changes">9. When the kit changes<a class="headerlink" href="#9-when-the-kit-changes" title="Permanent link">&para;</a></h2>
 <p>The kit version has two numbers:</p>
 <ul>
-<li>the <strong>first</strong> number goes up when a name is removed or its inputs
-  change. Your package may break. Read the notes and change your code;</li>
-<li>the <strong>second</strong> number goes up when names are only added, or a name is
-  marked as old. Your package keeps working.</li>
+<li>the <strong>first</strong> number goes up when a name is removed, or its inputs
+  change in a way that can break a package: a new input that can be given
+  by its place, a new input with no default, a changed default, type or
+  meaning of an input that exists, a new input on a function with a <code>**</code>
+  input, or any other change of the name (for example its answer type).
+  Your package may break. Read the notes and change your code;</li>
+<li>the <strong>second</strong> number goes up when names are only added, a name is
+  marked as old, or a function only gets new inputs that are given only by
+  name (after the <code>*</code> or after a <code>*args</code> input) and have a default. A
+  function with no such input before may get the <code>*</code> together with the
+  new inputs. Your package keeps working.</li>
 </ul>
 <p>When the kit changed, the MEHO release notes
 (<a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>) have

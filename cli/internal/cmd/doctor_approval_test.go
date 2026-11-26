@@ -142,9 +142,9 @@ func TestSecondAdminCheck(t *testing.T) {
 		h      *api.HealthResponse
 		detail string
 	}{
-		"one platform admin":              {count(2, 1), "This tenant has only one platform admin." + tail},
+		"one platform admin": {count(2, 1), "This tenant has only one platform admin." + tail},
 		"tenant admins only": {count(3, 0), "This tenant has no platform admin." + tail},
-		"no platform admin":               {count(1, 0), "This tenant has no platform admin." + tail},
+		"no platform admin":  {count(1, 0), "This tenant has no platform admin." + tail},
 	} {
 		t.Run(name+" warns with the full texts", func(t *testing.T) {
 			r := &doctorReport{}

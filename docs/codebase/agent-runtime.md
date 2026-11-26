@@ -371,7 +371,9 @@ pieces make that work:
   drops the fields that only describe an MCP session:
   `mcp_session_id_capture`, `mcp_protocol_version`, `granted_scopes`, and
   `surface_summary` (that one lists MCP tools, which a hosted run does not
-  have). It keeps `operator`, `vault`, `db`, `sensor_runner`, and `pairings`.
+  have). It also leaves out the field
+  `approvals.rights_change_platform_admins`. It keeps `operator`, `vault`, `db`,
+  `sensor_runner`, and `pairings`.
   The hosted floor is `OPERATOR`, like the REST route, because the check reads
   a credential through Vault. It takes no arguments. It is not built with
   `_bridge`: the MCP module imports the agent package, so it is not registered

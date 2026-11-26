@@ -10394,6 +10394,8 @@ type RunnerPrincipalRead struct {
 	OwnerSub           string             `json:"owner_sub"`
 	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
+	SetAsideCount      *int               `json:"set_aside_count,omitempty"`
+	SetAsideLastAt     *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
 	WireVersion        *string            `json:"wire_version"`
@@ -10416,6 +10418,8 @@ type RunnerPrincipalRegistered struct {
 	OwnerSub                string             `json:"owner_sub"`
 	PackageSetDigest        *string            `json:"package_set_digest"`
 	Revoked                 bool               `json:"revoked"`
+	SetAsideCount           *int               `json:"set_aside_count,omitempty"`
+	SetAsideLastAt          *time.Time         `json:"set_aside_last_at,omitempty"`
 	TenantId                openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt               time.Time          `json:"updated_at"`
 	WireVersion             *string            `json:"wire_version"`
@@ -10460,9 +10464,22 @@ type RunnerResult_Result struct {
 }
 
 // RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
+//
+// “set_aside“ names the results of batches the runner set aside since its
+// last notice. “set_aside_total“ and “set_aside_last_at“ say how many
+// batches are in the runner's set-aside folder and when the newest one was
+// set aside. All three stay empty on a batch without a notice. MEHO reads at
+// most the first 1,000 entries of “set_aside“ and skips the rest before it
+// checks any entry. It keeps a “set_aside_total“ that is a whole number from
+// 0 to 2147483647 and a “set_aside_last_at“ that is a date-time text with a
+// time zone; it drops any other value of these two (also “true“ or a
+// number) and still takes the batch.
 type RunnerResultBatch struct {
-	Results  *[]RunnerResult `json:"results,omitempty"`
-	RunnerId string          `json:"runner_id"`
+	Results        *[]RunnerResult   `json:"results,omitempty"`
+	RunnerId       string            `json:"runner_id"`
+	SetAside       *[]SetAsideNotice `json:"set_aside,omitempty"`
+	SetAsideLastAt *time.Time        `json:"set_aside_last_at"`
+	SetAsideTotal  *int              `json:"set_aside_total"`
 }
 
 // RunnerWorkItem One centrally-authorized operation for the runner to execute.
@@ -11649,6 +11666,19 @@ type SessionUploadResultOutcome string
 
 // SessionUploadResultState defines model for SessionUploadResult.State.
 type SessionUploadResultState string
+
+// SetAsideNotice A result of a batch that MEHO refused every time, so the runner set it aside.
+//
+// The runner keeps the batch in its set-aside folder and sends only this
+// notice: which check, which result, the status and the code MEHO answered
+// with (never the free text of the answer), and the runner time of the result.
+type SetAsideNotice struct {
+	CheckRef   string     `json:"check_ref"`
+	Code       *string    `json:"code"`
+	ProducedAt *time.Time `json:"produced_at"`
+	ResultUid  string     `json:"result_uid"`
+	Status     int        `json:"status"`
+}
 
 // SettingsImportResponse The preview and the apply answer: plain JSON, the mistakes and the diff.
 //

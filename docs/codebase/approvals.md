@@ -929,6 +929,16 @@ boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
 branches that already set `400`/`403`/`404` pass through untouched, and a
 genuine handler fault still records `500`.
 
+## The fixed rules
+
+Some approval rules are fixed: no policy and no admin can lower them. They
+are in one list, `policy/fixed_rules.py` (`credential_waits`,
+`rights_change_waits`, `policy_change_waits`, `agent_never_approves`,
+`destructive_waits`, `delete_waits`, `caller_address_waits`). The call
+gate asks this list before it reads a standing grant or a run approval.
+Each rule and its sentence:
+[policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
+
 ## A credential call always waits for a person
 
 A call that reads, writes or makes a credential (the classes

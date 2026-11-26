@@ -23,6 +23,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.connectors.target_form import CredentialWay, TargetField
 
 __all__ = [
     "Connector",
@@ -181,6 +182,27 @@ class Connector(ABC):
     #: ``meho_connector_list`` also matches these names (case is ignored).
     #: The connector declares them; the core only reads them.
     product_aliases: tuple[str, ...] = ()
+
+    #: The port a target of this product usually has, or ``None`` (not
+    #: declared). The connector declares it; the core only reads it.
+    default_port: int | None = None
+
+    #: The extra settings a target of this connector needs (keys in the
+    #: target's ``extras``). ``None`` (the default) means not declared. See
+    #: :mod:`meho_backplane.connectors.target_form`.
+    target_fields: tuple[TargetField, ...] | None = None
+
+    #: The ways to log in, each with the fields of the secret. ``None`` (the
+    #: default) means not declared; an empty tuple means "declared: no
+    #: credential needed". Two or more ways are for a connector with a choice,
+    #: for example a key or a password.
+    credential_ways: tuple[CredentialWay, ...] | None = None
+
+    #: The op id of one ``safe`` read of this connector that needs no input
+    #: beyond the target. It proves that the address, the login and the
+    #: rights work. ``None`` (the default) means not declared. MEHO checks it
+    #: at start.
+    test_operation: str | None = None
 
     # G0.28-T1 (#1967) — tri-state dispatchability classification. The
     # default ``"none"`` marks every connector a hand-coded class unless it

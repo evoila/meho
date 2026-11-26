@@ -4,8 +4,11 @@
 """Console page of the admin block list: ``/ui/blocked-people``.
 
 An admin sees the blocked logins, blocks a login with a reason, and
-unblocks a login. The block field takes a login id or an agent name
-(``agent:<name>``), and the list names the agent of an agent's login.
+unblocks a login. The form offers the agents in the admin's reach to
+pick (``agent``), so nobody types the ``agent:`` prefix; the typed field
+(``sub``) takes a login id, and MEHO stores its block. A typed text that
+starts with ``agent:`` follows the same rule as the REST route. The list
+names the agent of an agent's login.
 The page calls the same functions as the REST routes
 (:mod:`meho_backplane.auth.principal_block`), so the rules are the same:
 a platform admin blocks and unblocks in every tenant, a tenant admin in
@@ -52,6 +55,7 @@ from meho_backplane.auth.principal_block import (
     list_blocked,
     unblock_principal,
 )
+from meho_backplane.auth.principal_block_agents import agents_in_reach, is_agent_name
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.agents.operator import resolve_human_admin_or_403
@@ -80,9 +84,11 @@ _OWN_LOGIN_UNBLOCK = (
 )
 _CONFIRMED = "yes"
 _FIELD_MESSAGES = {
-    "sub": "Enter the login id, or the agent name (agent:<name>).",
+    "sub": "Pick an agent, or type a login id.",
     "reason": "Enter a reason (at most 500 characters).",
 }
+_BOTH_GIVEN = "Pick an agent or type a login id, not both."
+_NOT_AN_AGENT = "Pick an agent from the list."
 
 
 def _set_csrf_cookie(response: HTMLResponse, token: str) -> None:
@@ -117,6 +123,7 @@ async def _page(
         "page_title": "Blocked people",
         "active_surface": "blocked-people",
         "blocked": await _readable_blocks(operator),
+        "agents": await agents_in_reach(operator),
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
         "own_sub": operator.sub,
@@ -155,28 +162,40 @@ async def _index(
     return await _page(request, session, operator)
 
 
+def _picked_or_typed(agent: str, sub: str) -> tuple[str, dict[str, str]]:
+    """The block text and the form errors: the picked agent, or the typed login id."""
+    if agent and sub:
+        return "", {"agent": _BOTH_GIVEN}
+    if agent and not is_agent_name(agent):
+        return "", {"agent": _NOT_AN_AGENT}
+    return agent or sub, {}
+
+
 async def _block(
     request: Request,
     sub: str = Form(default=""),
+    agent: str = Form(default=""),
     reason: str = Form(default=""),
     session: UISessionContext = _session,
     operator: Operator = _admin,
 ) -> HTMLResponse | RedirectResponse:
-    sub, reason = sub.strip(), reason.strip()
-    try:
-        body = BlockCreate(sub=sub, reason=reason)
-        await block_principal(operator, body.sub, body.reason)
-    except ValidationError as exc:
-        errors = _errors_of(exc)
-    except CannotBlockSelfError:
-        errors = {"sub": _SELF_BLOCK_MESSAGE}
-    except UnknownLoginError as exc:
-        errors = {"sub": str(exc)}
-    else:
-        return _back_to_page()
-    return await _page(
-        request, session, operator, errors=errors, values={"sub": sub, "reason": reason}
-    )
+    sub, agent, reason = sub.strip(), agent.strip(), reason.strip()
+    text, errors = _picked_or_typed(agent, sub)
+    field = "agent" if agent else "sub"
+    if not errors:
+        try:
+            body = BlockCreate(sub=text, reason=reason)
+            await block_principal(operator, body.sub, body.reason)
+        except ValidationError as exc:
+            errors = _errors_of(exc)
+        except CannotBlockSelfError:
+            errors = {field: _SELF_BLOCK_MESSAGE}
+        except UnknownLoginError as exc:
+            errors = {field: str(exc)}
+        else:
+            return _back_to_page()
+    values = {"sub": sub, "agent": agent, "reason": reason}
+    return await _page(request, session, operator, errors=errors, values=values)
 
 
 async def _confirm_page(

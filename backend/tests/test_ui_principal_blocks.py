@@ -22,13 +22,17 @@ from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.auth.principal_block import PrincipalBlockUnavailableError, reset_block_cache
+from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal, AuditLog, PrincipalBlock
+from meho_backplane.main import app as main_app
+from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes import principal_blocks as ui_principal_blocks
+from tests import _agent_block_paths as agent_paths
 from tests._oidc_jwt_helpers import mint_token, mock_discovery_and_jwks
 from tests.test_ui_agent_grants import (
     _OP_A,
@@ -48,8 +52,12 @@ _BLOCKED = "person-to-block"
 
 @pytest.fixture(autouse=True)
 def _blocks_bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    clear_registry()
+    reset_dispatcher_caches()
     yield from _bff_env.__wrapped__(monkeypatch)
     reset_block_cache()
+    clear_registry()
+    reset_dispatcher_caches()
 
 
 def _build_app() -> FastAPI:
@@ -579,6 +587,7 @@ def test_a_form_without_the_csrf_token_is_refused() -> None:
 
 
 _AGENT = "agent:page-bot"
+_AGENT_SUB = "3c9e2a40-0000-4000-8000-0000000c0a6e"
 
 
 def _seed_agent() -> None:
@@ -594,36 +603,83 @@ def _seed_agent() -> None:
                     created_by_sub="owner-person",
                 )
             )
+        await agent_paths.register_ops()
 
     asyncio.run(_do())
 
 
-def test_page_blocks_an_agent_by_its_name_lists_the_name_and_unblocks_it() -> None:
+def _token_of(keys: Any, sub: str, *, agent: bool) -> dict[str, str]:
+    """The real signed token of the agent, or of a person, as an Authorization header."""
+    extra = {"azp": _AGENT, "jti": str(uuid.uuid4())} if agent else None
+    token = mint_token(
+        keys[0],
+        sub=sub,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        principal_kind="agent" if agent else None,
+        extra_claims=extra,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _safe_call(rest: TestClient, headers: dict[str, str]) -> Any:
+    body = {"connector_id": agent_paths.CONNECTOR_ID, "op_id": agent_paths.READ_OP, "params": {}}
+    return rest.post("/api/v1/operations/call", json=body, headers=headers)
+
+
+def test_page_offers_the_agents_to_pick_and_a_picked_agent_is_blocked_and_unblocked() -> None:
     _tenants()
     _seed_agent()
-    client, mock, csrf = _client()
+    keys = _make_keypair_and_jwks()
+    client, mock, csrf = _client(keys=keys)
+    rest = TestClient(main_app)
+    agent = _token_of(keys, _AGENT_SUB, agent=True)
     try:
+        page = client.get(_PAGE)
         blocked = client.post(
-            _PAGE, data={"sub": _AGENT, "reason": "agent revoked"}, headers=_csrf_headers(csrf)
+            _PAGE, data={"agent": _AGENT, "reason": "agent revoked"}, headers=_csrf_headers(csrf)
         )
-        refused_now = asyncio.run(
-            principal_block.is_principal_blocked("agent-login-id", _TENANT_A, client_id=_AGENT)
-        )
+        rows_after_block = _block_rows()
+        refused = rest.get("/api/v1/connectors", headers=agent)
         listed = client.get(_PAGE)
         confirm = client.post(_UNBLOCK, data={"sub": _AGENT}, headers=_csrf_headers(csrf))
         unblocked = client.post(_UNBLOCK, data=_confirmed(_AGENT), headers=_csrf_headers(csrf))
-        works_again = not asyncio.run(
-            principal_block.is_principal_blocked("agent-login-id", _TENANT_A, client_id=_AGENT)
-        )
+        read_again = rest.get("/api/v1/connectors", headers=agent)
+        ran = _safe_call(rest, agent)
     finally:
         mock.stop()
+    assert f'<option value="{_AGENT}">{_AGENT}</option>' in page.text
     assert blocked.status_code == 303, blocked.text
-    assert refused_now
+    assert [sub for sub, _scope, _reason in rows_after_block] == [_AGENT]
+    assert refused.status_code == 403, refused.text
+    assert "principal_blocked" in refused.text
     assert f"data-blocked-agent>{_AGENT}</td>" in listed.text
     assert confirm.status_code == 200
     assert unblocked.status_code == 303
-    assert works_again
+    assert read_again.status_code == 200, read_again.text
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["status"] == "ok", ran.text
     assert _block_rows() == []
+
+
+@pytest.mark.parametrize("text", ["new-person", "page-bot"], ids=["not-seen", "agent-short-name"])
+def test_page_stores_a_typed_login_id_and_it_holds_from_the_first_request(text: str) -> None:
+    _tenants()
+    _seed_agent()
+    keys = _make_keypair_and_jwks()
+    client, mock, csrf = _client(keys=keys)
+    rest = TestClient(main_app)
+    try:
+        blocked = client.post(
+            _PAGE, data={"sub": text, "reason": "left the team"}, headers=_csrf_headers(csrf)
+        )
+        first = rest.get("/api/v1/connectors", headers=_token_of(keys, text, agent=False))
+    finally:
+        mock.stop()
+    assert blocked.status_code == 303, blocked.text
+    assert [sub for sub, _scope, _reason in _block_rows()] == [text]
+    assert first.status_code == 403, first.text
+    assert "principal_blocked" in first.text
 
 
 def test_page_refuses_an_unknown_agent_name_with_a_plain_sentence() -> None:
@@ -637,4 +693,21 @@ def test_page_refuses_an_unknown_agent_name_with_a_plain_sentence() -> None:
         mock.stop()
     assert response.status_code == 422
     assert "MEHO knows no agent with the login name agent:nobody." in response.text
+    assert _block_rows() == []
+
+
+def test_page_refuses_a_picked_agent_and_a_typed_login_id_together() -> None:
+    _tenants()
+    _seed_agent()
+    client, mock, csrf = _client()
+    try:
+        response = client.post(
+            _PAGE,
+            data={"agent": _AGENT, "sub": "someone", "reason": "both"},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422
+    assert "Pick an agent or type a login id, not both." in response.text
     assert _block_rows() == []

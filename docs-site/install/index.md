@@ -46,7 +46,7 @@ systems.
 |---|---|
 | **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class (the built-in parts keep their data on disks the cluster makes). [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. The chart is tested with Helm 3.16.4. Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **A DNS name + TLS story** | A hostname for the backplane (e.g. `meho.example.com`) and a certificate for it — public CA or internal CA both work; [TLS and ingress](tls-ingress.md) covers the differences. With the built-in parts, the chart can also make a self-signed certificate for you. |
-| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
+| **A second platform admin** | Plan for a second platform admin. An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else — the activity-feed store (Valkey), database
 migrations, the operations catalog — ships inside the Helm release.
@@ -321,9 +321,11 @@ Then log in:
 meho login https://meho.example.com
 ```
 
-This runs the OAuth device-code flow: the CLI prints a verification
-URL and code, you approve it in a browser, and the CLI stores the
-resulting token in your OS keyring.
+This runs the OAuth device-code flow. The CLI prints an address and a
+short code. Open the address on any device with a browser, enter the
+code, and sign in. No browser opens on the machine where the CLI runs,
+and nothing comes back to it. The CLI then stores the resulting token in
+your OS keyring.
 
 **Who logs in.** The install made one Admin login with a temporary password (`admin`, in `MEHO-Admins` and
 `MEHO-Platform-Admins`). It is in the Secret `meho-core-first-login`. Keycloak asks for a new password, a
@@ -395,6 +397,52 @@ instead of the standard one.
 | **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package). See [Your own PostgreSQL](#your-own-postgresql). |
 | **Keycloak** | A [Keycloak](https://www.keycloak.org/) where you have realm admin rights, to make MEHO's realm, clients and groups. See [Your own Keycloak](#your-own-keycloak). |
 | **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. See [Your own Vault or Google Secret Manager](#your-own-vault-or-google-secret-manager). |
+
+### The approval hand-off key
+
+MEHO needs a key for a credential write that waits for approval, for
+example `meho vault kv put`. The key is
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. MEHO uses it to keep the value safe
+while the write waits for a person to approve it. With no key, MEHO
+refuses such a write at once.
+
+- **A built-in part is on (the default install):** the install makes the
+  key in the Secret `<release>-core-approval-handoff`. You have nothing
+  to do.
+- **No built-in part is on:** make the key yourself.
+
+    1. Make a Fernet key:
+
+        ```bash
+        python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+        ```
+
+    2. Store it in a Kubernetes Secret in the namespace of the release.
+       The key name in the Secret is `approval_handoff_encryption_key`.
+    3. Set `approvalHandoff.enabled: true` and
+       `approvalHandoff.secretName: <your Secret>` in your values file.
+       Then install or upgrade.
+
+To check the state, read `features.approval_custody` on `GET /ready`.
+With the metrics token on (`metricsAuth.enabled: true`, the default),
+`/ready` shows the `features` block only to a caller that sends the
+token as a bearer token. The chart keeps the token in the Secret
+`<release>-metrics-auth`, under the key `token`. This command reads the
+token and gives the header to curl on standard input (`-H @-`, curl
+7.55.0 or newer), so the token is on no command line and in no shell
+history:
+
+```bash
+kubectl -n <namespace> get secret <release>-metrics-auth -o jsonpath='{.data.token}' \
+  | base64 -d | sed 's/^/Authorization: Bearer /' \
+  | curl -s -H @- https://<your-backplane>/ready | jq .features.approval_custody
+```
+
+With `metricsAuth.enabled: false`, `/ready` shows the block to every
+caller: `curl -s https://<your-backplane>/ready | jq .features.approval_custody`.
+With your own Secret in `metricsAuth.existingSecret`, put that Secret's
+name in the command, and the key in `metricsAuth.secretKey` in place of
+`token`.
 
 ### Your own PostgreSQL
 

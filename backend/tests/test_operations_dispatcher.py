@@ -69,6 +69,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
@@ -3984,7 +3985,8 @@ async def test_park_without_builder_uses_identifier_default(
         # preview_populated=False + a "connector_did_not_populate" reason so a
         # caller can refuse to auto-approve the blind, op-identity-only
         # request, and the uniform op_class metadata field (#2681).
-        assert row.proposed_effect == {
+        # The agent's record stays under an internal key no caller reads.
+        assert without_internal_effect_keys(row.proposed_effect) == {
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
@@ -4037,7 +4039,8 @@ async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
     async with get_sessionmaker()() as fresh:
         row = await fresh.get(ApprovalRequest, approval_request_id)
         assert row is not None
-        assert row.proposed_effect == {
+        # The agent's record stays under an internal key no caller reads.
+        assert without_internal_effect_keys(row.proposed_effect) == {
             "op_id": "vault.kv.failing_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),

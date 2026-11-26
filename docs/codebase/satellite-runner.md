@@ -248,11 +248,24 @@ work item, plus approval-bound minting.
   defence) and **single-use** (the approval's one-way `resumed_at` latch,
   claimed in the mint session so it is consumed iff the mint commits). No
   approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
-  An approval covers one request of one asker, and the mint uses it only for
-  that asker: the caller must be the login that asked, the approval must
-  match the connector and must not be past its time limit, and the mint
-  refuses while the asker is blocked. The mint audit row names the asker,
-  the caller and the approval.
+  The mint uses an approval only when the caller is the login that asked, the
+  approval matches the connector, and it is not past its own `expires_at`
+  (never later than the clean-up job's limit); it also refuses while the asker
+  is blocked (`asker_blocked`) or the block list cannot be read
+  (`asker_block_unreadable`). The mint audit row names the asker, the caller
+  and the approval. Every refused mint of a remote-write operation (also for
+  invalid params, a broken stored schema or a revoked runner) writes one
+  audit row in the same tenant: event class `policy_decision`, path
+  `gateway.command.mint`, status 403, the session id of the call, and in the
+  payload the caller, the approval request id the caller sent, the runner,
+  the operation and the refusal code, and no params. The mint commits this
+  row itself, in its own session, so it stays stored when the caller rolls
+  back, and `MintResult.refusal_audit_id` names a stored row. When that write
+  fails, MEHO logs it and the mint still refuses with the same code, with no
+  `refusal_audit_id`. The row of a successful mint stays in the caller's
+  transaction. No command row is written and the approval stays unused.
+  The refusals of other operations (unknown operation, an operation not
+  allowed for a runner, a read refused by policy) write a log line only.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
@@ -309,7 +322,7 @@ allowlist — and fail-closed when either is absent.
   (`load_runner_allowlist`) and ANDs the gate with the approval binding; an
   op-class/target off the allowlist (or no allowlist at all) →
   `MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`, before the single-use latch
-  (a refusal writes no rows / consumes no approval).
+  (a refusal writes one audit row, no command row, and uses up no approval).
 - **At the edge** — `_screen_item` re-runs the same matcher against the
   runner's **own** provisioning-config mirror (`satellite_write_allowlist`,
   parsed by `parse_runner_allowlist`), never the mint's and never a field on
@@ -721,8 +734,10 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   whose *effective* policy (`lookup_descriptor`, operator overrides applied)
   needs no approval, that is not a safe write and not a call that waits for
   a person. Else the item is dropped with a warning; hand-written items use
-  the same check. Create, edit and the Dashboard file import refuse such an
-  op for a bound Sensor (`checks/runner_binding.py::require_runner_can_run`).
+  the same check. An op that needs approval by a rule set after the Sensor was
+  created leaves the runner's list too. Create, edit and the Dashboard file
+  import refuse such an op for a bound Sensor
+  (`checks/runner_binding.py::require_runner_can_run`).
   The Dashboard file import lists every such Sensor in one answer, together
   with the other problems of the file.
 - **Only to a runner that can schedule.** The runner names what it can do in
@@ -731,6 +746,25 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   Sensor items only for a runner that names it. An older runner gets none and
   MEHO logs `assignment_sensor_items_withheld`; its checks turn `unknown`
   until it is updated. The word needs no wire version bump.
+- **A bound check that is not on the list reads `unknown`.** The central
+  check loop skips a Sensor with a `runner_name`, so MEHO records the state
+  itself when the runner does not get the Sensor. On each
+  `GET /api/v1/checks/assignment`, `materialize_assignment(left_off=...)`
+  names every active bound Sensor it left off the list, with the reason:
+  `runner_cannot_schedule` (the runner does not name `scheduled-checks`),
+  `op_requires_approval`, `op_unresolved_or_unsafe`, `op_is_write`,
+  `op_waits_for_person`, `target_unresolved`, `sensor_target_unreadable`,
+  `connector_package_set_mismatch`.
+  `runner_checks.mark_left_off_sensors` then locks the runner's row and
+  records `unknown` (`reason` `not_on_runner_list`, `why` the reason above)
+  through `_record` and `_claim`, once for each change of reason: a Sensor
+  whose last reading already names the same reason is not written again. The
+  Dashboard edge is claimed for each written Sensor, so the Dashboard mail
+  and the investigator also start when every check of the Dashboard runs on
+  that runner. A Sensor that is resumed while its runner is marked stale
+  (`checks/sensor_pause.py`) reads `unknown` with the reason `runner_stale`.
+  A reader sees the state in `meho sensor get`, REST, MCP and the Dashboard;
+  the evidence holds the reason. With the switch off none of this runs.
 - **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
   `timezone`, and `next_due_at`: the Sensor's `next_fire_at` (or its
   `created_at` when it has none), always in UTC. The runner
@@ -788,10 +822,16 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   `last_evaluated_at`. So a batch that waited for the lock never counts a
   reading at a time before one another batch already counted. `RunnerResult.produced_at`
   (the runner clock) is compared only with `sensor.runner_produced_at`, the
-  runner time of the last counted result. A `produced_at` later than
-  `received_at` is refused: not stored, outcome `future_time`, and named in
-  the answer's `refused` list (`[{result_uid, reason}]`, left out when
-  empty); the runner logs `runner_result_refused_by_central`. A result
+  runner time of the last counted result. A `produced_at` more than
+  `CLOCK_ALLOWANCE` (30 seconds) later than `received_at` is refused: not
+  stored, outcome `future_time`, and named in the answer's `refused` list
+  (`[{result_uid, reason}]`, left out when empty); the runner logs
+  `runner_result_refused_by_central`. The allowance covers the small
+  difference of two clocks that are set by network time. When every result of
+  a batch is refused, the answer is a 422 with `detail.code`
+  `results_refused` and the same list. The counter rises for a refused result
+  after the rest of the batch is stored. A refused result is counted once in
+  each MEHO process, however often its batch is sent. A result
   without `produced_at` is stored and not counted (`no_time`): without it
   MEHO cannot tell a new result from a replay. A result at or before
   `runner_produced_at` is dropped (`old`), also after the clean-up job
@@ -818,6 +858,54 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   Sensor bind creates an empty assignment row (`ensure_assignment_row`) so
   the sweeper watches a runner that has only Sensors. The next accepted
   result batch clears the marker and normal results follow.
+- **A batch that MEHO refuses every time is set aside.** The runner keeps a
+  failed batch in its retry folder and sends later results behind it. A
+  failure that can pass (no connection, a time-out, a 5xx answer, a rate
+  limit 429, a login to renew 401 or 403) leaves the batch in its place. A
+  client error that is none of these counts as a refusal. After
+  `SET_ASIDE_AFTER_TRIES` (3) refusals of the same batch, the runner moves
+  it to the `set-aside` folder inside its spool folder
+  (`runner/spool.py::ResultSpool.set_aside`), together with the HTTP status,
+  the short code of the answer and the time (never the free text of the
+  answer), and goes on with the next batch. Nothing sends a set-aside batch
+  again. The `set-aside` folder keeps at most `spool_max_files` batches:
+  before one more is set aside past the limit, the runner removes the oldest
+  set-aside batch and logs `runner_set_aside_overflow_drop` with its file
+  name, status and code. In the same tick, also while other batches wait in the retry folder,
+  the runner posts a batch without results that carries
+  `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
+  `set_aside_last_at`. One post holds at most 1,000 notices
+  (`wire.SET_ASIDE_NOTICES_MAX`); the rest go out on the next tick. When that
+  post fails, the next tick sends it again.
+  `runner_checks.record_set_aside` shows each such check
+  as `unknown` with the reason `result_refused`, the status and the code,
+  and stores the count and the time on the runner's assignment row
+  (`set_aside_count`, `set_aside_last_at`). It keeps only short, fixed
+  forms: a `result_uid` or `code` must be 1 to 64 lowercase letters, digits
+  and underscores (the runner keeps a code in the same form), and a status
+  must be 400 to 499. A notice with another `result_uid` is skipped, another
+  code is stored as no code, another status as 0, and the post still answers
+  200. MEHO reads the first 1,000 notices of a post and skips the rest
+  before it checks any notice, so a bad entry after them never changes the
+  answer; it logs `runner_set_aside_notices_skipped` with the runner and the
+  number. It keeps `set_aside_total` only as a whole number from 0 to
+  2147483647 and `set_aside_last_at` only as a date-time text with a time
+  zone; another value (also `true` or a number) leaves the stored one as it
+  is, and the post still answers 200. A notice without `produced_at` never replaces a
+  counted result. The readings, the count and the time are saved in one
+  transaction. When that save fails, MEHO keeps nothing of the notices and
+  the post answers 503 with `detail.code` `set_aside_not_saved`; the results
+  of the same post are stored before. The runner keeps its notices and sends
+  them again on the next tick. With
+  `RUNNER_CHECKS_ENABLED` on, the console page `/ui/runners` has a "Set
+  aside" column with both, and the list and get answers of
+  `/api/v1/runner-principals` hold `set_aside_count` for every runner and
+  `set_aside_last_at` only for a runner that has set a batch aside. A runner
+  that has never set a batch aside has the count `0` and no time key; no
+  answer holds the time as `null`. `meho runner-principal list` and `show`
+  print both (`-` for a missing time), and their `--json` output holds the
+  same keys as the answer. With the switch off the page has no such column
+  and the answers and the CLI output have neither field.
 - **Measure.** `runner_check_results_total{outcome}` with `counted`,
   `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
   result is added after its transaction commits, so a result that rolls
@@ -973,24 +1061,33 @@ authenticator. The lines the code follows:
     private key in `MEHO_RUNNER_KEY_DIR`; MEHO stores only the public key on
     the client, as a key set in `jwks.string`.
 
+Three facts of the key login:
+
+- MEHO stores the runner's public key set on the Keycloak client, because
+  central cannot reach the runner. (Keycloak's page recommends a JWKS URL.)
+- The client's "Max expiration" setting is not set. The runner's signed
+  request lives 60 seconds, which equals Keycloak's default.
+- Replay protection of the request id (`jti`) is on Keycloak's side.
+
 The system it is proven on: the live test
 `backend/tests/integration/test_runner_key_login_keycloak.py` runs in CI
 against the Keycloak image `keycloak/keycloak:26.0` (the value of
-`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). The proof on an
-operator's own Keycloak comes with a later step on a real install.
+`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). It was proven on
+the Keycloak image `keycloak/keycloak:26.0` of the CI live test.
 
 **The key file.** `runner/login.py::_read_key_file` checks the mode of the
 open key file before it reads the key. Any right for the group or for
 other users (any of the last six mode bits) stops the runner with a
 `RunnerLoginError` that names the file and its mode, says to set mode `0600`
 and names the docs page; no request is sent. Any other mode works (for example
-`0600` and `0400`). From the Kubernetes docs
-([Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)):
-In a Kubernetes pod with
-`fsGroup`, Kubernetes can add group rights to the key file at each mount, and
-the runner then stops. Mount the key so that it keeps mode `0600`: set no
-`fsGroup` for that pod, or set `fsGroupChangePolicy: OnRootMismatch`, or use a
-volume driver that does not change file rights.
+`0600` and `0400`). In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key
+file at each mount, and the runner then stops. Mount the key so that it keeps
+mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does
+not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode
+only when the top folder of the volume already has the `fsGroup` group and the
+rights Kubernetes expects. When it does not, Kubernetes changes the rights of
+every file in the volume, and the runner stops (see
+[Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
 
 **Register.** Only a person with `tenant_admin` can register a runner, because
 the answer carries the enrollment code. A service login or an agent login

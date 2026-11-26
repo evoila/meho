@@ -29,7 +29,7 @@ which is why this is the first guide.
 | Path | What it is | When to use it |
 |---|---|---|
 | **CLI — `meho targets import`** | Bulk-import from a `targets.yaml` file you keep in version control. | The canonical path. Your target registry becomes a reviewable, re-runnable file. |
-| **Operator console — `/ui/connectors`** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
+| **Operator console — "Targets" in the menu (`/ui/connectors`)** | Create/edit forms plus a paste-or-upload `targets.yaml` import with a preview table. | Console-first operators. Produces byte-identical writes to the CLI import. |
 | **REST — `POST /api/v1/targets`** | The API the other two paths call. | Scripts that a person runs with their own login. |
 
 Create, edit and delete on REST are for people only. A service login
@@ -55,8 +55,14 @@ scope also has `meho_targets_register` and `meho_targets_update`
 (tenant_admin only). Through `call_operation`, the connector
 `targets-registry-1.x` offers `targets.register`, `targets.update`,
 `targets.remove` and `targets.probe`; every register and every update
-waits for a person's approval, and `targets.remove` always waits for one. MEHO has no MCP tool to stage a secret. This is also why
-the CLI is worth installing before your first agent session.
+waits for a person's approval, and `targets.remove` always waits for one.
+
+MEHO has no MCP tool to stage a secret, on purpose: a password must
+never pass through an agent or a model. A person stores it with the
+CLI or the web console (see
+[Store the credential through MEHO](#store-the-credential-through-meho)).
+This is also why the CLI is worth installing before your first agent
+session.
 
 ## Write a `targets.yaml`
 
@@ -282,19 +288,103 @@ tenants/<tenant-id>/<target-name>
 
 If you omit `secret_ref` at registration, **the server derives exactly
 that path for you**. The reliable recipe is therefore: register first,
-read the derived reference back, then stage the secret at it.
+read the derived reference back, then store the secret at it through MEHO.
 
-```bash
-# 1. After import, read the derived reference:
-meho targets describe lab-vcenter
-#   ...
-#   secret_ref:        tenants/4f6f6f6f-.../lab-vcenter
+#### Store the credential through MEHO
 
-# 2. Stage the credential there with your own Vault tooling.
-#    The Vault CLI addresses the *wire* path, which prepends the mount:
-vault kv put secret/tenants/4f6f6f6f-.../lab-vcenter \
-  username=svc-meho password='...'
-```
+MEHO stores the credential for you. The write uses the operation
+`vault.kv.put`. It has the risk level `caution`, and **it always waits for
+a person's approval.** No grant and no run approval covers it. While it
+waits, MEHO keeps the value encrypted. The audit row keeps only a hash of
+it, never the value. This recipe is for installs that use Vault or the
+built-in OpenBao. It is not for Google Secret Manager (see below).
+
+1. Read the derived reference:
+
+    ```bash
+    meho targets describe lab-vcenter
+    #   ...
+    #   secret_ref:        tenants/4f6f6f6f-.../lab-vcenter
+    ```
+
+2. Make a new, empty file that only you can read:
+
+    ```bash
+    CREDS="$(mktemp)"
+    ```
+
+    `mktemp` always makes a new file with a new name, readable only by
+    you. It never reuses an old file. Then open the file `$CREDS` in an
+    editor and write the credential. The password stays out of your shell
+    history:
+
+    ```json
+    {"username": "svc-meho", "password": "<password>"}
+    ```
+
+    Save the file.
+
+3. Send it. Use the mount `secret` and the `secret_ref` from step 1:
+
+    ```bash
+    meho vault kv put secret tenants/4f6f6f6f-.../lab-vcenter --data @"$CREDS"
+    # → status: awaiting_approval
+    #   approval id: 4b1c… — inspect with: meho approvals show 4b1c…
+    ```
+
+    You need no `--target` for this. MEHO logs in to Vault with your own
+    token. The `--data` flag reads a file with `@<file>`. It does not read
+    standard input, and you should never put the password in the command
+    itself. If MEHO refuses the path, check that the mount is `secret` and
+    that the path is the `secret_ref` from step 1.
+
+4. A person approves the request. When they approve, MEHO runs the
+   write with **the approver's** Vault rights, not yours. MEHO also
+   checks your own write rights before the request waits. So both of
+   you need the right to write the exact path from step 1.
+
+    - **On the built-in OpenBao (the default install):** a tenant
+      operator (`MEHO-Operators`) may write only under
+      `tenants/<tenant-id>/rotation/`. They cannot write the target's
+      path. So use a tenant admin (`MEHO-Admins`) for both steps: an
+      admin sends the request, and an admin approves it. If you are the
+      only admin, you may approve your own request with a click in the
+      web console, or on the command line after a fresh sign-in. See
+      [Approve on the command line](approvals-and-break-glass.md#approve-on-the-command-line).
+    - **On your own Vault:** the Vault policies of both people must allow
+      a write on the exact path. MEHO's own rules on who may approve
+      still hold: see
+      [Who may approve](approvals-and-break-glass.md#who-may-approve).
+      The write also needs the approval hand-off key. See
+      [The approval hand-off key](../install/index.md#the-approval-hand-off-key).
+
+    On the command line, use the approval id from step 3:
+
+    ```bash
+    meho approvals approve 4b1c…
+    ```
+
+    Approving runs the write at once. No second step follows.
+
+5. Delete the file after the write is done:
+
+    ```bash
+    rm -f "$CREDS"
+    ```
+
+    If the request was rejected, nothing was stored. Delete the file
+    anyway. Fix the cause the person gave, make the file again (step 2)
+    and send it again (step 3).
+
+**The same in the web console.** Open the page **Vault** (`/ui/vault`),
+press **Write secret**, and fill in the mount `secret`, the path from
+step 1, and the JSON body. The form shows that the write waits for
+approval. Approve it on the page **Approvals**.
+
+!!! warning "An agent must not send a password"
+    Never send a password through `call_operation` or any other agent
+    tool. The value would pass through the model. Store the credential
+    yourself, as above.
 
 The two path notations trip everyone once, so:
 
@@ -321,10 +411,19 @@ Rules the backplane enforces:
   connector's onboarding notes
   ([`docs/cross-repo/`](https://github.com/evoila/meho/tree/main/docs/cross-repo)).
 
+The `--data` file is a JSON object, so the kubeconfig text goes into
+one JSON string. This one-liner builds the file from a kubeconfig
+without printing it:
+
 ```bash
 # Kubernetes example — one field, whole kubeconfig as the value:
-vault kv put secret/tenants/<tenant-id>/lab-rke2 \
-  kubeconfig=@rke2-kubeconfig.yaml
+# mktemp makes a new file that only you can read.
+CREDS="$(mktemp)"
+python3 -c 'import json,sys; print(json.dumps({"kubeconfig": open(sys.argv[1]).read()}))' \
+  rke2-kubeconfig.yaml > "$CREDS"
+meho vault kv put secret tenants/<tenant-id>/lab-rke2 --data @"$CREDS"
+# After the request is approved and the write is done:
+rm -f "$CREDS"
 ```
 
 ### Google Secret Manager (`credentialBackend: gsm`)
@@ -624,7 +723,7 @@ Real failure modes, with the errors they actually produce:
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. |
+| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. On a Linux server (install form 2), run `sudo meho-host target-networks <list>` instead ([The target networks](../install/form-2-linux-server.md#the-target-networks)). |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
 | 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |
@@ -632,7 +731,7 @@ Real failure modes, with the errors they actually produce:
 | Probe exits with 501 — *"no connector registered for product=…"* | The target row is fine; no connector serves that product on this backplane version. Any cached fingerprint is left untouched. | Check the [connector catalog](https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-catalog.md) for your version; for spec-ingested (generic) connectors, ingest one first. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…has a KV-v2 API-path-shaped secret_ref…"* | Your ref embeds the mount or a `data/` segment (`secret/data/…`). | Store the logical path only: `tenants/<tenant-id>/<name>`. |
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |
-| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run `meho targets update <name> --secret-ref <path>`. If the error says it is not the target's own `secret_ref`, check the path the operation names. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422. |
+| Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | Store the credential at the expected path with `meho vault kv put secret <path> --data @creds.json` ([recipe](#store-the-credential-through-meho)). If the error says the ref is the default path MEHO builds from the target name, this install does not let MEHO read that path: store the credential at a path MEHO may read, then run `meho targets update <name> --secret-ref <path>`. If the error says it is not the target's own `secret_ref`, check the path the operation names. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. A probe answers the same error with a 422. |
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
 | Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |

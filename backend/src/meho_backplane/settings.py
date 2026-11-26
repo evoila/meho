@@ -1745,6 +1745,12 @@ class Settings(BaseModel):
         nothing is stored or checked, MEHO reads no binding, and today's
         rule decides who may approve. Env ``POLICY_APPROVER_ROUTING``; Helm
         ``config.policy.approverRouting``.
+    custom_policy:
+        Off by default. The one switch of the custom policy model. When
+        on, the three switches above count as on
+        (:mod:`meho_backplane.policy.switches`); each of them still works
+        alone. When off, the three parts follow their own switches.
+        Env ``CUSTOM_POLICY``; Helm ``config.policy.customPolicy``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -2713,6 +2719,7 @@ class Settings(BaseModel):
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
     policy_approver_routing: bool = False
+    custom_policy: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Absolute URL of the external vendor-document corpus search
     #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
     #: forwarded operator JWT. Empty ("") means the add-on is not
@@ -3989,6 +3996,9 @@ def get_settings() -> Settings:
         ),
         policy_approver_routing=parse_bool_env(
             os.environ.get("POLICY_APPROVER_ROUTING"),
+        ),
+        custom_policy=parse_bool_env(
+            os.environ.get("CUSTOM_POLICY"),
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),

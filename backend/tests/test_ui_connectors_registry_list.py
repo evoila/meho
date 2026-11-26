@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the Connector Registry list surface.
+"""Behavioural tests for the connector registry list surface.
 
 Initiative #1839 (G10.13 Connector ingest & curation registry UI),
 Task #1885 (T1). Covers the ``GET /ui/connectors/registry`` role-scoped
@@ -43,6 +43,7 @@ resolve through the dispatcher).
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -79,6 +80,7 @@ from meho_backplane.ui.auth.session_store import (
     reset_fernet_cache_for_testing,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
+from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
@@ -368,6 +370,29 @@ def test_registry_list_renders_rows() -> None:
     # Tenant B's distinctive "2/2 ops enabled" signature must NOT leak into
     # tenant A's view -- the row tenant A sees carries only its own counts.
     assert "ops: 2 / 2" not in body
+
+
+def test_registry_page_says_connectors_and_keeps_maturity_badge() -> None:
+    """The page title and heading say "Connectors"; the badge key is unchanged."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/connectors/registry")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "<title>Connectors" in body
+    assert re.search(r"<h1[^>]*>\s*Connectors", body)
+    assert "Connector Registry" not in body
+    badge = surface_maturity("connectors-registry")
+    if badge is not None:
+        assert badge["label"] in body
 
 
 def test_registry_filter_form_triggers_on_any_select_change() -> None:

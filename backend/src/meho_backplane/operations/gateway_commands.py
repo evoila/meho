@@ -50,8 +50,10 @@ owns the commit so the mint (or consume + record + audit) lands atomically
 
 from __future__ import annotations
 
+import functools
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -86,6 +88,7 @@ from meho_backplane.gateway.queue import (
     enqueue_command,
     record_result,
 )
+from meho_backplane.operations._audit import resolve_audit_session_id
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -146,6 +149,7 @@ __all__ = [
 _AUDIT_METHOD = "GATEWAY"
 _MINT_AUDIT_PATH = "gateway.command.mint"
 _MINT_AUDIT_STATUS = 202
+_MINT_REFUSED_AUDIT_STATUS = 403
 _RESULT_AUDIT_PATH = "gateway.command.result"
 _RESULT_AUDIT_STATUS = 200
 
@@ -183,7 +187,9 @@ class MintRefusalCode(StrEnum):
     signing key is not provisioned (#3189); ``RUNNER_REVOKED`` is the
     write-tier revocation refusal (#3192, the Stage-3 gate) — a revoked runner
     gets no new ``remote-write`` mint, checked before the composed gate so a
-    revoked runner reads the specific refusal; ``POLICY_DENIED`` /
+    revoked runner reads the specific refusal; ``ASKER_BLOCKED`` refuses a
+    mint while the login that asked is blocked, and ``ASKER_BLOCK_UNREADABLE``
+    refuses it when the block list cannot be read; ``POLICY_DENIED`` /
     ``NEEDS_APPROVAL`` are the policy-gate verdicts that are not
     ``AUTO_EXECUTE``.
     """
@@ -197,6 +203,7 @@ class MintRefusalCode(StrEnum):
     REMOTE_WRITE_SIGNING_UNAVAILABLE = "remote_write_signing_unavailable"
     RUNNER_REVOKED = "runner_revoked"
     ASKER_BLOCKED = "asker_blocked"
+    ASKER_BLOCK_UNREADABLE = "asker_block_unreadable"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -208,13 +215,19 @@ class MintResult:
     On a successful mint, :attr:`command` and :attr:`mint_audit_id` are set
     and :attr:`refusal_code` is ``None``. On a refusal, :attr:`command` is
     ``None`` and :attr:`refusal_code` / :attr:`refusal_reason` explain why
-    — no command row and no approval row were written.
+    — no command row is written and no approval is used up. A refused
+    remote-write mint also writes one audit row. The mint commits that row
+    itself, in its own session, so it stays stored when the caller rolls
+    back. :attr:`refusal_audit_id` names that stored row. It is ``None``
+    when the row could not be written; the mint refuses all the same.
+    The row of a successful mint stays in the caller's transaction.
     """
 
     command: GatewayCommand | None = None
     mint_audit_id: uuid.UUID | None = None
     refusal_code: MintRefusalCode | None = None
     refusal_reason: str | None = None
+    refusal_audit_id: uuid.UUID | None = None
 
     @property
     def minted(self) -> bool:
@@ -227,15 +240,16 @@ def _refused(code: MintRefusalCode, reason: str) -> MintResult:
     return MintResult(refusal_code=code, refusal_reason=reason)
 
 
-def _refuse_remote_write(
+async def _refuse_remote_write(
     code: MintRefusalCode,
     reason: str,
     *,
     op_id: str,
     operator: Operator,
     runner_id: str,
+    approval_request_id: uuid.UUID | None,
 ) -> MintResult:
-    """Log + build a fail-closed ``remote-write`` mint refusal (no rows written)."""
+    """Log, audit and build a fail-closed ``remote-write`` mint refusal."""
     structlog.get_logger(__name__).warning(
         "gateway_command_mint_refused_remote_write",
         reason=code.value,
@@ -243,7 +257,73 @@ def _refuse_remote_write(
         operator_sub=operator.sub,
         runner_id=runner_id,
     )
-    return _refused(code, reason)
+    return await _audit_remote_write_refusal(
+        code,
+        reason,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
+
+
+async def _audit_remote_write_refusal(
+    code: MintRefusalCode,
+    reason: str,
+    *,
+    op_id: str,
+    operator: Operator,
+    runner_id: str,
+    approval_request_id: uuid.UUID | None,
+) -> MintResult:
+    """Write the one audit row of a refused ``remote-write`` mint and build the refusal.
+
+    The row is a ``policy_decision`` row in the caller's tenant. The mint
+    writes it in its own session and commits it, so the row stays stored
+    when the caller rolls back. It carries the session id of the call. It
+    names the caller, the approval request id the caller sent, the runner,
+    the operation and the refusal code. It holds no params. No command row
+    is written.
+
+    When the write or its commit fails, the failure is logged and the mint
+    still refuses with *code*; the result then has no
+    :attr:`MintResult.refusal_audit_id`.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    payload: dict[str, Any] = {
+        "op_id": op_id,
+        "runner_id": runner_id,
+        "caller_sub": operator.sub,
+        "result_status": code.value,
+    }
+    if approval_request_id is not None:
+        payload["approval_request_id"] = str(approval_request_id)
+    audit_id = uuid.uuid4()
+    try:
+        async with get_sessionmaker()() as audit_session:
+            await _write_gateway_audit_row(
+                audit_session,
+                audit_id=audit_id,
+                operator=operator,
+                path=_MINT_AUDIT_PATH,
+                status_code=_MINT_REFUSED_AUDIT_STATUS,
+                duration_ms=0.0,
+                payload=payload,
+                event_class=AuditEventClass.POLICY_DECISION,
+                agent_session_id=resolve_audit_session_id(),
+            )
+            await audit_session.commit()
+    except Exception:
+        structlog.get_logger(__name__).exception(
+            "gateway_command_mint_refusal_audit_failed",
+            reason=code.value,
+            op_id=op_id,
+            operator_sub=operator.sub,
+            runner_id=runner_id,
+        )
+        return MintResult(refusal_code=code, refusal_reason=reason)
+    return MintResult(refusal_code=code, refusal_reason=reason, refusal_audit_id=audit_id)
 
 
 async def _runner_is_revoked(
@@ -276,10 +356,11 @@ def _refuse_unvalidatable_params(
     params: dict[str, Any],
     op_id: str,
     operator_sub: str,
-) -> MintResult | None:
+) -> tuple[MintRefusalCode, str] | None:
     """Mint ladder Step 3: refuse when params fail — or cannot be — validated.
 
-    ``None`` means the params validated cleanly and the ladder proceeds.
+    ``None`` means the params validated cleanly and the ladder proceeds;
+    otherwise the refusal code and reason.
     Two refusal shapes, distinguished because the fault differs:
 
     * :attr:`MintRefusalCode.INVALID_PARAMS` — the caller's params
@@ -299,7 +380,7 @@ def _refuse_unvalidatable_params(
             operator_sub=operator_sub,
             missing_ref=exc.missing_ref,
         )
-        return _refused(
+        return (
             MintRefusalCode.INVALID_OP_SCHEMA,
             f"stored parameter_schema for op {op_id!r} contains an "
             f"unresolvable $ref ({exc.missing_ref}); re-ingest the "
@@ -312,7 +393,7 @@ def _refuse_unvalidatable_params(
             op_id=op_id,
             operator_sub=operator_sub,
         )
-        return _refused(
+        return (
             MintRefusalCode.INVALID_PARAMS,
             f"params failed schema validation for op {op_id!r}",
         )
@@ -330,6 +411,8 @@ async def _write_gateway_audit_row(
     payload: dict[str, Any],
     target_id: uuid.UUID | None = None,
     parent_audit_id: uuid.UUID | None = None,
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
+    agent_session_id: uuid.UUID | None = None,
 ) -> None:
     """Insert one synchronous ``audit_log`` row for a gateway command event.
 
@@ -344,12 +427,13 @@ async def _write_gateway_audit_row(
     """
     row = AuditLog(
         id=audit_id,
-        event_class=AuditEventClass.OPERATION_EXECUTION,
+        event_class=event_class,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         tenant_id=operator.tenant_id,
         target_id=target_id,
         parent_audit_id=parent_audit_id,
+        agent_session_id=agent_session_id,
         method=_AUDIT_METHOD,
         path=path,
         status_code=status_code,
@@ -448,7 +532,8 @@ async def mint_gateway_command(
 
     Returns:
         A :class:`MintResult` — minted (``command`` + ``mint_audit_id`` set)
-        or refused (``refusal_code`` set, no rows written).
+        or refused (``refusal_code`` set, no command row written; a refused
+        remote-write mint also writes one audit row).
     """
     started = time.monotonic()
     product, version, impl_id = parse_connector_id(connector_id)
@@ -475,19 +560,30 @@ async def mint_gateway_command(
         )
 
     # --- Step 3: parameter_schema validation -----------------------------
+    # Classified first so a refused remote-write call (also one with invalid
+    # params) writes its audit row; the order of the refusals is unchanged.
+    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
+    audit_refusal = functools.partial(
+        _audit_remote_write_refusal,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
     params_refusal = _refuse_unvalidatable_params(
         descriptor=descriptor, params=params, op_id=op_id, operator_sub=operator.sub
     )
     if params_refusal is not None:
-        return params_refusal
+        if tier is SatelliteMintTier.REMOTE_WRITE:
+            return await audit_refusal(*params_refusal)
+        return _refused(*params_refusal)
 
     # --- Satellite-mint tier ladder (#3188) ------------------------------
     # The safe-only wall generalised, bound to the real op-identity metadata
-    # read straight off the descriptor (dispatcher.py:1772). Classified against
-    # the single source of truth shared with the edge executor and the
+    # read straight off the descriptor (dispatcher.py:1772). ``tier`` above is
+    # classified against the single source of truth shared with the edge executor and the
     # assignment materialiser (defence in depth), before the policy gate so a
     # refused op is never parked.
-    tier = classify_satellite_tier(descriptor.safety_level, op_id=op_id)
     if tier is SatelliteMintTier.EXCLUDED:
         # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
@@ -520,7 +616,7 @@ async def mint_gateway_command(
                 operator_sub=operator.sub,
                 runner_id=runner_id,
             )
-            return _refused(
+            return await audit_refusal(
                 MintRefusalCode.RUNNER_REVOKED,
                 f"runner {runner_id!r} is revoked; no remote-write capability "
                 "is minted to a revoked runner",
@@ -610,30 +706,28 @@ async def _asker_block_refusal(
     *,
     op_id: str,
     operator: Operator,
-    runner_id: str,
+    refuse: Callable[[MintRefusalCode, str], Awaitable[MintResult]],
 ) -> MintResult | None:
-    """Refuse the mint when the login that asked is blocked, as a resume does.
+    """Refuse the mint when the login that asked is blocked.
 
-    A block list that cannot be read refuses the mint too.
+    The mint stays refused and the approval stays unused: no claim is taken.
+    *refuse* is :func:`_refuse_remote_write` with the call's values filled in,
+    so one audit row records the refusal. A blocked login gets
+    ``ASKER_BLOCKED``; a block list that cannot be read gets
+    ``ASKER_BLOCK_UNREADABLE``.
     """
     try:
         blocked = await is_principal_blocked(operator.sub, operator.tenant_id)
     except PrincipalBlockUnavailableError:
-        return _refuse_remote_write(
-            MintRefusalCode.ASKER_BLOCKED,
+        return await refuse(
+            MintRefusalCode.ASKER_BLOCK_UNREADABLE,
             f"remote-write op {op_id!r} refused: the block list could not be read",
-            op_id=op_id,
-            operator=operator,
-            runner_id=runner_id,
         )
     if not blocked:
         return None
-    return _refuse_remote_write(
+    return await refuse(
         MintRefusalCode.ASKER_BLOCKED,
         f"remote-write op {op_id!r} refused: {PRINCIPAL_BLOCKED_MESSAGE}",
-        op_id=op_id,
-        operator=operator,
-        runner_id=runner_id,
     )
 
 
@@ -654,13 +748,21 @@ async def _screen_remote_write(
 
     1. The named approval of this asker matches op, target and params:
        ``REMOTE_WRITE_GATE_UNSATISFIED``.
-    2. The asker is not blocked, and the block list can be read: ``ASKER_BLOCKED``.
+    2. The asker is not blocked (``ASKER_BLOCKED``) and the block list can be read
+       (``ASKER_BLOCK_UNREADABLE``).
     3. The signing key is set up: ``REMOTE_WRITE_SIGNING_UNAVAILABLE``.
     4. The runner allowlist has the op class and target, by the matcher the
        runner runs too: ``REMOTE_WRITE_NOT_ALLOWLISTED``.
     """
     from meho_backplane.settings import get_settings
 
+    refuse = functools.partial(
+        _refuse_remote_write,
+        op_id=op_id,
+        operator=operator,
+        runner_id=runner_id,
+        approval_request_id=approval_request_id,
+    )
     raw_target_id = getattr(target, "id", None) if target is not None else None
     target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
 
@@ -683,18 +785,13 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
                 approval_refusal,
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
             ),
         )
 
-    blocked_refusal = await _asker_block_refusal(
-        op_id=op_id, operator=operator, runner_id=runner_id
-    )
+    blocked_refusal = await _asker_block_refusal(op_id=op_id, operator=operator, refuse=refuse)
     if blocked_refusal is not None:
         return None, None, blocked_refusal
 
@@ -704,12 +801,9 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE,
                 f"remote-write op {op_id!r} refused: {exc}",
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
             ),
         )
 
@@ -727,16 +821,30 @@ async def _screen_remote_write(
         return (
             None,
             None,
-            _refuse_remote_write(
+            await refuse(
                 MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED,
                 gate.reason,
-                op_id=op_id,
-                operator=operator,
-                runner_id=runner_id,
             ),
         )
 
     return approval, signing_key, None
+
+
+async def _sqlite_driver_without_writes(session: AsyncSession) -> Any | None:
+    """Return the SQLite driver connection when the caller has written nothing yet.
+
+    Pending rows of the caller are flushed first, so a driver connection
+    that is not in a transaction holds no caller work. Returns ``None`` on
+    any other database, or when the caller's transaction has writes.
+    """
+    await session.flush()
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return None
+    driver = (await connection.get_raw_connection()).driver_connection
+    if driver is None or driver.in_transaction:
+        return None
+    return driver
 
 
 async def _mint_remote_write(
@@ -761,8 +869,7 @@ async def _mint_remote_write(
     key + the per-runner allowlist) **before** the single-use latch: the tier is
     satisfiable only when **both** the committed approval **and** the allowlist
     pass, and either absent fails closed. The human approval decision is the
-    authorization (policy gate bypassed for this tier, the mould of
-    ``approve_request``'s ``_approved=True`` re-dispatch); on a win the capability
+    authorization (the policy gate does not run for this tier); on a win the capability
     is **signed** for offline edge verification, and the same allowlist matcher is
     re-run at the DB-free edge (``executor._screen_item``), defence in depth.
     """
@@ -782,14 +889,21 @@ async def _mint_remote_write(
     # _screen_remote_write); claim the single-use latch only now the mint is
     # certain to proceed. A racing mint that already claimed this approval loses
     # (touches zero rows), so an approval binds at most one capability.
+    sqlite_driver = await _sqlite_driver_without_writes(session)
     if not await consume_remote_write_approval(session, approval):
-        return _refuse_remote_write(
+        if sqlite_driver is not None:
+            # On SQLite the lost claim's zero-row UPDATE holds the database
+            # write lock, and the refusal audit row is written in its own
+            # session. The UPDATE changed nothing, so end its transaction.
+            await sqlite_driver.rollback()
+        return await _refuse_remote_write(
             MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
             f"remote-write op {op_id!r} refused: the binding approval "
             f"{approval.id} was already consumed by a concurrent mint",
             op_id=op_id,
             operator=operator,
             runner_id=runner_id,
+            approval_request_id=approval_request_id,
         )
 
     # Keep custody cleanup in the caller-owned mint transaction: a rollback

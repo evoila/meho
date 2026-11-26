@@ -18,10 +18,9 @@ const approvalSignInCheckName = "approval sign-in"
 const approvalFlowDocs = "https://evoila.github.io/meho/install/keycloak-realm/#add-the-approval-flow-to-a-running-realm-through-meho"
 
 // approvalFlowFix is the fix for a missing flow or binding.
-const approvalFlowFix = "a Keycloak admin runs the operation keycloak.authflow.ensure_approval_flow " +
-	"on the Keycloak target; another admin approves it, never the person who asked, so the install " +
-	"needs two admins first (add the second one in Keycloak itself); with the built-in Keycloak, " +
-	"`helm upgrade` does it too; see " + approvalFlowDocs
+const approvalFlowFix = "a platform admin runs the operation keycloak.authflow.ensure_approval_flow " +
+	"on the Keycloak target in the web console; asked with a token, a second platform admin " +
+	"approves it; with the built-in Keycloak, `helm upgrade` does it too; see " + approvalFlowDocs
 
 // approvalLevelCheckName names the doctor line for the approval level.
 const approvalLevelCheckName = "approval level"
@@ -108,11 +107,11 @@ const secondAdminCheckName = "second admin"
 // rightsChangeGuide is the guide part that explains who approves a change of rights.
 const rightsChangeGuide = "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
 
-// addSecondAdminCheck adds one line that says whether a change of rights
-// can be approved in the tenant: another admin must approve it, never the
-// person who asked (approvals.rights_change_admins in /api/v1/health,
-// #6641). One admin is a warning. A backplane that does not report the
-// count, or that cannot count the admins, gets no line.
+// addSecondAdminCheck adds one line with the number of admins of the tenant
+// (approvals.rights_change_admins in /api/v1/health). One admin is a
+// warning: some changes of rights in MEHO's own login realm need a platform
+// admin other than the person who asked. A backplane that does not report
+// the count, or that cannot count the admins, gets no line.
 func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
 	if h.Approvals == nil || h.Approvals.RightsChangeAdmins == nil {
 		return
@@ -120,8 +119,9 @@ func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
 	n := *h.Approvals.RightsChangeAdmins
 	if n == 1 {
 		r.add(authed(secondAdminCheckName, doctorWarn, "",
-			"This change needs a second admin to approve it. This tenant has only one admin.",
-			"add a second admin in Keycloak (in MEHO-Admins or MEHO-Platform-Admins); see "+rightsChangeGuide))
+			"This tenant has only one admin. Some changes of rights in MEHO's own login realm "+
+				"need a platform admin other than the person who asked.",
+			"add a second platform admin in Keycloak (in MEHO-Platform-Admins); see "+rightsChangeGuide))
 		return
 	}
 	if n > 1 {

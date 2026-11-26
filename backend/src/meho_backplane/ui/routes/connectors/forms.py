@@ -268,7 +268,7 @@ async def render_edit_modal(
 def _build_form_context(csrf_token: str, *, mode: str) -> dict[str, object]:
     """Build the template context shared by the create + edit modals."""
     return {
-        "page_title": "Connectors",
+        "page_title": "Targets",
         "active_surface": "connectors",
         "csrf_token": csrf_token,
         "mode": mode,

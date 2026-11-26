@@ -28,8 +28,8 @@
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
   {# ---------- Breadcrumb + header ---------- #}
-  {# The sidebar entry stays "Connectors" (route + label parity); the
-     page-level breadcrumb + heading use the backend taxonomy "Targets"
+  {# The sidebar entry says "Targets" (the web address stays
+     /ui/connectors); the page-level breadcrumb + heading use the backend taxonomy "Targets"
      so an operator clicking into a row sees they're inspecting a
      **target** (deployed instance), not a **connector** (typed class).
      G0.15-T10 #1218 / Option B in the issue body. #}

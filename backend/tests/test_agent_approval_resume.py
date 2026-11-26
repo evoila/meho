@@ -899,6 +899,7 @@ async def test_decision_landing_mid_wait_is_returned() -> None:
     assert decision == "approved"
 
 
+@pytest.mark.slow_runner_tolerant
 async def test_poll_interval_bounds_the_gap_between_stored_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -909,7 +910,16 @@ async def test_poll_interval_bounds_the_gap_between_stored_reads(
     monkeypatch.setattr(approval_wait_module, "_POLL_SECONDS", poll_s)
     request = await _park_request(requester=_make_operator())
     read_times = _record_stored_read_times(monkeypatch)
-    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.EXPIRED, 0.3))
+
+    async def _expire_after_three_reads() -> None:
+        # Three reads start before the change, also when each read is slow,
+        # so there are always at least two gaps to measure.
+        await asyncio.sleep(0.3)
+        while len(read_times) < 3:
+            await asyncio.sleep(0.01)
+        await _set_status(request.id, ApprovalRequestStatus.EXPIRED)
+
+    flip = asyncio.create_task(_expire_after_three_reads())
 
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=5.0
@@ -920,7 +930,11 @@ async def test_poll_interval_bounds_the_gap_between_stored_reads(
     gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
     assert len(gaps) >= 2
     # Each read takes a few milliseconds itself; allow for that and jitter.
-    assert max(gaps) < poll_s + 0.1
+    check_time_limit(
+        max(gaps),
+        poll_s + 0.1,
+        f"the longest gap between two stored reads was {max(gaps):.3f} s",
+    )
 
 
 @pytest.mark.slow_runner_tolerant

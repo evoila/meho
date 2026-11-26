@@ -759,7 +759,7 @@ data:
   # in the Deployment template.
   KEYCLOAK_ISSUER_URL: "https://keycloak.example.test/realms/meho"
   KEYCLOAK_AUDIENCE: "meho-backplane"
-  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id surfaced
+  # Public OAuth client_id surfaced
   # to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`.
   # Unconditionally emitted so the env-var contract stays stable
   # across deploys; when the operator hasn't wired the value the
@@ -840,8 +840,7 @@ data:
   # under it via `extraVolumes`, or repoint `config.kbIngestRoot` to
   # wherever the content lives.
   KB_INGEST_ROOT: "/opt/meho/kb-ingest"
-  # Issue #730 (Signal #3, RDC dogfood 2026-05-20). Restricts the
-  # connecting peers uvicorn trusts as upstream proxies when parsing
+  # Restricts the connecting peers uvicorn trusts as upstream proxies when parsing
   # `X-Forwarded-Proto` / `X-Forwarded-For`. uvicorn reads
   # `FORWARDED_ALLOW_IPS` natively — equivalent to the
   # `--forwarded-allow-ips` CLI flag (omitted from the Dockerfile CMD
@@ -954,6 +953,9 @@ data:
   # routing section, and the policy file's bindings give login groups a
   # group kind and categories. Off by default.
   POLICY_APPROVER_ROUTING: "false"
+  # The one switch of the custom policy model. With it on, the three
+  # switches above count as on. Off by default.
+  CUSTOM_POLICY: "false"
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep off, once a week when on).

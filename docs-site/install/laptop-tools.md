@@ -157,8 +157,11 @@ Every file is also signed with cosign. To check the signature too, see
 meho login https://meho.example.com
 ```
 
-The command prints a web address and a code. Open the address in your
-browser, enter the code and log in. Then check the connection:
+The command prints a web address and a short code. Open the address on
+any device with a browser, enter the code and log in. No browser opens
+on the machine where the CLI runs, and the browser does not send you
+back to the CLI: the CLI sees the login by itself. Then check the
+connection:
 
 ```bash
 meho status

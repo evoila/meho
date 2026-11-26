@@ -19,7 +19,7 @@ for approval, and an approver who decides it. Each profile keeps its
 own login, so you do not log in again each time you switch.
 
 ```bash
-# Once for each identity (sign in as that person in the browser):
+# Once for each identity (enter the printed code in a browser and sign in as that person):
 meho login https://meho.example.com --profile initiator
 meho login https://meho.example.com --profile approver
 
@@ -133,7 +133,9 @@ The Makefile also exposes the convenience target from the repo root
 ```bash
 ./bin/meho login https://meho.example.com
 # ...prints a verification URL + user_code; open the URL on any
-# device with a browser, sign in, approve, and the CLI completes.
+# device with a browser, enter the user_code, sign in and approve.
+# No browser opens on this machine and nothing is sent back to the
+# CLI: it waits and sees the login by itself.
 ```
 
 Tokens persist to the OS keyring by default (Keychain on macOS,

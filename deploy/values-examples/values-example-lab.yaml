@@ -6,10 +6,15 @@
 # The *actual* values-site.yaml is environment-private and lives in
 # the operator's own repo. This file is a SANITIZED EXAMPLE
 # that other operators copy as a template: no real secrets, no real
-# CIDRs, and every site-specific field uses a `<REPLACE: ...>`
+# CIDRs, and most site-specific fields use a `<REPLACE: ...>`
 # placeholder so a forgotten substitution fails values.schema.json
 # validation at `helm install` time instead of CrashLoopBackOff'ing
-# silently against the wrong system.
+# silently against the wrong system. Some fields have no marker: they
+# hold example values that the chart accepts, for example `ingress.host`,
+# the Vault and PostgreSQL addresses, `config.forwardedAllowIps` and the
+# private ranges a target may use. Check every value before you install,
+# not only the marked ones. Replace `config.forwardedAllowIps` with your
+# ingress controller's own address.
 #
 # See `deploy/values-examples/README.md` for the substitution recipe
 # and the External Secrets Operator (ESO) sync patterns the chart
@@ -142,20 +147,19 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
-  # Reverse-proxy trust list (consumer feedback). uvicorn's
-  # default `127.0.0.1` fails-closed in-cluster — the Ingress
-  # controller's pod IP is never the loopback.
+  # Reverse-proxy trust list. uvicorn's default `127.0.0.1` fails closed
+  # in a cluster: the ingress controller's pod address is never the loopback.
   # SECURITY BASELINE (narrow forwarded-header trust). Trust `X-Forwarded-*`
-  # ONLY from the ingress controller's own source address — a `/32` or the
-  # tightest slice you have subnetted the controller onto — NOT the whole
-  # pod CIDR. The wide `10.42.0.0/16` below is the lab convenience value; on
-  # a shared or multi-tenant cluster it lets any in-cluster workload forge
-  # the client address, so narrow it. Recover the controller address with
+  # ONLY from the ingress controller's own address, as a `/32`. Never the
+  # whole pod network and never `*`: then any workload that can reach the
+  # backplane can send a false client address.
+  # `10.0.4.11/32` is an example address. Replace it with the address of
+  # your own ingress controller. Find that address with
   #   kubectl get endpoints <ingress-controller> -n <ns> \
   #     -o jsonpath='{.subsets[].addresses[].ip}'
-  # See `docs/cross-repo/reverse-proxy-contract.md` for per-cluster values
-  # and docs-site install/tls-ingress.md § Reverse-proxy trust.
-  forwardedAllowIps: "10.42.0.0/16"   # REPLACE: narrow to the controller /32
+  # See `docs/cross-repo/reverse-proxy-contract.md` and docs-site
+  # install/tls-ingress.md § Reverse-proxy trust.
+  forwardedAllowIps: "10.0.4.11/32"
   # Target-destination allowlist (v0.20.0). The default-
   # deny guard refuses to register or dial a target on non-public space,
   # but the example lab registers on-prem appliances on RFC 1918 ranges as a

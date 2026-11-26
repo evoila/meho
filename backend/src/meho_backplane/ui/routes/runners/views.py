@@ -72,11 +72,14 @@ def project_runner_to_row(
     principal: RunnerPrincipalRead,
     *,
     stale_at: datetime | None,
+    set_aside: tuple[int, datetime | None] = (0, None),
 ) -> dict[str, object]:
     """Project one runner principal (+ its dead-man marker) into a template row.
 
     *stale_at* is the ``runner_assignments.stale_at`` value for this runner
     (``None`` when fresh or when the runner has no assignment row yet).
+    *set_aside* is the count of result batches the runner has set aside and the
+    time of the newest one.
     """
     state, badge = runner_liveness(revoked=principal.revoked, stale_at=stale_at)
     return {
@@ -103,4 +106,6 @@ def project_runner_to_row(
             and principal.package_set_digest != local_package_set().digest
         ),
         "central_package_set_digest": local_package_set().digest,
+        "set_aside_count": set_aside[0],
+        "set_aside_last_at": coerce_utc_aware(set_aside[1]),
     }

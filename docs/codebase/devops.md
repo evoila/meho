@@ -1241,6 +1241,8 @@ What an operator can do now:
 
   `deploy/values-examples/values-vks.yaml` does this for Traefik in the
   namespace `traefik`, and turns on the OpenBao rule too (#5833).
+  `deploy/values-examples/values-k3s.yaml` does the same for the Traefik of
+  k3s in `kube-system`.
 
 - Run a service mesh that encrypts traffic between pods (mutual TLS).
 
@@ -3228,12 +3230,15 @@ GitHub Actions does **not** expose the `secrets` context to job-level
 `if:` expressions (only `github`, `needs`, `vars`, and `inputs` are
 available — see the
 [GitHub Actions contexts reference](https://docs.github.com/en/actions/reference/contexts-reference)).
-A clause like `secrets.RDC_KUBECONFIG != ''` therefore collapses to
+A clause like `secrets.<kubeconfig secret> != ''` therefore collapses to
 undefined at evaluation time and the gate silently breaks. The single
 repository-scoped `vars.RKE2_SMOKE_ENABLED` is the documented gate;
 maintainers flip it to `'true'` after the consumer-side auth lands. The "Build kubeconfig" step still inspects
-`env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG` to pick Option A vs Option B
+`env.RKE2_CA_CERT` / `env.<kubeconfig secret>` to pick Option A vs Option B
 at step level (where the env indirection makes `secrets.*` legal).
+
+The exact secret name is set in `.github/workflows/pr-smoke.yml` (the
+`env:` block of the smoke job).
 
 Two auth modes are supported, matching the cross-repo doc's Sections 1A
 and 1B:
@@ -3241,7 +3246,7 @@ and 1B:
 | Mode | Required from consumer | Selected when |
 | --- | --- | --- |
 | Option A (OIDC trust) | `RKE2_CA_CERT` secret + `RKE2_API_SERVER` var + apiserver `--oidc-issuer-url=https://token.actions.githubusercontent.com` (or `AuthenticationConfiguration`) | `RKE2_CA_CERT` is set AND `RKE2_API_SERVER` is set |
-| Option B (kubeconfig) | `RDC_KUBECONFIG` secret (base64-encoded SA kubeconfig) | Only `RDC_KUBECONFIG` is set |
+| Option B (kubeconfig) | the kubeconfig secret of the smoke cluster (base64-encoded SA kubeconfig) | Only the kubeconfig secret is set |
 
 When both are set, Option A wins (the cross-repo doc's preference
 order: short-lived OIDC tokens vs. a long-lived stored kubeconfig).
@@ -3368,7 +3373,7 @@ Script invariants:
 Deferred-AC: every criterion that requires a live run against
 the consumer's cluster (image-push verification, namespace-create-then-teardown
 verifiability) is gated on the consumer-side OIDC trust OR
-`RDC_KUBECONFIG` secret landing. Until then the workflow ships in
+kubeconfig secret of the smoke cluster landing. Until then the workflow ships in
 "skipped at job level" mode and the AC bullets stay open in the
 Task body's tracking checklist. The cross-repo doc's "Status" table
 is the source of truth for when these bullets close.
@@ -3499,7 +3504,7 @@ package, and only for that package:
 ## Cross-repo handshake
 
 The v0.1 deploy contract crosses one repo boundary: `evoila/meho`
-produces the chart + image; the dogfooding consumer, in its own repo,
+produces the chart + image; the consumer, in its own repo,
 operates the cluster the per-PR ephemeral smoke and post-merge deploy
 run against. The handshake spec — cluster auth
 options (OIDC trust preferred over a long-lived kubeconfig secret),
@@ -3524,7 +3529,7 @@ companion verifier shell under
 | 1 — `install.sh` cold-deploy → working MEHO in <5 min | [`docs/acceptance/install.md`](../acceptance/install.md) | [`scripts/acceptance/install-verify.sh`](../../scripts/acceptance/install-verify.sh) |
 | 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) — federation chain end-to-end | [`docs/acceptance/smoke.md`](../acceptance/smoke.md) | [`scripts/acceptance/smoke.sh`](../../scripts/acceptance/smoke.sh) |
 | 3 — `helm rollback meho` end-to-end with a non-trivial schema diff (cluster-level forward-compat proof) | [`docs/acceptance/rollback.md`](../acceptance/rollback.md) | [`scripts/acceptance/rollback-verify.sh`](../../scripts/acceptance/rollback-verify.sh) (sample N+1 migration at [`scripts/acceptance/synthetic-n-plus-1.sql`](../../scripts/acceptance/synthetic-n-plus-1.sql)) |
-| 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` `rdc-meho` entry (deploy-stability proof + chassis registration) | [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md) | producer-side contract only — counter implementation and the `targets.yaml` entry land on the consumer side per the cross-repo split. Schema for the `targets.yaml` entry lives at [`docs/cross-repo/targets-yaml.md`](../cross-repo/targets-yaml.md); the draft consumer-side issue body the maintainer files is at [`docs/cross-repo/issue-58-consumer-ticket-body.md`](../cross-repo/issue-58-consumer-ticket-body.md); the README ships a badge placeholder the maintainer swaps for the live Shields endpoint URL once the consumer-side counter is up |
+| 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` entry for the consumer's install (deploy-stability proof + chassis registration) | [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md) | producer-side contract only — counter implementation and the `targets.yaml` entry land on the consumer side per the cross-repo split. Schema for the `targets.yaml` entry lives at [`docs/cross-repo/targets-yaml.md`](../cross-repo/targets-yaml.md); the draft consumer-side issue body the maintainer files is at [`docs/cross-repo/issue-58-consumer-ticket-body.md`](../cross-repo/issue-58-consumer-ticket-body.md); the README ships a badge placeholder the maintainer swaps for the live Shields endpoint URL once the consumer-side counter is up |
 
 The split between producer-owned contracts + verifiers and
 consumer-owned wrappers (`install.sh`, `smoke.sh`,

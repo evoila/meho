@@ -76,8 +76,11 @@ correct, secure response.
 **Fix.** Give the client a pre-registered `client_id`. [Claude Code](claude-code.md)
 takes it in `.mcp.json` (`oauth.clientId`); the
 [Claude Desktop shim](claude-desktop.md) takes it via
-`--static-oauth-client-info`. For a client that exposes neither, carry a
-token through the [static-token shim](mcp-remote-shim.md). Do **not**
+`--static-oauth-client-info`. For a client that exposes neither, run the
+[`mcp-remote` shim in login mode](mcp-remote-shim.md#connect-with-a-login-that-renews-itself).
+Only if that is not possible, carry a token through the
+[static-token shim](mcp-remote-shim.md#the-static-token-last-resort); its
+token ends after 5 minutes. Do **not**
 open DCR on a production realm to work around a per-client config gap.
 
 ## Login start fails with `unauthorized_client` (W1)
@@ -128,14 +131,17 @@ To see what it would change, run it with `--dry-run`. See
 [Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
 `meho-cli` does not get these scopes by default.
 
-## The MEHO login ends after about 30 minutes with no use
+## The MEHO login ends after a short time with no use
 
-**Symptom.** MEHO tools work, but after about half an hour without a MEHO
+**Symptom.** MEHO tools work, but after 30 to 60 minutes without a MEHO
 call, the next call opens a new browser login or does not answer.
 
 **Wall.** The client did not ask for `offline_access`. Then Keycloak
-issues a normal refresh token, and it ends at the realm's SSO idle limit
-(30 minutes by default). Older versions of the MEHO plugin and the Claude
+issues a normal refresh token, and it ends at the realm's SSO idle limit:
+1 hour on a realm the MEHO chart created new.
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has.
+Older versions of the MEHO plugin and the Claude
 Desktop bundle did not ask for it.
 
 **Fix.** Update the MEHO plugin (`claude plugin update meho@meho`, then
@@ -322,6 +328,25 @@ older dotted names (`meho.status`) failed.
 **Fix.** Pin backplane **v0.27.0 or later**, where the tools were renamed
 to underscores (`meho_status`, `list_targets`, …). See
 [Claude Desktop § pinning a build](claude-desktop.md#pin-a-build-with-underscore-tool-names-and-structured-results).
+
+## A model gateway refuses MEHO's tool list
+
+**Symptom.** A strict model gateway (one that checks tool schemas the
+way the OpenAI API does in strict mode) refuses the tool list, and the
+agent gets no MEHO tools. The error says a schema holds `null` inside an
+`enum`. Some clients check the schemas themselves. For example, LangChain's
+Gemini client (`langchain-google-genai` 4.5.2) stops with
+`Input should be a valid string [... input_value=None ...]` for an `enum`.
+
+**Wall.** On MEHO 0.48.0 and older, the sent input and output schemas of
+some tools list `null` inside an `enum`. A strict gateway refuses such a schema, and
+then refuses the whole list.
+
+**Fix.** Update MEHO to a version newer than 0.48.0. MEHO then sends the
+tool input and output schemas without `null` inside an `enum`. A call that
+sends `null` still works, because the server checks every call against the
+full schema. An answer with `null` in such a field still passes the sent
+output schema.
 
 ## A tool call fails with "Tool execution failed" but the server logged 200
 

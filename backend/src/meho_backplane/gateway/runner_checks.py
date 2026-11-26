@@ -11,9 +11,13 @@ chooses a state.
 Steps for one result batch (see :func:`screen_batch` and
 :func:`ingest_and_count`):
 
-1. Refuse a result whose runner time (``produced_at``) is later than MEHO's
-   clock. MEHO does not store it and names it in the answer, so the runner
-   can log it.
+1. Refuse a result whose runner time (``produced_at``) is more than
+   :data:`CLOCK_ALLOWANCE` later than MEHO's clock. MEHO does not store it
+   and names it in the answer. When every result of a batch is refused, the
+   answer is a 422, so the runner knows the batch was refused. The counter
+   ``runner_check_results_total`` rises for a refused result once the rest
+   of the batch has been stored. A refused result is counted once in each
+   MEHO process, however often its batch is sent.
 2. Cap the size of each answer and of the whole batch. An answer over the cap
    is stored without its payload and the Sensor reads ``unknown`` with the
    reason ``answer too large``.
@@ -55,7 +59,9 @@ then sets the state of its Sensors to ``unknown``.
 from __future__ import annotations
 
 import json
+import re
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
@@ -80,23 +86,38 @@ from meho_backplane.checks.investigate import (
 from meho_backplane.checks.park_notify import ParkNotice, schedule_sensor_parked_notification
 from meho_backplane.checks.repository import accelerate_sensor_next_fire, record_sensor_result
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus
+from meho_backplane.db.models import (
+    RunnerAssignmentRow,
+    Sensor,
+    SensorCadenceKind,
+    SensorStatus,
+)
 from meho_backplane.gateway.repository import ingest_new_results, lock_assignment_row
 from meho_backplane.metrics import RUNNER_CHECK_RESULTS_TOTAL
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.runner.result_clean import clean_result
-from meho_backplane.runner.wire import RefusedResult, RunnerResult
+from meho_backplane.runner.wire import (
+    SET_ASIDE_NOTICES_MAX,
+    RefusedResult,
+    RunnerResult,
+    SetAsideNotice,
+)
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.settings import get_settings
 
 __all__ = [
     "BATCH_MAX_BYTES",
+    "CLOCK_ALLOWANCE",
     "RESULT_MAX_BYTES",
     "CountedSensor",
     "ScreenedBatch",
+    "SetAsideNotSavedError",
     "after_commit",
     "ingest_and_count",
+    "mark_left_off_sensors",
     "mark_runner_sensors_unknown",
+    "mark_sensor_unknown",
+    "record_set_aside",
     "screen_batch",
 ]
 
@@ -111,6 +132,29 @@ BATCH_MAX_BYTES = 4 * 1024 * 1024
 _ANSWER_TOO_LARGE = "answer too large"
 
 _FUTURE_TIME = "future_time"
+
+#: How many refused results this process remembers, so that one refused
+#: result is counted once in this MEHO process however often its batch is sent.
+_REFUSED_SEEN_MAX = 10_000
+_refused_seen: OrderedDict[tuple[uuid.UUID, str, str], None] = OrderedDict()
+
+
+def _count_refused_once(tenant_id: uuid.UUID, runner_name: str, result_uid: str) -> None:
+    """Raise the counter for a refused result the first time it is seen."""
+    key = (tenant_id, runner_name, result_uid)
+    if key in _refused_seen:
+        return
+    _refused_seen[key] = None
+    while len(_refused_seen) > _REFUSED_SEEN_MAX:
+        _refused_seen.popitem(last=False)
+    _count(_FUTURE_TIME)
+
+
+#: How far a result's runner time may be ahead of MEHO's clock: 30 seconds.
+#: Two clocks that are set by network time still differ by a few seconds, and
+#: a runner whose clock is a little ahead must not lose its results. A larger
+#: difference means the runner clock is wrong, and MEHO refuses the result.
+CLOCK_ALLOWANCE = timedelta(seconds=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +202,8 @@ def screen_batch(
 ) -> ScreenedBatch:
     """Refuse results with a runner time in the future and cap the answer sizes.
 
-    A result whose ``produced_at`` is later than *received_at* goes to
+    A result whose ``produced_at`` is later than *received_at* plus
+    :data:`CLOCK_ALLOWANCE` goes to
     :attr:`ScreenedBatch.refused` and is not stored. An answer over
     :data:`RESULT_MAX_BYTES`, or one that takes the batch over
     :data:`BATCH_MAX_BYTES`, is stored with no payload and the error text
@@ -167,8 +212,10 @@ def screen_batch(
     screened = ScreenedBatch(results=[])
     total = 0
     for item in results:
-        if item.produced_at is not None and _as_utc(item.produced_at) > received_at:
-            _count(_FUTURE_TIME)
+        if (
+            item.produced_at is not None
+            and _as_utc(item.produced_at) > received_at + CLOCK_ALLOWANCE
+        ):
             _log.warning(
                 "runner_result_refused_future_time",
                 runner=runner_name,
@@ -478,7 +525,8 @@ async def ingest_and_count(
     take the time of the count, clean the result, store it, count it, claim
     its Dashboard edge, commit. Then the counter rises and :func:`after_commit`
     runs for it. When a result fails, the ones before it stay stored and
-    counted, and a re-post of the batch skips them as duplicates.
+    counted, and a re-post of the batch skips them as duplicates. The refused
+    results of *screened* are counted after the last result is stored.
     """
     sessionmaker = get_sessionmaker()
     accepted = 0
@@ -514,6 +562,8 @@ async def ingest_and_count(
             _count(label)
         if counted is not None:
             await after_commit(tenant_id, [counted])
+    for refused in screened.refused:
+        _count_refused_once(tenant_id, runner_name, refused.result_uid)
     return accepted, len(screened.results) - accepted
 
 
@@ -536,29 +586,287 @@ async def mark_runner_sensors_unknown(
     sensors = (
         (
             await session.execute(
-                select(Sensor).where(
+                select(Sensor)
+                .where(
                     Sensor.tenant_id == tenant_id,
                     Sensor.runner_name == runner_name,
                     Sensor.status == SensorStatus.ACTIVE.value,
                 )
+                .order_by(Sensor.id)
             )
         )
         .scalars()
         .all()
     )
     marked: list[CountedSensor] = []
-    outcome = _unknown("runner_stale", runner=runner_name)
     for sensor in sensors:
-        last: CountedSensor | None = None
-        evaluated_at = now
-        for step in range(sensor.retry_times + 1):
-            evaluated_at = _evaluation_time(sensor, now + timedelta(microseconds=step))
-            last = await _record(session, sensor, outcome, evaluated_at, advance_due_time=False)
-        if last is not None:
-            marked.append(
-                await _claim(session, tenant_id=tenant_id, counted=last, now=evaluated_at)
+        marked.append(
+            await mark_sensor_unknown(
+                session, sensor, now=now, reason="runner_stale", runner=runner_name
             )
+        )
     return marked
+
+
+async def mark_sensor_unknown(
+    session: AsyncSession,
+    sensor: Sensor,
+    *,
+    now: datetime,
+    reason: str,
+    **extra: object,
+) -> CountedSensor:
+    """Record ``unknown`` with *reason* on *sensor* and claim its Dashboard edge.
+
+    A Sensor that confirms a change only after a few readings gets as many
+    ``unknown`` readings (``retry_times`` + 1). The next due time stays.
+    Does not commit. The caller holds the lock of the runner's assignment row
+    and sends the mails with :func:`after_commit` after the commit.
+    """
+    outcome = _unknown(reason, **extra)
+    last: CountedSensor | None = None
+    evaluated_at = now
+    for step in range(sensor.retry_times + 1):
+        evaluated_at = _evaluation_time(sensor, now + timedelta(microseconds=step))
+        last = await _record(session, sensor, outcome, evaluated_at, advance_due_time=False)
+    assert last is not None
+    return await _claim(session, tenant_id=sensor.tenant_id, counted=last, now=evaluated_at)
+
+
+_NOT_ON_LIST = "not_on_runner_list"
+
+
+def _already_marked(sensor: Sensor, why: str) -> bool:
+    """True when the last reading of *sensor* already says it is off the runner's list for *why*."""
+    evidence = sensor.last_evidence or {}
+    return evidence.get("reason") == _NOT_ON_LIST and evidence.get("why") == why
+
+
+async def mark_left_off_sensors(
+    *,
+    tenant_id: uuid.UUID,
+    runner_name: str,
+    left_off: dict[uuid.UUID, str],
+) -> None:
+    """Record ``unknown`` on the bound Sensors that MEHO left off the runner's list.
+
+    *left_off* maps a Sensor id to the reason. A Sensor whose last reading
+    already names the same reason is not written again, so the record and
+    the notice happen once for each change of reason. The Dashboard edge of
+    each written Sensor is claimed in the same transaction, so the Dashboard
+    mail goes out also when every check of the Dashboard runs on this runner.
+    A failure is logged and never reaches the runner's poll.
+    """
+    if not left_off:
+        return
+    try:
+        counted: list[CountedSensor] = []
+        async with get_sessionmaker()() as session:
+            await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+            now = datetime.now(UTC)
+            sensors = (
+                (
+                    await session.execute(
+                        select(Sensor)
+                        .where(
+                            Sensor.id.in_(list(left_off)),
+                            Sensor.tenant_id == tenant_id,
+                            Sensor.runner_name == runner_name,
+                            Sensor.status == SensorStatus.ACTIVE.value,
+                        )
+                        .order_by(Sensor.id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for sensor in sensors:
+                why = left_off[sensor.id]
+                if _already_marked(sensor, why):
+                    continue
+                counted.append(
+                    await mark_sensor_unknown(
+                        session,
+                        sensor,
+                        now=now,
+                        reason=_NOT_ON_LIST,
+                        why=why,
+                        runner=runner_name,
+                    )
+                )
+            await session.commit()
+        await after_commit(tenant_id, counted)
+    except Exception:
+        _log.warning("runner_left_off_mark_failed", runner=runner_name, exc_info=True)
+
+
+_RESULT_REFUSED = "result_refused"
+
+#: The form of a result id and a code in a set-aside notice: 1 to 64 lowercase
+#: letters, digits and underscores. The runner keeps a code in the same form.
+_NOTICE_ID = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def _kept_notice(notice: SetAsideNotice) -> SetAsideNotice | None:
+    """*notice* with only the values MEHO keeps, or ``None`` to skip it.
+
+    A notice whose ``result_uid`` is not in the short form is skipped. A code
+    in another form is kept as no code, and a status outside 400 to 499 as 0.
+    """
+    if not _NOTICE_ID.fullmatch(notice.result_uid):
+        return None
+    code = notice.code if notice.code and _NOTICE_ID.fullmatch(notice.code) else None
+    status = notice.status if 400 <= notice.status <= 499 else 0
+    return notice.model_copy(update={"code": code, "status": status})
+
+
+#: The largest set-aside count the integer column holds.
+_SET_ASIDE_COUNT_MAX = 2_147_483_647
+
+
+class SetAsideNotSavedError(Exception):
+    """The set-aside notices of a post were not saved; nothing of them is kept."""
+
+
+def _first_notices(
+    runner_name: str, notices: list[SetAsideNotice], skipped: int
+) -> list[SetAsideNotice]:
+    """The first :data:`SET_ASIDE_NOTICES_MAX` notices of one post; the rest is skipped.
+
+    *skipped* counts the notices the post's model already cut off.
+    """
+    skipped += max(0, len(notices) - SET_ASIDE_NOTICES_MAX)
+    if skipped > 0:
+        _log.warning("runner_set_aside_notices_skipped", runner=runner_name, skipped=skipped)
+    return notices[:SET_ASIDE_NOTICES_MAX]
+
+
+def _kept_time(value: datetime | None) -> datetime | None:
+    """*value* in UTC, or ``None`` without a time zone or when UTC cannot hold it."""
+    if value is None or value.utcoffset() is None:
+        return None
+    try:
+        return value.astimezone(UTC)
+    except OverflowError:
+        return None
+
+
+def _keep_summary(row: RunnerAssignmentRow, total: int | None, last_at: datetime | None) -> None:
+    """Store the runner's count and time on *row*; a value outside the limits changes nothing."""
+    if total is not None and 0 <= total <= _SET_ASIDE_COUNT_MAX:
+        row.set_aside_count = total
+    kept_at = _kept_time(last_at)
+    if kept_at is not None:
+        row.set_aside_last_at = kept_at
+
+
+async def record_set_aside(
+    *,
+    tenant_id: uuid.UUID,
+    runner_name: str,
+    notices: list[SetAsideNotice],
+    total: int | None,
+    last_at: datetime | None,
+    skipped: int = 0,
+) -> None:
+    """Show the checks of set-aside results as ``unknown``, and keep the runner's count.
+
+    Each notice names a result of a batch that MEHO refused on every try. The
+    check of that result reads ``unknown`` with the reason ``result_refused``,
+    the HTTP status and the code (no free text). Only short, fixed forms of
+    these values are kept (:func:`_kept_notice`); another value never makes
+    MEHO refuse the post. A check that already has a newer counted result of
+    the runner, or already shows this refusal, is not written again. A notice
+    without a runner time never replaces a counted result. Only the first
+    :data:`SET_ASIDE_NOTICES_MAX` notices of one post are read; *skipped* says
+    how many more the post held, for the log line. The count and
+    the time of the newest set-aside batch are stored on the runner's assignment
+    row, the count only from 0 to 2147483647 and the time only with a time zone.
+
+    Everything is saved in one transaction. When the save fails, nothing is
+    kept, no mail goes out, the failure is logged and
+    :class:`SetAsideNotSavedError` is raised. The endpoint then answers 503
+    with the code ``set_aside_not_saved``, and the runner keeps its notices and
+    sends them again.
+    """
+    notices = _first_notices(runner_name, notices, skipped)
+    try:
+        counted: list[CountedSensor] = []
+        async with get_sessionmaker()() as session:
+            await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+            now = datetime.now(UTC)
+            row = await session.scalar(
+                select(RunnerAssignmentRow)
+                .where(
+                    RunnerAssignmentRow.tenant_id == tenant_id,
+                    RunnerAssignmentRow.runner_name == runner_name,
+                )
+                .execution_options(populate_existing=True)
+            )
+            if row is not None:
+                _keep_summary(row, total, last_at)
+            kept = [n for n in map(_kept_notice, notices) if n is not None]
+            for notice in sorted(kept, key=lambda n: n.check_ref):
+                sensor = await _runner_sensor_by_ref(session, tenant_id, runner_name, notice)
+                if sensor is None or _refusal_shown(sensor, notice):
+                    continue
+                counted.append(
+                    await mark_sensor_unknown(
+                        session,
+                        sensor,
+                        now=now,
+                        reason=_RESULT_REFUSED,
+                        result_uid=notice.result_uid,
+                        http_status=notice.status,
+                        code=notice.code,
+                    )
+                )
+            await session.commit()
+    except Exception as exc:
+        _log.warning("runner_set_aside_record_failed", runner=runner_name, exc_info=True)
+        raise SetAsideNotSavedError from exc
+    await after_commit(tenant_id, counted)
+
+
+async def _runner_sensor_by_ref(
+    session: AsyncSession, tenant_id: uuid.UUID, runner_name: str, notice: SetAsideNotice
+) -> Sensor | None:
+    """The active Sensor of this runner that *notice* names, else ``None``."""
+    try:
+        sensor_id = uuid.UUID(notice.check_ref)
+    except ValueError:
+        return None
+    sensor: Sensor | None = await session.scalar(
+        select(Sensor)
+        .where(
+            Sensor.id == sensor_id,
+            Sensor.tenant_id == tenant_id,
+            Sensor.runner_name == runner_name,
+            Sensor.status == SensorStatus.ACTIVE.value,
+        )
+        .execution_options(populate_existing=True)
+    )
+    return sensor
+
+
+def _refusal_shown(sensor: Sensor, notice: SetAsideNotice) -> bool:
+    """True when *sensor* already shows this refusal, or has a newer result of the runner.
+
+    A notice without a runner time cannot be newer, so it never replaces a
+    counted result.
+    """
+    evidence = sensor.last_evidence or {}
+    if (
+        evidence.get("reason") == _RESULT_REFUSED
+        and evidence.get("result_uid") == notice.result_uid
+    ):
+        return True
+    if sensor.runner_produced_at is None:
+        return False
+    if notice.produced_at is None:
+        return True
+    return _as_utc(sensor.runner_produced_at) >= _as_utc(notice.produced_at)
 
 
 async def after_commit(tenant_id: uuid.UUID, counted: list[CountedSensor]) -> None:

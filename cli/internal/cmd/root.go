@@ -114,7 +114,14 @@ func newRootCmdFor(args []string) *cobra.Command {
 		// SilenceErrors = true on itself to take over both the JSON
 		// and human error rendering paths.
 		SilenceErrors: false,
+		// `meho --version` prints the same CLI line as `meho version`,
+		// without contacting a backplane.
+		Version: cliVersionLine(),
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
+	// Defined here, with no short form: cobra's own default flag would
+	// take -v, which belongs to --verbose.
+	root.Flags().Bool("version", false, "print the CLI version line and exit")
 
 	// Global flags. Bound to no destination yet — later tasks read
 	// them via cmd.Flags().GetString / GetBool inside their RunE
@@ -657,8 +664,10 @@ func newRootCmdFor(args []string) *cobra.Command {
 	// discovery fetch entirely.
 	//
 	// `meho doctor` is left out: it must make exactly the network calls
-	// it reports, and none at all with --no-network.
-	if !invokesDoctor(root, args) {
+	// it reports, and none at all with --no-network. `meho --version` is
+	// left out too: it prints only the CLI line, so an unreachable
+	// backplane must not delay it.
+	if !invokesDoctor(root, args) && !invokesRootVersionFlag(root, args) {
 		registerDynamicSubcommands(root)
 	}
 
@@ -751,6 +760,28 @@ func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
 func invokesDoctor(root *cobra.Command, args []string) bool {
 	c, _, err := root.Find(args)
 	return err == nil && c != nil && c.Parent() == root && c.Name() == "doctor"
+}
+
+// invokesRootVersionFlag reports whether args make cobra print the
+// root version line: the root command, its --version flag true after
+// cobra's own flag parsing (so `--version=0` is false), and no --help
+// (cobra prints help first). `meho version` is a subcommand and is not
+// matched.
+func invokesRootVersionFlag(root *cobra.Command, args []string) bool {
+	c, rest, err := root.Find(args)
+	if err != nil || c != root {
+		return false
+	}
+	// Cobra adds --help only when it runs; add it now so that `--help`
+	// and `-h` parse. Execute parses the same args again later; the
+	// root flags are plain strings and bools, so it sets the same values.
+	root.InitDefaultHelpFlag()
+	if err := root.ParseFlags(rest); err != nil {
+		return false
+	}
+	help, _ := root.Flags().GetBool("help")
+	version, _ := root.Flags().GetBool("version")
+	return version && !help
 }
 
 // registerDynamicSubcommands runs the discovery fetch and grafts

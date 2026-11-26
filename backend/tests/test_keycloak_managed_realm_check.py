@@ -20,6 +20,7 @@ realm first and compares the answered name:
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -315,3 +316,43 @@ async def test_a_passed_check_does_not_count_for_the_next_call(
             assert "did not answer with the realm" in str(exc)
         assert realm.call_count == reads + 1
         assert rest.call_count + secret.call_count + clients.call_count == sent
+
+
+async def test_the_card_of_an_inner_call_reads_the_realm_inside_an_outer_run(
+    operator: Operator,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operation sends another one through the connector's shim; the inner card reads the realm.
+
+    The outer run passed its check. Keycloak then answers another realm. The
+    inner call builds its card and runs the check before an approved run: each
+    reads the realm itself, and no user is read.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.managed_realm_check.time.monotonic", lambda: 100.0
+    )
+    connector = _CONNECTOR_INSTANCE_CACHE[KeycloakConnector]
+    target = await _target(operator)
+
+    async def _inner_dispatch(**_kwargs: Any) -> Any:
+        for build in (_delete_card, _check_before_the_run):
+            with contextlib.suppress(ValueError):  # a card may refuse; reads are counted below
+                await build(operator)
+        return None
+
+    monkeypatch.setattr("meho_backplane.operations.dispatch", _inner_dispatch)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        answer: dict[str, Any] = {"now": {"realm": _REALM, "id": "realm-id"}}
+        realm = mock.get(_REALM_PATH).mock(
+            side_effect=lambda _request: httpx.Response(200, json=answer["now"])
+        )
+        rest = mock.route(url__regex=r".*").mock(return_value=httpx.Response(200, json=_SOMEONE))
+        with connector._realm_checks.run():
+            await connector._realm_checks.check(connector, target, operator)
+            assert realm.call_count == 1
+            answer["now"] = _OTHER_ANSWERS[0]
+            await connector.execute(target, "keycloak.user.delete", {"username": "someone"})
+
+    assert realm.call_count == 3
+    assert rest.call_count == 0

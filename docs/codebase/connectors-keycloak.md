@@ -2296,7 +2296,10 @@ around its write (a wrong answer before the write sends no PUT). A passed check 
 there for at most 5 seconds; each run starts with a new one. A request
 outside a run (a `keycloak:` side of `secret.move`, an approval card, the
 check before an approved run) reads the realm first every time, so a call
-never uses a check of an earlier call. Every admin login can read the name. A
+never uses a check of an earlier call. An operation that sends another one
+through the connector's `execute` shim starts a run for the inner call, so the
+inner approval card and the check before its approved run read the realm
+themselves. Every admin login can read the name. A
 `keycloak.realm.create` that names no realm (no `realm` value, an empty
 name or a null name, also in `representation`) counts as a write in the
 login realm on every target, so a platform admin must approve it

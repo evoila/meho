@@ -1617,13 +1617,17 @@ class KeycloakConnector(HttpConnector):
             tenant_role=TenantRole.OPERATOR,
         )
         connector_id = f"{self.impl_id}-{self.version}"
-        return await dispatch(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=params,
-        )
+        # The inner call is a run of its own: its approval card and the check
+        # before an approved run read the realm, and use no check that an outer
+        # run passed.
+        with self._realm_checks.run():
+            return await dispatch(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+            )
 
     async def invalidate_credentials(self, target: KeycloakTargetLike) -> None:
         """Drop the kept admin token for *target* (#2396, #3879).

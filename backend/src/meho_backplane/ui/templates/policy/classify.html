@@ -10,7 +10,8 @@
   rights that a tenant admin makes in the console runs at once.
 
   Context contract:
-    * ``enabled``    -- bool: the POLICY_CLASSIFICATION switch.
+    * ``enabled``    -- bool: classification is on (POLICY_CLASSIFICATION
+                        or CUSTOM_POLICY).
     * ``categories`` -- list[str]: the taxonomy of the admin's tenant.
     * ``match``      -- dict: {connector, group, op}, filled in from the
                         query string (the review drawer links here).

@@ -14,7 +14,8 @@ Three parts of the policy have their own switch, each off by default:
 
 The one switch ``CUSTOM_POLICY`` (off by default) turns on all three. A
 part counts as on when its own switch is on or ``CUSTOM_POLICY`` is on.
-Each old switch still works alone. See ``docs/codebase/policy.md``.
+Each old switch still works alone. :func:`custom_policy_on` answers
+whether ``CUSTOM_POLICY`` itself is on. See ``docs/codebase/policy.md``.
 
 Code asks these functions, never the settings or the environment.
 """
@@ -29,23 +30,30 @@ __all__ = [
     "approver_routing_on",
     "classification_on",
     "classification_on_in_environment",
+    "custom_policy_on",
+    "custom_policy_on_in_environment",
     "engine_shadow_on",
 ]
 
 
+def custom_policy_on(settings: Settings) -> bool:
+    """True when ``CUSTOM_POLICY`` is on."""
+    return settings.custom_policy
+
+
 def classification_on(settings: Settings) -> bool:
     """True when ``POLICY_CLASSIFICATION`` or ``CUSTOM_POLICY`` is on."""
-    return settings.policy_classification or settings.custom_policy
+    return settings.policy_classification or custom_policy_on(settings)
 
 
 def engine_shadow_on(settings: Settings) -> bool:
     """True when ``POLICY_ENGINE_SHADOW`` or ``CUSTOM_POLICY`` is on."""
-    return settings.policy_engine_shadow or settings.custom_policy
+    return settings.policy_engine_shadow or custom_policy_on(settings)
 
 
 def approver_routing_on(settings: Settings) -> bool:
     """True when ``POLICY_APPROVER_ROUTING`` or ``CUSTOM_POLICY`` is on."""
-    return settings.policy_approver_routing or settings.custom_policy
+    return settings.policy_approver_routing or custom_policy_on(settings)
 
 
 def classification_on_in_environment() -> bool:
@@ -56,6 +64,16 @@ def classification_on_in_environment() -> bool:
     cannot build :class:`~meho_backplane.settings.Settings`. The parsing is
     the same as in ``Settings``.
     """
-    return parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")) or parse_bool_env(
-        os.environ.get("CUSTOM_POLICY")
+    return (
+        parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")) or custom_policy_on_in_environment()
     )
+
+
+def custom_policy_on_in_environment() -> bool:
+    """:func:`custom_policy_on`, read from the environment.
+
+    For code that runs before the settings are loaded, as
+    :func:`classification_on_in_environment` is. The parsing is the same as
+    in ``Settings``.
+    """
+    return parse_bool_env(os.environ.get("CUSTOM_POLICY"))

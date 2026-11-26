@@ -78,6 +78,22 @@ page." -- for read-only methods too, so an old tab cannot load another
 tenant's data into its page. Nothing runs. The switch form
 (``/ui/tenant/switch``) is not checked: it names its new tenant.
 
+Where the request comes from
+============================
+
+A state-changing request is also refused with the same ``403`` when the
+browser says it comes from another origin:
+
+* ``Sec-Fetch-Site`` is ``cross-site`` or ``same-site``; or
+* there is no ``Sec-Fetch-Site`` and the ``Origin`` header is present
+  and is not MEHO's own origin (the host of ``BACKPLANE_URL``, or the
+  host the request was sent to).
+
+A request with neither header goes on to the token check. A plain form
+(token in the form body, no ``Meho-Tenant`` header) that has no
+``meho_tenant`` field is refused with the ``409`` of a changed tenant.
+The switch form is exempt.
+
 Token issuance
 ==============
 
@@ -119,7 +135,7 @@ import hashlib
 import hmac
 import json
 from typing import Final
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -525,7 +541,55 @@ async def _resolve_presented_token(
     return form_token, page_tenant, _replay_receive(buffered)
 
 
-def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
+#: ``Sec-Fetch-Site`` values that mean the request did not start on MEHO's own origin.
+_FOREIGN_FETCH_SITES: Final[frozenset[str]] = frozenset({"cross-site", "same-site"})
+
+
+def _origin_netloc(origin: str) -> str | None:
+    """Return the lower-case ``host[:port]`` of an origin or URL, or ``None``."""
+    try:
+        netloc = urlsplit(origin.strip()).netloc
+    except ValueError:
+        return None
+    return netloc.lower() or None
+
+
+def _from_another_origin(scope: Scope) -> bool:
+    """Return whether the browser says the request comes from another origin.
+
+    ``Sec-Fetch-Site`` decides when it is there: ``cross-site`` and
+    ``same-site`` are refused. Without it, an ``Origin`` header that is
+    present and does not name MEHO's own host is refused. Own hosts are the
+    one of ``BACKPLANE_URL`` and the ``Host`` header of the request. A
+    request with neither header (an old browser, a test client) is not
+    refused here.
+    """
+    fetch_site = _extract_header(scope, "sec-fetch-site")
+    if fetch_site is not None:
+        return fetch_site.strip().lower() in _FOREIGN_FETCH_SITES
+    origin = _extract_header(scope, "origin")
+    if origin is None:
+        return False
+    origin_host = _origin_netloc(origin)
+    if origin_host is None:
+        return True
+    own_hosts = {
+        host
+        for host in (
+            _origin_netloc(get_settings().backplane_url),
+            (_extract_header(scope, "host") or "").strip().lower() or None,
+        )
+        if host
+    }
+    return origin_host not in own_hosts
+
+
+def _page_tenant_changed(
+    scope: Scope,
+    form_page_tenant: str | None,
+    *,
+    plain_form: bool = False,
+) -> bool:
     """Return whether the request comes from a page made for another tenant (#5240).
 
     Every console page carries the tenant it was made for: htmx sends it
@@ -536,7 +600,9 @@ def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
     browser tab, the session's tenant differs, and the request must not
     run. A request without the marker passes (an API-style call, or a
     page from before this check existed). The switch form itself names
-    its new tenant, so it is not checked.
+    its new tenant, so it is not checked. A *plain_form* (the token in
+    the form body, no ``Meho-Tenant`` header) must name its page tenant:
+    without the field it is treated like a form from another tenant.
     """
     if _select_path(scope) == TENANT_SWITCH_PATH:
         return False
@@ -551,7 +617,7 @@ def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
         or _extract_query_param(scope, PAGE_TENANT_FORM_FIELD)
     )
     if not page_tenant:
-        return False
+        return plain_form
     return page_tenant.strip().lower() != str(session_tenant).lower()
 
 
@@ -566,6 +632,14 @@ async def _send_tenant_changed(send: Send) -> None:
     ]
     await send({"type": "http.response.start", "status": 409, "headers": headers})
     await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+def _is_plain_form(scope: Scope) -> bool:
+    """Return whether this is a plain form post: the token is in the form body."""
+    if _extract_header(scope, CSRF_HEADER_NAME) is not None:
+        return False
+    content_type = _extract_header(scope, "content-type") or ""
+    return "application/x-www-form-urlencoded" in content_type.lower()
 
 
 def _validate_csrf(
@@ -641,6 +715,11 @@ class CSRFMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if _from_another_origin(scope):
+            log.info("ui_csrf_rejected", path=path, method=method, reason="other_origin")
+            await _send_forbidden(send, "other_origin")
+            return
+
         session_id = read_session_cookie(scope)
         cookie_token = _extract_cookie(scope, CSRF_COOKIE_NAME)
 
@@ -681,7 +760,7 @@ class CSRFMiddleware:
             await _send_forbidden(send, rejection)
             return
 
-        if _page_tenant_changed(scope, form_page_tenant):
+        if _page_tenant_changed(scope, form_page_tenant, plain_form=_is_plain_form(scope)):
             log.info("ui_page_tenant_changed", path=path, method=method)
             await _send_tenant_changed(send)
             return

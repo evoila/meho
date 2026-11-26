@@ -906,3 +906,42 @@ def test_revoke_cross_tenant_is_404() -> None:
     finally:
         mock.stop()
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        ({"Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Sec-Fetch-Site": "same-site"}, 403),
+        ({"Origin": "https://other.example"}, 403),
+        ({"Sec-Fetch-Site": "same-origin"}, 204),
+        ({"Origin": "http://testserver"}, 204),
+        ({}, 204),
+    ],
+)
+def test_create_from_another_origin_is_refused_and_writes_nothing(
+    headers: dict[str, str], status: int
+) -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_principal(_TENANT_A, "agent-new")
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/grants/create",
+            data={
+                "principal_sub": "agent-new",
+                "op_pattern": "vault.kv.*",
+                "target_scope": "",
+                "verdict": "needs-approval",
+                "expires_at": "",
+            },
+            headers={**_csrf_headers(csrf), **headers},
+        )
+        listing = client.get("/ui/agents/grants")
+    finally:
+        mock.stop()
+    assert response.status_code == status, response.text
+    assert ("vault.kv.*" in listing.text) == (status == 204)

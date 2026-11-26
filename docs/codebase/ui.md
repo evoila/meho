@@ -705,8 +705,19 @@ the `Meho-Tenant` header of every htmx request and as the hidden
 session's tenant, for read and write methods. A mismatch gives `409`
 with `{"detail": "The tenant changed. Reload the page."}` and the header
 `x-meho-tenant-changed`; nothing runs, and the script shows a reload
-banner. A request without the marker passes. The switch route is not
-checked.
+banner. A request without the marker passes, except a plain form: a
+POST form whose token is in the form body, with no `Meho-Tenant` header,
+must carry the `meho_tenant` field, or it gets the same `409`. The
+switch route is not checked.
+
+**Where a write comes from.** For POST, PUT, PATCH and DELETE under
+`/ui/`, `CSRFMiddleware` also checks the browser's own origin headers,
+before the token. `Sec-Fetch-Site` of `cross-site` or `same-site` gives
+`403 csrf_token_invalid`. Without `Sec-Fetch-Site`, an `Origin` header
+that is not MEHO's own host (the host of `BACKPLANE_URL`, or the `Host`
+of the request) gives the same `403`. A request with neither header
+goes on to the token check. GET, HEAD and OPTIONS are not checked, so a
+link from another site and the sign-in callback keep working.
 
 The broadcast live feed connects with the browser's `EventSource`, which
 sends no header. So the feed page puts the marker on the stream URL as

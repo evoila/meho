@@ -75,42 +75,37 @@ KERNEL_DEFAULTS = {
     "kernel.panic_on_oops": "0",
 }
 
-# The lock of install.sh and meho-host target-networks (lib/common.sh).
-HOST_LOCK = "/run/meho/host.lock"
-# The line of a run that finds the lock held. meho-host says "the command"
-# where install.sh says "install.sh".
+# The lock of install.sh and meho-host target-networks (lib/common.sh): the
+# folder itself, locked with flock.
+HOST_LOCK = "/run/meho"
+# The line of a run that finds the lock held, and of a run that finds a lock
+# folder that another account could open. meho-host says "the command" where
+# install.sh says "install.sh".
 LOCK_HELD_LINE = (
     "[FAIL] another install.sh or meho-host command changes this machine now (lock "
-    "/run/meho/host.lock). Nothing was changed. Fix: run {command} again after the other "
+    "/run/meho). Nothing was changed. Fix: run {command} again after the other "
     "command ends."
 )
-
-
-def chmod_that_skips_the_lock_folder(tools: Path) -> None:
-    """Put a chmod on PATH that leaves the lock folder alone, so a test sees
-    the mode that mkdir gave the folder. Every other call runs the real chmod."""
-    real = shutil.which("chmod")
-    if real is None:
-        raise RuntimeError("the tests need 'chmod' on PATH")
-    target = tools / "chmod"
-    target.unlink()
-    lines = [
-        "#!/bin/sh",
-        f'case "$*" in *"{Path(HOST_LOCK).parent}") exit 0 ;; esac',
-        f'exec "{real}" "$@"',
-    ]
-    target.write_text("\n".join(lines) + "\n")
-    target.chmod(0o755)
+LOCK_UNSAFE_LINE = (
+    "[FAIL] the lock folder /run/meho is not a folder that only root may open, so another "
+    "account could hold the lock. Nothing was changed. Fix: remove it with 'sudo rm -r "
+    "/run/meho' (it holds only the lock), then run {command} again."
+)
 
 
 @contextlib.contextmanager
 def held_lock(lock: Path) -> Iterator[None]:
-    """Hold the lock file, as another run of install.sh or meho-host does
-    (flock on the open file). The lock ends when the block ends."""
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open("a") as file:
-        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    """Hold the lock folder, as another run of install.sh or meho-host does:
+    the folder with mode 0700, open, with flock on it. The lock ends when the
+    block ends."""
+    lock.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock.chmod(0o700)
+    descriptor = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
+    finally:
+        os.close(descriptor)
 
 
 REAL_TOOLS = (
@@ -131,6 +126,7 @@ REAL_TOOLS = (
     "sort",
     "tar",
     "flock",
+    "stat",
 )
 
 # What "nft list chain inet meho prerouting" prints for the file install.sh
@@ -594,12 +590,9 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual([], FAIL_LINE.findall(self.output(result)))
 
     def written_files(self) -> list[str]:
-        """Files the script wrote below the fake root: everything but the inputs
-        and the lock that every run takes first (take_host_lock in
-        lib/common.sh). The lock file is empty, and /run is emptied at each
-        boot, so it is no change of the machine."""
+        """Files the script wrote below the fake root: everything but the inputs.
+        The lock that every run takes first is a folder, so it is no file."""
         inputs = {
-            HOST_LOCK.lstrip("/"),
             "etc/os-release",
             "etc/hosts",
             "etc/passwd",

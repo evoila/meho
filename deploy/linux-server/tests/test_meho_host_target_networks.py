@@ -20,8 +20,8 @@ from cluster_harness import ClusterTestCase
 from harness import (
     HOST_LOCK,
     LOCK_HELD_LINE,
+    LOCK_UNSAFE_LINE,
     TENANT_ID,
-    chmod_that_skips_the_lock_folder,
     held_lock,
 )
 from test_core_install import place_values
@@ -320,28 +320,8 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
                 self.assertEqual(before, self.files())
                 self.assertEqual(1, self.host.deployment_restarts())
 
-    def test_only_root_may_open_the_lock(self) -> None:
-        # flock takes the lock on a file that is open only for reading, so
-        # another account must not be able to open the folder or the file.
-        lock = self.host.host_path(HOST_LOCK)
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.parent.chmod(0o755)
-        lock.write_text("")
-        lock.chmod(0o644)
-        old = os.umask(0o022)
-        try:
-            result = self.run_command(LIST)
-        finally:
-            os.umask(old)
-
-        self.assertEqual(0, result.returncode, self.output(result))
-        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
-        self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
-
     def test_a_new_lock_folder_is_private_from_the_start(self) -> None:
-        # mkdir itself gives the folder mode 0700; this chmod leaves the
-        # folder alone, and with umask 000 a plain mkdir would give 0777.
-        chmod_that_skips_the_lock_folder(self.host.tools)
+        # mkdir gives the lock folder mode 0700 itself, also with umask 000.
         old = os.umask(0)
         try:
             result = self.run_command(LIST)
@@ -350,24 +330,35 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
 
         self.assertEqual(0, result.returncode, self.output(result))
         lock = self.host.host_path(HOST_LOCK)
-        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(lock.stat().st_mode))
+        self.assertEqual([], os.listdir(lock))
 
-    def test_a_link_in_the_lock_folder_is_not_followed(self) -> None:
+    def test_a_lock_folder_that_others_may_open_changes_nothing(self) -> None:
         lock = self.host.host_path(HOST_LOCK)
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        other = self.host.host_path("/etc/another-file")
-        other.write_text("not the lock\n")
-        other.chmod(0o644)
-        lock.symlink_to(other)
+        lock.mkdir(parents=True)
+        lock.chmod(0o755)
+        before = self.files()
 
         result = self.run_command(LIST)
 
-        self.assertEqual(0, result.returncode, self.output(result))
-        self.assertFalse(lock.is_symlink())
-        self.assertTrue(lock.is_file())
-        self.assertEqual(0o644, stat.S_IMODE(other.stat().st_mode))
-        self.assertEqual("not the lock\n", other.read_text())
-        self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
+        self.assert_one_fail_line(result, LOCK_UNSAFE_LINE.format(command="the command"))
+        self.assert_nothing_changed(before)
+        self.assertEqual(0o755, stat.S_IMODE(lock.stat().st_mode))
+
+    def test_a_link_at_the_lock_folder_changes_nothing(self) -> None:
+        other = self.host.host_path("/var/another-folder")
+        other.mkdir(parents=True)
+        other.chmod(0o700)
+        lock = self.host.host_path(HOST_LOCK)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.symlink_to(other)
+        before = self.files()
+
+        result = self.run_command(LIST)
+
+        self.assert_one_fail_line(result, LOCK_UNSAFE_LINE.format(command="the command"))
+        self.assert_nothing_changed(before)
+        self.assertEqual([], os.listdir(other))
 
     def test_the_lock_comes_before_the_record_is_read(self) -> None:
         self.host.host_path(RECORD_PATH).unlink()
@@ -385,7 +376,7 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
         with held_lock(self.host.host_path(HOST_LOCK)):
             with_lock = self.host.run("check")
 
-        self.assertNotIn("host.lock", self.output(with_lock))
+        self.assertNotIn("/run/meho", self.output(with_lock))
         self.assertEqual(
             (without_lock.returncode, without_lock.stdout, without_lock.stderr),
             (with_lock.returncode, with_lock.stdout, with_lock.stderr),

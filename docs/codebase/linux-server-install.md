@@ -683,28 +683,30 @@ Where the list goes:
 key in `meho-config` and restarts the `meho` Deployment, because a pod
 reads its environment from a ConfigMap only when it starts
 ([linux-server-meho-host.md](linux-server-meho-host.md#target-networks)).
+Helm owns `meho-config`, and its next upgrade (an update) renders the same
+list from `install.json`, so the patched value stays. Helm 3 compares the
+old manifest, the live object and the new manifest when it upgrades; the
+new manifest holds the list.
 
-`install.sh` and `meho-host target-networks` share one lock,
-`/run/meho/host.lock`, taken with `flock -n` (`take_host_lock` in
+`install.sh` and `meho-host target-networks` share one lock: the folder
+`/run/meho` itself, taken with `flock -n` (`take_host_lock` in
 `lib/common.sh`, and its copy in `meho-host`). `install.sh` takes it right
 after the root check, before it looks for the install or reads the
 record, for an install, an update and `--from-disk`, and holds it until
 it ends. Without it, an update that read the list and waits for the
 backup answer would write the old list back after `meho-host` changed
 it. A second run does not wait: it stops with a `[FAIL]` line before it
-reads or changes anything. `flock` holds the lock on the open file
-descriptor, so it ends with the process, also after a crash. `flock` takes
-the lock on a file that is open only for reading too, so the folder
-`/run/meho` is 0700 and the file 0600: another local account cannot hold
-the lock and block every update. `mkdir -m 0700` makes a new folder
-private at once, so nobody can add a file to it before `chmod` runs, and
-a link left in the folder from before is removed, because `open` and
-`chmod` would follow it to another file. The other
-`meho-host` commands that change the machine do not take it yet (#6870).
-Helm owns `meho-config`, and its next upgrade (an update) renders the same
-list from `install.json`, so the patched value stays. Helm 3 compares the
-old manifest, the live object and the new manifest when it upgrades; the
-new manifest holds the list.
+reads or changes anything. `flock` holds the lock on the open folder, so
+it ends with the process, also after a crash.
+
+`flock` takes a lock on a folder that is open only for reading, so only
+root may open the folder: `mkdir -m 0700` makes a new one private at
+once, and a folder that is a link, is not root's, or has another mode
+than 0700 stops the run with a `[FAIL]` line that says to remove it. It
+is not repaired, because a repair could race with another run. The lock
+is the folder and not a file in it, so no link or second name of a file
+can reach it, and there is nothing to clean up. The other `meho-host`
+commands that change the machine do not take the lock yet (#6870).
 
 ## The host firewall
 

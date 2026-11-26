@@ -999,6 +999,12 @@ async def apply_import(
         raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     tenant_ids = [tp.tenant_id for tp in plan.tenants]
+    # Bound before the first write, so the row of an apply that stops names it.
+    structlog.contextvars.bind_contextvars(
+        audit_settings_import=True,
+        audit_settings_file_sha256=plan.file_sha256,
+        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
+    )
     broken = await _apply_tenant_rows(session, plan, result.failed)
     live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
     replanned = await _replan_new_tenants(session, plan, live)
@@ -1048,10 +1054,7 @@ async def apply_import(
         result.revision_id = revision.id
 
     structlog.contextvars.bind_contextvars(
-        audit_settings_import=True,
-        audit_settings_file_sha256=plan.file_sha256,
         audit_settings_revision_id=str(result.revision_id) if result.revision_id else "",
-        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
         audit_settings_summary=summary,
         audit_settings_failed=len(result.failed),
     )

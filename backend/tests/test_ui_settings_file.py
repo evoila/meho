@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import re
 import uuid
@@ -731,6 +732,36 @@ def test_a_failed_revision_write_saves_nothing(
         mock.stop()
 
     _assert_nothing_saved_and_only_the_attempt_recorded(applied, _INTERNAL_ERROR)
+
+
+@pytest.mark.usefixtures("sqlite_transactions")
+@_CUTOVER
+def test_a_cancelled_apply_saves_nothing_and_its_row_names_the_attempt(
+    cutover: bool, request: pytest.FixtureRequest
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    _seed_tenants()
+
+    def _cancel(*_args: Any) -> None:
+        raise asyncio.CancelledError
+
+    client, mock, csrf = _client()
+    event.listen(InstanceSettingsRevision, "before_insert", _cancel)
+    try:
+        # The test client reports the cancelled request as a cancelled future.
+        with pytest.raises(concurrent.futures.CancelledError):
+            _apply(client, csrf, _LOOSEN)
+    finally:
+        event.remove(InstanceSettingsRevision, "before_insert", _cancel)
+        mock.stop()
+
+    assert _state() == _UNCHANGED
+    (row,) = _audit_rows("settings.import")
+    assert set(row.payload) - _MIDDLEWARE_KEYS == _ATTEMPT_KEYS
+    assert row.payload["settings_import"] is True
+    assert row.payload["settings_file_sha256"] == hashlib.sha256(_LOOSEN).hexdigest()
+    assert row.payload["settings_tenant_ids"] == [str(_TENANT_A)]
 
 
 @pytest.mark.usefixtures("sqlite_transactions")

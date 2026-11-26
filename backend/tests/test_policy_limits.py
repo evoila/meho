@@ -31,7 +31,7 @@ from meho_backplane.policy.document import (
     file_sha256,
     parse_policy_file,
 )
-from meho_backplane.policy.limits import personal_agent_limit
+from meho_backplane.policy.limits import limits_diff, personal_agent_limit
 from meho_backplane.policy.service import (
     NO_CHANGE,
     apply_policy,
@@ -152,6 +152,17 @@ def test_limits_need_the_switch() -> None:
 )
 def test_the_reader_says_safe_without_a_limit(document: Any, level: str) -> None:
     assert personal_agent_limit(document) == level
+
+
+def test_a_stored_limit_that_is_not_a_map_is_no_limit_in_the_diff() -> None:
+    assert limits_diff({"limits": ["caution"]}, {}) == {}
+    assert limits_diff({"limits": ["caution"]}, {"limits": {"personal_agent_up_to": "safe"}}) == {
+        "limits": {
+            "added": [{"key": "personal_agent_up_to", "value": "safe"}],
+            "changed": [],
+            "removed": [],
+        }
+    }
 
 
 def test_the_shipped_install_policy_has_no_limit() -> None:

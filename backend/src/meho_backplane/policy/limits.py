@@ -84,8 +84,8 @@ def limits_diff(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str
     It is ``{}`` when neither side has a limit, so the diff of a policy
     without limits stays as it was.
     """
-    old = before.get("limits") or {}
-    new = after.get("limits") or {}
+    old = _mapping(before.get("limits"))
+    new = _mapping(after.get("limits"))
     if not old and not new:
         return {}
     out: dict[str, list[dict[str, Any]]] = {"added": [], "changed": [], "removed": []}
@@ -99,6 +99,11 @@ def limits_diff(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str
     return {"limits": out}
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    """*value* when it is a mapping; a stored value of another type counts as no limit."""
+    return value if isinstance(value, Mapping) else {}
+
+
 def personal_agent_limit(install_document: Mapping[str, Any] | None) -> str:
     """The highest level a tenant's personal agent rule may let run at once.
 
@@ -106,6 +111,5 @@ def personal_agent_limit(install_document: Mapping[str, Any] | None) -> str:
     ``limits`` part, or with a value that is not a limit level, the answer
     is ``safe``, the lowest level.
     """
-    limits = (install_document or {}).get("limits")
-    level = limits.get("personal_agent_up_to") if isinstance(limits, Mapping) else None
+    level = _mapping((install_document or {}).get("limits")).get("personal_agent_up_to")
     return level if level in LIMIT_LEVELS else DEFAULT_PERSONAL_AGENT_LIMIT

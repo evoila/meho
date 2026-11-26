@@ -67,7 +67,6 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-import yaml
 from kubernetes_asyncio import client
 from kubernetes_asyncio.dynamic import DynamicClient
 
@@ -81,6 +80,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.kubernetes._apply_manifest import (
+    ApplyManifestError,
+    _parse_manifest,
+)
 from meho_backplane.redaction import get_default_policy, redact
 
 if TYPE_CHECKING:
@@ -123,16 +126,6 @@ DELETABLE_KINDS: dict[str, dict[str, str]] = {
     "job": {"api": "BatchV1Api", "delete": "delete_namespaced_job"},
     "replicaset": {"api": "AppsV1Api", "delete": "delete_namespaced_replica_set"},
 }
-
-
-class ApplyManifestError(ValueError):
-    """The apply manifest could not be parsed or is missing required fields.
-
-    Subclasses :class:`ValueError` so the dispatcher's
-    ``connector_error`` envelope tags
-    ``extras.exception_class="ApplyManifestError"`` and the operator
-    sees the parse/validation reason rather than an opaque YAML error.
-    """
 
 
 class ApplyNotPersistedError(ValueError):
@@ -184,44 +177,6 @@ class KubernetesSecretRefError(ValueError):
     ``extras.exception_class="KubernetesSecretRefError"``, like the sibling
     manifest / kind errors above.
     """
-
-
-def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
-    """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
-
-    ``yaml.safe_load_all`` handles both JSON (a subset of YAML) and
-    multi-doc YAML separated by ``---``. Empty documents (a trailing
-    ``---`` or blank stanza) are dropped. Each surviving doc must be a
-    mapping carrying ``apiVersion`` + ``kind`` + ``metadata.name`` --
-    SSA cannot address an object without them. Raises
-    :class:`ApplyManifestError` on any structural problem.
-    """
-    try:
-        docs = list(yaml.safe_load_all(manifest))
-    except yaml.YAMLError as exc:
-        raise ApplyManifestError(f"manifest is not valid YAML/JSON: {exc}") from exc
-
-    parsed: list[dict[str, Any]] = []
-    for idx, doc in enumerate(docs):
-        if doc is None:
-            continue
-        if not isinstance(doc, dict):
-            raise ApplyManifestError(f"manifest document {idx} is not a mapping")
-        api_version = doc.get("apiVersion")
-        kind = doc.get("kind")
-        name = (doc.get("metadata") or {}).get("name")
-        if not api_version or not kind:
-            raise ApplyManifestError(f"manifest document {idx} is missing apiVersion/kind")
-        if not name:
-            if isinstance(api_version, str) and isinstance(kind, str):
-                shown = f" ({api_version}/{kind})"
-            else:
-                shown = ""
-            raise ApplyManifestError(f"manifest document {idx}{shown} is missing metadata.name")
-        parsed.append(doc)
-    if not parsed:
-        raise ApplyManifestError("manifest contains no applyable documents")
-    return parsed
 
 
 def _status_message(body: str) -> str | None:

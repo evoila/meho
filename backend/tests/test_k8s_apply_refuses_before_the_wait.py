@@ -19,6 +19,7 @@ What these tests prove, through the real dispatch over a stand-in cluster
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,10 +27,14 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
-from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
+from meho_backplane.connectors.kubernetes._apply_manifest import (
+    ApplyManifestError,
+    _parse_manifest,
+)
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector,
@@ -62,40 +67,68 @@ _THREE = "---\n".join([_NAMESPACE, _DEPLOYMENT, _SERVICE])
 
 #: (manifest, the part of the reason that names what is wrong)
 _REFUSED: dict[str, tuple[str, str]] = {
-    "json-array": ('[{"apiVersion": "v1", "kind": "Namespace"}]', "document 0 is not a mapping"),
-    "yaml-list": ("- apiVersion: v1\n  kind: Namespace\n", "document 0 is not a mapping"),
-    "one-word": ("hello", "document 0 is not a mapping"),
+    "json-array": ('[{"apiVersion": "v1", "kind": "Namespace"}]', "document 1 is not a mapping"),
+    "yaml-list": ("- apiVersion: v1\n  kind: Namespace\n", "document 1 is not a mapping"),
+    "one-word": ("hello", "document 1 is not a mapping"),
     "list-without-name": (
         "apiVersion: v1\nkind: List\nitems:\n  - apiVersion: v1\n    kind: Namespace\n"
         "    metadata: {name: web}\n",
-        "document 0 (v1/List) is missing metadata.name",
+        "document 1 is a list object",
     ),
     "no-kind": (
         "apiVersion: v1\nmetadata:\n  name: web\n",
-        "document 0 is missing apiVersion/kind",
+        "document 1 (apiVersion v1) is missing kind",
     ),
     "no-api-version": (
         "kind: Namespace\nmetadata:\n  name: web\n",
-        "document 0 is missing apiVersion/kind",
+        "document 1 (kind Namespace) is missing apiVersion",
     ),
     "no-name": (
         "apiVersion: v1\nkind: Namespace\nmetadata: {}\n",
-        "document 0 (v1/Namespace) is missing metadata.name",
+        "document 1 (apiVersion v1, kind Namespace) is missing metadata.name",
     ),
     "only-spaces": ("   \n  \n", "the text has no documents"),
     "only-comments": ("# a\n# b\n", "the text has no documents"),
     "only-separators": ("---\n---\n---\n", "the text has no documents"),
     "bad-yaml-in-the-middle": (
         _NAMESPACE + "---\na: [b\n---\n" + _SERVICE,
-        "the text is not valid YAML or JSON",
+        "document 2 is not valid YAML or JSON",
     ),
     "no-kind-in-the-middle": (
         _NAMESPACE + "---\nmetadata: {name: x}\n---\n" + _SERVICE,
-        "document 1 is missing apiVersion/kind",
+        "document 2 is missing apiVersion",
     ),
     "word-in-the-middle": (
         _NAMESPACE + "---\nhello\n---\n" + _SERVICE,
-        "document 1 is not a mapping",
+        "document 2 is not a mapping",
+    ),
+    "metadata-is-text": (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: web\n",
+        "document 1 (apiVersion apps/v1, kind Deployment) has a metadata that is not a mapping",
+    ),
+    "kind-is-a-list": (
+        "apiVersion: v1\nkind: [Namespace]\nmetadata: {name: web}\n",
+        "document 1 (apiVersion v1, kind (not shown)) has a kind that is not a text",
+    ),
+    "api-version-is-a-number": (
+        "apiVersion: 1\nkind: Namespace\nmetadata: {name: web}\n",
+        "document 1 (apiVersion (not shown), kind Namespace) has an apiVersion that is not a text",
+    ),
+    "name-is-a-number": (
+        "apiVersion: v1\nkind: Namespace\nmetadata: {name: 123}\n",
+        "document 1 (apiVersion v1, kind Namespace) has a metadata.name that is not a text",
+    ),
+    "empty-kind": (
+        "apiVersion: v1\nkind: ''\nmetadata: {name: web}\n",
+        "document 1 (apiVersion v1) is missing kind",
+    ),
+    "kind-list-with-name": (
+        "apiVersion: v1\nkind: List\nmetadata: {name: web}\nitems: []\n",
+        "document 1 is a list object",
+    ),
+    "namespace-list-with-items": (
+        "apiVersion: v1\nkind: NamespaceList\nmetadata: {name: web}\nitems: []\n",
+        "document 1 is a list object",
     ),
 }
 
@@ -191,13 +224,159 @@ async def test_a_manifest_the_run_cannot_parse_is_refused_before_the_wait(
     cluster.assert_not_awaited()
 
 
-async def test_the_refusal_does_not_repeat_a_value_of_the_manifest(cluster: AsyncMock) -> None:
-    result = await _call({"manifest": "apiVersion: v1\nkind: Namespace\nmetadata: {x: sentinel-1}"})
-    assert result.status == "denied"
-    assert "sentinel-1" not in result.error
-    bad = await _call({"manifest": "a: [sentinel-2"})
-    assert bad.status == "denied"
-    assert "sentinel-2" not in bad.error
+async def _refusal_seen_everywhere(manifest: str) -> tuple[str, str, str, str]:
+    """The reason, the preview reason, the audit rows and the logs of one refused call."""
+    params = {"manifest": manifest}
+    with capture_logs() as logs:
+        result = await _call(params)
+        preview = await preview_dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP,
+            target=_TARGET,
+            params=params,
+        )
+    assert result.status == "denied", result
+    assert result.extras["error_code"] == "refused_before_approval"
+    assert await _count(ApprovalRequest) == 0
+    async with get_sessionmaker()() as s:
+        audit = list((await s.execute(select(AuditLog))).scalars().all())
+    assert [r.payload["result_status"] for r in audit] == ["denied"]
+    audit_text = json.dumps([r.payload for r in audit], default=str)
+    return result.extras["reason"], preview["extras"]["reason"], audit_text, repr(logs)
+
+
+def _no_metadata_name(api_version: str, kind: str) -> str:
+    return f"apiVersion: {api_version}\nkind: {kind}\nmetadata: {{}}\n"
+
+
+@pytest.mark.parametrize(
+    ("manifest", "marker", "shown"),
+    [
+        (
+            "apiVersion: v1\nkind: {x: marker-kind-mapping}\nmetadata: {}\n",
+            "marker-kind-mapping",
+            "(apiVersion v1, kind (not shown)) has a kind that is not a text",
+        ),
+        (
+            "apiVersion: {x: marker-api-mapping}\nkind: Namespace\nmetadata: {}\n",
+            "marker-api-mapping",
+            "(apiVersion (not shown), kind Namespace) has an apiVersion that is not a text",
+        ),
+        (
+            _no_metadata_name("v1", "K" + "m" * 63),
+            "K" + "m" * 63,
+            "(apiVersion v1, kind (not shown)) is missing metadata.name",
+        ),
+        (
+            _no_metadata_name("v1", "'marker kind'"),
+            "marker kind",
+            "(apiVersion v1, kind (not shown)) is missing metadata.name",
+        ),
+        (
+            _no_metadata_name("'marker api/v1'", "Namespace"),
+            "marker api",
+            "(apiVersion (not shown), kind Namespace) is missing metadata.name",
+        ),
+        (
+            _no_metadata_name("Marker.Group/v1", "Namespace"),
+            "Marker.Group",
+            "(apiVersion (not shown), kind Namespace) is missing metadata.name",
+        ),
+        (
+            _no_metadata_name("v1", "Namespace") + "spec: {x: marker-other-value}\n",
+            "marker-other-value",
+            "(apiVersion v1, kind Namespace) is missing metadata.name",
+        ),
+        (
+            "apiVersion: v1\nkind: Namespace\nmetadata: marker-metadata-text\n",
+            "marker-metadata-text",
+            "(apiVersion v1, kind Namespace) has a metadata that is not a mapping",
+        ),
+    ],
+    ids=[
+        "kind-mapping",
+        "api-version-mapping",
+        "kind-64-chars",
+        "kind-with-space",
+        "api-version-with-space",
+        "group-with-capitals",
+        "other-value",
+        "metadata-text",
+    ],
+)
+async def test_the_refusal_shows_no_unsafe_value_of_the_manifest(
+    manifest: str, marker: str, shown: str, cluster: AsyncMock
+) -> None:
+    reason, preview_reason, audit, logs = await _refusal_seen_everywhere(manifest)
+    assert reason == f"The manifest cannot be applied: document 1 {shown}. {_FORM}"
+    assert preview_reason == reason
+    for text in (reason, audit, logs):
+        assert marker not in text
+    if "(not shown)" in reason:
+        assert "(not shown)" in audit
+    cluster.assert_not_awaited()
+
+
+async def test_a_yaml_error_text_is_not_shown(cluster: AsyncMock) -> None:
+    reason, preview_reason, audit, logs = await _refusal_seen_everywhere(
+        _NAMESPACE + "---\na: [marker-yaml\n"
+    )
+    assert (
+        reason == f"The manifest cannot be applied: document 2 is not valid YAML or JSON. {_FORM}"
+    )
+    assert preview_reason == reason
+    for text in (reason, audit, logs):
+        assert "marker-yaml" not in text
+
+
+@pytest.mark.parametrize(
+    ("api_version", "kind"),
+    [
+        ("apps/v1", "Deployment"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding"),
+        ("v1", "Namespace"),
+    ],
+)
+async def test_a_kubernetes_api_version_and_kind_show_whole(
+    api_version: str, kind: str, cluster: AsyncMock
+) -> None:
+    reason, preview_reason, audit, _logs = await _refusal_seen_everywhere(
+        _no_metadata_name(api_version, kind)
+    )
+    assert reason == (
+        f"The manifest cannot be applied: document 1 (apiVersion {api_version}, kind {kind}) "
+        f"is missing metadata.name. {_FORM}"
+    )
+    assert preview_reason == reason
+    assert api_version in audit
+    assert kind in audit
+
+
+async def test_a_long_valid_group_and_kind_keep_the_whole_form(cluster: AsyncMock) -> None:
+    group = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 61])
+    assert len(group) == 253
+    kind = "K" + "k" * 62
+    reason, preview_reason, _audit, _logs = await _refusal_seen_everywhere(
+        _no_metadata_name(f"{group}/v1", kind)
+    )
+    assert len(reason) <= 256
+    assert reason.endswith(f"is missing metadata.name. {_FORM}")
+    assert reason.startswith("The manifest cannot be applied: document 1 (apiVersion (not shown)")
+    assert preview_reason == reason
+
+
+def test_the_run_names_the_same_document_as_the_check() -> None:
+    with pytest.raises(ApplyManifestError) as raised:
+        _parse_manifest(_NAMESPACE + "---\nhello\n")
+    assert str(raised.value) == "The manifest cannot be applied: document 2 is not a mapping"
+
+
+async def test_a_kind_ending_in_list_without_items_waits_once(cluster: AsyncMock) -> None:
+    manifest = "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\n"
+    result = await _call({"manifest": manifest})
+    assert result.status == "awaiting_approval", result
+    assert await _count(ApprovalRequest) == 1
 
 
 async def test_three_documents_wait_once_and_apply_in_order(
@@ -270,12 +449,12 @@ async def test_a_manifest_that_passes_the_check_passes_the_parse_step(
     assert _parse_manifest(manifest)
 
 
-async def test_the_hint_says_what_stays_applied() -> None:
+def test_the_manifest_hint_is_the_released_text() -> None:
     from meho_backplane.connectors.kubernetes.ops_write_meta import WRITE_DANGEROUS_OPS
 
     op = next(o for o in WRITE_DANGEROUS_OPS if o.op_id == _OP)
     assert op.llm_instructions is not None
     assert (
-        "When the cluster refuses one document of the text, the documents before it stay applied."
-        in op.llm_instructions["parameter_hints"]["manifest"]
+        op.llm_instructions["parameter_hints"]["manifest"]
+        == "YAML/JSON; multi-doc supported via '---'."
     )

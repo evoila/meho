@@ -103,10 +103,9 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import yaml
 from kubernetes_asyncio import client
 
-from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
+from meho_backplane.connectors.kubernetes._apply_manifest import (
     ApplyManifestError,
     _parse_manifest,
 )
@@ -712,10 +711,12 @@ async def _apply_park_check(ctx: PreviewContext) -> str | None:
 
     Runs the same :func:`_parse_manifest` the run uses, on the text only:
     nothing goes to the cluster. A manifest that passes here passes the
-    parse step of the run. The reason names the document by its number
-    (and its ``apiVersion`` and ``kind`` when they are there) and never
-    repeats a value of the manifest: a YAML error text is not shown. A
-    param that is not a text is left to the params check.
+    parse step of the run. The reason names the document by its number,
+    counted from 1, and shows only an ``apiVersion`` and ``kind`` of the
+    shape Kubernetes allows; it never repeats another value of the
+    manifest or a YAML error text. The form the caller must send always
+    fits in the reason. A param that is not a text is left to the params
+    check.
     """
     manifest = ctx.params.get("manifest")
     if not isinstance(manifest, str):
@@ -723,13 +724,7 @@ async def _apply_park_check(ctx: PreviewContext) -> str | None:
     try:
         _parse_manifest(manifest)
     except ApplyManifestError as exc:
-        if isinstance(exc.__cause__, yaml.YAMLError):
-            detail = "the text is not valid YAML or JSON"
-        elif str(exc).startswith("manifest document "):
-            detail = str(exc).removeprefix("manifest ")
-        else:
-            detail = "the text has no documents"
-        return f"The manifest cannot be applied: {detail}. {_APPLY_FORM}"
+        return exc.text(tail=f". {_APPLY_FORM}")
     return None
 
 

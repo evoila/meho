@@ -742,19 +742,33 @@ rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
 labels and annotations of an existing Secret as they are.
 
 **`k8s.apply` manifest form.** One text, with the documents split by
-`---`. Each document has `apiVersion`, `kind` and `metadata.name`. Before
-the call waits for approval, a check (`_apply_park_check` in
-`ops_write_preview.py`) runs the same `_parse_manifest` the run uses, on
-the text only. Any other form is refused at once: nothing waits, no
-approval request is made and nothing goes to the cluster. Examples are a
-JSON array, a YAML list of documents, a `kind: List` without
-`metadata.name`, a document without `kind`, `apiVersion` or
-`metadata.name`, a text with no documents, and text that is not valid
-YAML. The refusal names the document by its number and does not repeat
-values of the manifest. `preview_operation` gives the same refusal. A
-document that the cluster refuses cannot be found from the text. When the
-cluster refuses one document of the text, the documents before it stay
-applied.
+`---`. Each document is a mapping with a `metadata` mapping, and its
+`apiVersion`, `kind` and `metadata.name` are texts that are not empty.
+Before the call waits for approval, a check (`_apply_park_check` in
+`ops_write_preview.py`) runs `_parse_manifest` (in `_apply_manifest.py`),
+the same function the run uses, on the text only. Any other form is
+refused at once: nothing waits, no approval request is made and nothing
+goes to the cluster. Examples are a JSON array, a YAML list of documents,
+a document without `kind`, `apiVersion` or `metadata.name`, a `metadata`
+that is plain text, a `kind` or `metadata.name` that is not a text, a
+text with no documents, and text that is not valid YAML. A list object is
+refused too: a document whose `kind` is `List`, or whose `kind` ends in
+`List` and that has an `items` field.
+
+The refusal names the document by its number, counted from 1 (the first
+document is document 1; an empty document between two `---` lines counts
+too). It names the field that is wrong, and shows the document's
+`apiVersion` and `kind` only when each has the shape Kubernetes allows: a
+`kind` that is a DNS-1035 label of at most 63 characters (any case), and
+an `apiVersion` that is a DNS-1035 version with an optional group that is
+a DNS-1123 subdomain of at most 253 characters. Any other value shows as
+`(not shown)`, in the refusal, the audit row and the logs. The refusal
+shows no YAML error text and no other value of the manifest. It is at
+most 256 characters, and a long `apiVersion` or `kind` gives way to
+`(not shown)` so the sentence about the form is never cut.
+`preview_operation` gives the same refusal. The run's own parse error
+uses the same numbers. When the cluster refuses one document of the text,
+the documents before it stay applied.
 
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without

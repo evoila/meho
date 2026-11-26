@@ -103,27 +103,26 @@ import base64
 import datetime
 import json
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
 from kubernetes_asyncio import client
 
-from meho_backplane.connectors.kubernetes.op_classes import SECRET_VALUE_FIELDS
+from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
+from meho_backplane.connectors.kubernetes.op_classes import (
+    SECRET_VALUE_FIELDS,
+    hide_command_secrets,
+)
 from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
-from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
+from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest, error_subject
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
     register_person_only_preview_keys,
     register_preview_builder,
 )
-from meho_backplane.redaction.command_line import (
-    HIDDEN,
-    hide_command_text,
-    hide_flag_value,
-    hide_in_text,
-    reads_shell_script,
-)
+from meho_backplane.redaction.command_line import HIDDEN
 
 #: Put in place of a value the approver must not see.
 _HIDDEN = HIDDEN
@@ -193,44 +192,6 @@ async def _secret_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 def _parts_bytes(parts: list[Any]) -> int:
     """Total UTF-8 size of the parts of a command line."""
     return sum(len(str(part).encode("utf-8")) for part in parts)
-
-
-def _hide_command_secrets(parts: list[Any]) -> list[Any]:
-    """Copy one command line (``command`` + ``args``) with its secret values hidden.
-
-    The words stay, so the approver still reads what runs. Hidden are: what
-    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
-    password in a URL, tokens with a known vendor prefix, the argument after
-    a secret-shaped flag (``--password x``, ``-p x``) and the password in
-    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
-    two list items or two words of one string.
-
-    Each list item is one argument of the program, so a secret value in it
-    runs to the end of the item, spaces and shell operators included
-    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
-    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
-    is a shell command string: there a value is one shell word, quotes and
-    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
-    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
-    """
-    hidden: list[Any] = []
-    pending: str | None = None
-    previous = ""
-    for part in parts:
-        if not isinstance(part, str):
-            hidden.append(part)
-            previous = ""
-            continue
-        if pending is not None and not part.startswith("-"):
-            hidden.append(hide_flag_value(pending, part))
-            pending = None
-        else:
-            text, pending = hide_command_text(
-                hide_in_text(part), pending, shell=reads_shell_script(previous)
-            )
-            hidden.append(text)
-        previous = part
-    return hidden
 
 
 def _job_spec_echo(ctx: PreviewContext, spec: Any) -> Any:
@@ -312,7 +273,7 @@ def _hide_command_line(node: dict[str, Any]) -> dict[str, list[Any]]:
     not a list are left out.
     """
     lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
-    hidden = _hide_command_secrets([part for parts in lists.values() for part in parts])
+    hidden = hide_command_secrets([part for parts in lists.values() for part in parts])
     out: dict[str, list[Any]] = {}
     start = 0
     for key, parts in lists.items():
@@ -338,6 +299,27 @@ def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: Kubernetes fields with a secret-shaped name that hold a yes/no setting,
+#: never a secret. The card shows their value.
+_PLAIN_SETTINGS = frozenset({"automountServiceAccountToken"})
+
+
+def _is_secret_scalar(key: Any, item: Any, *, secret_pair: bool) -> bool:
+    """True for a value that is not a text, a map or a list, under a secret name.
+
+    YAML reads an unquoted ``password: 123456`` as a number and
+    ``password: yes`` as a yes/no value. A secret name is a key the name rule marks
+    (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), or the
+    ``value`` of a ``{name, value}`` pair whose name it marks
+    (*secret_pair*). A field of :data:`_PLAIN_SETTINGS` keeps its value.
+    """
+    if item is None or isinstance(item, str | dict | list) or not isinstance(key, str):
+        return False
+    if key in _PLAIN_SETTINGS:
+        return False
+    return is_secret_param_name(key) or (secret_pair and key == "value")
+
+
 def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     """Copy *node*, hiding at any depth every value that can hold a secret.
 
@@ -354,13 +336,19 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
       object, not only a top-level Secret document.
     * The last-applied annotation is hidden in every ``annotations`` map,
       so a pod template's copy is caught too.
+    * A number or a yes/no value under a secret name is hidden
+      (:func:`_is_secret_scalar`). The shared redaction that runs after
+      this hides a text under a secret name, but keeps such a value.
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         command_line = {} if hide_commands else _hide_command_line(node)
+        secret_pair = is_secret_name_value_pair(node)
         for key, item in node.items():
             if key in command_line:
                 out[key] = command_line[key]
+            elif _is_secret_scalar(key, item, secret_pair=secret_pair):
+                out[key] = _HIDDEN
             elif key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
                     _hide_values({**entry, "value": _HIDDEN}, hide_commands=hide_commands)
@@ -426,10 +414,14 @@ def _plain_scalar(value: Any) -> Any:
     ``.inf`` as numbers that JSON cannot hold, and ``!!binary`` as bytes.
     A date or time becomes its ISO text, as the client sends it; such a
     number becomes its YAML text; bytes become their base64 text, as the
-    manifest has them. Text, a whole number, a finite number, a yes/no
-    value and ``None`` stay; any other value becomes its text.
+    manifest has them. A null character in a text (``"\\0"`` in YAML)
+    becomes the two characters ``\\0``, as the database cannot store it.
+    Other text, a whole number, a finite number, a yes/no value and
+    ``None`` stay; any other value becomes its text.
     """
-    if value is None or isinstance(value, str | bool | int):
+    if isinstance(value, str):
+        return value.replace("\x00", "\\0")
+    if value is None or isinstance(value, bool | int):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else _NOT_FINITE[str(value)]
@@ -472,6 +464,51 @@ def card_documents(manifest: str) -> list[dict[str, Any]]:
     """
     done: dict[int, Any] = {}
     return [_plain(doc, done) for doc in _parse_manifest(manifest)]
+
+
+def plain_copy(node: Any) -> Any:
+    """A copy of *node* that the database can store, each value made plain (:func:`_plain`)."""
+    return _plain(node, {})
+
+
+def _identity_texts(doc: Any) -> list[Any]:
+    """``apiVersion``, ``kind``, ``metadata.namespace`` and ``metadata.name`` of *doc*."""
+    if not isinstance(doc, dict):
+        return [None] * 4
+    metadata = doc.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return [doc.get("apiVersion"), doc.get("kind"), metadata.get("namespace"), metadata.get("name")]
+
+
+def names_as_on_card(manifest: str, message: str, *, redact: ManifestRedactor) -> str:
+    """*message* with each object of *manifest* named as the card names it.
+
+    The error of a failed dry run names the object it stopped at, with the
+    text of the manifest (:func:`~.ops_write_dangerous.error_subject`). The
+    card shows the ``apiVersion``, ``kind``, namespace and name of each
+    document after the card's own steps (:func:`card_documents`) and
+    *redact*: a redaction rule for a field path such as
+    ``manifest.*.metadata.name`` hides a name there. So in *message* each
+    object label is replaced by the label of the shown document, and each
+    of these texts that the card shows in another form by that form (a
+    message of the API server can name the object too). The longest text
+    wins where two start at one place.
+    """
+    raw_docs = _parse_manifest(manifest)
+    shown_docs = redact(card_documents(manifest))
+    swaps: dict[str, str] = {}
+    for raw, shown in zip(raw_docs, shown_docs, strict=False):
+        for raw_text, shown_text in zip(_identity_texts(raw), _identity_texts(shown), strict=True):
+            if isinstance(raw_text, str) and raw_text and raw_text != shown_text:
+                swaps.setdefault(raw_text, _HIDDEN if shown_text is None else str(shown_text))
+    for raw, shown in zip(raw_docs, shown_docs, strict=False):
+        swaps[error_subject(raw)] = error_subject(shown)
+    changed = sorted((text for text, to in swaps.items() if text != to), key=len, reverse=True)
+    if not changed:
+        return message
+    # One pass, so a replaced text is not replaced again.
+    pattern = re.compile("|".join(re.escape(text) for text in changed))
+    return pattern.sub(lambda match: swaps[match.group(0)], message)
 
 
 def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
@@ -711,8 +748,9 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     has the object, the container name, the image, the
     ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
     each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
-    hidden the way the Job previews hide them (:func:`_hide_command_secrets`). Then *redact*,
-    the shared params redaction, runs over the entries. An empty list when
+    hidden the way the Job previews hide them
+    (:func:`~.op_classes.hide_command_secrets`). Then *redact*, the shared
+    params redaction, runs over the entries. An empty list when
     no document runs a container.
 
     The entries count toward :data:`MANIFEST_ECHO_MAX_BYTES`. Room is kept

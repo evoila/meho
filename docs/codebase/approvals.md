@@ -3751,25 +3751,57 @@ manifest text with the same hiding as on a preview that worked
 (`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
 line and `dry_run_stop` take the names from the documents after that
 hiding, in their own shape, so a redaction rule for a field path such as
-`manifest.*.metadata.name` hides the name in both too. Before anything is
+`manifest.*.metadata.name` hides the name in both too. The error of the
+dry run (`preview_error`, for a person and for agents) names each object
+the same way: MEHO writes each object label and name in it as the card
+shows it (`names_as_on_card` in `ops_write_preview.py`). Before anything is
 hidden or measured, each value that YAML does not read as text becomes
 plain text (`card_documents` in `ops_write_preview.py`): a date or time
 becomes its ISO text, `.nan` and `.inf` become that YAML text, and
-`!!binary` becomes its base64 text. So each filter hides such a value as
-text, and the stored request holds only values the database accepts. In
+`!!binary` becomes its base64 text. A null character in a text (`"\0"` in
+YAML) becomes the two characters `\0`. So each filter hides such a value
+as text, and the stored request holds only values the database accepts. In
 a Secret, also one inside another object, the card hides each value of
 `data`, `stringData` and `binaryData`: the same fields that make the
-stored request keep the manifest only in the encrypted handoff. For a
+stored request keep the manifest only in the encrypted handoff. In any
+object, a number or a yes/no value under a secret name (`password:
+123456`) is hidden, and so is the argument after a secret flag on a
+command line (`--password 123456`), whatever type YAML gives it. The
+field `automountServiceAccountToken` keeps its yes/no value. For a
 manifest of more than one
 document, `dry_run_stop` names the document the dry run stopped at and
 says that the documents after it had no dry run. A caller that is not a
-person (the agent REST view and the MCP approvals tools) reads the failed
-request as before: the marker and the error, without these keys.
+person (the agent REST view and the MCP approvals tools) reads the
+`preview_unavailable` marker and the `preview_error` text, without these
+keys.
 The console card shows these in a "What the apply sends" block, and from
 the `preview_unavailable` mark the sentence "The summary of the objects
 could not be made, because the dry run failed." A key that cannot be built
 (for example from a manifest that is not valid YAML) is left out; the mark
 and that sentence stay.
+
+When MEHO cannot read the manifest text (it is not valid YAML or JSON),
+the call still waits for approval, and `preview_error` is
+`ApplyManifestError: manifest is not valid YAML/JSON`, followed by one of
+these (`connectors/kubernetes/manifest_yaml.py`):
+
+- The explanation of the parser with the line and the column of each part,
+  for example `expected ',' or ']', but got '<stream end>' (line 1,
+  column 6)`. A quoted part stays only when it names a token of the YAML
+  grammar; any other quoted part (an alias name, a tag, a character of the
+  manifest) becomes `'…'`.
+- For a character the reader refuses (a control character):
+  `unacceptable character: special characters are not allowed (position
+  N)`, where N counts the characters from the start of the text.
+- For a value that its tag cannot read (`!!int abc`): `a value cannot be
+  read as the type its tag names (line L, column C)`.
+- Nothing more for an error with no explanation (for example an object
+  nested too deep).
+
+The text quotes nothing of the manifest. The same text is in the stored
+request, the console card, the REST views, the MCP approvals tools, the
+audit rows, the log line `proposed_effect_preview_failed` and the answer
+of the run after approval.
 
 ## Credential writes: what the approver sees (#4850)
 

@@ -19,9 +19,11 @@ the encrypted handoff of the run.
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
-import yaml
-
 from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.connectors.kubernetes.manifest_yaml import (
+    ManifestYamlError,
+    load_manifest_documents,
+)
 from meho_backplane.op_classes import (
     declare_credential_capable,
     declare_hidden_stored_param,
@@ -29,7 +31,12 @@ from meho_backplane.op_classes import (
     declare_op_classes,
     declare_sandbox_delete_grant,
 )
-from meho_backplane.redaction.command_line import hide_in_text
+from meho_backplane.redaction.command_line import (
+    hide_command_text,
+    hide_flag_value,
+    hide_in_text,
+    reads_shell_script,
+)
 
 declare_op_classes(
     credential_read=(
@@ -153,8 +160,8 @@ def _manifest_has(params: Mapping[str, Any], counts: _Counts) -> bool:
     if not isinstance(manifest, str):
         return True
     try:
-        docs = [doc for doc in yaml.safe_load_all(manifest) if doc is not None]
-    except (yaml.YAMLError, RecursionError):
+        docs = [doc for doc in load_manifest_documents(manifest) if doc is not None]
+    except ManifestYamlError:
         return True
     if not docs:
         return True
@@ -174,6 +181,73 @@ SECRET_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData", "binaryData
 def _is_secret_shaped(value: Any) -> bool:
     """True for a text with a secret shape of its own (a password in a URL, a known token)."""
     return isinstance(value, str) and hide_in_text(value) != value
+
+
+#: A container's ``command`` and ``args`` lists. In this order they make one
+#: command line, the way Kubernetes runs them.
+_COMMAND_LISTS: Final[tuple[str, ...]] = ("command", "args")
+
+
+def _argument_text(part: Any) -> str | None:
+    """The text of one argument: a text, or a number, a yes/no value or a date as YAML read it.
+
+    ``None`` for a map, a list or an empty value, which is no argument.
+    """
+    if isinstance(part, str):
+        return part
+    if part is None or isinstance(part, Mapping | list):
+        return None
+    return str(part)
+
+
+def hide_command_secrets(parts: list[Any]) -> list[Any]:
+    """Copy one command line (``command`` + ``args``) with its secret values hidden.
+
+    The words stay, so the approver still reads what runs. Hidden are: what
+    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
+    password in a URL, tokens with a known vendor prefix, the argument after
+    a secret-shaped flag (``--password x``, ``-p x``) and the password in
+    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
+    two list items or two words of one string. An argument YAML reads as a
+    number, a yes/no value or a date is read as its text, so
+    ``--password 123456`` is hidden too; an argument with nothing hidden
+    keeps its type.
+
+    Each list item is one argument of the program, so a secret value in it
+    runs to the end of the item, spaces and shell operators included
+    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
+    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
+    is a shell command string: there a value is one shell word, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
+    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
+    """
+    hidden: list[Any] = []
+    pending: str | None = None
+    previous = ""
+    for part in parts:
+        text = _argument_text(part)
+        if text is None:
+            hidden.append(part)
+            previous = ""
+            continue
+        if pending is not None and not (isinstance(part, str) and part.startswith("-")):
+            shown = hide_flag_value(pending, text)
+            pending = None
+        else:
+            shown, pending = hide_command_text(
+                hide_in_text(text), pending, shell=reads_shell_script(previous)
+            )
+        hidden.append(part if shown == text else shown)
+        previous = text
+    return hidden
+
+
+def _has_secret_command_line(node: Any) -> bool:
+    """True when the command line of *node* holds a value :func:`hide_command_secrets` hides."""
+    if not isinstance(node, Mapping):
+        return False
+    line = [part for key in _COMMAND_LISTS if isinstance(node.get(key), list) for part in node[key]]
+    return bool(line) and hide_command_secrets(line) != line
 
 
 def _is_nested_secret(node: Any) -> bool:
@@ -215,7 +289,10 @@ class _SecretValueCheck:
     ``binaryData`` has a secret name (the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
     an ``env`` entry at any depth, the object itself included, has a secret
-    name and a value, or when a text at any depth has a secret shape
+    name and a value, when the ``command`` and ``args`` of an object at any
+    depth, read as one command line, hold a value the approval card hides
+    (:func:`hide_command_secrets`: the argument after ``--password``, for
+    example), or when a text at any depth has a secret shape
     (:func:`~meho_backplane.redaction.command_line.hide_in_text`). Each value
     of the manifest is read once, and the names of each ``data``,
     ``stringData``, ``binaryData`` and ``env`` value are read once, also when YAML aliases
@@ -253,14 +330,19 @@ class _SecretValueCheck:
             return True
         if not self._first_visit(doc, self._seen):
             return False
-        if self._has_secret_env(doc):
+        if self._has_secret_env(doc) or _has_secret_command_line(doc):
             return True
         stack = _children(doc, skip_items=_is_list_kind(str(doc["kind"])))
         while stack:
             node = stack.pop()
             if not self._first_visit(node, self._seen):
                 continue
-            if _is_secret_shaped(node) or self._has_secret_env(node) or _is_nested_secret(node):
+            if (
+                _is_secret_shaped(node)
+                or self._has_secret_env(node)
+                or _is_nested_secret(node)
+                or _has_secret_command_line(node)
+            ):
                 return True
             stack.extend(_children(node, skip_items=False))
         return False

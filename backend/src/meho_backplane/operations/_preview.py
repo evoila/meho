@@ -1118,6 +1118,7 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         apply_summaries_var,
     )
     from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_apply
+    from meho_backplane.connectors.kubernetes.ops_write_preview import plain_copy
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
         return None
@@ -1147,10 +1148,37 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     except Exception as exc:
         if summaries is not None:
             setattr(exc, _APPLY_DOCUMENTS_DONE, len(summaries.entries))
+        _name_objects_as_on_card(ctx, exc)
         raise
     finally:
         apply_summaries_var.reset(token)
-    return {**result, **_k8s_apply_manifest_echo(ctx, result, summaries)}
+    shown = plain_copy(result)
+    return {**shown, **_k8s_apply_manifest_echo(ctx, shown, summaries)}
+
+
+def _name_objects_as_on_card(ctx: PreviewContext, exc: Exception) -> None:
+    """Write each object name in the message of *exc* as the card writes it.
+
+    The message becomes the ``preview_error`` of the stored request and of
+    an agent's own preview. A redaction rule that hides a name on the card
+    hides it in the error too (``ops_write_preview.names_as_on_card``).
+    When the names cannot be read, the message stays.
+    """
+    from meho_backplane.connectors.base import ConnectorUpstreamError
+    from meho_backplane.connectors.kubernetes.ops_write_dangerous import ApplyManifestError
+    from meho_backplane.connectors.kubernetes.ops_write_preview import names_as_on_card
+
+    message = exc.args[0] if len(exc.args) == 1 else None
+    if isinstance(exc, ApplyManifestError) or not isinstance(message, str):
+        return
+    manifest = ctx.params["manifest"]
+    try:
+        redact = _k8s_apply_redactor(ctx)
+        exc.args = (names_as_on_card(manifest, message, redact=redact),)
+        if isinstance(exc, ConnectorUpstreamError) and exc.upstream_message is not None:
+            exc.upstream_message = names_as_on_card(manifest, exc.upstream_message, redact=redact)
+    except Exception as failure:
+        _log.warning("k8s_apply_error_names_failed", error=type(failure).__name__)
 
 
 #: The attribute of a failed ``k8s.apply`` dry run's error that counts the
@@ -1186,6 +1214,7 @@ def _k8s_apply_manifest_echo(
         apply_manifest_echo,
         apply_run_commands,
         apply_subject,
+        plain_copy,
     )
 
     _redact = _k8s_apply_redactor(ctx)
@@ -1195,7 +1224,7 @@ def _k8s_apply_manifest_echo(
         if run_commands:
             echo[RUN_COMMANDS_KEY] = run_commands
     if summaries is not None and summaries.entries:
-        echo[OBJECT_SUMMARY_KEY] = _redact(summaries.entries)
+        echo[OBJECT_SUMMARY_KEY] = _redact(plain_copy(summaries.entries))
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject

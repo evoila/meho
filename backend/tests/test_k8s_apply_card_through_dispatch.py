@@ -396,8 +396,8 @@ def _assert_failed_card(row: ApprovalRequest, stop: str) -> None:
     assert person["manifest"][2]["spec"]["ports"][0]["targetPort"] == 8181
     assert person["subject"] == effect["subject"]
     assert person["dry_run_stop"] == stop
-    # A caller that is not a person reads the failed preview as before: the
-    # marker and the error, without the manifest, the subject or the stop.
+    # A caller that is not a person reads the marker and the error, without
+    # the manifest, the subject or the stop.
     for name, view in {"rest-person": person, **views}.items():
         assert view["preview_unavailable"] is True, name
         assert view["preview_error"] == effect["preview_error"], name

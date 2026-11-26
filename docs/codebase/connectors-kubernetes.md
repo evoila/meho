@@ -76,9 +76,14 @@ asked has the role Operator or higher; for any other login the card says
 "not read". It changes no approval rule. When the dry run fails, the card
 of a person still shows the manifest and the subject line, and names the
 document the dry run stopped at. See `approvals.md`. When the manifest is
-not valid YAML, the error gives what the parser found wrong (for example
-"expected ',' or ']'") with the line and the column, never the text of
-the manifest.
+not valid YAML or JSON, the error (`manifest_yaml.py`) is "manifest is not
+valid YAML/JSON", followed by what the parser found wrong (for example
+"expected ',' or ']', but got '<stream end>'") with the line and the
+column; for a refused character, the reason and its position; for a value
+that its tag cannot read, a fixed sentence with the line and the column;
+for an error with no explanation, nothing more. A quoted part that is not
+a word of the YAML grammar becomes `'…'`, so the error never quotes text
+of the manifest. The run after approval answers with the same error.
 The stored request of a `k8s.apply` of a Secret, or of a manifest with a
 secret-looking value, keeps its manifest only in the encrypted one-time
 handoff of the run, as a credential write does. Such a call needs
@@ -94,6 +99,10 @@ handoff of the run, as a credential write does. Such a call needs
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
   token with a known vendor prefix);
+- the `command` and `args` of an object at any depth, read as one command
+  line, hold a value the card hides (`hide_command_secrets` in
+  `op_classes.py`): for example the argument after `--password`, also when
+  YAML reads it as a number;
 - it holds a Secret object at any depth, for example as a template: a map
   with the kind `Secret` and either its own `metadata` or a `data`,
   `stringData` or `binaryData` field. A reference to a Secret does not

@@ -11,7 +11,8 @@ stand-in Kubernetes API server of ``test_k8s_apply_card_through_dispatch``.
 * A number YAML reads as ``.nan`` or ``.inf`` is stored as its YAML text, so a
   failed apply still waits for approval.
 * A redaction rule for the field path ``manifest.*.metadata.name`` hides the
-  name in the subject line and in the "stopped at" sentence too.
+  name in the subject line, in the "stopped at" sentence and in the error of
+  the dry run, for a person and for agents.
 * The ``binaryData`` of a Secret inside another object is hidden on the card.
 * A ServiceAccount that only names a Secret waits for approval without the
   key of the encrypted handoff.
@@ -139,6 +140,11 @@ def test_a_field_path_rule_for_the_name_hides_it_in_both_labels(
     )
     labels = json.dumps([effect["manifest"], effect["subject"], effect["dry_run_stop"]])
     assert name not in labels
+    # The error names the object as the card does, for a person and for agents.
+    assert f"v1/Service web/{_HIDDEN_BY_RULE}" in effect["preview_error"]
+    for view_name, view in _views(row).items():
+        assert view["preview_error"] == effect["preview_error"], view_name
+    assert name not in _everything_shown(row)
 
 
 def test_the_binary_data_of_a_secret_template_is_hidden(

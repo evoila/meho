@@ -337,6 +337,7 @@ def _delete_spec(op_id: str, handler: Any, summary: str, description: str) -> di
         "summary": summary,
         "description": description,
         "tags": ["write", "destructive", "identity", "oidc"],
+        "hard_to_undo": "deletes",
         "safety_level": "dangerous",
         "requires_approval": True,
     }

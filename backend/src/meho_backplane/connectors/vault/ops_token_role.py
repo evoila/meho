@@ -218,6 +218,7 @@ TOKEN_ROLE_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_TOKEN_ROLE_WRITE_PARAMETER_SCHEMA,
         "response_schema": VAULT_TOKEN_ROLE_WRITE_RESPONSE_SCHEMA,
+        "changes_rights": True,
         "tags": ["write", "token", "identity"],
         "safety_level": "dangerous",
         "requires_approval": True,

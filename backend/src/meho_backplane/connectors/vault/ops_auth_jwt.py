@@ -281,6 +281,7 @@ AUTH_JWT_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_AUTH_JWT_ROLE_WRITE_PARAMETER_SCHEMA,
         "response_schema": VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA,
+        "changes_rights": True,
         "tags": ["write", "auth", "identity", "jwt", "oidc"],
         "safety_level": "dangerous",
         "requires_approval": True,
@@ -334,6 +335,8 @@ async def register_vault_auth_jwt_operations(
             tags=spec["tags"],
             safety_level=spec["safety_level"],
             requires_approval=spec["requires_approval"],
+            hard_to_undo=spec.get("hard_to_undo"),
+            changes_rights=spec.get("changes_rights", False),
             llm_instructions=spec["llm_instructions"],
             embedding_service=embedding_service,
         )

@@ -265,6 +265,7 @@ async def register_secret_handoff_operations(
         parameter_schema=SECRET_HANDOFF_IMPORT_PARAMETER_SCHEMA,
         response_schema=_IMPORT_RESPONSE_SCHEMA,
         tags=["secret-broker", "handoff", "write", "change-class"],
+        hard_to_undo="overwrites",
         llm_instructions=_IMPORT_LLM_INSTRUCTIONS,
         **common,
     )

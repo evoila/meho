@@ -332,6 +332,7 @@ async def register_policy_apply_operation(
         tags=["policy", "write", "rights"],
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

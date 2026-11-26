@@ -61,6 +61,7 @@ import structlog
 from sqlalchemy import Insert, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
@@ -343,7 +344,9 @@ async def block_principal(
     when the row is there). While an unblock of the login holds the row,
     the statement waits; when the unblock removed the row, the statement
     writes a new one. So a block is always written. Raises
-    :class:`CannotBlockSelfError` for the admin's own login.
+    :class:`CannotBlockSelfError` for the admin's own login, and
+    :class:`PrincipalBlockUnavailableError` when the table cannot be
+    reached; then nothing is written.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError
@@ -358,25 +361,29 @@ async def block_principal(
         "blocked_at": now,
     }
     changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
-    async with get_sessionmaker()() as session:
-        conn = await session.connection()
-        stmt: Insert
-        if conn.dialect.name == "postgresql":
-            pg = pg_insert(PrincipalBlock).values(**values)
-            stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-        else:
-            lite = sqlite_insert(PrincipalBlock).values(**values)
-            stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-        await session.execute(stmt)
-        add_audit_row(
-            session,
-            operator,
-            op_id="principal.block",
-            method=route[0],
-            path=route[1],
-            payload={"blocked_sub": sub, "scope": scope, "reason": reason},
-        )
-        await session.commit()
+    try:
+        async with get_sessionmaker()() as session:
+            conn = await session.connection()
+            stmt: Insert
+            if conn.dialect.name == "postgresql":
+                pg = pg_insert(PrincipalBlock).values(**values)
+                stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+            else:
+                lite = sqlite_insert(PrincipalBlock).values(**values)
+                stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+            await session.execute(stmt)
+            add_audit_row(
+                session,
+                operator,
+                op_id="principal.block",
+                method=route[0],
+                path=route[1],
+                payload={"blocked_sub": sub, "scope": scope, "reason": reason},
+            )
+            await session.commit()
+    except SQLAlchemyError as exc:
+        _log.warning("principal_block_write_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     reset_block_cache()
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
@@ -453,8 +460,9 @@ async def unblock_principal(
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
     is none, and :class:`PrincipalBlockUnavailableError` when the table
-    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given. *route* is the method and
+    cannot be read or written; then nothing is removed. *reason* and
+    *sign_in* (the proof of a fresh sign-in) go into the audit row when
+    they are given. *route* is the method and
     path the audit row names; the default is the REST route. When *shown*
     is given (the :func:`block_set_digest` of the blocks the admin was
     shown), MEHO removes the blocks only when they are still exactly those
@@ -467,40 +475,45 @@ async def unblock_principal(
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
     only_this_tenant = own_login or not operator.platform_admin
-    async with get_sessionmaker()() as session:
-        blocks = await _read_blocks(session, sub)
-        scopes = {b.scope for b in blocks}
-        if own_login and (
-            BLOCK_SCOPE_ALL in scopes or (not operator.platform_admin and tenant_scope in scopes)
-        ):
-            raise OwnBlockStaysError
-        removed = [b for b in blocks if b.scope == tenant_scope] if only_this_tenant else blocks
-        if not removed:
-            raise PrincipalNotBlockedError
-        if shown is not None and shown != block_set_digest(removed):
-            raise BlockSetChangedError
-        if await _delete_read_blocks(session, removed) != len(removed):
-            await session.rollback()
-            raise BlockSetChangedError
-        removed_scopes = [b.scope for b in removed]
-        payload: dict[str, Any] = {
-            "unblocked_sub": sub,
-            "scopes": removed_scopes,
-            "removed_blocks": [{"scope": b.scope, "reason": b.reason} for b in removed],
-        }
-        if reason is not None:
-            payload["reason"] = reason
-        if sign_in is not None:
-            payload["sign_in"] = sign_in
-        add_audit_row(
-            session,
-            operator,
-            op_id="principal.unblock",
-            method=route[0] if route else "DELETE",
-            path=route[1] if route else f"/api/v1/principals/blocked/{sub}",
-            payload=payload,
-        )
-        await session.commit()
+    try:
+        async with get_sessionmaker()() as session:
+            blocks = await _read_blocks(session, sub)
+            scopes = {b.scope for b in blocks}
+            if own_login and (
+                BLOCK_SCOPE_ALL in scopes
+                or (not operator.platform_admin and tenant_scope in scopes)
+            ):
+                raise OwnBlockStaysError
+            removed = [b for b in blocks if b.scope == tenant_scope] if only_this_tenant else blocks
+            if not removed:
+                raise PrincipalNotBlockedError
+            if shown is not None and shown != block_set_digest(removed):
+                raise BlockSetChangedError
+            if await _delete_read_blocks(session, removed) != len(removed):
+                await session.rollback()
+                raise BlockSetChangedError
+            removed_scopes = [b.scope for b in removed]
+            payload: dict[str, Any] = {
+                "unblocked_sub": sub,
+                "scopes": removed_scopes,
+                "removed_blocks": [{"scope": b.scope, "reason": b.reason} for b in removed],
+            }
+            if reason is not None:
+                payload["reason"] = reason
+            if sign_in is not None:
+                payload["sign_in"] = sign_in
+            add_audit_row(
+                session,
+                operator,
+                op_id="principal.unblock",
+                method=route[0] if route else "DELETE",
+                path=route[1] if route else f"/api/v1/principals/blocked/{sub}",
+                payload=payload,
+            )
+            await session.commit()
+    except SQLAlchemyError as exc:
+        _log.warning("principal_unblock_write_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     reset_block_cache()
     return len(removed)
 

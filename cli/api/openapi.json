@@ -20569,7 +20569,7 @@
             }
           },
           "503": {
-            "description": "MEHO cannot read the block list now.",
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
             "content": {
               "application/json": {
                 "schema": {
@@ -20579,6 +20579,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -20605,7 +20610,7 @@
             "description": "Done. The answer sends the browser back to the page."
           },
           "503": {
-            "description": "MEHO cannot read the block list now.",
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
             "content": {
               "application/json": {
                 "schema": {
@@ -20615,6 +20620,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -20679,7 +20689,7 @@
             }
           },
           "403": {
-            "description": "The login is the admin's own login.",
+            "description": "The login is the admin's own login (JSON), or the admin's own login is blocked in this tenant (plain text, from the session check).",
             "content": {
               "application/json": {
                 "schema": {
@@ -20689,6 +20699,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -20709,7 +20724,7 @@
             }
           },
           "503": {
-            "description": "MEHO cannot read the block list now.",
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
             "content": {
               "application/json": {
                 "schema": {
@@ -20719,6 +20734,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -48409,11 +48429,6 @@
             "type": "object",
             "nullable": true,
             "title": "Client"
-          },
-          "is_tenant_admin": {
-            "type": "boolean",
-            "title": "Is Tenant Admin",
-            "default": false
           }
         },
         "type": "object",

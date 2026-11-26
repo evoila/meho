@@ -13028,7 +13028,6 @@ type TraceView struct {
 type UISessionContext struct {
 	CanSwitchTenant *bool                   `json:"can_switch_tenant,omitempty"`
 	Client          *map[string]interface{} `json:"client"`
-	IsTenantAdmin   *bool                   `json:"is_tenant_admin,omitempty"`
 	OperatorSub     string                  `json:"operator_sub"`
 	SessionId       openapi_types.UUID      `json:"session_id"`
 	TenantChosen    *bool                   `json:"tenant_chosen,omitempty"`
@@ -84645,6 +84644,9 @@ func ParseBlockedPeoplePageUiBlockedPeopleGetResponse(rsp *http.Response) (*Bloc
 		}
 		response.JSON503 = &dest
 
+	case rsp.StatusCode == 503:
+		// Content-type (text/plain) unsupported
+
 	}
 
 	return response, nil
@@ -84681,6 +84683,9 @@ func ParseBlockPersonUiBlockedPeoplePostResponse(rsp *http.Response) (*BlockPers
 			return nil, err
 		}
 		response.JSON503 = &dest
+
+	case rsp.StatusCode == 503:
+		// Content-type (text/plain) unsupported
 
 	}
 
@@ -84743,6 +84748,12 @@ func ParseUnblockPersonUiBlockedPeopleUnblockPostResponse(rsp *http.Response) (*
 			return nil, err
 		}
 		response.JSON503 = &dest
+
+	case rsp.StatusCode == 403:
+	// Content-type (text/plain) unsupported
+
+	case rsp.StatusCode == 503:
+		// Content-type (text/plain) unsupported
 
 	}
 

@@ -231,6 +231,11 @@ async def block_principal_route(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="cannot_block_self: you cannot block your own login.",
         ) from exc
+    except PrincipalBlockUnavailableError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="principal_block_check_unavailable",
+        ) from exc
 
 
 @router.delete("/{sub}", response_model=UnblockResponse)

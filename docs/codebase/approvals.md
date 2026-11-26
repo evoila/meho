@@ -2859,8 +2859,13 @@ for approval.
   asked the same way as this call (`_Asker` in `approval_queue.py`): the
   same kind of login (`principal_kind`), the same people behind the login
   (`people_behind`, compared by the set of `sub` values, casefolded: the
-  compare of the self-approval rule, `behind_subs`) and the same
-  `reveal_secret` choice. A request asked another way is not returned, and
+  compare of the self-approval rule, `behind_subs`), the same
+  `reveal_secret` choice, the same acting agent (`principal_act`, empty for
+  a direct call) and the same agent run (`run_id`, empty outside a run).
+  A call that the same person sends directly and a call that an agent
+  sends for that person are asked differently, and so are the calls of two
+  agent runs. Both the compare and the stored row read the same values.
+  A request asked another way is not returned, and
   the call gets its own request, which waits for a person. The first
   request stays as it is. The new request cannot keep the key in its own
   column while the first one holds it there (the unique index below), so
@@ -2910,8 +2915,9 @@ for approval.
   new one.
 - **Who can match.** The key is scoped to `(tenant_id, principal_sub)` and
   to the way the call was asked (see "Asked the same way"). Two requesters,
-  two logins with one `principal_sub` but other people behind them, or two
-  runs with different `work_ref` values, never share one request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
+  two logins with one `principal_sub` but other people behind them, two
+  acting agents, two agent runs, or two runs with different `work_ref`
+  values, never share one request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
   a call with no key makes a new request every time. With it on, see
   "The same call without the same key" below.
 

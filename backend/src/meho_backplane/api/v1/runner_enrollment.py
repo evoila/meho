@@ -11,11 +11,16 @@ login. See :mod:`meho_backplane.auth.runner_enrollment`.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi import status as http_status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema, model_validator
 
 from meho_backplane.api.v1._errors import http_for, register_error
@@ -28,12 +33,121 @@ from meho_backplane.auth.runner_enrollment import (
     EnrollmentCodeInvalidError,
     EnrollmentKeyInvalidError,
     EnrollmentRunnerMismatchError,
+    audit_refused_body,
     enroll_runner_key,
+)
+from meho_backplane.auth.runner_enrollment_limits import (
+    ENROLL_LIMIT_UNAVAILABLE_DETAIL,
+    ENROLL_RATE_LIMIT_DETAIL,
+    EnrollRateLimitError,
+    enforce_enroll_request_limit,
 )
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1/runner-principals", tags=["runner-principals"])
+#: The field names a body error may carry in its ``loc`` after the leading
+#: ``body`` marker. Any other name is a field the sender added, so it is not
+#: repeated.
+_FIELD_NAMES: frozenset[str] = frozenset({"enrollment_code", "public_key", "runner_name"})
+
+
+def _answer_loc(error: Any) -> list[int | str]:
+    """The ``loc`` of *error* with each name the sender chose replaced.
+
+    Only the first part may be the framework's ``body`` marker. An
+    ``extra_forbidden`` error names the sender's field in its last part, which
+    always becomes ``extra_field``.
+    """
+    loc = list(error.get("loc", ()))
+    extra = error.get("type") == "extra_forbidden"
+    answer: list[int | str] = []
+    for index, part in enumerate(loc):
+        marker = index == 0 and part == "body"
+        field = part in _FIELD_NAMES and not (extra and index == len(loc) - 1)
+        answer.append(part if isinstance(part, int) or marker or field else "extra_field")
+    return answer
+
+
+def _answer_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
+    """The body-check errors of the 422 answer, without anything the sender sent.
+
+    Each error keeps its type, its text and its place. It leaves out ``input``,
+    the names of fields the sender added and every ``ctx`` value that is not a
+    number (a limit such as the longest length).
+    """
+    answer: list[dict[str, Any]] = []
+    for error in errors:
+        item: dict[str, Any] = {
+            "type": error["type"],
+            "loc": _answer_loc(error),
+            "msg": error["msg"],
+        }
+        ctx = {
+            key: value
+            for key, value in (error.get("ctx") or {}).items()
+            if isinstance(value, int | float) and not isinstance(value, bool)
+        }
+        if ctx:
+            item["ctx"] = ctx
+        answer.append(item)
+    return answer
+
+
+async def _sent_code(request: Request) -> Any:
+    """The ``enrollment_code`` of the body, or ``None`` when there is none."""
+    try:
+        body = json.loads(await request.body())
+    except (ValueError, RecursionError):
+        return None
+    return body.get("enrollment_code") if isinstance(body, dict) else None
+
+
+class _EnrollRoute(APIRoute):
+    """Limit the requests per source address first, then check the body.
+
+    A body that fails the check gets a 422 that repeats nothing the sender
+    sent. When its code matches a runner, one audit row records the refusal.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def limited(request: Request) -> Response:
+            source = request.client.host if request.client else "unknown"
+            try:
+                await enforce_enroll_request_limit(source)
+            except EnrollRateLimitError as exc:
+                raise HTTPException(
+                    status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=ENROLL_RATE_LIMIT_DETAIL,
+                    headers={"Retry-After": str(exc.retry_after_seconds)},
+                ) from exc
+            except Exception as exc:
+                structlog.get_logger().warning("runner_enroll_limit_unavailable", exc_info=True)
+                raise HTTPException(
+                    status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=ENROLL_LIMIT_UNAVAILABLE_DETAIL,
+                ) from exc
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                answer = JSONResponse(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    content={"detail": _answer_errors(exc.errors())},
+                )
+            # The audit runs after the handler is left, so an audit error does
+            # not carry the body check error (and the sent body) with it.
+            await audit_refused_body(await _sent_code(request))
+            return answer
+
+        return limited
+
+
+router = APIRouter(
+    prefix="/api/v1/runner-principals",
+    tags=["runner-principals"],
+    route_class=_EnrollRoute,
+)
 
 register_error(
     EnrollmentKeyInvalidError,
@@ -81,7 +195,20 @@ class RunnerEnrollResponse(BaseModel):
     key_id: str
 
 
-@router.post("/enroll", response_model=RunnerEnrollResponse)
+@router.post(
+    "/enroll",
+    response_model=RunnerEnrollResponse,
+    responses={
+        429: {"description": "Too many requests from this source address."},
+        502: {"description": "Keycloak cannot be reached or answers with an error."},
+        503: {
+            "description": (
+                "The request counter cannot be reached, or the Keycloak admin "
+                "client is not configured."
+            )
+        },
+    },
+)
 async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     """Register a runner's public key with its one-time code.
 
@@ -91,7 +218,14 @@ async def enroll_runner(body: RunnerEnrollRequest) -> RunnerEnrollResponse:
     a runner with another name gets 409 ``enrollment_code_for_another_runner``,
     and the code stays usable for its own runner. A good, unused code with a
     bad key gets 422. A repeat of a used code with the key it enrolled gives
-    the same answer again.
+    the same answer again. A source address that sends more requests per minute
+    than ``RUNNER_ENROLL_RATE_PER_MINUTE`` gets 429 ``enrollment_rate_limited``.
+    When the counter cannot be reached the route answers 503
+    ``enrollment_limit_unavailable``; the runner's next start tries again.
+    When the Keycloak admin client is not configured it answers 503
+    ``keycloak_admin_not_configured``. When Keycloak cannot be reached or
+    answers with an error it answers 502 ``keycloak_admin_error``.
+    A body that fails the body check gets 422 without any value the sender sent.
     """
     try:
         result = await enroll_runner_key(

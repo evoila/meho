@@ -1994,6 +1994,11 @@ class Settings(BaseModel):
     #: a source may override the cap per-source via
     #: ``event_source.extras["rate_per_minute"]``.
     events_ingest_rate_per_minute: int = Field(default=60, ge=0)
+    #: Requests per minute that one source address may send to the open
+    #: runner enrollment route (``POST /api/v1/runner-principals/enroll``).
+    #: The counter is on the same Valkey as the limits above. Over the limit
+    #: the route answers 429. ``0`` disables the limit.
+    runner_enroll_rate_per_minute: int = Field(default=60, ge=0)
     #: #3500 -- per-principal dispatch rate limit (requests per minute).
     #: Applied on the shared dispatch path (``call_operation`` /
     #: ``search_operations`` / ``preview_operation`` / ``result_query``,
@@ -3503,6 +3508,9 @@ def get_settings() -> Settings:
         ),
         events_ingest_rate_per_minute=int(
             os.environ.get("EVENTS_INGEST_RATE_PER_MINUTE", "60"),
+        ),
+        runner_enroll_rate_per_minute=int(
+            os.environ.get("RUNNER_ENROLL_RATE_PER_MINUTE", "60"),
         ),
         dispatch_rate_limit_per_minute=int(
             os.environ.get("DISPATCH_RATE_LIMIT_PER_MINUTE", "0"),

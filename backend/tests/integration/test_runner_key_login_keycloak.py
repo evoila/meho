@@ -58,6 +58,9 @@ async def test_runner_signs_its_own_login_and_renews(
     monkeypatch.setenv("KEYCLOAK_ADMIN_URL", keycloak_bootstrap.admin_url)
     monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", keycloak_bootstrap.admin_client_id)
     monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", keycloak_bootstrap.admin_client_secret)
+    # This test has no Valkey. The enrollment request limit is off, so the
+    # route makes no Valkey call; the limit has its own tests.
+    monkeypatch.setenv("RUNNER_ENROLL_RATE_PER_MINUTE", "0")
     get_settings.cache_clear()
     clear_jwks_cache()
     # A test clock for the renew timer only. The signed login request keeps

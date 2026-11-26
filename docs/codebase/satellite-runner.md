@@ -1108,6 +1108,45 @@ while the enrollment waited) and the id of the offered key when the key can
 be read. It holds no code and no key. A code that matches no runner writes no
 audit row; the route writes a log line.
 
+**Request limits of the open route.** The route counts requests per source
+address on the shared Valkey, `meho:ratelimit:runner-enroll:<source>:<minute>`.
+The source is `request.client.host`. Uvicorn sets it to the client address
+when the connecting proxy is trusted (`FORWARDED_ALLOW_IPS`). Behind a proxy
+that is not trusted, all callers share the proxy address and one limit. With
+no client address the source is `unknown`. Over `RUNNER_ENROLL_RATE_PER_MINUTE`
+(default 60, `0` turns it off and makes no Valkey call) the route answers 429
+`enrollment_rate_limited` with `Retry-After`. When Valkey cannot be reached it
+answers 503 `enrollment_limit_unavailable`, as event intake does; the runner's
+login treats it as a failure and enrolls again at its next start. The limit
+comes before the body check. A code over 256 characters gets 403 before any
+database read. A code that is not valid UTF-8 (a lone surrogate sent as a
+JSON escape) matches no stored code and is refused like any wrong code. A
+runner gets at most one refusal row per reason and minute
+(`auth/runner_enrollment_limits.py`). The state is the database table
+`runner_enroll_refusal` (migration 0189): one row per runner and reason, with
+the time of the newest refusal row (`last_row_at`) and the refusals since then
+that got no row (`left_out`). A refusal less than a minute from `last_row_at`
+adds one to `left_out`. Any other refusal writes its audit row with
+`left_out_before` (the count, when it is not zero) and sets the count back to
+zero. The change of the count and the audit row are one database transaction,
+under an advisory lock per runner and reason on PostgreSQL, so a second
+refusal waits for this commit. A commit that fails saves neither, and a commit
+whose answer is lost has saved both, so each refusal is counted once: in the
+count or in its own row. Refusal rows use no Valkey. A body that fails the body check gets 422 without `input`,
+without the names of fields the sender added (an extra field is always
+`extra_field` in `loc`, also when it is named `body`), and with only numbers in
+`ctx`. When its code matches a runner that is not revoked, one refusal row
+records it (status 422, reason `request_body_invalid`, or `code_expired` for an
+ended code with no key). The route builds this 422 first and writes the row
+after it has left the body check error, so an audit error does not carry the
+sent body into the log. A Keycloak that cannot be reached or answers with an
+error gives 502 `keycloak_admin_error`; a Keycloak admin client that is not
+configured gives 503 `keycloak_admin_not_configured`. Keycloak is called only after an audit row
+`runner.principal.key_enrollment_started` is committed: with the claim of the
+key, and again in its own commit for each later attempt to store the key. When
+the row cannot be written, Keycloak is not called, and the same code and key
+work on a retry.
+
 **Revoke.** Revoke works the same for every runner, with a key or with a fixed
 token. `RunnerPrincipalService.revoke` turns the runner's Keycloak client off,
 then deletes the client. With the client, its public key and its Keycloak
@@ -1117,7 +1156,11 @@ revoked runners included; `show` shows it as revoked. The name stays taken: a
 new register of the same name gets 409. A revoked runner cannot be brought
 back: the deleted client cannot be turned on again. A new runner needs a new
 name and a new enrollment code. A token the runner already has works until it
-ends.
+ends, plus the grace time of `KEYCLOAK_JWT_LEEWAY_SECONDS` (default 30 seconds),
+which the token check adds to `exp`. The access token life of the realm MEHO
+ships is 300 seconds, so with both defaults a token issued just before the
+revoke works for about 330 seconds. Central does not read `revoked` on each
+request.
 
 ## Dependencies
 

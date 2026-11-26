@@ -416,3 +416,61 @@ async def test_the_code_of_another_runner_changes_nothing(
     assert (await _row()).enrolled_key_id is None
     enrolled = await enroll_runner_key(code, _jwk(), _NAME)
     assert (await _row()).enrolled_key_id == enrolled.key_id
+
+
+@_skip_no_docker
+async def test_two_refusal_rows_at_once_count_each_left_out_refusal_once(
+    pg_engine: None,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second refusal waits for the first commit, then counts itself once."""
+    from meho_backplane.auth import runner_enrollment_limits
+    from meho_backplane.db.models import RunnerEnrollRefusal
+
+    await _seed_runner()
+    row = await _row()
+    async with get_sessionmaker()() as session:
+        session.add(
+            RunnerEnrollRefusal(
+                runner_id=row.id,
+                reason="code_invalid",
+                last_row_at=datetime.now(UTC) - timedelta(minutes=2),
+                left_out=2,
+            )
+        )
+        await session.commit()
+    real_claim = runner_enrollment_limits.claim_refusal_row
+    first_claimed = asyncio.Event()
+    go = asyncio.Event()
+
+    async def held_claim(session: Any, runner_id: uuid.UUID, reason: str) -> int | None:
+        left_out = await real_claim(session, runner_id, reason)
+        if not first_claimed.is_set():
+            first_claimed.set()
+            await go.wait()
+        return left_out
+
+    monkeypatch.setattr(runner_enrollment, "claim_refusal_row", held_claim)
+    first = asyncio.create_task(runner_enrollment._audit_refusal(row, 403, "code_invalid", None))
+    await asyncio.wait_for(first_claimed.wait(), timeout=10)
+    second = asyncio.create_task(runner_enrollment._audit_refusal(row, 403, "code_invalid", None))
+    await asyncio.sleep(_OVERLAP_SECONDS)
+    assert not second.done()  # it waits for the first commit
+    go.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=20)
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "runner.principal.key_enrollment_refused"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        state = await session.get(RunnerEnrollRefusal, (row.id, "code_invalid"))
+    # The first refusal writes the row with the 2 left out; the second is left out.
+    assert [r.payload.get("left_out_before", 0) for r in rows] == [2]
+    assert state is not None and state.left_out == 1

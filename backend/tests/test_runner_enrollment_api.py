@@ -51,6 +51,7 @@ from meho_backplane.settings import get_settings
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from ._runner_enroll_fakes import LIMITS, FakeValkey
 from ._vault_fakes import install_fake_vault
 
 
@@ -87,6 +88,13 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     get_settings.cache_clear()
     clear_jwks_cache()
+
+
+@pytest.fixture(autouse=True)
+def _fake_valkey() -> Iterator[None]:
+    fake = FakeValkey()
+    with patch(f"{LIMITS}.get_broadcast_client", lambda: fake):
+        yield
 
 
 @pytest.fixture
@@ -619,7 +627,11 @@ async def test_a_refused_enrollment_with_a_right_code_writes_one_audit_row(
     row = next(r for r in rows if r.payload["runner"] == name)
     assert row.tenant_id == _TENANT
     assert row.status_code == status
-    assert row.payload == {"runner": name, "reason": reason, "key_id": key_id}
+    assert row.payload == {
+        "runner": name,
+        "reason": reason,
+        "key_id": key_id,
+    }
     _assert_no_secret_in(row, code, offered)
 
 
@@ -684,7 +696,11 @@ async def test_a_right_code_with_a_key_in_a_wrong_form_gets_422_and_one_audit_ro
         row = next(r for r in rows if r.payload["runner"] == name)
         assert row.tenant_id == _TENANT
         assert row.status_code == 422
-        assert row.payload == {"runner": name, "reason": "public_key_invalid", "key_id": None}
+        assert row.payload == {
+            "runner": name,
+            "reason": "public_key_invalid",
+            "key_id": None,
+        }
         _assert_no_secret_in(row, code, {})
         stored = [
             json.dumps(getattr(one, column.key), default=str)

@@ -248,6 +248,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # every PG-backed acceptance test errors at setup with ``cannot truncate
     # a table referenced in a foreign key constraint``.
     "runner_principal",
+    # ``runner_enroll_refusal`` FKs ``runner_principal`` with ``ON DELETE
+    # CASCADE`` (migration ``0189``). PG rejects truncating ``runner_principal``
+    # unless every referencing table is in the same statement.
+    "runner_enroll_refusal",
     # ``runner_write_allowlist.tenant_id`` is a real ``REFERENCES tenant(id)``
     # FK from migration ``0095`` (#3190 per-runner capability allowlist), and it
     # also carries a real FK ``runner_principal(id)``. PG rejects truncating

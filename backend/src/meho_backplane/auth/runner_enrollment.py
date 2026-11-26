@@ -29,6 +29,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final
 
 import structlog
@@ -38,8 +39,9 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
+from meho_backplane.auth.runner_enrollment_limits import claim_refusal_row
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
+from meho_backplane.db.models import AuditEventClass, AuditLog, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.runner.key_id import ec_key_id
 from meho_backplane.settings import get_settings
@@ -51,6 +53,7 @@ __all__ = [
     "EnrollmentKeyInvalidError",
     "EnrollmentRunnerMismatchError",
     "RunnerEnrollment",
+    "audit_refused_body",
     "enroll_runner_key",
     "new_enrollment_code",
     "take_runner_lock",
@@ -67,6 +70,7 @@ SIGNING_ALG: Final[str] = "ES256"
 _CODE_MAX_LENGTH: Final[int] = 256
 
 _ENROLL_AUDIT_PATH: Final[str] = "runner.principal.key_enrolled"
+_STARTED_AUDIT_PATH: Final[str] = "runner.principal.key_enrollment_started"
 _REFUSED_AUDIT_PATH: Final[str] = "runner.principal.key_enrollment_refused"
 _PRIVATE_JWK_MEMBERS: Final[frozenset[str]] = frozenset({"d", "p", "q", "dp", "dq", "qi", "k"})
 
@@ -108,7 +112,9 @@ class RunnerEnrollment:
 
 
 def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+    # "surrogatepass": a lone surrogate (valid in JSON, not in UTF-8) is hashed
+    # as its own bytes, so such a code matches no stored code and is refused.
+    return hashlib.sha256(code.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def new_enrollment_code(runner_id: uuid.UUID) -> tuple[str, str, datetime]:
@@ -237,6 +243,23 @@ def _check_runner_name(row: RunnerPrincipal, runner_name: str) -> None:
         raise EnrollmentRunnerMismatchError
 
 
+def _started_audit_row(row: RunnerPrincipal, key_id: str) -> AuditLog:
+    """The audit row that says which key the code accepted. It holds no secret."""
+    return AuditLog(
+        id=uuid.uuid4(),
+        occurred_at=datetime.now(UTC),
+        operator_sub=row.keycloak_client_id,
+        actor_sub=row.keycloak_client_id,
+        tenant_id=row.tenant_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        method=INTERNAL_METHOD,
+        path=_STARTED_AUDIT_PATH,
+        status_code=202,
+        duration_ms=Decimal("0.0"),
+        payload={"runner": row.name, "key_id": key_id},
+    )
+
+
 async def _claim_key(
     session: AsyncSession, row: RunnerPrincipal, code: str, key_id: str
 ) -> RunnerPrincipal:
@@ -245,9 +268,24 @@ async def _claim_key(
     The claim is committed before Keycloak is called. So when the call to
     Keycloak ends without an answer, the code still belongs to this one key:
     another key is refused, and this key can finish, also after the code's end.
+    The audit row "enrollment started" is part of the same commit. When the row
+    cannot be written, the claim is not saved, Keycloak is not called, and the
+    runner can send the same code and key again.
     """
     row.enrolled_key_id = key_id
     row.updated_at = datetime.now(UTC)
+    return await _commit_started(session, row, code, key_id)
+
+
+async def _commit_started(
+    session: AsyncSession, row: RunnerPrincipal, code: str, key_id: str
+) -> RunnerPrincipal:
+    """Commit the row "enrollment started", then take the runner's lock again.
+
+    Keycloak is called only after this commit. When the row cannot be written,
+    nothing is saved and the runner can send the same code and key again.
+    """
+    session.add(_started_audit_row(row, key_id))
     await session.commit()
     await take_runner_lock(session, row.id)
     return await _row_after_wait(session, row, code)
@@ -280,22 +318,66 @@ def _offered_key_id(public_jwk: Any) -> str | None:
 async def _audit_refusal(
     row: RunnerPrincipal, status_code: int, reason: str, public_jwk: Any
 ) -> None:
-    """One audit row for a refused enrollment whose code matched *row*.
+    """Record a refused enrollment whose code matched *row*.
 
-    The row holds the runner's name, the answer's status, the reason and the
-    id of the offered key. It never holds the code or the key.
+    A runner gets one audit row per reason and minute. It holds the runner's
+    name, the answer's status, the reason and the id of the offered key, and
+    says how many refusals were left out since the row before
+    (``left_out_before``). It never holds the code or the key. A refusal with
+    no row of its own adds one to that count. The count and the row are
+    saved in one transaction: a commit that fails saves neither.
     """
-    await write_internal_audit_row(
-        event_class=AuditEventClass.SECURITY_EVENT,
-        operator_sub=row.keycloak_client_id,
-        actor_sub=row.keycloak_client_id,
-        tenant_id=row.tenant_id,
-        method=INTERNAL_METHOD,
-        path=_REFUSED_AUDIT_PATH,
-        status_code=status_code,
-        duration_ms=0.0,
-        payload={"runner": row.name, "reason": reason, "key_id": _offered_key_id(public_jwk)},
-    )
+    async with get_sessionmaker()() as session:
+        left_out = await claim_refusal_row(session, row.id, reason)
+        if left_out is not None:
+            payload: dict[str, Any] = {
+                "runner": row.name,
+                "reason": reason,
+                "key_id": _offered_key_id(public_jwk),
+            }
+            if left_out:
+                payload["left_out_before"] = left_out
+            session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    occurred_at=datetime.now(UTC),
+                    operator_sub=row.keycloak_client_id,
+                    actor_sub=row.keycloak_client_id,
+                    tenant_id=row.tenant_id,
+                    event_class=AuditEventClass.SECURITY_EVENT,
+                    method=INTERNAL_METHOD,
+                    path=_REFUSED_AUDIT_PATH,
+                    status_code=status_code,
+                    duration_ms=Decimal("0.0"),
+                    payload=payload,
+                )
+            )
+        await session.commit()
+
+
+async def audit_refused_body(code: Any) -> None:
+    """One audit row for a request whose body fails the body check.
+
+    The row is written only when *code* is a text that matches a runner that
+    is not revoked. It says status 422 and the reason ``request_body_invalid``
+    (``code_expired`` for an ended code that enrolled no key). It holds no code
+    and no key. Any other *code* (not a text, too long, matching no runner)
+    writes nothing.
+    """
+    if not isinstance(code, str) or len(code) > _CODE_MAX_LENGTH:
+        return
+    async with get_sessionmaker()() as session:
+        try:
+            row = await _row_of_code(session, code)
+        except EnrollmentCodeInvalidError:
+            return
+    reason = "request_body_invalid"
+    if row.enrolled_key_id is None:
+        try:
+            _check_not_expired(row)
+        except EnrollmentCodeInvalidError as exc:
+            reason = exc.reason or reason
+    await _audit_refusal(row, 422, reason, None)
 
 
 _Refusal = EnrollmentCodeInvalidError | EnrollmentRunnerMismatchError | EnrollmentKeyInvalidError
@@ -330,6 +412,10 @@ async def _enroll_matched(
         # same refusal as a wrong code, before the name is looked at.
         jwks, key_id = _claimed_key(row, public_jwk)
         _check_runner_name(row, runner_name)
+        if row.key_enrolled_at is None:
+            # A new attempt to store the key (the claim is older, or Keycloak
+            # failed before): it gets its own "started" row first.
+            row = await _commit_started(session, row, code, key_id)
     if row.enrolled_key_id != key_id:
         raise EnrollmentCodeInvalidError("code_used_by_another_key")
     repeated = row.key_enrolled_at is not None
@@ -362,6 +448,8 @@ async def enroll_runner_key(code: str, public_jwk: Any, runner_name: str) -> Run
     Keycloak cannot store the key (the runner can retry with the same key).
     """
     log = structlog.get_logger()
+    if len(code) > _CODE_MAX_LENGTH:
+        raise EnrollmentCodeInvalidError
     refusal: _Refusal | None = None
     async with get_sessionmaker()() as session:
         # Check the code first, so only a caller with a good code takes the
